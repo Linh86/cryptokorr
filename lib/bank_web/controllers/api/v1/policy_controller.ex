@@ -1,0 +1,358 @@
+defmodule BankWeb.API.V1.PolicyController do
+  @moduledoc """
+  `/v1/policies` — versioned policy rule management.
+
+  Rules are never mutated in place. A `revise` writes a new version and
+  marks the prior one `superseded`; in-flight evaluations continue using
+  their captured policy snapshot.
+
+  Endpoints:
+
+    * `GET  /v1/policies`               — list (active / superseded / archived)
+    * `POST /v1/policies`               — create a new rule
+    * `POST /v1/policies/:id/revise`    — write new version
+    * `POST /v1/policies/:id/archive`   — archive rule
+
+  Write paths delegate to `Bank.Policies`, which owns the transaction
+  boundary and audit composition. The controller is responsible for
+  request parsing and response shaping.
+
+  `actor` / `actor_id` fall back to `:user` / `nil` today; a real
+  auth plug will populate them on the connection and the controller
+  will forward those values into the context.
+  """
+
+  use BankWeb, :controller
+
+  alias Bank.Policies
+  alias BankWeb.API.V1.PolicyJSON
+
+  @list_limit_default 50
+  @list_limit_max 500
+  @states ~w(draft active superseded archived)
+  @rule_types ~w(amount_limit rolling_spend_cap slippage_ceiling allowed_router allowed_asset allowed_chain autonomy_tier time_window)
+
+  # --- GET /v1/policies -------------------------------------------------
+
+  def index(conn, params) do
+    with {:ok, filters} <- parse_filters(params),
+         {:ok, opts} <- parse_list_opts(params) do
+      page = Policies.list_rules(filters, opts)
+
+      conn
+      |> put_status(:ok)
+      |> json(PolicyJSON.index(page))
+    else
+      {:error, envelope} -> render_error(conn, envelope)
+    end
+  end
+
+  # --- POST /v1/policies ------------------------------------------------
+
+  def create(conn, params) do
+    with {:ok, attrs} <- parse_create_attrs(params) do
+      case Policies.create_rule(attrs, actor_opts(conn)) do
+        {:ok, rule} ->
+          conn
+          |> put_status(:created)
+          |> json(PolicyJSON.rule_created(%{rule: rule}))
+
+        {:error, %Ecto.Changeset{} = changeset} ->
+          render_changeset_error(conn, changeset)
+      end
+    else
+      {:error, envelope} -> render_error(conn, envelope)
+    end
+  end
+
+  # --- POST /v1/policies/:id/revise ------------------------------------
+
+  def revise(conn, %{"id" => id} = params) do
+    with {:ok, uuid} <- cast_uuid(id, "id"),
+         {:ok, rule} <- fetch_rule(uuid),
+         {:ok, attrs} <- parse_revise_attrs(params) do
+      case Policies.revise_rule(rule, attrs, actor_opts(conn)) do
+        {:ok, successor} ->
+          conn
+          |> put_status(:created)
+          |> json(PolicyJSON.rule_created(%{rule: successor}))
+
+        {:error, :not_active} ->
+          render_error(conn, %{
+            status: :conflict,
+            code: "not_active",
+            message: "only an `:active` rule can be revised",
+            hint: "fetch the current active tip of the supersession chain",
+            retryable: false
+          })
+
+        {:error, %Ecto.Changeset{} = changeset} ->
+          render_changeset_error(conn, changeset)
+      end
+    else
+      {:error, envelope} -> render_error(conn, envelope)
+    end
+  end
+
+  # --- POST /v1/policies/:id/archive -----------------------------------
+
+  def archive(conn, %{"id" => id}) do
+    with {:ok, uuid} <- cast_uuid(id, "id"),
+         {:ok, rule} <- fetch_rule(uuid) do
+      case Policies.archive_rule(rule, actor_opts(conn)) do
+        {:ok, archived} ->
+          conn
+          |> put_status(:ok)
+          |> json(PolicyJSON.rule_archived(%{rule: archived}))
+
+        {:error, :not_active} ->
+          render_error(conn, %{
+            status: :conflict,
+            code: "not_active",
+            message: "only an `:active` rule can be archived",
+            hint: "rules that are already superseded or archived stay where they are",
+            retryable: false
+          })
+
+        {:error, %Ecto.Changeset{} = changeset} ->
+          render_changeset_error(conn, changeset)
+      end
+    else
+      {:error, envelope} -> render_error(conn, envelope)
+    end
+  end
+
+  # --- input parsing ----------------------------------------------------
+
+  defp parse_filters(params) do
+    with {:ok, state} <- parse_atom_enum(params, "state", @states, "state"),
+         {:ok, rule_type} <- parse_atom_enum(params, "rule_type", @rule_types, "rule_type") do
+      {:ok, %{state: state, rule_type: rule_type}}
+    end
+  end
+
+  defp parse_create_attrs(params) do
+    with :ok <- require_string(params, "rule_type"),
+         true <- Map.get(params, "rule_type") in @rule_types || rule_type_error() do
+      attrs =
+        %{
+          "rule_type" => Map.get(params, "rule_type"),
+          "params" => Map.get(params, "params") || %{},
+          "scope" => Map.get(params, "scope") || %{},
+          "priority" => Map.get(params, "priority") || 0,
+          "created_by" => Map.get(params, "created_by") || "user",
+          "state" => Map.get(params, "state") || "active"
+        }
+
+      case Map.get(params, "state") do
+        nil ->
+          {:ok, attrs}
+
+        s when s in @states ->
+          {:ok, attrs}
+
+        _ ->
+          {:error, invalid_body(~s|`state` must be one of #{inspect(@states)}|)}
+      end
+    else
+      {:error, envelope} -> {:error, envelope}
+      other -> other
+    end
+  end
+
+  defp parse_revise_attrs(params) do
+    # `rule_type` is not editable via revise — it is carried forward
+    # from the prior row (see `PolicyRule.supersede/2`). We drop it
+    # silently rather than erroring so idempotent clients that PUT the
+    # full rule don't need to strip it.
+    attrs =
+      %{
+        "params" => Map.get(params, "params") || %{},
+        "scope" => Map.get(params, "scope") || %{},
+        "priority" => Map.get(params, "priority") || 0,
+        "created_by" => Map.get(params, "created_by") || "user"
+      }
+
+    case Map.get(params, "state") do
+      nil ->
+        {:ok, attrs}
+
+      s when s in @states ->
+        {:ok, Map.put(attrs, "state", s)}
+
+      _ ->
+        {:error, invalid_body(~s|`state` must be one of #{inspect(@states)}|)}
+    end
+  end
+
+  defp parse_atom_enum(params, key, allowed, display_key) do
+    value = Map.get(params, key)
+
+    cond do
+      value in [nil, ""] ->
+        {:ok, nil}
+
+      is_binary(value) and value in allowed ->
+        {:ok, String.to_existing_atom(value)}
+
+      true ->
+        {:error,
+         %{
+           status: :unprocessable_entity,
+           code: "invalid_query",
+           message: "invalid value for `#{display_key}`",
+           hint: ~s|must be one of #{inspect(allowed)}|,
+           retryable: false
+         }}
+    end
+  end
+
+  defp parse_list_opts(params) do
+    with {:ok, limit} <- parse_limit(params) do
+      opts = [limit: limit]
+
+      opts =
+        case string_param(params, "cursor") do
+          nil -> opts
+          cursor -> Keyword.put(opts, :cursor, cursor)
+        end
+
+      {:ok, opts}
+    end
+  end
+
+  defp parse_limit(params) do
+    case Map.get(params, "limit") do
+      nil ->
+        {:ok, @list_limit_default}
+
+      "" ->
+        {:ok, @list_limit_default}
+
+      value when is_binary(value) ->
+        case Integer.parse(value) do
+          {n, ""} when n > 0 and n <= @list_limit_max ->
+            {:ok, n}
+
+          _ ->
+            {:error,
+             %{
+               status: :unprocessable_entity,
+               code: "invalid_query",
+               message: "invalid value for `limit`",
+               hint: "must be a positive integer up to #{@list_limit_max}",
+               retryable: false
+             }}
+        end
+    end
+  end
+
+  defp string_param(params, key) do
+    case Map.get(params, key) do
+      nil -> nil
+      "" -> nil
+      value when is_binary(value) -> value
+      _ -> nil
+    end
+  end
+
+  defp require_string(params, key) do
+    case Map.get(params, key) do
+      v when is_binary(v) and v != "" -> :ok
+      _ -> {:error, invalid_body("missing `#{key}`")}
+    end
+  end
+
+  defp rule_type_error do
+    {:error, invalid_body(~s|`rule_type` must be one of #{inspect(@rule_types)}|)}
+  end
+
+  defp cast_uuid(value, field) when is_binary(value) do
+    case Ecto.UUID.cast(value) do
+      {:ok, uuid} ->
+        {:ok, uuid}
+
+      :error ->
+        {:error,
+         %{
+           status: :unprocessable_entity,
+           code: "invalid_id",
+           message: "`#{field}` must be a UUID",
+           hint: nil,
+           retryable: false
+         }}
+    end
+  end
+
+  defp fetch_rule(id) do
+    case Policies.get_rule(id) do
+      {:ok, rule} ->
+        {:ok, rule}
+
+      {:error, :not_found} ->
+        {:error,
+         %{
+           status: :not_found,
+           code: "not_found",
+           message: "no policy rule with id=#{id}",
+           hint: "check the id or confirm the rule still exists",
+           retryable: false
+         }}
+    end
+  end
+
+  defp invalid_body(hint) do
+    %{
+      status: :unprocessable_entity,
+      code: "invalid_body",
+      message: "request body failed validation",
+      hint: hint,
+      retryable: false
+    }
+  end
+
+  # --- response shaping -------------------------------------------------
+
+  defp actor_opts(_conn) do
+    [actor: :user, actor_id: nil]
+  end
+
+  defp render_error(conn, %{status: status} = envelope) do
+    conn
+    |> put_status(status)
+    |> json(%{
+      error: %{
+        code: envelope.code,
+        message: envelope.message,
+        hint: envelope[:hint],
+        retryable: envelope[:retryable] || false
+      }
+    })
+  end
+
+  defp render_changeset_error(conn, %Ecto.Changeset{} = changeset) do
+    details = Ecto.Changeset.traverse_errors(changeset, &translate_error/1)
+
+    conn
+    |> put_status(:unprocessable_entity)
+    |> json(%{
+      error: %{
+        code: "invalid_body",
+        message: "request body failed validation",
+        hint: nil,
+        retryable: false,
+        details: details
+      }
+    })
+  end
+
+  defp translate_error({msg, opts}) do
+    Enum.reduce(opts, msg, fn
+      {key, value}, acc when is_binary(value) or is_atom(value) or is_integer(value) ->
+        String.replace(acc, "%{#{key}}", to_string(value))
+
+      _, acc ->
+        acc
+    end)
+  end
+end
