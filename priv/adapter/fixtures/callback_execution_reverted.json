@@ -1,0 +1,16 @@
+{
+  "contract_version": 1,
+  "callback_id": "cb_0003",
+  "kind": "execution.reverted",
+  "execution_plan_id": "11111111-1111-4111-8111-111111111111",
+  "tx_refs": [
+    {
+      "chain": "base",
+      "hash": "0xbbbb...",
+      "block_number": 14532101,
+      "status": "reverted"
+    }
+  ],
+  "reason": "slippage_exceeded",
+  "emitted_at": "2026-04-15T20:00:25Z"
+}

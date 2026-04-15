@@ -1,0 +1,28 @@
+{
+  "contract_version": 1,
+  "action": "swap",
+  "execution_plan_id": "11111111-1111-4111-8111-111111111112",
+  "intent_id": "22222222-2222-4222-8222-222222222223",
+  "smart_account_id": "sa_0xdeadbeef",
+  "chain": "base",
+  "input_asset": "USDC",
+  "output_asset": "WETH",
+  "input_amount": "100",
+  "expected_output": "0.028",
+  "slippage_bps": 50,
+  "route": {
+    "venue": "whitelisted_aggregator_v1",
+    "path": ["USDC", "WETH"]
+  },
+  "signing_requirements": {
+    "delegation_id": "del_primary",
+    "scope": {
+      "chain": "base",
+      "asset": "USDC",
+      "max_amount": "500",
+      "whitelist": ["WETH"]
+    }
+  },
+  "correlation_id": "22222222-2222-4222-8222-222222222223",
+  "emitted_at": "2026-04-15T20:00:05Z"
+}

@@ -1,0 +1,8 @@
+{
+  "contract_version": 1,
+  "action": "revoke_delegation",
+  "smart_account_id": "sa_0xdeadbeef",
+  "reason": "operator_requested",
+  "correlation_id": null,
+  "emitted_at": "2026-04-15T20:00:10Z"
+}

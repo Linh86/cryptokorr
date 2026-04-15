@@ -79,7 +79,45 @@ defmodule BankWeb.Telemetry do
       summary("vm.memory.total", unit: {:byte, :kilobyte}),
       summary("vm.total_run_queue_lengths.total"),
       summary("vm.total_run_queue_lengths.cpu"),
-      summary("vm.total_run_queue_lengths.io")
+      summary("vm.total_run_queue_lengths.io"),
+
+      # --- Bank runtime (v0.1 observability baseline) -----------------
+      # One counter per decision outcome and risk tier so operators
+      # can answer "how many auto_execs / holds / blocks in the last
+      # hour" without reading audit. Emitted from
+      # Bank.Runtime.Telemetry.
+      counter("bank.autonomy.decision.count",
+        tags: [:outcome, :risk_tier, :reason_code],
+        description: "Autonomy decisions grouped by outcome and risk tier"
+      ),
+
+      # Quote provider health. Counted on every preview; tagged
+      # result is :ok | :provider_unavailable | :stale |
+      # :simulation_failed.
+      counter("bank.quotes.preview.count",
+        tags: [:provider, :result],
+        description: "Quote/simulation provider calls by outcome"
+      ),
+
+      # Execution outcomes as they progress through the engine.
+      counter("bank.execution.lifecycle.count",
+        tags: [:status],
+        description:
+          "Execution-plan transitions (prepared | broadcast | completed | failed | aborted)"
+      ),
+
+      # Emergency controls, observed for dashboard health.
+      counter("bank.security.event.count",
+        tags: [:event, :scope],
+        description: "Pause/resume/revoke events grouped by scope"
+      ),
+
+      # Oban queue-depth: one summary per MVP queue name so operators
+      # can see whether a queue is backing up without touching the DB.
+      summary("oban.job.stop.duration",
+        unit: {:native, :millisecond},
+        tags: [:queue, :state]
+      )
     ]
   end
 

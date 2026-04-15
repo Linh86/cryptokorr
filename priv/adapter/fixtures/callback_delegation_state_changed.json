@@ -1,0 +1,18 @@
+{
+  "contract_version": 1,
+  "callback_id": "cb_0005",
+  "kind": "delegation.state_changed",
+  "smart_account_id": "sa_0xdeadbeef",
+  "delegation_id": "del_primary",
+  "state": "revoked",
+  "reason": "operator_requested",
+  "tx_refs": [
+    {
+      "chain": "base",
+      "hash": "0xcccc...",
+      "block_number": 14532130,
+      "status": "success"
+    }
+  ],
+  "emitted_at": "2026-04-15T20:00:40Z"
+}
