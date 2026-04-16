@@ -1,7 +1,7 @@
 defmodule Bank.Repo.Migrations.AddIntentCurrentPointers do
   @moduledoc """
   Cached pointers on `agent_intents` to the current decision /
-  epistemic claim / simulation / execution plan.
+  trust assessment / simulation / execution plan.
 
   These are convenience columns for fast single-row lookups (e.g.
   `GET /v1/intents/:id` with `?include=decision,simulation,plan`); the
@@ -20,7 +20,7 @@ defmodule Bank.Repo.Migrations.AddIntentCurrentPointers do
   def change do
     alter table(:agent_intents) do
       add :current_decision_id, :binary_id
-      add :current_epistemic_claim_id, :binary_id
+      add :current_trust_assessment_id, :binary_id
       add :current_simulation_id, :binary_id
       add :current_execution_plan_id, :binary_id
     end

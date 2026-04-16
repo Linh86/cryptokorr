@@ -60,7 +60,7 @@ config :phoenix, :json_library, Jason
 # Oban uses atoms for queue names; we use underscores in code and document
 # the canonical dotted semantic name in the left column.
 #
-#   intents.evaluate     -> :intents_evaluate     (initial policy/epistemic/simulation pipeline)
+#   intents.evaluate     -> :intents_evaluate     (initial policy/trust/simulation pipeline)
 #   intents.reevaluate   -> :intents_reevaluate   (hold-TTL or trust-change driven re-eval)
 #   approvals.expire     -> :approvals_expire     (approval TTL → successor block envelope)
 #   executions.run       -> :executions_run       (prepare + hand off to the chain adapter)

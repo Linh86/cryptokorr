@@ -27,7 +27,7 @@ Four systems participate. Each has one role.
 
 ### Phoenix control plane (runtime)
 
-- Accepts intents. Persists them. Evaluates policy. Consults the epistemic engine. Requests simulations. Writes decisions. Manages approvals, hold timers, and expirations. Dispatches execution. Owns the audit sink.
+- Accepts intents. Persists them. Evaluates policy. Consults the trust engine. Requests simulations. Writes decisions. Manages approvals, hold timers, and expirations. Dispatches execution. Owns the audit sink.
 - Postgres is the source of truth. Every domain object lives here.
 - Publishes realtime updates via PubSub. Runs background work via Oban.
 - **Decision authority.** The outcome (`auto_exec` / `hold` / `approval_required` / `block`) is determined only here.
@@ -56,7 +56,7 @@ flowchart TD
     A[Agent submits intent] --> B[Phoenix accepts and returns 202]
     B --> C[Policy evaluation]
     C --> D[Trust and evidence lookup]
-    D --> E[Epistemic claim written]
+    D --> E[Trust assessment written]
     E --> F[Simulation via adapter]
     F --> G{Decision engine}
     G -->|auto_exec| H[ExecutionPlan prepared]
@@ -83,11 +83,11 @@ Every transition above writes an `AuditEvent` with `correlation_id = intent_id`.
 
 3. **Trust and evidence lookup.** Phoenix resolves the target. A known `AddressLabel` pulls in its `Counterparty`, that counterparty's latest non-expired `TrustAssertion`s, and backing `EvidenceArtifact`s. A `raw_address` with no matching label defaults to `unknown`.
 
-4. **Epistemic claim.** A fresh `EpistemicClaim` is written for this intent: `derived_trust` (`trusted` / `sensitive` / `unknown` / `conflicted`), `confidence` (`low` / `medium` / `high`), `contradictions[]`, `rationale`, references to the backing assertions and evidence.
+4. **Trust assessment.** A fresh `TrustAssessment` is written for this intent: `derived_trust` (`trusted` / `sensitive` / `unknown` / `conflicted`), `confidence` (`low` / `medium` / `high`), `contradictions[]`, `rationale`, references to the backing assertions and evidence.
 
 5. **Simulation.** Phoenix asks the adapter for a `SimulationReport`. The adapter calls the configured provider and reports predicted balance changes, gas, fees, routing, expected output, slippage exposure, and failure conditions. Phoenix persists the report with a `freshness_ttl`. Provider failure is treated as a caution-widening input, not a soft skip.
 
-6. **Decisioning.** The decision engine combines the policy constraints, the epistemic claim, and the simulation report into a single `DecisionEnvelope`:
+6. **Decisioning.** The decision engine combines the policy constraints, the trust assessment, and the simulation report into a single `DecisionEnvelope`:
    - `auto_exec` — within policy, trust is `trusted`, simulation healthy.
    - `hold` — all permissions pass but something is temporarily off (stale simulation, cooldown window, transient trust recomputation needed).
    - `approval_required` — trust is `sensitive`, or an amount / asset / time-window condition trips an autonomy-tier threshold, or simulation surfaces a flaggable condition.
@@ -117,10 +117,10 @@ This is the split every layer must respect.
 | `Counterparty` | Operator-created: `name`, `ownership_context`, `notes`, `active`. | Runtime-maintained: `current_trust_level` cache. |
 | `AddressLabel` | Operator-created and operator-verified. | Runtime may propose candidates via evidence; attachment still requires operator confirmation. |
 | `EvidenceArtifact` | Operator-pinned (manual notes, signatures) and runtime-harvested (execution history, provider lookups). `actor` and `source` always tagged. | `payload_hash`. |
-| `TrustAssertion` | Operator overrides. Epistemic engine derivations. Both carry `issued_by`. | Supersession chain, `current` pointer. |
+| `TrustAssertion` | Operator overrides. Trust engine derivations. Both carry `issued_by`. | Supersession chain, `current` pointer. |
 | `PolicyRule` | Operator-only. | `version`, `supersedes_id`, `created_at`. |
 | `SimulationReport` | — (fully derived) | Adapter + provider produce; Phoenix persists. |
-| `EpistemicClaim` | — (fully derived) | Epistemic engine produces. |
+| `TrustAssessment` | — (fully derived) | Trust engine produces. |
 | `DecisionEnvelope` | — (fully derived) | Decision engine produces. |
 | `ExecutionPlan` | — (fully derived from an approved decision) | Phoenix + adapter jointly produce. |
 | `AuditEvent` | — (no external write permitted) | Every component emits; sink is append-only. |
@@ -134,7 +134,7 @@ Agents and operators push input. The runtime produces output. The runtime never 
 | Step | Sync / async | Queue | Realtime channel |
 |---|---|---|---|
 | Intent submit | Sync accept (202). Evaluation async. | `intents.evaluate` | `intent:{id}` |
-| Policy + epistemic + simulation | Async (single staged job) | `intents.evaluate` | `intent:{id}` |
+| Policy + trust + simulation | Async (single staged job) | `intents.evaluate` | `intent:{id}` |
 | Ad-hoc simulation via `/intents/{id}/simulate` | Sync response. Report persisted. | Bypasses `intents.evaluate` | `intent:{id}` |
 | Decision writing | Sync within evaluation job | — | `intent:{id}`, `approval:queue` when routed to approval |
 | Approval TTL | Async timer | `approvals.expire` | `approval:queue` |
@@ -284,14 +284,14 @@ All endpoints live under `/v1/`. Auth is not specified here — assume session +
 
 #### `GET /v1/intents/{id}/replay`
 
-**Purpose.** Full replay bundle: original intent, policy snapshot, epistemic claim chain, simulation chain, decision envelope chain, execution plan chain, audit events.
+**Purpose.** Full replay bundle: original intent, policy snapshot, trust assessment chain, simulation chain, decision envelope chain, execution plan chain, audit events.
 **Caller.** Operator.
 **Response.**
 ```
 {
   "intent": { ... },
   "policy_snapshot": [ ... rules at each decision time ... ],
-  "epistemic": [ ... claims in supersession order ... ],
+  "trust_assessments": [ ... claims in supersession order ... ],
   "simulations": [ ... ],
   "decisions": [ ... ],
   "plans": [ ... ],
@@ -307,7 +307,7 @@ All endpoints live under `/v1/`. Auth is not specified here — assume session +
 
 **Purpose.** Read a specific decision envelope and its supersession chain.
 **Caller.** Operator.
-**Response.** The envelope plus `supersedes` and `superseded_by` links, and pointers to the policy snapshot, epistemic claim, and simulation report it referenced.
+**Response.** The envelope plus `supersedes` and `superseded_by` links, and pointers to the policy snapshot, trust assessment, and simulation report it referenced.
 **Failure modes.** `404`.
 
 ---
@@ -390,7 +390,7 @@ All endpoints live under `/v1/`. Auth is not specified here — assume session +
 }
 ```
 **Response.** The new assertion. Any prior active assertion with an overlapping scope is marked `superseded`.
-**Validation.** Operator-only. Unscoped `trusted` assertions are accepted but flagged in the response as coarse. Epistemic-engine-derived assertions take the same shape internally but never come through this endpoint.
+**Validation.** Operator-only. Unscoped `trusted` assertions are accepted but flagged in the response as coarse. Trust-engine-derived assertions take the same shape internally but never come through this endpoint.
 **Failure modes.** `422` for malformed scope. `404` for missing subject.
 
 ---
@@ -433,7 +433,7 @@ Policy edits never mutate in place. Every change is a new version. This is how r
 - The active `PolicyRule` set at each decision moment, captured as an immutable snapshot.
 - Every `EvidenceArtifact` (content by reference via `content_uri` + `payload_hash`).
 - Every `TrustAssertion` in the supersession chain.
-- Every `EpistemicClaim`, `SimulationReport`, `DecisionEnvelope`, `ExecutionPlan` written during the intent's life.
+- Every `TrustAssessment`, `SimulationReport`, `DecisionEnvelope`, `ExecutionPlan` written during the intent's life.
 - Every `AuditEvent`.
 - The runtime version that produced each derived object (`generated_by`, `decided_by`, adapter version).
 
@@ -459,7 +459,7 @@ The domain model describes several per-intent objects as "1:1 with `AgentIntent`
 
 - **"1:1" means "one current, zero or more historical via supersession chain."** Default reads return the current record; history is available via `?include=history` on intent GETs and is always fully present on `/replay`.
 - **`SimulationReport`** — one `current` per intent. Re-simulation (whether automatic refresh or via `POST /v1/intents/{id}/simulate` with `reason="refresh"`) creates a new report and marks the prior one `stale`. `freshness_ttl` governs when a report is no longer usable to back a decision.
-- **`EpistemicClaim`** — one `current` per intent. Re-evaluation after a trust or evidence change creates a new claim.
+- **`TrustAssessment`** — one `current` per intent. Re-evaluation after a trust or evidence change creates a new claim.
 - **`DecisionEnvelope`** — one `current` per intent. Approvals and re-decisions produce successor envelopes via `supersedes_id`, never edits.
 - **`ExecutionPlan`** — one `active` per decision. A retry after an `aborted` plan creates a new plan linked to the same decision, not to a new decision.
 
@@ -503,4 +503,4 @@ These clarifications are conventions, not schema changes. The domain spec remain
 
 ## What's next
 
-The individual engines referenced in the flow (policy, epistemic, simulation, decision, adapter, approvals, security) are implemented across issues #6–#19. This document is their shared interface — when a concrete endpoint shape differs from what's captured here, the change flows back through product/engineering review rather than landing silently in an implementation PR.
+The individual engines referenced in the flow (policy, trust, simulation, decision, adapter, approvals, security) are implemented across issues #6–#19. This document is their shared interface — when a concrete endpoint shape differs from what's captured here, the change flows back through product/engineering review rather than landing silently in an implementation PR.

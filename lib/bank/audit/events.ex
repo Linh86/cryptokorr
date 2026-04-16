@@ -17,7 +17,7 @@ defmodule Bank.Audit.Events do
   """
 
   alias Bank.Counterparties.{AddressLabel, Counterparty, EvidenceArtifact, TrustAssertion}
-  alias Bank.Decisions.{DecisionEnvelope, EpistemicClaim, ExecutionPlan, SimulationReport}
+  alias Bank.Decisions.{DecisionEnvelope, TrustAssessment, ExecutionPlan, SimulationReport}
   alias Bank.Intents.AgentIntent
   alias Bank.Policies.PolicyRule
 
@@ -58,18 +58,18 @@ defmodule Bank.Audit.Events do
   end
 
   @doc """
-  `epistemic.claimed` — a new epistemic claim is the current claim for
+  `trust.assessed` — a new trust assessment is the current claim for
   an intent.
   """
-  @spec epistemic_claimed(EpistemicClaim.t(), keyword()) :: attrs()
-  def epistemic_claimed(%EpistemicClaim{} = claim, opts \\ []) do
+  @spec trust_assessed(TrustAssessment.t(), keyword()) :: attrs()
+  def trust_assessed(%TrustAssessment{} = claim, opts \\ []) do
     %{
       actor: Keyword.get(opts, :actor, :runtime),
-      event_type: "epistemic.claimed",
-      subject_type: "epistemic_claim",
+      event_type: "trust.assessed",
+      subject_type: "trust_assessment",
       subject_id: claim.id,
       correlation_id: claim.intent_id,
-      before_ref: ref_from_supersedes(claim.supersedes_id, "epistemic_claim"),
+      before_ref: ref_from_supersedes(claim.supersedes_id, "trust_assessment"),
       after_ref: %{
         id: claim.id,
         derived_trust: atom_or_nil(claim.derived_trust),

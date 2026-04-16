@@ -7,7 +7,7 @@ defmodule Bank.Fixtures do
 
   alias Bank.Audit.AuditEvent
   alias Bank.Counterparties.{AddressLabel, Counterparty, EvidenceArtifact, TrustAssertion}
-  alias Bank.Decisions.{DecisionEnvelope, EpistemicClaim, ExecutionPlan, SimulationReport}
+  alias Bank.Decisions.{DecisionEnvelope, TrustAssessment, ExecutionPlan, SimulationReport}
   alias Bank.Intents.AgentIntent
   alias Bank.Policies.PolicyRule
   alias Bank.Repo
@@ -153,7 +153,7 @@ defmodule Bank.Fixtures do
     intent
   end
 
-  def epistemic_claim(attrs \\ %{}) do
+  def trust_assessment(attrs \\ %{}) do
     attrs = to_map(attrs)
     intent = Map.get_lazy(attrs, :intent, fn -> agent_intent() end)
 
@@ -167,8 +167,8 @@ defmodule Bank.Fixtures do
       |> Map.put_new(:generated_by, :runtime)
 
     {:ok, claim} =
-      %EpistemicClaim{}
-      |> EpistemicClaim.changeset(attrs)
+      %TrustAssessment{}
+      |> TrustAssessment.changeset(attrs)
       |> Repo.insert()
 
     claim

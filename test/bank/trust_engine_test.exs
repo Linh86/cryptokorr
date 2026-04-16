@@ -1,7 +1,7 @@
-defmodule Bank.EpistemicTest do
+defmodule Bank.TrustEngineTest do
   use Bank.DataCase, async: true
 
-  alias Bank.Epistemic
+  alias Bank.TrustEngine
   alias Bank.Fixtures
 
   describe "classify/2 — raw-address intents" do
@@ -23,7 +23,7 @@ defmodule Bank.EpistemicTest do
         })
         |> Bank.Repo.insert()
 
-      claim = Epistemic.classify(intent)
+      claim = TrustEngine.classify(intent)
 
       assert claim.derived_trust == :unknown
       assert claim.confidence == :low
@@ -37,7 +37,7 @@ defmodule Bank.EpistemicTest do
       cp = Fixtures.counterparty(name: "No Assertions")
       intent = Fixtures.agent_intent(counterparty: cp)
 
-      claim = Epistemic.classify(intent)
+      claim = TrustEngine.classify(intent)
 
       assert claim.derived_trust == :unknown
       assert claim.confidence == :low
@@ -55,7 +55,7 @@ defmodule Bank.EpistemicTest do
         })
 
       intent = Fixtures.agent_intent(counterparty: cp, chain: "base")
-      claim = Epistemic.classify(intent)
+      claim = TrustEngine.classify(intent)
 
       assert claim.derived_trust == :unknown
       assert claim.supporting_assertion_ids == []
@@ -75,7 +75,7 @@ defmodule Bank.EpistemicTest do
         })
 
       intent = Fixtures.agent_intent(counterparty: cp, asset: "USDC", chain: "base")
-      claim = Epistemic.classify(intent)
+      claim = TrustEngine.classify(intent)
 
       assert claim.derived_trust == :trusted
       assert claim.confidence == :medium
@@ -89,7 +89,7 @@ defmodule Bank.EpistemicTest do
       _sens = Fixtures.trust_assertion(%{subject: cp, level: :sensitive, scope: %{}})
 
       intent = Fixtures.agent_intent(counterparty: cp)
-      claim = Epistemic.classify(intent)
+      claim = TrustEngine.classify(intent)
 
       assert claim.derived_trust == :conflicted
       items = claim.contradictions["items"]
@@ -103,7 +103,7 @@ defmodule Bank.EpistemicTest do
       Fixtures.trust_assertion(%{subject: cp, level: :unknown, scope: %{}})
 
       intent = Fixtures.agent_intent(counterparty: cp, asset: "USDC")
-      claim = Epistemic.classify(intent)
+      claim = TrustEngine.classify(intent)
 
       assert claim.derived_trust == :conflicted
       assert claim.confidence == :low
@@ -115,7 +115,7 @@ defmodule Bank.EpistemicTest do
       Fixtures.trust_assertion(%{subject: cp, level: :trusted, scope: %{}, issued_by: :user})
 
       intent = Fixtures.agent_intent(counterparty: cp)
-      claim = Epistemic.classify(intent)
+      claim = TrustEngine.classify(intent)
 
       assert claim.derived_trust == :trusted
       assert claim.confidence == :high
@@ -136,8 +136,8 @@ defmodule Bank.EpistemicTest do
       small = Fixtures.agent_intent(counterparty: cp, asset: "USDC", amount: Decimal.new("250"))
       big = Fixtures.agent_intent(counterparty: cp, asset: "USDC", amount: Decimal.new("750"))
 
-      assert Epistemic.classify(small).derived_trust == :trusted
-      assert Epistemic.classify(big).derived_trust == :unknown
+      assert TrustEngine.classify(small).derived_trust == :trusted
+      assert TrustEngine.classify(big).derived_trust == :unknown
     end
   end
 end

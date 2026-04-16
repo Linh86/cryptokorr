@@ -112,7 +112,7 @@ defmodule Bank.Runtime.Workers.ExpireApproval do
             ]
           },
           policy_snapshot_ref: prior.policy_snapshot_ref,
-          epistemic_claim_id: prior.epistemic_claim_id,
+          trust_assessment_id: prior.trust_assessment_id,
           simulation_report_id: prior.simulation_report_id,
           decided_at: now,
           decided_by: :runtime,

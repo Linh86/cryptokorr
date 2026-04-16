@@ -58,7 +58,7 @@ defmodule Bank.Counterparties do
     * Scoped assertions don't flip a counterparty to `:trusted` at
       large; a "trusted for USDC payouts under $500" assertion shouldn't
       render as a global trust badge.
-    * Epistemic-engine-derived assertions (issue #8+) will use the
+    * Trust-engine-derived assertions (issue #8+) will use the
       same internal helper and thus maintain the cache by construction.
 
   ## Trust supersession rule

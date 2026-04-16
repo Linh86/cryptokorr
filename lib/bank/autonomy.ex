@@ -5,7 +5,7 @@ defmodule Bank.Autonomy do
   inputs the runtime has already gathered:
 
     * `%Bank.Policies.Evaluation{}` (from the policy engine)
-    * `%Bank.Epistemic{}` claim (from #9)
+    * a trust-assessment map from `Bank.TrustEngine.classify/2`
     * `%Bank.Quotes.Preview{}` result (from #11; may be `{:error, _}`)
     * the candidate `%Bank.Intents.AgentIntent{}`
 
@@ -99,8 +99,8 @@ defmodule Bank.Autonomy do
 
     * `:intent` — `%AgentIntent{}`
     * `:policy` — `%Evaluation{}` (from `Bank.Policies.evaluate/2`)
-    * `:epistemic` — the epistemic-claim attr map from
-      `Bank.Epistemic.classify/2`
+    * `:trust` — the trust-assessment attr map from
+      `Bank.TrustEngine.classify/2`
     * `:preview` — `{:ok, %Preview{}}` or `{:error, reason}` from
       `Bank.Quotes.preview/2`. `nil` means "no preview attempted yet"
       and is treated as `{:error, :preview_missing}`.
@@ -257,18 +257,18 @@ defmodule Bank.Autonomy do
   defp simulation_failed?(%{preview: {:error, {:simulation_failed, _}}}), do: true
   defp simulation_failed?(_), do: false
 
-  defp conflicted_trust?(%{epistemic: %{derived_trust: :conflicted}}), do: true
+  defp conflicted_trust?(%{trust: %{derived_trust: :conflicted}}), do: true
   defp conflicted_trust?(_), do: false
 
-  defp sensitive_trust?(%{epistemic: %{derived_trust: :sensitive}}), do: true
+  defp sensitive_trust?(%{trust: %{derived_trust: :sensitive}}), do: true
   defp sensitive_trust?(_), do: false
 
-  defp unknown_trust?(%{epistemic: %{derived_trust: :unknown}}), do: true
+  defp unknown_trust?(%{trust: %{derived_trust: :unknown}}), do: true
   defp unknown_trust?(_), do: false
 
   defp trusted_auto?(
          %{
-           epistemic: %{derived_trust: :trusted},
+           trust: %{derived_trust: :trusted},
            policy: %Evaluation{autonomy_tier: :auto},
            intent: %AgentIntent{} = intent
          },
@@ -285,7 +285,7 @@ defmodule Bank.Autonomy do
   defp trusted_auto?(_, _), do: false
 
   defp trusted_manual?(%{
-         epistemic: %{derived_trust: :trusted},
+         trust: %{derived_trust: :trusted},
          policy: %Evaluation{autonomy_tier: tier}
        })
        when tier in [:manual, :auto],
@@ -393,7 +393,7 @@ defmodule Bank.Autonomy do
     }
   end
 
-  defp trust_confidence(%{epistemic: %{confidence: c}}), do: c
+  defp trust_confidence(%{trust: %{confidence: c}}), do: c
   defp trust_confidence(_), do: :low
 
   defp thresholds_for(asset, opts) do

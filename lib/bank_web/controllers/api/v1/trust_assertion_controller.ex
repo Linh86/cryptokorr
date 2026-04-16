@@ -3,7 +3,7 @@ defmodule BankWeb.API.V1.TrustAssertionController do
   `/v1/trust_assertions` — operator-issued manual trust overrides.
 
   Trust levels are the fixed v1 vocabulary: `trusted`, `sensitive`,
-  `unknown`, `conflicted`. Epistemic-engine-derived assertions take the
+  `unknown`, `conflicted`. Trust-engine-derived assertions take the
   same internal shape but never come through this endpoint.
 
   Endpoints:

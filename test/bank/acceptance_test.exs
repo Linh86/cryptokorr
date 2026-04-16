@@ -11,7 +11,7 @@ defmodule Bank.AcceptanceTest do
     * revoked delegation / paused runtime → no `:auto_exec`
 
   These assemble the full routing inputs (intent + policy eval +
-  epistemic claim + preview) and drive `Bank.Autonomy.route/2`. They
+  trust assessment + preview) and drive `Bank.Autonomy.route/2`. They
   deliberately exercise the decision surface, not the persistence
   wiring — per the ticket, "prefer high-signal checks over broad
   unfinished test infrastructure."
@@ -67,7 +67,7 @@ defmodule Bank.AcceptanceTest do
           paused?: false,
           intent: intent(%{amount: Decimal.new("25")}),
           policy: policy_pass(:auto),
-          epistemic: %{derived_trust: :trusted, confidence: :high},
+          trust: %{derived_trust: :trusted, confidence: :high},
           preview: preview_ok()
         })
 
@@ -81,7 +81,7 @@ defmodule Bank.AcceptanceTest do
           paused?: false,
           intent: intent(%{amount: Decimal.new("5000")}),
           policy: policy_pass(:manual),
-          epistemic: %{derived_trust: :trusted, confidence: :high},
+          trust: %{derived_trust: :trusted, confidence: :high},
           preview: preview_ok()
         })
 
@@ -94,7 +94,7 @@ defmodule Bank.AcceptanceTest do
           paused?: false,
           intent: intent(%{amount: Decimal.new("500"), target_counterparty_id: nil}),
           policy: policy_pass(),
-          epistemic: %{derived_trust: :unknown, confidence: :low},
+          trust: %{derived_trust: :unknown, confidence: :low},
           preview: preview_ok()
         })
 
@@ -108,7 +108,7 @@ defmodule Bank.AcceptanceTest do
           paused?: false,
           intent: intent(%{amount: Decimal.new("10"), target_counterparty_id: nil}),
           policy: policy_pass(),
-          epistemic: %{derived_trust: :unknown, confidence: :low},
+          trust: %{derived_trust: :unknown, confidence: :low},
           preview: preview_ok()
         })
 
@@ -122,7 +122,7 @@ defmodule Bank.AcceptanceTest do
           paused?: false,
           intent: intent(),
           policy: policy_pass(),
-          epistemic: %{derived_trust: :conflicted, confidence: :low},
+          trust: %{derived_trust: :conflicted, confidence: :low},
           preview: preview_ok()
         })
 
@@ -138,7 +138,7 @@ defmodule Bank.AcceptanceTest do
           paused?: false,
           intent: swap_intent,
           policy: policy_pass(:auto),
-          epistemic: %{derived_trust: :trusted, confidence: :high},
+          trust: %{derived_trust: :trusted, confidence: :high},
           preview: {:error, {:simulation_failed, "slippage_exceeded"}}
         })
 
@@ -152,7 +152,7 @@ defmodule Bank.AcceptanceTest do
           paused?: true,
           intent: intent(%{amount: Decimal.new("10")}),
           policy: policy_pass(:auto),
-          epistemic: %{derived_trust: :trusted, confidence: :high},
+          trust: %{derived_trust: :trusted, confidence: :high},
           preview: preview_ok()
         })
 
@@ -166,7 +166,7 @@ defmodule Bank.AcceptanceTest do
           paused?: false,
           intent: intent(),
           policy: policy_pass(:auto),
-          epistemic: %{derived_trust: :trusted, confidence: :high},
+          trust: %{derived_trust: :trusted, confidence: :high},
           preview: {:error, :provider_unavailable}
         })
 

@@ -8,7 +8,7 @@ defmodule BankWeb.API.V1.IntentReplayTest do
     test "returns a deterministic bundle for a known intent", %{conn: conn} do
       intent = Fixtures.agent_intent()
       rule = Fixtures.policy_rule()
-      claim = Fixtures.epistemic_claim(intent: intent, current: true)
+      claim = Fixtures.trust_assessment(intent: intent, current: true)
       sim = Fixtures.simulation_report(intent: intent, current: true)
 
       decision =
@@ -35,7 +35,7 @@ defmodule BankWeb.API.V1.IntentReplayTest do
       assert body["intent"]["id"] == intent.id
 
       assert Enum.map(body["policy_snapshot"], & &1["id"]) == [rule.id]
-      assert Enum.map(body["epistemic"], & &1["id"]) == [claim.id]
+      assert Enum.map(body["trust_assessments"], & &1["id"]) == [claim.id]
       assert Enum.map(body["simulations"], & &1["id"]) == [sim.id]
       assert Enum.map(body["decisions"], & &1["id"]) == [decision.id]
       assert Enum.map(body["plans"], & &1["id"]) == [plan.id]

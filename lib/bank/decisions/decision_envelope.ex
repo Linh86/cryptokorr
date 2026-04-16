@@ -32,7 +32,7 @@ defmodule Bank.Decisions.DecisionEnvelope do
 
   use Bank.Schema
 
-  alias Bank.Decisions.{EpistemicClaim, ExecutionPlan, SimulationReport}
+  alias Bank.Decisions.{TrustAssessment, ExecutionPlan, SimulationReport}
   alias Bank.Intents.AgentIntent
 
   @outcomes [:auto_exec, :hold, :approval_required, :block]
@@ -55,7 +55,7 @@ defmodule Bank.Decisions.DecisionEnvelope do
     field :approval_expires_at, :utc_datetime_usec
 
     belongs_to :intent, AgentIntent
-    belongs_to :epistemic_claim, EpistemicClaim
+    belongs_to :trust_assessment, TrustAssessment
     belongs_to :simulation_report, SimulationReport
     belongs_to :supersedes, __MODULE__, foreign_key: :supersedes_id
 
@@ -77,7 +77,7 @@ defmodule Bank.Decisions.DecisionEnvelope do
       :risk_tier,
       :reasons,
       :policy_snapshot_ref,
-      :epistemic_claim_id,
+      :trust_assessment_id,
       :simulation_report_id,
       :decided_at,
       :decided_by,
@@ -96,7 +96,7 @@ defmodule Bank.Decisions.DecisionEnvelope do
     |> validate_policy_snapshot_shape()
     |> validate_approval_expiry()
     |> foreign_key_constraint(:intent_id)
-    |> foreign_key_constraint(:epistemic_claim_id)
+    |> foreign_key_constraint(:trust_assessment_id)
     |> foreign_key_constraint(:simulation_report_id)
     |> foreign_key_constraint(:supersedes_id)
     |> unique_constraint(:intent_id,

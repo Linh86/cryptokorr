@@ -1,10 +1,10 @@
-defmodule Bank.Epistemic do
+defmodule Bank.TrustEngine do
   @moduledoc """
-  Epistemic engine v0 — rule-based trust classification.
+  Trust engine v0 — rule-based trust classification.
 
-  Produces an `%EpistemicClaim{}`-shaped classification for an
+  Produces an `%TrustAssessment{}`-shaped classification for an
   `%AgentIntent{}`. The engine does **not** write to the DB; it returns
-  an attribute map ready for `EpistemicClaim.changeset/2`. Persistence
+  an attribute map ready for `TrustAssessment.changeset/2`. Persistence
   is the caller's responsibility (typically the runtime evaluation
   worker), so the engine can be used for dry-run explanations without
   side effects.

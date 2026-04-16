@@ -45,7 +45,7 @@ defmodule Bank.AutonomyTest do
         paused?: true,
         intent: base_intent(),
         policy: pass_eval(),
-        epistemic: %{derived_trust: :trusted, confidence: :high},
+        trust: %{derived_trust: :trusted, confidence: :high},
         preview: {:ok, ok_preview()}
       })
 
@@ -71,7 +71,7 @@ defmodule Bank.AutonomyTest do
         paused?: false,
         intent: base_intent(),
         policy: eval,
-        epistemic: %{derived_trust: :trusted, confidence: :high},
+        trust: %{derived_trust: :trusted, confidence: :high},
         preview: {:ok, ok_preview()}
       })
 
@@ -85,7 +85,7 @@ defmodule Bank.AutonomyTest do
         paused?: false,
         intent: base_intent(),
         policy: pass_eval(),
-        epistemic: %{derived_trust: :trusted, confidence: :high},
+        trust: %{derived_trust: :trusted, confidence: :high},
         preview: {:error, :provider_unavailable}
       })
 
@@ -99,7 +99,7 @@ defmodule Bank.AutonomyTest do
         paused?: false,
         intent: base_intent(),
         policy: pass_eval(),
-        epistemic: %{derived_trust: :trusted, confidence: :high},
+        trust: %{derived_trust: :trusted, confidence: :high},
         preview: {:error, {:simulation_failed, "insufficient_liquidity"}}
       })
 
@@ -113,7 +113,7 @@ defmodule Bank.AutonomyTest do
         paused?: false,
         intent: base_intent(),
         policy: pass_eval(),
-        epistemic: %{derived_trust: :conflicted, confidence: :low},
+        trust: %{derived_trust: :conflicted, confidence: :low},
         preview: {:ok, ok_preview()}
       })
 
@@ -127,7 +127,7 @@ defmodule Bank.AutonomyTest do
         paused?: false,
         intent: base_intent(%{amount: Decimal.new("5")}),
         policy: pass_eval(),
-        epistemic: %{derived_trust: :sensitive, confidence: :medium},
+        trust: %{derived_trust: :sensitive, confidence: :medium},
         preview: {:ok, ok_preview()}
       })
 
@@ -140,7 +140,7 @@ defmodule Bank.AutonomyTest do
         paused?: false,
         intent: base_intent(%{amount: Decimal.new("10")}),
         policy: pass_eval(),
-        epistemic: %{derived_trust: :unknown, confidence: :low},
+        trust: %{derived_trust: :unknown, confidence: :low},
         preview: {:ok, ok_preview()}
       })
 
@@ -149,7 +149,7 @@ defmodule Bank.AutonomyTest do
         paused?: false,
         intent: base_intent(%{amount: Decimal.new("500")}),
         policy: pass_eval(),
-        epistemic: %{derived_trust: :unknown, confidence: :low},
+        trust: %{derived_trust: :unknown, confidence: :low},
         preview: {:ok, ok_preview()}
       })
 
@@ -163,7 +163,7 @@ defmodule Bank.AutonomyTest do
         paused?: false,
         intent: base_intent(%{amount: Decimal.new("50")}),
         policy: pass_eval(:auto),
-        epistemic: %{derived_trust: :trusted, confidence: :high},
+        trust: %{derived_trust: :trusted, confidence: :high},
         preview: {:ok, ok_preview()}
       })
 
@@ -177,7 +177,7 @@ defmodule Bank.AutonomyTest do
         paused?: false,
         intent: base_intent(%{amount: Decimal.new("50")}),
         policy: pass_eval(:manual),
-        epistemic: %{derived_trust: :trusted, confidence: :high},
+        trust: %{derived_trust: :trusted, confidence: :high},
         preview: {:ok, ok_preview()}
       })
 
@@ -191,7 +191,7 @@ defmodule Bank.AutonomyTest do
         paused?: false,
         intent: base_intent(%{amount: Decimal.new("50")}),
         policy: pass_eval(:manual),
-        epistemic: %{derived_trust: :trusted, confidence: :high},
+        trust: %{derived_trust: :trusted, confidence: :high},
         preview: {:ok, ok_preview()}
       })
       |> Autonomy.to_envelope_attrs()
@@ -203,7 +203,7 @@ defmodule Bank.AutonomyTest do
         paused?: false,
         intent: base_intent(%{amount: Decimal.new("50")}),
         policy: pass_eval(:auto),
-        epistemic: %{derived_trust: :trusted, confidence: :high},
+        trust: %{derived_trust: :trusted, confidence: :high},
         preview: {:ok, ok_preview()}
       })
       |> Autonomy.to_envelope_attrs()

@@ -10,7 +10,7 @@ defmodule Bank.Runtime.Workers do
 
   | Module                                  | Queue (atom)          | Semantic name        | Status (issue #6) |
   |-----------------------------------------|-----------------------|----------------------|-------------------|
-  | `Bank.Runtime.Workers.EvaluateIntent`   | `:intents_evaluate`   | `intents.evaluate`   | Safe boundary — verifies intent is evaluable, cancels with `:engines_pending`. Policy / epistemic / simulation engines ship in issues #7-#9. |
+  | `Bank.Runtime.Workers.EvaluateIntent`   | `:intents_evaluate`   | `intents.evaluate`   | Safe boundary — verifies intent is evaluable, cancels with `:engines_pending`. Policy / trust / simulation engines ship in issues #7-#9. |
   | `Bank.Runtime.Workers.ReevaluateIntent` | `:intents_reevaluate` | `intents.reevaluate` | Safe boundary — same engines gate. Carries `reason` so operator sees why the re-eval was requested. |
   | `Bank.Runtime.Workers.ExpireApproval`   | `:approvals_expire`   | `approvals.expire`   | **Real transition.** Flips prior envelope `current: false`, writes block successor, updates intent state, emits audit + PubSub. Pure DB work — no engine needed. |
   | `Bank.Runtime.Workers.RunExecution`     | `:executions_run`     | `executions.run`     | Safe boundary — adapter hand-off is the work, and the adapter lives in a separate service that is not wired yet. Cancels with `:adapter_pending`. |

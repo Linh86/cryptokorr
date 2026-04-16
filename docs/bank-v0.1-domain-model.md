@@ -41,7 +41,7 @@ It is intentionally narrow. This is the v1 MVP shape, not the long-term platform
 - `cancelled` is operator-initiated before execution starts.
 - `expired` applies to intents that are held or queued past a policy-defined TTL.
 
-**Relationships.** 1:1 with `EpistemicClaim`, `SimulationReport`, and `DecisionEnvelope` (each generated per intent). 0..1 `ExecutionPlan`. Many `AuditEvent`s correlated by `intent_id`. References one `Counterparty` / `AddressLabel` when the target is known.
+**Relationships.** 1:1 with `TrustAssessment`, `SimulationReport`, and `DecisionEnvelope` (each generated per intent). 0..1 `ExecutionPlan`. Many `AuditEvent`s correlated by `intent_id`. References one `Counterparty` / `AddressLabel` when the target is known.
 
 ---
 
@@ -87,7 +87,7 @@ It is intentionally narrow. This is the v1 MVP shape, not the long-term platform
 
 ### EvidenceArtifact
 
-**Purpose.** A durable item that supports, qualifies, or contradicts a claim about a counterparty or address. This is the raw material the epistemic engine reasons over.
+**Purpose.** A durable item that supports, qualifies, or contradicts a claim about a counterparty or address. This is the raw material the trust engine reasons over.
 
 **Key fields.**
 - `id`, `subject_type` (`counterparty` | `address_label`), `subject_id`
@@ -96,7 +96,7 @@ It is intentionally narrow. This is the v1 MVP shape, not the long-term platform
 - `content_uri` — where the payload lives (object store, inline)
 - `payload_hash` — integrity anchor for replay
 - `captured_at`, `captured_by` (actor)
-- `weight` — optional `low` | `medium` | `high` hint for the epistemic engine
+- `weight` — optional `low` | `medium` | `high` hint for the trust engine
 - `supersedes_id` — if this replaces an older artifact
 
 **Creator.** Operator (manual notes, pinned signatures) or runtime (evidence harvested from providers or execution history).
@@ -104,7 +104,7 @@ It is intentionally narrow. This is the v1 MVP shape, not the long-term platform
 
 **Lifecycle.** `created → (optionally) superseded`. No hard delete in v1.
 
-**Relationships.** Attached to a `Counterparty` or `AddressLabel`. Referenced by one or more `TrustAssertion.evidence_ids[]` and by the per-intent `EpistemicClaim`.
+**Relationships.** Attached to a `Counterparty` or `AddressLabel`. Referenced by one or more `TrustAssertion.evidence_ids[]` and by the per-intent `TrustAssessment`.
 
 ---
 
@@ -118,20 +118,20 @@ It is intentionally narrow. This is the v1 MVP shape, not the long-term platform
 - `scope` — structured: `{asset?, chain?, amount_ceiling?, time_window?}`; empty scope means "applies broadly"
 - `rationale` — short human-readable justification
 - `evidence_ids[]`
-- `issued_at`, `issued_by` (actor: operator or epistemic engine)
+- `issued_at`, `issued_by` (actor: operator or trust engine)
 - `expires_at` — optional; expired assertions are treated as absent
 - `supersedes_id`
 
-**Creator.** Operator (manual override) or epistemic engine (derived from evidence). Both paths are first-class.
+**Creator.** Operator (manual override) or trust engine (derived from evidence). Both paths are first-class.
 **Updater.** Append-only. To change trust, issue a new assertion.
 
 **Lifecycle.** `active → superseded | expired`. The effective trust for a subject at any instant is "the most recent non-expired active assertion matching the scope."
 
-**Relationships.** Points at `Counterparty` or `AddressLabel`. Aggregates `EvidenceArtifact`s. Read by `EpistemicClaim`.
+**Relationships.** Points at `Counterparty` or `AddressLabel`. Aggregates `EvidenceArtifact`s. Read by `TrustAssessment`.
 
 ---
 
-### EpistemicClaim
+### TrustAssessment
 
 **Purpose.** A per-intent assessment of how well-understood the action is. It combines the relevant trust assertions and evidence, surfaces contradictions, and produces the trust input that the decision engine consumes.
 
@@ -144,7 +144,7 @@ It is intentionally narrow. This is the v1 MVP shape, not the long-term platform
 - `rationale` — structured notes the UI can render
 - `generated_at`, `generated_by` (runtime version tag for replay)
 
-**Creator.** Epistemic engine (runtime), once per intent.
+**Creator.** Trust engine (runtime), once per intent.
 **Updater.** Immutable. If inputs change and the intent is re-evaluated, a new claim is created and the decision envelope gets a new link.
 
 **Lifecycle.** `generated → consumed`. Not user-facing as a mutable object; user-facing only through the decision and audit views.
@@ -209,7 +209,7 @@ It is intentionally narrow. This is the v1 MVP shape, not the long-term platform
 - `risk_tier` — `low` | `moderate` | `elevated` | `severe`
 - `reasons[]` — structured codes + human-readable strings
 - `policy_snapshot_ref` — immutable set of `PolicyRule` versions applied
-- `epistemic_claim_id`, `simulation_report_id`
+- `trust_assessment_id`, `simulation_report_id`
 - `decided_at`, `decided_by` (runtime version)
 - `supersedes_id` — present when an approval flow produces a follow-up envelope
 
@@ -221,7 +221,7 @@ It is intentionally narrow. This is the v1 MVP shape, not the long-term platform
 - `hold` and `approval_required` resolve via operator action (approve → new envelope with `auto_exec`; reject → resolved as blocked).
 - `block` is terminal.
 
-**Relationships.** 1:1 with `AgentIntent` at a given point in time. References a `PolicyRule` snapshot, one `EpistemicClaim`, one `SimulationReport`. 0..1 `ExecutionPlan`.
+**Relationships.** 1:1 with `AgentIntent` at a given point in time. References a `PolicyRule` snapshot, one `TrustAssessment`, one `SimulationReport`. 0..1 `ExecutionPlan`.
 
 ---
 
@@ -284,7 +284,7 @@ This section only covers state that lives on objects above. The end-to-end flow 
 `submitted → evaluating → decided → (executing → executed) | blocked | cancelled | expired`
 
 - `submitted` — accepted by the API, idempotency-key deduped, not yet evaluated.
-- `evaluating` — policy, epistemic, and simulation work in progress.
+- `evaluating` — policy, trust, and simulation work in progress.
 - `decided` — a DecisionEnvelope exists. The intent remains `decided` while any approval flow runs.
 - `executing` — an ExecutionPlan is live.
 - `executed` — terminal success.
@@ -361,9 +361,9 @@ Node labels are intent states; transitions reference the decision and execution 
 
 ## Object relationships at a glance
 
-- `AgentIntent` ── 1:1 ── `EpistemicClaim` ── references ── `TrustAssertion` ── references ── `EvidenceArtifact`
+- `AgentIntent` ── 1:1 ── `TrustAssessment` ── references ── `TrustAssertion` ── references ── `EvidenceArtifact`
 - `AgentIntent` ── 1:1 ── `SimulationReport`
-- `AgentIntent` ── 1:1 ── `DecisionEnvelope` ── references ── `PolicyRule` (snapshot), `EpistemicClaim`, `SimulationReport`
+- `AgentIntent` ── 1:1 ── `DecisionEnvelope` ── references ── `PolicyRule` (snapshot), `TrustAssessment`, `SimulationReport`
 - `DecisionEnvelope` ── 0..1 ── `ExecutionPlan`
 - `Counterparty` ── 1:n ── `AddressLabel`
 - `Counterparty` and `AddressLabel` ── 1:n ── `EvidenceArtifact`, `TrustAssertion`
@@ -393,7 +393,7 @@ Captured here to prevent domain drift during implementation.
 - Multi-chain live execution (schema-ready, runtime-restricted to Base).
 - Fiat rails, centralized-exchange accounts, bridging flows.
 - Open-ended contract calls outside whitelisted routers.
-- Numeric or probabilistic trust scores; ML-tuned epistemic weights.
+- Numeric or probabilistic trust scores; ML-tuned trust heuristics.
 - Counterparty relationship modeling beyond name, notes, addresses, and evidence (no org hierarchies, tags, or graph edges between counterparties in v1).
 - Cross-intent batching or atomic multi-intent plans.
 - User-editable audit records of any kind.
@@ -403,4 +403,4 @@ Captured here to prevent domain drift during implementation.
 
 ## What's next
 
-Issue #2 defines the canonical runtime flow and the API contract that produces and consumes these objects. Issues #7–#12 implement the individual engines (counterparties, policy, epistemic, adapter, execution). This document is the shared vocabulary those efforts should reference — updates here should flow back through product/engineering review rather than being made ad hoc in implementation PRs.
+Issue #2 defines the canonical runtime flow and the API contract that produces and consumes these objects. Issues #7–#12 implement the individual engines (counterparties, policy, trust, adapter, execution). This document is the shared vocabulary those efforts should reference — updates here should flow back through product/engineering review rather than being made ad hoc in implementation PRs.

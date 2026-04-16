@@ -8,7 +8,7 @@ defmodule BankWeb.API.V1.AuditJSON do
   """
 
   alias Bank.Audit.AuditEvent
-  alias Bank.Decisions.{DecisionEnvelope, EpistemicClaim, ExecutionPlan, SimulationReport}
+  alias Bank.Decisions.{DecisionEnvelope, TrustAssessment, ExecutionPlan, SimulationReport}
   alias Bank.Intents.AgentIntent
   alias Bank.Policies.PolicyRule
 
@@ -25,7 +25,7 @@ defmodule BankWeb.API.V1.AuditJSON do
     %{
       intent: render_intent(bundle.intent),
       policy_snapshot: Enum.map(bundle.policy_snapshot, &render_policy_rule/1),
-      epistemic: Enum.map(bundle.epistemic, &render_claim/1),
+      trust_assessments: Enum.map(bundle.trust_assessments, &render_claim/1),
       simulations: Enum.map(bundle.simulations, &render_simulation/1),
       decisions: Enum.map(bundle.decisions, &render_decision/1),
       plans: Enum.map(bundle.plans, &render_plan/1),
@@ -88,7 +88,7 @@ defmodule BankWeb.API.V1.AuditJSON do
     }
   end
 
-  defp render_claim(%EpistemicClaim{} = claim) do
+  defp render_claim(%TrustAssessment{} = claim) do
     %{
       id: claim.id,
       intent_id: claim.intent_id,
@@ -136,7 +136,7 @@ defmodule BankWeb.API.V1.AuditJSON do
       risk_tier: envelope.risk_tier,
       reasons: envelope.reasons,
       policy_snapshot_ref: envelope.policy_snapshot_ref,
-      epistemic_claim_id: envelope.epistemic_claim_id,
+      trust_assessment_id: envelope.trust_assessment_id,
       simulation_report_id: envelope.simulation_report_id,
       decided_at: envelope.decided_at,
       decided_by: envelope.decided_by,

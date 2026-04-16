@@ -3,7 +3,7 @@ defmodule Bank.Runtime.Workers.EvaluateIntent do
   Initial evaluation of a freshly-submitted agent intent.
 
   In the eventual runtime this worker stages policy evaluation,
-  epistemic trust derivation, and simulation, then writes the first
+  trust derivation, and simulation, then writes the first
   `DecisionEnvelope`. Those engines (issues #7-#9) do not exist yet,
   so today the worker stops at a safe boundary: it verifies the
   intent is in a state that can be evaluated and cancels with

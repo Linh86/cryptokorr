@@ -1,6 +1,6 @@
 defmodule Bank.Repo.Migrations.CreateDecisionFlowTables do
   @moduledoc """
-  Per-intent derived objects: epistemic claims, simulation reports,
+  Per-intent derived objects: trust assessments, simulation reports,
   decision envelopes, and execution plans.
 
   ## Current + history convention
@@ -35,8 +35,8 @@ defmodule Bank.Repo.Migrations.CreateDecisionFlowTables do
   use Ecto.Migration
 
   def change do
-    # Epistemic claims ---------------------------------------------------
-    create table(:epistemic_claims, primary_key: false) do
+    # Trust assessments ---------------------------------------------------
+    create table(:trust_assessments, primary_key: false) do
       add :id, :binary_id, primary_key: true, default: fragment("gen_random_uuid()")
 
       add :intent_id,
@@ -54,23 +54,23 @@ defmodule Bank.Repo.Migrations.CreateDecisionFlowTables do
       add :current, :boolean, null: false, default: false
 
       add :supersedes_id,
-          references(:epistemic_claims, type: :binary_id, on_delete: :restrict)
+          references(:trust_assessments, type: :binary_id, on_delete: :restrict)
 
       timestamps()
     end
 
-    create constraint(:epistemic_claims, :derived_trust_valid,
+    create constraint(:trust_assessments, :derived_trust_valid,
              check: "derived_trust IN ('trusted','sensitive','unknown','conflicted')"
            )
 
-    create constraint(:epistemic_claims, :confidence_valid,
+    create constraint(:trust_assessments, :confidence_valid,
              check: "confidence IN ('low','medium','high')"
            )
 
-    create index(:epistemic_claims, [:intent_id])
+    create index(:trust_assessments, [:intent_id])
 
-    create unique_index(:epistemic_claims, [:intent_id],
-             name: :epistemic_claims_intent_current_idx,
+    create unique_index(:trust_assessments, [:intent_id],
+             name: :trust_assessments_intent_current_idx,
              where: "current"
            )
 
@@ -130,8 +130,8 @@ defmodule Bank.Repo.Migrations.CreateDecisionFlowTables do
       # jsonb array of policy_rule uuids captured at decision time.
       add :policy_snapshot_ref, :map, null: false, default: %{"rule_ids" => []}
 
-      add :epistemic_claim_id,
-          references(:epistemic_claims, type: :binary_id, on_delete: :restrict)
+      add :trust_assessment_id,
+          references(:trust_assessments, type: :binary_id, on_delete: :restrict)
 
       add :simulation_report_id,
           references(:simulation_reports, type: :binary_id, on_delete: :restrict)

@@ -1,4 +1,4 @@
-defmodule Bank.Decisions.EpistemicClaim do
+defmodule Bank.Decisions.TrustAssessment do
   @moduledoc """
   The runtime's knowledge snapshot about an intent: derived trust,
   confidence, contradictions, and the supporting assertion / evidence
@@ -6,7 +6,7 @@ defmodule Bank.Decisions.EpistemicClaim do
 
   One claim per intent is "current" at a time. Refresh writes a new
   row, flips the prior row's `current` flag to false, and moves the
-  intent's cached `current_epistemic_claim_id` pointer forward — all in
+  intent's cached `current_trust_assessment_id` pointer forward — all in
   one transaction. A partial unique index on `(intent_id) WHERE
   current` enforces the single-live invariant at the DB.
   """
@@ -21,7 +21,7 @@ defmodule Bank.Decisions.EpistemicClaim do
 
   @type t :: %__MODULE__{}
 
-  schema "epistemic_claims" do
+  schema "trust_assessments" do
     field :derived_trust, Ecto.Enum, values: @trust_levels
     field :confidence, Ecto.Enum, values: @confidences
     field :contradictions, :map, default: %{"items" => []}
@@ -67,7 +67,7 @@ defmodule Bank.Decisions.EpistemicClaim do
     |> foreign_key_constraint(:intent_id)
     |> foreign_key_constraint(:supersedes_id)
     |> unique_constraint(:intent_id,
-      name: :epistemic_claims_intent_current_idx,
+      name: :trust_assessments_intent_current_idx,
       message: "another current claim already exists for this intent"
     )
   end

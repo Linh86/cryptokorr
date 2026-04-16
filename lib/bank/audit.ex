@@ -47,7 +47,7 @@ defmodule Bank.Audit do
   where possible:
 
     * `intent.submitted`, `intent.cancelled`, `intent.state_changed`
-    * `epistemic.claimed`, `simulation.produced`, `simulation.stale`
+    * `trust.assessed`, `simulation.produced`, `simulation.stale`
     * `decision.decided`, `decision.superseded`
     * `approval.granted`, `approval.rejected`, `approval.expired`
     * `execution.prepared`, `execution.broadcast`, `execution.confirmed`,
@@ -78,7 +78,7 @@ defmodule Bank.Audit do
   import Ecto.Query
 
   alias Bank.Audit.{AuditEvent, Envelope}
-  alias Bank.Decisions.{DecisionEnvelope, EpistemicClaim, ExecutionPlan, SimulationReport}
+  alias Bank.Decisions.{DecisionEnvelope, TrustAssessment, ExecutionPlan, SimulationReport}
   alias Bank.Intents.AgentIntent
   alias Bank.Policies.PolicyRule
   alias Bank.Repo
@@ -247,7 +247,7 @@ defmodule Bank.Audit do
                                                      # snapshot_rule_ids
                                                      # captured across
                                                      # every decision
-        epistemic: [%EpistemicClaim{}, ...],        # oldest first
+        trust_assessments: [%TrustAssessment{}, ...],        # oldest first
         simulations: [%SimulationReport{}, ...],    # oldest first
         decisions: [%DecisionEnvelope{}, ...],      # oldest first
         plans: [%ExecutionPlan{}, ...],             # oldest first
@@ -283,7 +283,7 @@ defmodule Bank.Audit do
       |> Repo.all()
 
     claims =
-      EpistemicClaim
+      TrustAssessment
       |> where([c], c.intent_id == ^intent.id)
       |> order_by([c], asc: c.generated_at, asc: c.id)
       |> Repo.all()
@@ -311,7 +311,7 @@ defmodule Bank.Audit do
     %{
       intent: intent,
       policy_snapshot: policy_rules,
-      epistemic: claims,
+      trust_assessments: claims,
       simulations: simulations,
       decisions: decisions,
       plans: plans,

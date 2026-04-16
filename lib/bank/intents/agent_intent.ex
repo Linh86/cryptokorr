@@ -27,7 +27,7 @@ defmodule Bank.Intents.AgentIntent do
 
   ## Current-pointer columns
 
-  `current_decision_id`, `current_epistemic_claim_id`,
+  `current_decision_id`, `current_trust_assessment_id`,
   `current_simulation_id`, and `current_execution_plan_id` are cached
   uuids with no FK. They are set inside the same transaction that
   writes the new child row (decision envelope, claim, etc.). The
@@ -39,7 +39,7 @@ defmodule Bank.Intents.AgentIntent do
   use Bank.Schema
 
   alias Bank.Counterparties.{AddressLabel, Counterparty}
-  alias Bank.Decisions.{DecisionEnvelope, EpistemicClaim, ExecutionPlan, SimulationReport}
+  alias Bank.Decisions.{DecisionEnvelope, TrustAssessment, ExecutionPlan, SimulationReport}
 
   @kinds [:transfer, :swap, :scheduled_transfer]
   @states [
@@ -77,14 +77,14 @@ defmodule Bank.Intents.AgentIntent do
     # Cached pointers to the active child rows — set in the same
     # transaction that writes the successor, no FK.
     field :current_decision_id, Ecto.UUID
-    field :current_epistemic_claim_id, Ecto.UUID
+    field :current_trust_assessment_id, Ecto.UUID
     field :current_simulation_id, Ecto.UUID
     field :current_execution_plan_id, Ecto.UUID
 
     belongs_to :target_counterparty, Counterparty
     belongs_to :target_address_label, AddressLabel
 
-    has_many :epistemic_claims, EpistemicClaim, foreign_key: :intent_id
+    has_many :trust_assessments, TrustAssessment, foreign_key: :intent_id
     has_many :simulation_reports, SimulationReport, foreign_key: :intent_id
     has_many :decision_envelopes, DecisionEnvelope, foreign_key: :intent_id
     has_many :execution_plans, ExecutionPlan, foreign_key: :intent_id
@@ -151,7 +151,7 @@ defmodule Bank.Intents.AgentIntent do
     intent
     |> cast(attrs, [
       :current_decision_id,
-      :current_epistemic_claim_id,
+      :current_trust_assessment_id,
       :current_simulation_id,
       :current_execution_plan_id,
       :state

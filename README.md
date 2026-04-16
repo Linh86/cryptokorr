@@ -75,7 +75,7 @@ runtime-flow doc.
 
 | Semantic name         | Queue atom             | Purpose |
 |-----------------------|------------------------|---------|
-| `intents.evaluate`    | `:intents_evaluate`    | Policy + epistemic + simulation pipeline on intent submission. |
+| `intents.evaluate`    | `:intents_evaluate`    | Policy + trust + simulation pipeline on intent submission. |
 | `intents.reevaluate`  | `:intents_reevaluate`  | Hold-TTL and trust/policy-change-driven re-evaluation. |
 | `approvals.expire`    | `:approvals_expire`    | Approval TTL → successor envelope with outcome `block`. |
 | `executions.run`      | `:executions_run`      | Prepare plan skeleton, hand off to the adapter. |
@@ -176,7 +176,7 @@ column, `gen_random_uuid()` default). Foreign keys are `binary_id`
 throughout. Shared in `Bank.Schema`.
 
 **Append-only history via supersession.** Domain objects that evolve
-(policy rules, evidence, trust assertions, epistemic claims, simulations,
+(policy rules, evidence, trust assertions, trust assessments, simulations,
 decision envelopes, execution plans) are never edited in place. An
 "update" writes a new row with `supersedes_id` pointing at the prior row.
 The prior row is never deleted or mutated, which keeps replay bundles
@@ -194,7 +194,7 @@ foreign-key that, so the invariant is a CHECK constraint on the allowed
 `subject_type` values plus app-level validation of `subject_id`.
 
 **Cached current-pointers on `agent_intents`.** `current_decision_id`,
-`current_epistemic_claim_id`, etc. are plain uuid columns with no FK.
+`current_trust_assessment_id`, etc. are plain uuid columns with no FK.
 They're set in the same transaction as the child-row insert. The
 authoritative "which row is current" invariant lives on the child
 table's partial unique index — pointers are a read optimisation, not
@@ -281,7 +281,7 @@ column widening (`subject_id uuid → text`) landed with issue #6 so the
 id directly.
 
 **Replay determinism.** `Bank.Audit.replay/1` reads the authoritative
-child tables (`epistemic_claims`, `simulation_reports`,
+child tables (`trust_assessments`, `simulation_reports`,
 `decision_envelopes`, `execution_plans`) in domain-time order — not
 cached `current_*_id` pointers on `agent_intents` — then pulls the
 policy snapshot by resolving the union of `rule_ids` captured in every
@@ -296,7 +296,7 @@ surfaces that as `422 invalid_query`.
 ## Counterparties + address book
 
 `Bank.Counterparties` is the operator-authoritative write path for
-recipients. Decisioning (issue #9+) and the epistemic engine read
+recipients. Decisioning (issue #9+) and the trust engine read
 through this context rather than touching `Counterparty`, `AddressLabel`,
 `EvidenceArtifact`, or `TrustAssertion` directly.
 
@@ -307,7 +307,7 @@ through this context rather than touching `Counterparty`, `AddressLabel`,
 | `Counterparty`     | Business-level recipient. Policy and trust reason at this level.     |
 | `AddressLabel`     | A `(chain, address)` pair owned by a counterparty. Retire, not edit. |
 | `EvidenceArtifact` | Append-only piece of evidence on a counterparty or label.            |
-| `TrustAssertion`   | Operator or epistemic-engine trust claim on a counterparty or label. |
+| `TrustAssertion`   | Operator or trust-engine trust claim on a counterparty or label. |
 
 **Public context API.**
 
@@ -396,10 +396,10 @@ stored and returned verbatim but do not update the cache:
 * Intent-level decisioning walks the effective-assertion set, not this
   cache.
 
-**What's still deferred to the epistemic engine.** This context handles
+**What's still deferred to the trust engine.** This context handles
 only operator-authored state. Derived claims that combine evidence,
 prior-successful-transfer data, and on-chain classification into an
-`EpistemicClaim` land with the epistemic engine. Those claims will
+`TrustAssessment` land with the trust engine. Those claims will
 produce `TrustAssertion` rows through the same `issue_trust_assertion/4`
 path, so the cache and supersession invariants here carry forward
 unchanged.
@@ -553,7 +553,7 @@ safe boundary because the engine or adapter they need isn't wired yet.
 
 | Worker              | Queue                  | Posture today |
 |---------------------|------------------------|---------------|
-| `EvaluateIntent`    | `:intents_evaluate`    | **Safe boundary.** Cancels as `:engines_pending` — the policy / epistemic / simulation engines land with the engine issues (#8+). |
+| `EvaluateIntent`    | `:intents_evaluate`    | **Safe boundary.** Cancels as `:engines_pending` — the policy / trust / simulation engines land with the engine issues (#8+). |
 | `ReevaluateIntent`  | `:intents_reevaluate`  | **Safe boundary.** Same as above, plus validates the intent is in `:decided` or `:blocked`. |
 | `ExpireApproval`    | `:approvals_expire`    | **Real transition.** Supersedes the `:approval_required` envelope with a `:block` successor, flips the intent to `:blocked`, emits `decision.decided` + `intent.state_changed` audit, broadcasts on `approval:queue` + `intent:{id}`. Whole transition runs inside an `Ecto.Multi` so the partial unique index stays valid at every commit boundary. |
 | `RunExecution`      | `:executions_run`      | **Safe boundary.** Validates the envelope is current + `:auto_exec` + `:decided`, then cancels as `:adapter_pending`. Actual plan preparation lands with the TypeScript adapter. |
@@ -597,9 +597,9 @@ pipeline, the Oban worker + PubSub substrate, and the counterparty +
 address book + operator trust surface. The following are intentionally
 deferred:
 
-* **Epistemic / simulation engines.** `Bank.Policies` is wired (issue
+* **Trust / simulation engines.** `Bank.Policies` is wired (issue
   #8), but `EvaluateIntent` and `ReevaluateIntent` still stop at a safe
-  boundary and cancel as `:engines_pending` because the epistemic and
+  boundary and cancel as `:engines_pending` because the trust and
   simulation engines that sit alongside policy in the pipeline land with
   later engine issues. Decisioning wires all three together.
 * **TypeScript adapter.** `RunExecution` and `RevokeDelegation` stop at

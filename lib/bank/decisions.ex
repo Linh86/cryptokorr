@@ -13,7 +13,7 @@ defmodule Bank.Decisions do
   Public surface scope in v0.1:
 
     * write an envelope (called by the evaluation pipeline in
-      `Bank.Runtime` once policy / epistemic / simulation inputs are
+      `Bank.Runtime` once policy / trust / simulation inputs are
       ready)
     * read an envelope with its supersession chain
     * approve / reject a pending `approval_required` envelope — both
@@ -21,7 +21,7 @@ defmodule Bank.Decisions do
     * arm the approval TTL timer (enqueued on `approvals.expire`) and
       the hold TTL timer (enqueued on `intents.reevaluate`)
 
-  Epistemic claims and simulation reports are inputs the decision engine
+  Trust assessments and simulation reports are inputs the decision engine
   consumes; they live under `Bank.Runtime` with the workflow code that
   produces them.
   """

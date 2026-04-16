@@ -247,8 +247,8 @@ defmodule Bank.AuditTest do
       rule = Fixtures.policy_rule()
 
       # Two claims in supersession order
-      claim1 = Fixtures.epistemic_claim(intent: intent, current: false)
-      claim2 = Fixtures.epistemic_claim(intent: intent, current: true)
+      claim1 = Fixtures.trust_assessment(intent: intent, current: false)
+      claim2 = Fixtures.trust_assessment(intent: intent, current: true)
 
       # Two decisions, second captures the rule in its policy snapshot
       dec1 = Fixtures.decision_envelope(intent: intent, current: false)
@@ -282,7 +282,7 @@ defmodule Bank.AuditTest do
       {:ok, bundle} = Audit.replay(intent.id)
 
       assert bundle.intent.id == intent.id
-      assert Enum.map(bundle.epistemic, & &1.id) == [claim1.id, claim2.id]
+      assert Enum.map(bundle.trust_assessments, & &1.id) == [claim1.id, claim2.id]
       assert Enum.map(bundle.simulations, & &1.id) == [sim.id]
       assert Enum.map(bundle.decisions, & &1.id) == [dec1.id, dec2.id]
       assert Enum.map(bundle.plans, & &1.id) == [plan.id]
@@ -325,15 +325,15 @@ defmodule Bank.AuditTest do
       # pointer columns. Set a bogus pointer and verify replay still
       # returns the actual persisted claim.
       intent = Fixtures.agent_intent()
-      claim = Fixtures.epistemic_claim(intent: intent, current: true)
+      claim = Fixtures.trust_assessment(intent: intent, current: true)
 
       {:ok, _} =
         intent
-        |> Ecto.Changeset.change(current_epistemic_claim_id: Ecto.UUID.generate())
+        |> Ecto.Changeset.change(current_trust_assessment_id: Ecto.UUID.generate())
         |> Repo.update()
 
       {:ok, bundle} = Audit.replay(intent.id)
-      assert Enum.map(bundle.epistemic, & &1.id) == [claim.id]
+      assert Enum.map(bundle.trust_assessments, & &1.id) == [claim.id]
     end
   end
 

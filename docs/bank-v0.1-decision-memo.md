@@ -28,7 +28,7 @@ The runtime makes decisions using three layers.
 
 The first layer is policy. Policy answers the question: what is allowed? It encodes allowed assets, chains, counterparties, routers, amount limits, slippage ceilings, time windows, and autonomy thresholds.
 
-The second layer is the epistemic layer. It answers the question: how sure are we that we understand who or what this action touches? It reasons about address identity, counterparty trust, protocol classification, supporting evidence, and contradictions or uncertainty in the available context.
+The second layer is the trust layer. It answers the question: how sure are we that we understand who or what this action touches? It reasons about address identity, counterparty trust, protocol classification, supporting evidence, and contradictions or uncertainty in the available context.
 
 The third layer is execution guardrails. It answers the question: what can actually be signed and executed, even if other software behaves unexpectedly? These guardrails belong at the account-permission and smart-account level, where practical limits can still be enforced if upstream systems fail.
 
@@ -77,9 +77,9 @@ The product needs a first-class counterparty model rather than a flat list of ad
 
 The policy engine defines the operational box in which automation is allowed. It should support allowed assets, chains, counterparties, routers, amount limits, daily or rolling spend caps, slippage limits, time windows, and autonomy tiers.
 
-### Epistemic Engine
+### Trust Engine
 
-The epistemic engine determines how confident the system is in the identity and context of an action. It should store evidence artifacts, derive trust assertions, surface contradictions, and produce a structured claim with confidence and uncertainty rather than a binary yes or no.
+The trust engine determines how confident the system is in the identity and context of an action. It should store evidence artifacts, derive trust assertions, surface contradictions, and produce a structured claim with confidence and uncertainty rather than a binary yes or no.
 
 ### Simulation Engine
 
@@ -106,7 +106,7 @@ The domain should be expressed through a small, explicit set of core types:
 - `AddressLabel`
 - `EvidenceArtifact`
 - `TrustAssertion`
-- `EpistemicClaim`
+- `TrustAssessment`
 - `PolicyRule`
 - `SimulationReport`
 - `DecisionEnvelope`
