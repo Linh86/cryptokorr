@@ -86,6 +86,9 @@ defmodule BankWeb.Router do
     post "/security/pause", SecurityController, :pause
     post "/security/resume", SecurityController, :resume
     post "/security/revoke_delegation", SecurityController, :revoke_delegation
+
+    # Browser wallet connect (v1.1 scaffolding — see docs/wallet-connect.md)
+    post "/connect/smart_account", ConnectController, :request
   end
 
   # Internal adapter callback — private network, not part of /v1/.

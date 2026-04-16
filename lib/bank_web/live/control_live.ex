@@ -88,6 +88,43 @@ defmodule BankWeb.ControlLive do
     end
   end
 
+  # --- Wallet connect events (v1.1 scaffolding) ---------------------------
+  #
+  # The `WalletConnect` JS hook pushes one of these events after the
+  # EIP-1193 handshake. Full signing + adapter dispatch lands once the
+  # SDK + adapter endpoint decisions in `docs/wallet-connect.md` land.
+
+  def handle_event("wallet_connect:unavailable", _params, socket) do
+    {:noreply,
+     put_flash(socket, :error, "No browser wallet detected. Install MetaMask or equivalent.")}
+  end
+
+  def handle_event("wallet_connect:wrong_chain", %{"chainId" => chain_id}, socket) do
+    {:noreply,
+     put_flash(
+       socket,
+       :error,
+       "Wallet is on chain #{chain_id}. Switch to Base (8453) or Base Sepolia (84532)."
+     )}
+  end
+
+  def handle_event("wallet_connect:cancelled", _params, socket) do
+    {:noreply, put_flash(socket, :info, "Wallet connect cancelled.")}
+  end
+
+  def handle_event("wallet_connect:stub", params, socket) do
+    {:noreply,
+     put_flash(
+       socket,
+       :info,
+       "Wallet detected (#{params["account"]}). Signing flow is scaffolded — see docs/wallet-connect.md."
+     )}
+  end
+
+  def handle_event("wallet_connect:error", %{"message" => msg}, socket) do
+    {:noreply, put_flash(socket, :error, "Wallet connect error: #{msg}")}
+  end
+
   # --- PubSub handlers ----------------------------------------------------
 
   @impl true
@@ -399,11 +436,23 @@ defmodule BankWeb.ControlLive do
           status={:info}
           text="Intents submitted by agents will be evaluated and routed"
         />
-        <.step_item
-          :if={is_nil(@delegation)}
-          status={:info}
-          text="Browser wallet connection is not yet available in v0.1"
-        />
+        <li :if={is_nil(@delegation)} class="flex items-start gap-2">
+          <.icon name="hero-wallet" class="size-4 mt-0.5 text-base-content/40 shrink-0" />
+          <div class="flex flex-col gap-1">
+            <button
+              id="wallet-connect-btn"
+              type="button"
+              phx-hook="WalletConnect"
+              class="btn btn-xs btn-outline"
+              title="Requires a browser wallet (Base / Base Sepolia). SDK integration lands in v1.1."
+            >
+              Connect wallet
+            </button>
+            <span class="text-xs text-base-content/50">
+              Browser wallet flow is scaffolded — see docs/wallet-connect.md.
+            </span>
+          </div>
+        </li>
       </ul>
     </div>
     """

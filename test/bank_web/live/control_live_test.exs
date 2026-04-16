@@ -43,7 +43,8 @@ defmodule BankWeb.ControlLiveTest do
       {:ok, _view, html} = live(conn, "/")
 
       assert html =~ "Establish a delegation through the adapter callback flow"
-      assert html =~ "Browser wallet connection is not yet available in v0.1"
+      assert html =~ ~s(id="wallet-connect-btn")
+      assert html =~ "Connect wallet"
     end
 
     test "shows navigation sidebar with Connection active", %{conn: conn} do

@@ -278,6 +278,58 @@ defmodule Bank.Delegations do
 
   def apply_callback(_), do: {:error, :invalid_callback}
 
+  @doc """
+  Record a browser-initiated connect request (v1.1 scaffolding).
+
+  Writes an `intent-to-connect` audit event capturing the signed
+  payload the JS hook built. The actual adapter call
+  (`dispatch_grant_delegation`) is stubbed until the adapter repo
+  exposes the endpoint — see `docs/wallet-connect.md` for the full
+  plan.
+
+  Accepts a map with:
+    * `:smart_account_id` — string
+    * `:chain_id` — integer (must be Base or Base Sepolia)
+    * `:account` — string (EOA / session key address)
+    * `:delegation_payload` — map (signed payload, optional during
+      the v1.1 stub phase)
+
+  Returns `{:ok, :accepted}` after the audit event is written.
+  """
+  @spec request_connect(map()) :: {:ok, :accepted} | {:error, term()}
+  def request_connect(%{
+        "smart_account_id" => sa_id,
+        "chain_id" => chain_id,
+        "account" => account
+      })
+      when is_binary(sa_id) and is_integer(chain_id) and is_binary(account) do
+    with :ok <- validate_chain(chain_id),
+         {:ok, _event} <- write_intent_audit(sa_id, chain_id, account) do
+      {:ok, :accepted}
+    end
+  end
+
+  def request_connect(_), do: {:error, :invalid_payload}
+
+  defp validate_chain(8453), do: :ok
+  defp validate_chain(84_532), do: :ok
+  defp validate_chain(_), do: {:error, :unsupported_chain}
+
+  defp write_intent_audit(sa_id, chain_id, account) do
+    Bank.Audit.append_event(%{
+      actor: :user,
+      event_type: "delegation.connect_requested",
+      subject_type: "smart_account",
+      subject_id: sa_id,
+      correlation_id: nil,
+      after_ref: %{
+        "chain_id" => chain_id,
+        "account" => account,
+        "source" => "browser_wallet"
+      }
+    })
+  end
+
   # --- Private helpers ----------------------------------------------------
 
   defp extract_tx_hash(%{"tx_refs" => [%{"hash" => hash} | _]}), do: hash
