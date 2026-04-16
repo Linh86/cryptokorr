@@ -6,8 +6,9 @@
   "tx_refs": [
     {
       "chain": "base",
-      "hash": "0xaaaa...",
-      "nonce": 7
+      "userop_hash": "0xaaaa...",
+      "nonce": "0x0000000000000000000000000000000000000000000000000000000000000007",
+      "bundler": "pimlico"
     }
   ],
   "emitted_at": "2026-04-15T20:00:12Z"

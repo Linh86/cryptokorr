@@ -17,7 +17,10 @@
       "chain": "base",
       "asset": "USDC",
       "max_amount": "500"
-    }
+    },
+    "entry_point": "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
+    "nonce_key": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "sponsor": "self"
   },
   "correlation_id": "22222222-2222-4222-8222-222222222222",
   "emitted_at": "2026-04-15T20:00:00Z"

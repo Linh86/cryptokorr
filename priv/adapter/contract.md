@@ -18,8 +18,8 @@ The transfer dispatch path is **wired end-to-end** on Base + USDC:
   `execution.broadcast` → `execution.confirmed` (or `.reverted` /
   `.aborted`) on every tx.
 
-Still deferred (explicitly out of scope for #30): swap execution,
-bundler / AA migration, any staging or production deploy pipeline.
+Still deferred (explicitly out of scope for #30): swap execution, any
+staging or production deploy pipeline.
 
 ## Status (issue #31)
 
@@ -39,6 +39,87 @@ On-chain delegation revoke is wired end-to-end:
 - Fail-closed posture is preserved: until the adapter confirms
   `revoked`, policy evaluation keeps treating the delegation as
   in-flight (operator-visible) rather than assuming revoke completed.
+
+## Status (issue #32)
+
+Base execution assumes **ERC-4337 account abstraction** (EntryPoint
+v0.7+). Phoenix no longer speaks EOA transactions on Base: the adapter
+assembles a UserOperation, signs it against the active delegation,
+submits through a bundler, and reports progress through the same
+callback kinds used for EOA flow.
+
+**In-repo scope for #32 is the contract + data model.** The bundler /
+EntryPoint / paymaster integration itself lives in the TypeScript
+adapter (separate repo / service) and is tracked there.
+
+### Lifecycle mapping
+
+| Chain-level event                  | Phoenix callback kind  | `tx_refs` shape                         |
+| ---------------------------------- | ---------------------- | --------------------------------------- |
+| Bundler accepted userop            | `execution.broadcast`  | `[{chain, userop_hash, nonce, bundler}]`|
+| Userop included, call succeeded    | `execution.confirmed`  | adds final tx hash                      |
+| Userop included, call reverted     | `execution.reverted`   | adds final tx hash + revert reason      |
+| Pre-submission denial              | `execution.aborted`    | empty or `[{stage, reason}]`            |
+
+Phoenix's `%ExecutionPlan{tx_refs: [text]}` already accepts
+per-chain-string references (see `execution_plan.ex` module doc) —
+userop hashes, final tx hashes, or bundler ids all coexist.
+
+### Pre-submission denial taxonomy (`execution.aborted` reasons)
+
+The adapter MUST report one of the following `reason` values so
+Phoenix can distinguish operator-facing incidents from chain-level
+failures. Matches the enum already used by
+`Bank.Decisions.apply_execution_callback/1`:
+
+- `bundler_rejected` — bundler refused the userop (sim failure,
+  insufficient prefund, invalid signature).
+- `paymaster_denied` — sponsored flow denied by the paymaster policy.
+- `delegation_revoked` — signing refused because the active delegation
+  is no longer `granted`. Adapter MUST emit `delegation.state_changed`
+  after the abort.
+- `operator_paused` — runtime pause detected pre-submission.
+- `replaced` — a prior userop with the same sender+nonce was mined
+  first (typically an operator-driven replacement). Phoenix stops
+  waiting on the original plan.
+- `timeout` — submission attempt exceeded the adapter's bundler
+  timeout; Phoenix may re-dispatch a fresh plan after operator review.
+
+### `signing_requirements` (AA conventions)
+
+`signing_requirements` remains opaque to Phoenix. Conventionally, for
+Base AA flow the adapter expects:
+
+```jsonc
+{
+  "delegation_id": "del_...",           // required
+  "scope": { /* per-delegation policy */ },
+  "entry_point": "0x...EntryPointV0_7", // optional; adapter default OK
+  "nonce_key": "0x00...",               // optional; AA key-of-key
+  "sponsor": "self" | "paymaster"       // optional; default self
+}
+```
+
+Phoenix always sets `delegation_id` + `scope`. The rest is forwarded
+from `Bank.Delegations.scope` if present; the adapter resolves
+defaults otherwise.
+
+### Failure-mode recovery stance
+
+- **Bundler down / timeout** — retryable by the worker (counts as 5xx
+  equivalent). The adapter SHOULD surface HTTP 503 on dispatch when
+  its configured bundler is unreachable so Phoenix retries with
+  backoff, rather than accepting the dispatch and aborting later.
+- **Paymaster denial** — deterministic. The adapter returns HTTP 422
+  on dispatch (no plan state change) or emits `execution.aborted`
+  with `reason=paymaster_denied` post-accept. Phoenix fails closed;
+  operator must re-price or switch sponsor.
+- **Userop replacement** — if an operator (outside Phoenix) replaces
+  a stuck userop, the adapter MUST emit `execution.aborted` with
+  `reason=replaced` so Phoenix stops polling on the old plan.
+- **Validation-time revert (entryPoint.validateUserOp)** — treated
+  identically to `bundler_rejected`: the userop never existed on
+  chain.
 
 ## Service boundary
 
