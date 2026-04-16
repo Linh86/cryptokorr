@@ -64,6 +64,111 @@ defmodule Bank.Decisions do
     )
   end
 
+  @doc """
+  List current decision envelopes with outcome `:approval_required`.
+
+  Returns envelopes ordered by `decided_at` descending, preloaded with
+  the parent intent. Used by the action queue to show pending approvals.
+  """
+  @spec list_pending_approvals() :: [DecisionEnvelope.t()]
+  def list_pending_approvals do
+    from(e in DecisionEnvelope,
+      where: e.current == true and e.outcome == :approval_required,
+      order_by: [desc: e.decided_at],
+      preload: [:intent]
+    )
+    |> Repo.all()
+  end
+
+  @doc "Count of current envelopes awaiting approval."
+  @spec count_pending_approvals() :: non_neg_integer()
+  def count_pending_approvals do
+    from(e in DecisionEnvelope,
+      where: e.current == true and e.outcome == :approval_required,
+      select: count(e.id)
+    )
+    |> Repo.one()
+  end
+
+  @doc """
+  List recent current decision envelopes, most recent first.
+
+  Accepts an optional `limit` (default 10). Preloads the parent intent
+  for display in the dashboard.
+  """
+  @spec list_recent_decisions(pos_integer()) :: [DecisionEnvelope.t()]
+  def list_recent_decisions(limit \\ 10) do
+    from(e in DecisionEnvelope,
+      where: e.current == true,
+      order_by: [desc: e.decided_at],
+      limit: ^limit,
+      preload: [:intent]
+    )
+    |> Repo.all()
+  end
+
+  @doc """
+  Count active (non-terminal) execution plans.
+
+  Terminal statuses are `:confirmed`, `:reverted`, `:aborted`.
+  """
+  @spec count_active_executions() :: non_neg_integer()
+  def count_active_executions do
+    from(p in ExecutionPlan,
+      where:
+        p.active == true and
+          p.execution_status not in [:confirmed, :reverted, :aborted],
+      select: count(p.id)
+    )
+    |> Repo.one()
+  end
+
+  @doc """
+  List active (non-terminal) execution plans, most recent first.
+
+  Preloads the parent intent for display purposes.
+  """
+  @spec list_active_executions() :: [ExecutionPlan.t()]
+  def list_active_executions do
+    from(p in ExecutionPlan,
+      where:
+        p.active == true and
+          p.execution_status not in [:confirmed, :reverted, :aborted],
+      order_by: [desc: p.inserted_at],
+      preload: [:intent]
+    )
+    |> Repo.all()
+  end
+
+  @doc """
+  List current envelopes with outcome `:hold`, most recent first.
+  Preloads the parent intent for the action queue held-items view.
+  """
+  @spec list_held_decisions() :: [DecisionEnvelope.t()]
+  def list_held_decisions do
+    from(e in DecisionEnvelope,
+      where: e.current == true and e.outcome == :hold,
+      order_by: [desc: e.decided_at],
+      preload: [:intent]
+    )
+    |> Repo.all()
+  end
+
+  @doc """
+  List current envelopes with outcome `:block`, most recent first.
+  Preloads the parent intent for the action queue blocked-items view.
+  """
+  @spec list_blocked_decisions() :: [DecisionEnvelope.t()]
+  def list_blocked_decisions(limit \\ 20) do
+    from(e in DecisionEnvelope,
+      where: e.current == true and e.outcome == :block,
+      order_by: [desc: e.decided_at],
+      limit: ^limit,
+      preload: [:intent]
+    )
+    |> Repo.all()
+  end
+
   # --- Manual execution ---------------------------------------------------
 
   @doc """

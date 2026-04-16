@@ -25,6 +25,8 @@ defmodule BankWeb.Layouts do
     default: nil,
     doc: "the current [scope](https://hexdocs.pm/phoenix/scopes.html)"
 
+  attr :active_page, :atom, default: nil, doc: "the active navigation page atom"
+
   slot :inner_block, required: true
 
   def app(assigns) do
@@ -48,12 +50,49 @@ defmodule BankWeb.Layouts do
         </div>
 
         <nav class="flex-1 px-3 py-4 space-y-1">
-          <.nav_item href="/" icon="hero-signal" label="Connection" active />
+          <.nav_item
+            href="/dashboard"
+            icon="hero-chart-bar-square"
+            label="Dashboard"
+            active={@active_page == :dashboard}
+          />
+          <.nav_item
+            href="/"
+            icon="hero-signal"
+            label="Connection"
+            active={@active_page == :connection}
+          />
           <.nav_item href="#" icon="hero-document-text" label="Intents" disabled />
-          <.nav_item href="#" icon="hero-scale" label="Policies" disabled />
-          <.nav_item href="#" icon="hero-users" label="Counterparties" disabled />
-          <.nav_item href="#" icon="hero-queue-list" label="Action Queue" disabled />
-          <.nav_item href="#" icon="hero-document-magnifying-glass" label="Audit" disabled />
+          <.nav_item
+            href="/policies"
+            icon="hero-scale"
+            label="Policies"
+            active={@active_page == :policies}
+          />
+          <.nav_item
+            href="/counterparties"
+            icon="hero-users"
+            label="Counterparties"
+            active={@active_page == :counterparties}
+          />
+          <.nav_item
+            href="/queue"
+            icon="hero-queue-list"
+            label="Action Queue"
+            active={@active_page == :queue}
+          />
+          <.nav_item
+            href="/audit"
+            icon="hero-document-magnifying-glass"
+            label="Audit"
+            active={@active_page == :audit}
+          />
+          <.nav_item
+            href="/security"
+            icon="hero-shield-check"
+            label="Security"
+            active={@active_page == :security}
+          />
         </nav>
 
         <div class="px-3 py-4 border-t border-base-300">
@@ -102,8 +141,8 @@ defmodule BankWeb.Layouts do
 
   defp nav_item(assigns) do
     ~H"""
-    <a
-      href={unless @disabled, do: @href}
+    <.link
+      navigate={unless @disabled, do: @href}
       class={[
         "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
         @active && "bg-primary/10 text-primary",
@@ -116,7 +155,7 @@ defmodule BankWeb.Layouts do
       <span :if={@disabled} class="ml-auto text-[0.6rem] uppercase tracking-wider opacity-50">
         Soon
       </span>
-    </a>
+    </.link>
     """
   end
 

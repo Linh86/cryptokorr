@@ -87,14 +87,23 @@ defmodule BankWeb.Router do
   end
 
   # Web control tower — LiveView-based operator console.
-  # Issue #13 replaces the default landing page with the
-  # connection/delegation dashboard. Remaining tower pages
-  # (Intents, Policies, Counterparties, Action Queue, Audit)
-  # land with issues #14-#16.
+  # Issue #13 replaced the default landing page with the
+  # connection/delegation dashboard; #14, #15, and #16 added the
+  # action queue, counterparty/policy management, and the audit /
+  # replay / security console respectively. The Intents page is the
+  # remaining stub for a future issue.
   scope "/", BankWeb do
     pipe_through :browser
 
     live "/", ControlLive
+    live "/dashboard", DashboardLive
+    live "/queue", QueueLive
+    live "/counterparties", CounterpartiesLive
+    live "/counterparties/:id", CounterpartyDetailLive
+    live "/policies", PoliciesLive
+    live "/audit", AuditLive
+    live "/audit/replay/:intent_id", IntentReplayLive
+    live "/security", SecurityLive
   end
 
   # Enable LiveDashboard in development

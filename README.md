@@ -138,6 +138,160 @@ All state is loaded from the real backend contexts (`Bank.Delegations`,
 PubSub and re-renders on pause/resume/revoke broadcasts without
 polling.
 
+**`BankWeb.DashboardLive` (`/dashboard`)**
+
+The operator dashboard provides a high-signal overview of the runtime:
+
+* **Stat cards** — runtime status (running / paused), delegation state,
+  pending approvals count, and active executions count. Each card pulls
+  real backend data from `Bank.Decisions` and `Bank.Delegations`.
+* **Needs attention banner** — aggregates actionable items (paused
+  runtime, missing delegation, in-flight revocations, pending approvals,
+  active executions) into a single summary.
+* **Recent decisions** — the latest current decision envelopes with
+  outcome badges, risk tier, and intent summary. Empty state shows
+  guidance about the trust engine.
+* **Execution readiness checklist** — three-item checklist (runtime,
+  delegation, execution) with pass/fail indicators.
+
+Subscribes to four PubSub topics: `security:events`, `approval:queue`,
+`dashboard:runtime_status`, and `audit:stream`. Re-renders on any
+broadcast without polling.
+
+**`BankWeb.QueueLive` (`/queue`)**
+
+The action queue surfaces decisions and executions that need attention:
+
+* **Pending approvals** — decisions with outcome `:approval_required`.
+  Approve/reject buttons are rendered but disabled because the approval
+  backend endpoints are stubs (501) — wiring lands with the approval
+  engine. Shows risk tier and expiry time.
+* **Active executions** — in-flight execution plans (non-terminal
+  status). Shows execution status badge and intent summary.
+* **Held actions** — decisions with outcome `:hold` from the trust
+  engine.
+* **Blocked actions** — decisions with outcome `:block`. Read-only
+  for audit investigation.
+
+Empty state shows when the queue is clear. Subscribes to
+`approval:queue`, `security:events`, and `audit:stream`.
+
+**`BankWeb.CounterpartiesLive` (`/counterparties`)**
+
+List and create counterparties — the business-level recipients that
+addresses, evidence, and trust assertions attach to:
+
+* **Counterparty list** — name, trust level badge (trusted / sensitive /
+  unknown / conflicted), and link to detail page.
+* **Inline create form** — changeset-backed form with name, initial trust
+  level, ownership context, and notes. Blank enum selects are stripped
+  before context calls to avoid Ecto.Enum cast errors.
+* **Archive filter** — toggle to show/hide archived counterparties.
+
+**`BankWeb.CounterpartyDetailLive` (`/counterparties/:id`)**
+
+Full management of a single counterparty:
+
+* **Edit** — inline form to rename or update notes/ownership context.
+* **Archive** — one-click archive with state badge update.
+* **Address labels** — attach blockchain addresses (chain + address + role),
+  retire addresses (preserves history, removes from active list).
+* **Evidence artifacts** — pin evidence (kind + content URI) to the
+  counterparty. Append-only.
+* **Trust assertions** — issue trust assertions with level, rationale, and
+  optional scope (asset/chain). Displays assertion history with
+  supersession. Schemaless changeset for the trust form.
+
+Redirects to `/counterparties` if the counterparty ID is not found.
+
+**`BankWeb.PoliciesLive` (`/policies`)**
+
+Policy rules management with rule-type-specific structured param forms
+(not raw JSON):
+
+* **Rules list** — rule type, params summary, scope badges, state badge,
+  and action buttons per rule.
+* **State filter** — Active (default), All, Archived, Draft tabs.
+* **Inline create form** — select a rule type to render its specific param
+  fields. Supports all 8 rule types: amount limit, rolling spend cap,
+  slippage ceiling, allowed router, allowed asset, allowed chain,
+  autonomy tier, and time window.
+* **Revise** — inline form below the rule being revised, pre-filled with
+  current params. Creates a new version and supersedes the prior.
+* **Archive** — one-click archive with flash confirmation.
+
+**`BankWeb.AuditLive` (`/audit`)**
+
+Append-only audit trail — the operator's view of what happened, who
+triggered it, and what state changes followed:
+
+* **Event list** — each row shows event type, actor, subject, correlation
+  id, and timestamp. Color-coded badges per event family
+  (intent/decision/trust/simulation/approval/execution/security).
+* **Filters** — by event type, subject type, or correlation id. Invalid
+  uuids in the correlation filter are gracefully ignored (empty result
+  rather than 500).
+* **Replay drilldown** — every row whose `correlation_id` is set carries
+  a one-click "Replay" link to the per-intent replay view.
+* **Real-time tail** — subscribes to `audit:stream`; the page reloads on
+  every appended event without polling.
+
+This is intentionally a focused log reader, not a SIEM. No aggregations
+or saved searches.
+
+**`BankWeb.IntentReplayLive` (`/audit/replay/:intent_id`)**
+
+Per-intent replay — the deterministic bundle that explains a decision
+path. Reads `Bank.Audit.replay/1` directly; no business logic is re-run.
+
+Six stacked sections, in operator-reading order:
+
+1. **Intent summary** — original submission (kind, asset, chain, amount,
+   target, source, idempotency key).
+2. **Audit timeline** — full correlation slice as a numbered sequence.
+3. **Trust assessment history** — every claim with derived trust,
+   confidence, supporting assertion/evidence counts, oldest first.
+4. **Simulation history** — every report with status, provider, gas,
+   slippage, TTL.
+5. **Decision history** — every envelope with outcome, risk tier,
+   reasons, supersession order.
+6. **Execution plan history** — every plan with status, final outcome,
+   tx refs.
+7. **Policy snapshot** — the union of rule uuids captured across every
+   decision, resolved to full rule rows.
+
+Empty bundles render "nothing to show yet" stubs so an in-flight intent
+loads cleanly. Subscribes to `audit:stream` and the per-intent
+lifecycle topic for real-time updates.
+
+**`BankWeb.SecurityLive` (`/security`)**
+
+Operator security console — runtime safety posture and emergency
+controls in one place:
+
+* **Posture banner** — paused / no-delegation / ready / blocked, with
+  one-line explanation of the current state.
+* **Runtime card** — pause/resume controls with `data-confirm` prompts.
+  Shows reason, actor, and timestamp when paused (from
+  `Bank.Security.snapshot/0`).
+* **Delegations card** — every active delegation, not just the primary.
+  Per-row revoke button transitions the row into `:revoking` state
+  immediately so an operator can't double-tap.
+* **Recent safety events** — the audit slice for `security.*` and
+  `delegation.*` event types, capped at 15.
+
+Subscribes to `security:events` and `audit:stream`; pause/resume/revoke
+changes from any source (this UI, the API, another operator) are
+reflected immediately. Reuses the real `Bank.Security` and
+`Bank.Delegations` contexts directly — no second interpretation layer.
+
+**Route-aware navigation.** The sidebar navigation is route-aware: every
+landed page (Dashboard, Connection, Action Queue, Policies,
+Counterparties, Audit, Security) highlights based on the current page.
+Each LiveView passes an `active_page` assign to the shared
+`Layouts.app/1` shell. The Intents page is the only remaining
+placeholder for a future issue.
+
 **What is not yet included:**
 
 * **Browser wallet integration.** The repo does not yet include a
@@ -145,12 +299,20 @@ polling.
   established through the adapter callback flow; the UI reflects
   the state the backend already tracks. This limitation is made
   explicit in the UI.
-* **Remaining tower pages.** Intents, Policies, Counterparties,
-  Action Queue, and Audit/Replay screens are scaffolded in the
-  sidebar as disabled items and land with issues #14-#16.
+* **Approve/reject actions.** The approval controller endpoints are
+  stubs (501 Not Implemented). The queue renders disabled buttons
+  with a tooltip explaining this. Wiring lands with the approval
+  engine.
+* **Audit pagination UI.** `Bank.Audit.list_events/2` returns a cursor
+  for pages beyond the first 50; the UI surfaces a "more events
+  available" footer but does not yet expose pagination controls.
+  Operators who need to page can hit `GET /v1/audit` directly.
+* **Intents page.** Sidebar placeholder; a dedicated intent listing
+  page is left for a future issue. The replay surface already covers
+  per-intent inspection from the audit drilldown.
 
 The sidebar layout, theme toggle, and navigation shell are shared
-infrastructure that future pages will reuse.
+infrastructure that future pages can reuse.
 
 ## `/v1/` API surface
 
@@ -697,10 +859,9 @@ deferred:
   enqueue side. The remaining work is HTTP dispatch from those workers to
   the adapter's `/dispatch/*` routes and wiring `ConfirmExecution` to
   poll real terminal outcomes.
-* **Remaining control tower pages.** The connection/delegation page
-  (issue #13) is the first LiveView consumer of PubSub. Intents,
-  Policies, Counterparties, Action Queue, and Audit/Replay screens
-  land with issues #14-#16.
+* **Remaining control tower pages.** The connection page (issue #13),
+  dashboard, and action queue (issue #14) are live. Intents, Policies,
+  Counterparties, and Audit/Replay screens land with issues #15-#16.
 * **Browser wallet integration.** The connection page shows delegation
   state from the backend but does not yet include a client-side
   wallet SDK. A browser-native "connect wallet" flow (WalletConnect
