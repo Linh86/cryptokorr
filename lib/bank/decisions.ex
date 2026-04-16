@@ -29,6 +29,7 @@ defmodule Bank.Decisions do
 
   alias Bank.Decisions.{DecisionEnvelope, ExecutionPlan}
   alias Bank.Delegations
+  alias Bank.Intents.AgentIntent
   alias Bank.Repo
   alias Bank.Runtime
   alias Bank.Security
@@ -276,4 +277,201 @@ defmodule Bank.Decisions do
         %{}
     end
   end
+
+  # --- Adapter callback application --------------------------------------
+
+  @execution_callback_kinds ~w(execution.broadcast execution.confirmed execution.reverted execution.aborted)
+
+  @doc """
+  Apply an `execution.*` adapter callback to the referenced plan,
+  atomically updating the plan's status (and final outcome for
+  terminal callbacks) together with the owning intent's state.
+
+  The returned shape exposes just enough information for the caller
+  (the internal callback controller) to emit the matching audit
+  events and realtime broadcasts, without having to re-query state.
+
+      {:ok,
+        %{
+          plan: updated_plan,
+          prior_plan_status: atom(),
+          intent_transition:
+            {:transitioned, prior_state, updated_intent}
+            | {:no_transition, current_state}
+            | :not_applicable
+        }}
+      | {:error, :plan_not_found}
+      | {:error, :unknown_kind}
+      | {:error, Ecto.Changeset.t()}
+
+  Unknown `execution_plan_id` is the one soft-failure mode: the
+  adapter is expected to dedupe on its side per
+  `priv/adapter/contract.md §4`, so we log and return
+  `{:error, :plan_not_found}` which the controller turns into
+  `accepted_with_warning`.
+
+  ### Kind → transitions
+
+    * `execution.broadcast` → plan `:broadcasting`; intent unchanged
+      (unless still `:decided`, in which case advance to
+      `:executing` to recover from a dropped `RunExecution` side
+      effect).
+    * `execution.confirmed` → plan `:confirmed`, `final_outcome:
+      :confirmed`; intent `:executing | :decided` → `:executed`.
+    * `execution.reverted`  → plan `:reverted`, `final_outcome:
+      :reverted`; intent `:executing | :decided` → `:blocked`.
+    * `execution.aborted`   → plan `:aborted`, `final_outcome:
+      :aborted`; intent `:executing | :decided` → `:blocked`.
+  """
+  @spec apply_execution_callback(map()) ::
+          {:ok,
+           %{
+             plan: ExecutionPlan.t(),
+             prior_plan_status: atom(),
+             intent_transition:
+               {:transitioned, atom(), AgentIntent.t()}
+               | {:no_transition, atom()}
+               | :not_applicable
+           }}
+          | {:error, :plan_not_found | :unknown_kind | Ecto.Changeset.t()}
+  def apply_execution_callback(%{"kind" => kind, "execution_plan_id" => plan_id} = params)
+      when kind in @execution_callback_kinds and is_binary(plan_id) do
+    Repo.transaction(fn ->
+      plan =
+        Repo.get(ExecutionPlan, plan_id)
+        |> case do
+          nil -> nil
+          found -> Repo.preload(found, :intent)
+        end
+
+      case plan do
+        nil ->
+          Repo.rollback(:plan_not_found)
+
+        %ExecutionPlan{} = plan ->
+          prior_status = plan.execution_status
+
+          case progress_plan_for_kind(plan, kind, params) do
+            {:ok, updated_plan} ->
+              intent_transition = advance_intent_for_kind(plan.intent, updated_plan, kind)
+
+              %{
+                plan: updated_plan,
+                prior_plan_status: prior_status,
+                intent_transition: intent_transition
+              }
+
+            {:error, changeset} ->
+              Repo.rollback(changeset)
+          end
+      end
+    end)
+    |> case do
+      {:ok, result} -> {:ok, result}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def apply_execution_callback(_), do: {:error, :unknown_kind}
+
+  defp progress_plan_for_kind(plan, "execution.broadcast", params) do
+    plan
+    |> ExecutionPlan.progress_changeset(
+      attrs_with_tx_refs(%{execution_status: :broadcasting, nonce: first_nonce(params)}, params)
+    )
+    |> Repo.update()
+  end
+
+  defp progress_plan_for_kind(plan, "execution.confirmed", params) do
+    plan
+    |> ExecutionPlan.progress_changeset(
+      attrs_with_tx_refs(
+        %{execution_status: :confirmed, final_outcome: :confirmed},
+        params
+      )
+    )
+    |> Repo.update()
+  end
+
+  defp progress_plan_for_kind(plan, "execution.reverted", params) do
+    plan
+    |> ExecutionPlan.progress_changeset(
+      attrs_with_tx_refs(
+        %{
+          execution_status: :reverted,
+          final_outcome: :reverted,
+          final_reason: Map.get(params, "reason")
+        },
+        params
+      )
+    )
+    |> Repo.update()
+  end
+
+  defp progress_plan_for_kind(plan, "execution.aborted", params) do
+    plan
+    |> ExecutionPlan.progress_changeset(%{
+      execution_status: :aborted,
+      final_outcome: :aborted,
+      final_reason: Map.get(params, "reason")
+    })
+    |> Repo.update()
+  end
+
+  defp attrs_with_tx_refs(attrs, params) do
+    case tx_hashes(params) do
+      [] -> attrs
+      refs -> Map.put(attrs, :tx_refs, refs)
+    end
+  end
+
+  defp advance_intent_for_kind(nil, _plan, _kind), do: :not_applicable
+
+  defp advance_intent_for_kind(%AgentIntent{} = intent, %ExecutionPlan{} = plan, kind) do
+    target_state = target_intent_state(kind)
+
+    cond do
+      is_nil(target_state) ->
+        # execution.broadcast doesn't normally move the intent; the
+        # only exception is recovering from a dropped RunExecution
+        # side effect where the intent is still `:decided`.
+        if intent.state == :decided do
+          transition_intent(intent, plan, :executing)
+        else
+          {:no_transition, intent.state}
+        end
+
+      intent.state == target_state ->
+        {:no_transition, intent.state}
+
+      true ->
+        transition_intent(intent, plan, target_state)
+    end
+  end
+
+  defp transition_intent(%AgentIntent{state: prior} = intent, %ExecutionPlan{} = plan, target) do
+    {:ok, updated} =
+      intent
+      |> AgentIntent.current_pointer_changeset(%{
+        state: target,
+        current_execution_plan_id: plan.id
+      })
+      |> Repo.update()
+
+    {:transitioned, prior, updated}
+  end
+
+  defp target_intent_state("execution.broadcast"), do: nil
+  defp target_intent_state("execution.confirmed"), do: :executed
+  defp target_intent_state("execution.reverted"), do: :blocked
+  defp target_intent_state("execution.aborted"), do: :blocked
+
+  defp tx_hashes(%{"tx_refs" => refs}) when is_list(refs) do
+    for %{"hash" => hash} <- refs, is_binary(hash), do: hash
+  end
+
+  defp tx_hashes(_), do: []
+
+  defp first_nonce(%{"tx_refs" => [%{"nonce" => nonce} | _]}) when is_integer(nonce), do: nonce
+  defp first_nonce(_), do: nil
 end

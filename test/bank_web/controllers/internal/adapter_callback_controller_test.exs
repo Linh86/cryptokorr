@@ -5,7 +5,44 @@ defmodule BankWeb.Internal.AdapterCallbackControllerTest do
 
   use BankWeb.ConnCase, async: true
 
+  import Ecto.Query
+
+  alias Bank.Audit.AuditEvent
+  alias Bank.Decisions.ExecutionPlan
   alias Bank.Delegations
+  alias Bank.Fixtures
+  alias Bank.Intents.AgentIntent
+  alias Bank.Repo
+  alias Bank.Runtime.PubSub
+
+  # Build an in-flight plan at `status` with the owning intent at
+  # `:executing`, mirroring the state after RunExecution has dispatched.
+  defp in_flight_plan(status) do
+    counterparty = Fixtures.counterparty()
+    label = Fixtures.address_label(counterparty: counterparty, chain: "base")
+
+    intent =
+      Fixtures.agent_intent(
+        counterparty: counterparty,
+        target_address_label_id: label.id
+      )
+
+    {:ok, intent} =
+      intent
+      |> AgentIntent.current_pointer_changeset(%{state: :executing})
+      |> Repo.update()
+
+    decision = Fixtures.decision_envelope(intent: intent, current: true)
+
+    plan =
+      Fixtures.execution_plan(
+        decision: decision,
+        intent_id: intent.id,
+        execution_status: status
+      )
+
+    %{intent: intent, plan: plan}
+  end
 
   describe "POST /internal/adapter/callback — delegation.state_changed" do
     test "granted creates delegation and returns accepted", %{conn: conn} do
@@ -24,7 +61,6 @@ defmodule BankWeb.Internal.AdapterCallbackControllerTest do
       assert body["status"] == "accepted"
       assert body["kind"] == "delegation.state_changed"
 
-      # Verify delegation was created
       d = Delegations.get("sa_new")
       assert d.state == :active
       assert d.delegation_id == "del_new"
@@ -66,21 +102,165 @@ defmodule BankWeb.Internal.AdapterCallbackControllerTest do
     end
   end
 
-  describe "POST /internal/adapter/callback — execution callbacks" do
-    test "execution.broadcast is acknowledged", %{conn: conn} do
+  describe "POST /internal/adapter/callback — execution.broadcast" do
+    test "advances the plan to :broadcasting and records tx_refs", %{conn: conn} do
+      %{intent: intent, plan: plan} = in_flight_plan(:signing)
+
+      :ok = PubSub.subscribe(PubSub.intent(intent.id))
+      :ok = PubSub.subscribe(PubSub.audit_stream())
+
+      tx_hash = "0x" <> String.duplicate("ab", 32)
+
       conn =
         post(conn, "/internal/adapter/callback", %{
           "contract_version" => 1,
           "kind" => "execution.broadcast",
-          "execution_plan_id" => Ecto.UUID.generate()
+          "execution_plan_id" => plan.id,
+          "tx_refs" => [%{"hash" => tx_hash, "nonce" => 7}]
         })
 
       body = json_response(conn, 200)
       assert body["status"] == "accepted"
       assert body["kind"] == "execution.broadcast"
+
+      reloaded = Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :broadcasting
+      assert reloaded.tx_refs == [tx_hash]
+      assert reloaded.nonce == 7
+
+      # Intent stays :executing on a broadcast callback (no terminal yet).
+      assert %AgentIntent{state: :executing} = Repo.get!(AgentIntent, intent.id)
+
+      assert_receive %{
+        topic: :intent_lifecycle,
+        event: :execution_updated,
+        payload: %{execution_status: :broadcasting}
+      }
+
+      assert_receive %{topic: :audit_stream, event: :appended}
+
+      [event] = Repo.all(from e in AuditEvent, where: e.event_type == "execution.broadcasting")
+      assert event.actor == :adapter
+    end
+  end
+
+  describe "POST /internal/adapter/callback — execution.confirmed" do
+    test "moves plan to :confirmed and intent to :executed", %{conn: conn} do
+      %{intent: intent, plan: plan} = in_flight_plan(:pending_confirmation)
+
+      :ok = PubSub.subscribe(PubSub.intent(intent.id))
+
+      tx_hash = "0x" <> String.duplicate("cd", 32)
+
+      conn =
+        post(conn, "/internal/adapter/callback", %{
+          "contract_version" => 1,
+          "kind" => "execution.confirmed",
+          "execution_plan_id" => plan.id,
+          "tx_refs" => [%{"hash" => tx_hash}]
+        })
+
+      assert json_response(conn, 200)["status"] == "accepted"
+
+      reloaded = Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :confirmed
+      assert reloaded.final_outcome == :confirmed
+      assert reloaded.tx_refs == [tx_hash]
+
+      assert %AgentIntent{state: :executed} = Repo.get!(AgentIntent, intent.id)
+
+      assert_receive %{
+        topic: :intent_lifecycle,
+        event: :execution_updated,
+        payload: %{execution_status: :confirmed}
+      }
+
+      assert_receive %{
+        topic: :intent_lifecycle,
+        event: :state_changed,
+        payload: %{from: :executing, to: :executed}
+      }
+
+      intent_events =
+        Repo.all(from e in AuditEvent, where: e.event_type == "intent.state_changed")
+
+      assert length(intent_events) == 1
+      assert hd(intent_events).actor == :adapter
     end
 
-    test "execution.confirmed is acknowledged", %{conn: conn} do
+    test "second confirmed callback is idempotent (no double transition)", %{conn: conn} do
+      %{intent: intent, plan: plan} = in_flight_plan(:pending_confirmation)
+
+      _ =
+        post(conn, "/internal/adapter/callback", %{
+          "contract_version" => 1,
+          "kind" => "execution.confirmed",
+          "execution_plan_id" => plan.id
+        })
+
+      _ =
+        post(conn, "/internal/adapter/callback", %{
+          "contract_version" => 1,
+          "kind" => "execution.confirmed",
+          "execution_plan_id" => plan.id
+        })
+
+      assert %AgentIntent{state: :executed} = Repo.get!(AgentIntent, intent.id)
+
+      # Only one intent.state_changed audit event, not two.
+      events = Repo.all(from e in AuditEvent, where: e.event_type == "intent.state_changed")
+      assert length(events) == 1
+    end
+  end
+
+  describe "POST /internal/adapter/callback — execution.reverted" do
+    test "moves plan to :reverted and intent to :blocked", %{conn: conn} do
+      %{intent: intent, plan: plan} = in_flight_plan(:pending_confirmation)
+
+      conn =
+        post(conn, "/internal/adapter/callback", %{
+          "contract_version" => 1,
+          "kind" => "execution.reverted",
+          "execution_plan_id" => plan.id,
+          "reason" => "chain_revert:out_of_gas"
+        })
+
+      assert json_response(conn, 200)["status"] == "accepted"
+
+      reloaded = Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :reverted
+      assert reloaded.final_outcome == :reverted
+      assert reloaded.final_reason == "chain_revert:out_of_gas"
+
+      assert %AgentIntent{state: :blocked} = Repo.get!(AgentIntent, intent.id)
+    end
+  end
+
+  describe "POST /internal/adapter/callback — execution.aborted" do
+    test "moves plan to :aborted and intent to :blocked", %{conn: conn} do
+      %{intent: intent, plan: plan} = in_flight_plan(:broadcasting)
+
+      conn =
+        post(conn, "/internal/adapter/callback", %{
+          "contract_version" => 1,
+          "kind" => "execution.aborted",
+          "execution_plan_id" => plan.id,
+          "reason" => "adapter_shutdown"
+        })
+
+      assert json_response(conn, 200)["status"] == "accepted"
+
+      reloaded = Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :aborted
+      assert reloaded.final_outcome == :aborted
+      assert reloaded.final_reason == "adapter_shutdown"
+
+      assert %AgentIntent{state: :blocked} = Repo.get!(AgentIntent, intent.id)
+    end
+  end
+
+  describe "POST /internal/adapter/callback — execution callback error paths" do
+    test "unknown execution_plan_id returns accepted_with_warning", %{conn: conn} do
       conn =
         post(conn, "/internal/adapter/callback", %{
           "contract_version" => 1,
@@ -88,29 +268,9 @@ defmodule BankWeb.Internal.AdapterCallbackControllerTest do
           "execution_plan_id" => Ecto.UUID.generate()
         })
 
-      assert json_response(conn, 200)["status"] == "accepted"
-    end
-
-    test "execution.reverted is acknowledged", %{conn: conn} do
-      conn =
-        post(conn, "/internal/adapter/callback", %{
-          "contract_version" => 1,
-          "kind" => "execution.reverted",
-          "execution_plan_id" => Ecto.UUID.generate()
-        })
-
-      assert json_response(conn, 200)["status"] == "accepted"
-    end
-
-    test "execution.aborted is acknowledged", %{conn: conn} do
-      conn =
-        post(conn, "/internal/adapter/callback", %{
-          "contract_version" => 1,
-          "kind" => "execution.aborted",
-          "execution_plan_id" => Ecto.UUID.generate()
-        })
-
-      assert json_response(conn, 200)["status"] == "accepted"
+      body = json_response(conn, 200)
+      assert body["status"] == "accepted_with_warning"
+      assert body["warning"] == "plan_not_found"
     end
   end
 

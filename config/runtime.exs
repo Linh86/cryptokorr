@@ -22,6 +22,22 @@ end
 
 config :bank, BankWeb.Endpoint, http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
+# Bank.AdapterClient: read adapter connection from env in non-test envs.
+# ADAPTER_BASE_URL / ADAPTER_AUTH_SECRET are required in production; dev
+# falls back to the defaults compiled into config/config.exs.
+if config_env() != :test do
+  adapter_base_url = System.get_env("ADAPTER_BASE_URL")
+  adapter_auth_secret = System.get_env("ADAPTER_AUTH_SECRET")
+
+  if adapter_base_url do
+    config :bank, Bank.AdapterClient, base_url: adapter_base_url
+  end
+
+  if adapter_auth_secret do
+    config :bank, Bank.AdapterClient, auth_secret: adapter_auth_secret
+  end
+end
+
 if config_env() == :prod do
   database_url =
     System.get_env("DATABASE_URL") ||

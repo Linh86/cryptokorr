@@ -1,5 +1,27 @@
 # Phoenix ↔ TS Adapter Contract (v0.1)
 
+## Status (issue #30)
+
+The transfer dispatch path is **wired end-to-end** on Base + USDC:
+
+- Phoenix-side outbound dispatch: `Bank.AdapterClient.dispatch_transfer/1`
+  (POSTs `/dispatch/transfer`, maps HTTP outcomes to typed errors).
+- Worker: `Bank.Runtime.Workers.RunExecution` calls the client, advances
+  the plan `:prepared` → `:signing` and the intent `:decided` →
+  `:executing` on HTTP 202, aborts on 4xx / unresolvable target /
+  revoked delegation, retries on 5xx and transport errors.
+- Inbound callbacks: `POST /internal/adapter/callback` routes through
+  `Bank.Decisions.apply_execution_callback/1`, which updates plan + owning
+  intent atomically. `Bank.Runtime.Workers.ConfirmExecution` stays as a
+  safety-net poller.
+- Adapter-side: `src/chains/base/transfer.ts` emits
+  `execution.broadcast` → `execution.confirmed` (or `.reverted` /
+  `.aborted`) on every tx.
+
+Still deferred (explicitly out of scope for #30): swap execution,
+on-chain delegation revoke hardening, bundler / AA migration, any
+staging or production deploy pipeline.
+
 ## Service boundary
 
 The TS adapter owns:

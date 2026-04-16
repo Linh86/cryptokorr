@@ -84,6 +84,13 @@ config :bank, Oban,
     {Oban.Plugins.Pruner, max_age: 60 * 60 * 24 * 7}
   ]
 
+# Default connection to the TypeScript chain adapter. Dev + test
+# override below; production reads from env in `config/runtime.exs`.
+config :bank, Bank.AdapterClient,
+  base_url: "http://localhost:4100",
+  auth_secret: "dev-adapter-secret",
+  req_options: []
+
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.
 import_config "#{config_env()}.exs"

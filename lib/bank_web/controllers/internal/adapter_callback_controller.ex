@@ -4,12 +4,14 @@ defmodule BankWeb.Internal.AdapterCallbackController do
 
   `POST /internal/adapter/callback`
 
-  The adapter sends callbacks here after chain-level events:
-  execution broadcast/confirmed/reverted/aborted and delegation
-  state changes. This controller routes each callback kind to the
-  appropriate context and emits audit + runtime broadcasts.
+  The adapter posts callbacks here after chain-level events:
+  execution broadcast/confirmed/reverted/aborted and delegation state
+  changes. Each callback is routed to its owning bounded context
+  (`Bank.Decisions` for execution, `Bank.Delegations` for delegation
+  state). The context returns enough information for this controller
+  to emit audit + runtime broadcasts without re-reading state.
 
-  Not part of the external `/v1/` API surface. Authenticated via
+  Not part of the external `/v1/` API surface. Authenticated via a
   shared bearer secret (mTLS in production).
   """
 
@@ -17,8 +19,11 @@ defmodule BankWeb.Internal.AdapterCallbackController do
 
   require Logger
 
+  alias Bank.Audit.Events
+  alias Bank.Decisions
   alias Bank.Delegations
   alias Bank.Runtime
+  alias Bank.Runtime.Notifier
 
   @execution_kinds ~w(execution.broadcast execution.confirmed execution.reverted execution.aborted)
   @delegation_kinds ~w(delegation.state_changed)
@@ -43,13 +48,11 @@ defmodule BankWeb.Internal.AdapterCallbackController do
 
     case Delegations.apply_callback(params) do
       {:ok, delegation} ->
-        # Audit
         audit_attrs =
-          Bank.Audit.Events.delegation_state_changed(delegation, prior_state, actor: :adapter)
+          Events.delegation_state_changed(delegation, prior_state, actor: :adapter)
 
         _ = Runtime.emit_audit(audit_attrs)
 
-        # Broadcast
         Runtime.broadcast_security_event(:delegation_state_changed, %{
           smart_account_id: delegation.smart_account_id,
           delegation_id: delegation.delegation_id,
@@ -78,47 +81,41 @@ defmodule BankWeb.Internal.AdapterCallbackController do
 
   # --- Execution callbacks ------------------------------------------------
 
-  defp handle_kind(conn, "execution.broadcast", params) do
-    # Update plan status and emit audit.
-    # For v0.1 the ConfirmExecution worker handles plan progression;
-    # the callback just acknowledges receipt.
-    Logger.info("Received execution.broadcast callback",
-      execution_plan_id: params["execution_plan_id"]
-    )
+  defp handle_kind(conn, kind, params) when kind in @execution_kinds do
+    case Decisions.apply_execution_callback(params) do
+      {:ok, result} ->
+        emit_execution_side_effects(result)
 
-    conn
-    |> put_status(:ok)
-    |> json(%{status: "accepted", kind: "execution.broadcast"})
-  end
+        conn
+        |> put_status(:ok)
+        |> json(%{status: "accepted", kind: kind})
 
-  defp handle_kind(conn, "execution.confirmed", params) do
-    Logger.info("Received execution.confirmed callback",
-      execution_plan_id: params["execution_plan_id"]
-    )
+      {:error, :plan_not_found} ->
+        Logger.warning(
+          "Execution callback for unknown plan: kind=#{kind}, params=#{inspect(params)}"
+        )
 
-    conn
-    |> put_status(:ok)
-    |> json(%{status: "accepted", kind: "execution.confirmed"})
-  end
+        conn
+        |> put_status(:ok)
+        |> json(%{
+          status: "accepted_with_warning",
+          kind: kind,
+          warning: "plan_not_found"
+        })
 
-  defp handle_kind(conn, "execution.reverted", params) do
-    Logger.info("Received execution.reverted callback",
-      execution_plan_id: params["execution_plan_id"]
-    )
+      {:error, reason} ->
+        Logger.warning(
+          "Execution callback failed: kind=#{kind}, reason=#{inspect(reason)}, params=#{inspect(params)}"
+        )
 
-    conn
-    |> put_status(:ok)
-    |> json(%{status: "accepted", kind: "execution.reverted"})
-  end
-
-  defp handle_kind(conn, "execution.aborted", params) do
-    Logger.info("Received execution.aborted callback",
-      execution_plan_id: params["execution_plan_id"]
-    )
-
-    conn
-    |> put_status(:ok)
-    |> json(%{status: "accepted", kind: "execution.aborted"})
+        conn
+        |> put_status(:ok)
+        |> json(%{
+          status: "accepted_with_warning",
+          kind: kind,
+          warning: summarise_error(reason)
+        })
+    end
   end
 
   defp handle_kind(conn, kind, _params) do
@@ -127,6 +124,36 @@ defmodule BankWeb.Internal.AdapterCallbackController do
       code: "unknown_kind",
       message: "unknown callback kind: #{kind}"
     })
+  end
+
+  # --- Side effects -------------------------------------------------------
+
+  defp emit_execution_side_effects(%{
+         plan: plan,
+         prior_plan_status: prior_status,
+         intent_transition: intent_transition
+       }) do
+    _ =
+      Runtime.emit_audit(Events.execution_transition(plan, prior_status, actor: :adapter))
+
+    Notifier.execution_progressed(plan, prior_status)
+
+    case intent_transition do
+      {:transitioned, from, intent} ->
+        _ =
+          Runtime.emit_audit(
+            Events.intent_state_changed(intent, from, intent.state, actor: :adapter)
+          )
+
+        Notifier.intent_lifecycle(intent, :state_changed, %{
+          from: from,
+          to: intent.state,
+          execution_plan_id: plan.id
+        })
+
+      _ ->
+        :ok
+    end
   end
 
   # --- Validation ---------------------------------------------------------
@@ -173,6 +200,14 @@ defmodule BankWeb.Internal.AdapterCallbackController do
        message: "kind is required"
      }}
   end
+
+  defp summarise_error(%Ecto.Changeset{errors: errors}) do
+    errors
+    |> Enum.map(fn {field, {msg, _}} -> "#{field}: #{msg}" end)
+    |> Enum.join(", ")
+  end
+
+  defp summarise_error(reason), do: inspect(reason)
 
   defp render_error(conn, %{status: status} = envelope) do
     conn

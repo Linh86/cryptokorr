@@ -36,3 +36,10 @@ config :phoenix,
 
 # Oban runs in manual/inline testing mode under the test env.
 config :bank, Oban, testing: :manual
+
+# Adapter HTTP requests are routed to Req.Test under the test env so
+# individual tests can stub per-test responses without a real server.
+config :bank, Bank.AdapterClient,
+  base_url: "http://adapter.test",
+  auth_secret: "test-adapter-secret",
+  req_options: [plug: {Req.Test, Bank.AdapterClient}]

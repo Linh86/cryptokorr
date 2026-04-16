@@ -102,10 +102,10 @@ defmodule Bank.Runtime.Workers.ConfirmExecutionTest do
   end
 
   describe "non-terminal plans" do
-    test "snoozes while the plan is :signing / :broadcasting / :pending_confirmation" do
+    test "snoozes while the plan is :prepared / :signing / :broadcasting / :pending_confirmation" do
       intent = executing_intent()
 
-      for status <- [:signing, :broadcasting, :pending_confirmation] do
+      for status <- [:prepared, :signing, :broadcasting, :pending_confirmation] do
         plan =
           Fixtures.execution_plan(
             intent_id: intent.id,
@@ -118,13 +118,6 @@ defmodule Bank.Runtime.Workers.ConfirmExecutionTest do
 
         assert is_integer(seconds) and seconds > 0
       end
-    end
-
-    test "cancels with :adapter_pending when the plan is still :prepared" do
-      plan = Fixtures.execution_plan(execution_status: :prepared)
-
-      assert {:cancel, :adapter_pending} =
-               perform_job(ConfirmExecution, %{"execution_plan_id" => plan.id})
     end
   end
 

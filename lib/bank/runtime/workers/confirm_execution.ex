@@ -1,45 +1,41 @@
 defmodule Bank.Runtime.Workers.ConfirmExecution do
   @moduledoc """
-  Poll a given execution plan and apply its intent-level effect when
-  the plan reaches a terminal state.
+  Safety-net worker that reconciles an execution plan's terminal
+  state with the owning intent's lifecycle state.
 
-  The adapter owns the plan's own lifecycle (prepared → signing →
-  broadcasting → pending_confirmation → confirmed | reverted |
-  aborted) and writes each progression to the row. This worker is
-  the piece that reacts to the plan *reaching a terminal state* and
-  finalises the intent:
+  Since issue #30 the primary execution lifecycle writes are driven
+  by adapter callbacks into `Bank.Decisions.apply_execution_callback/1`,
+  which updates plan + intent atomically. This worker exists as a
+  belt-and-braces poller for the rare case that a callback is lost
+  between the adapter writing the plan status and Phoenix advancing
+  the intent — e.g. a crash between the plan update and the intent
+  update in the controller. In practice it is a no-op; if it ever
+  does fire, it applies the same `intent.state_changed` transition
+  the callback controller would have.
 
-    * `final_outcome: :confirmed` → intent `:executing` → `:executed`
-    * `final_outcome: :reverted`  → intent `:executing` → `:blocked`
-    * `final_outcome: :aborted`   → intent `:executing` → `:blocked`
+    * `final_outcome: :confirmed` → intent → `:executed`
+    * `final_outcome: :reverted`  → intent → `:blocked`
+    * `final_outcome: :aborted`   → intent → `:blocked`
 
-  ### With the adapter
+  ### While the plan is mid-flight
 
-  When the adapter is wired, this worker polls: it snoozes itself
-  while the plan is still mid-flight, and on a subsequent run — once
-  the adapter has written the terminal state — it applies the intent
-  transition exactly once.
-
-  ### Without the adapter (issue #6 today)
-
-  A plan will sit in `:prepared` forever unless a test / fixture
-  writes a terminal state directly. The worker recognises that case
-  and cancels with `:adapter_pending` so the job doesn't burn forever
-  in a snooze loop.
+  A plan still in `:prepared`, `:signing`, `:broadcasting`, or
+  `:pending_confirmation` just snoozes. `max_attempts: 20` keeps the
+  total wait bounded.
 
   ## Idempotency
 
-  If the intent is already in the expected final state, the worker
-  returns `{:cancel, :already_finalised}` — two confirms for the same
-  plan do not double-write audit events.
+  If the intent is already in the expected final state (which is the
+  common case, because the callback controller got there first), the
+  worker returns `{:cancel, :already_finalised}` — two confirms for
+  the same plan do not double-write audit events.
 
   ## Retry posture
 
-    * `:ok` on successful intent transition.
-    * `{:snooze, 30}` while the plan is mid-flight; `max_attempts:
-      20` caps the total wait at ~10 minutes before Oban discards.
-    * `{:cancel, reason}` for `:not_found`, `:adapter_pending`,
-      `:already_finalised`, wrong execution status.
+    * `:ok` on a successful intent transition.
+    * `{:snooze, 30}` while the plan is mid-flight.
+    * `{:cancel, reason}` for `:not_found`, `:already_finalised`,
+      `:intent_not_found`.
     * `{:error, reason}` for transient failure; Oban retries with
       backoff.
   """
@@ -68,13 +64,6 @@ defmodule Bank.Runtime.Workers.ConfirmExecution do
       %ExecutionPlan{execution_status: status, final_outcome: final} = plan
       when status in [:confirmed, :reverted, :aborted] and not is_nil(final) ->
         finalise(plan)
-
-      %ExecutionPlan{execution_status: :prepared} = plan ->
-        Logger.info(
-          "ConfirmExecution: plan #{plan.id} still :prepared; adapter not wired, cancelling"
-        )
-
-        {:cancel, :adapter_pending}
 
       %ExecutionPlan{execution_status: status} ->
         Logger.debug("ConfirmExecution: plan #{plan_id} at #{status}; snoozing")
