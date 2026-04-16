@@ -62,7 +62,12 @@ defmodule BankWeb.Layouts do
             label="Connection"
             active={@active_page == :connection}
           />
-          <.nav_item href="#" icon="hero-document-text" label="Intents" disabled />
+          <.nav_item
+            href="/intents"
+            icon="hero-document-text"
+            label="Intents"
+            active={@active_page == :intents}
+          />
           <.nav_item
             href="/policies"
             icon="hero-scale"

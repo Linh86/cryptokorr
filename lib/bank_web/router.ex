@@ -110,6 +110,7 @@ defmodule BankWeb.Router do
 
     live "/", ControlLive
     live "/dashboard", DashboardLive
+    live "/intents", IntentsLive
     live "/queue", QueueLive
     live "/counterparties", CounterpartiesLive
     live "/counterparties/:id", CounterpartyDetailLive
