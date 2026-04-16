@@ -27,12 +27,17 @@ defmodule Bank.Decisions do
 
   import Ecto.Query
 
+  alias Bank.Audit.Events
   alias Bank.Decisions.{DecisionEnvelope, ExecutionPlan}
   alias Bank.Delegations
   alias Bank.Intents.AgentIntent
   alias Bank.Repo
   alias Bank.Runtime
+  alias Bank.Runtime.Notifier
   alias Bank.Security
+  alias Ecto.Multi
+
+  require Logger
 
   # --- Read API -----------------------------------------------------------
 
@@ -169,6 +174,184 @@ defmodule Bank.Decisions do
     )
     |> Repo.all()
   end
+
+  # --- Approval state transitions -----------------------------------------
+
+  @approval_valid_prior_states [:decided, :pending_decision]
+
+  @doc """
+  Operator approval of an `:approval_required` envelope.
+
+  Produces a successor envelope with outcome `:auto_exec`, re-pointing
+  the intent to the successor. All effects (envelope supersede, intent
+  pointer, audits, PubSub, execution enqueue) run inside a single
+  `Ecto.Multi` so the partial unique index stays valid at every commit
+  boundary.
+
+  ## Options
+
+    * `:actor_id` — required, identifies the operator (used for audit).
+    * `:reason`   — optional string stored on the successor's reasons
+      list.
+
+  Returns `{:ok, successor}` or `{:error, reason}`.
+  """
+  @spec approve(String.t(), keyword()) ::
+          {:ok, DecisionEnvelope.t()} | {:error, term()}
+  def approve(envelope_id, opts) when is_binary(envelope_id) and is_list(opts) do
+    actor_id = Keyword.fetch!(opts, :actor_id)
+    reason = Keyword.get(opts, :reason, "operator_approved")
+
+    apply_approval_decision(envelope_id, :auto_exec, reason, actor_id)
+  end
+
+  @doc """
+  Operator rejection of an `:approval_required` envelope.
+
+  Produces a successor with outcome `:block`, moving the intent to
+  `:blocked`. Same guarantees as `approve/2`.
+  """
+  @spec reject(String.t(), keyword()) ::
+          {:ok, DecisionEnvelope.t()} | {:error, term()}
+  def reject(envelope_id, opts) when is_binary(envelope_id) and is_list(opts) do
+    actor_id = Keyword.fetch!(opts, :actor_id)
+    reason = Keyword.get(opts, :reason, "operator_rejected")
+
+    apply_approval_decision(envelope_id, :block, reason, actor_id)
+  end
+
+  defp apply_approval_decision(envelope_id, successor_outcome, reason, actor_id) do
+    with {:ok, prior, intent} <- load_for_approval(envelope_id) do
+      now = DateTime.utc_now()
+      prior_intent_state = intent.state
+      target_intent_state = target_state_for_outcome(successor_outcome)
+
+      reason_code =
+        case successor_outcome do
+          :auto_exec -> "operator_approved"
+          :block -> "operator_rejected"
+        end
+
+      multi =
+        Multi.new()
+        |> Multi.update(:mark_not_current, DecisionEnvelope.mark_not_current(prior))
+        |> Multi.insert(:successor, fn _ ->
+          DecisionEnvelope.supersede(prior, %{
+            outcome: successor_outcome,
+            risk_tier: prior.risk_tier,
+            reasons: %{
+              "items" => [
+                %{
+                  "code" => reason_code,
+                  "message" => reason,
+                  "actor_id" => actor_id
+                }
+              ]
+            },
+            policy_snapshot_ref: prior.policy_snapshot_ref,
+            trust_assessment_id: prior.trust_assessment_id,
+            simulation_report_id: prior.simulation_report_id,
+            decided_at: now,
+            decided_by: :user,
+            state: successor_state_for(successor_outcome),
+            current: true,
+            approval_expires_at: nil
+          })
+        end)
+        |> Multi.update(:intent, fn %{successor: successor} ->
+          AgentIntent.current_pointer_changeset(intent, %{
+            current_decision_id: successor.id,
+            state: target_intent_state
+          })
+        end)
+
+      case Repo.transaction(multi) do
+        {:ok, %{successor: successor, intent: updated_intent}} ->
+          emit_approval_effects(
+            prior,
+            successor,
+            prior_intent_state,
+            updated_intent,
+            actor_id
+          )
+
+          maybe_enqueue_execution(successor)
+
+          {:ok, successor}
+
+        {:error, step, reason, _changes} ->
+          Logger.error(
+            "Decisions.apply_approval_decision: multi failed at #{step}: #{inspect(reason)}"
+          )
+
+          {:error, reason}
+      end
+    end
+  end
+
+  defp load_for_approval(envelope_id) do
+    case Repo.get(DecisionEnvelope, envelope_id) do
+      nil ->
+        {:error, :not_found}
+
+      %DecisionEnvelope{current: false} ->
+        {:error, :already_superseded}
+
+      %DecisionEnvelope{outcome: :approval_required, state: state} = prior
+      when state in @approval_valid_prior_states ->
+        case Repo.get(AgentIntent, prior.intent_id) do
+          nil -> {:error, :intent_not_found}
+          %AgentIntent{} = intent -> {:ok, prior, intent}
+        end
+
+      %DecisionEnvelope{outcome: outcome} ->
+        {:error, {:wrong_outcome, outcome}}
+
+      %DecisionEnvelope{state: state} ->
+        {:error, {:wrong_state, state}}
+    end
+  end
+
+  defp target_state_for_outcome(:auto_exec), do: :decided
+  defp target_state_for_outcome(:block), do: :blocked
+
+  defp successor_state_for(:auto_exec), do: :decided
+  defp successor_state_for(:block), do: :resolved
+
+  defp emit_approval_effects(prior, successor, prior_intent_state, intent, actor_id) do
+    event_builder =
+      case successor.outcome do
+        :auto_exec -> &Events.approval_granted/3
+        :block -> &Events.approval_rejected/3
+      end
+
+    Runtime.emit_audit(event_builder.(prior, successor, actor_id: actor_id))
+    Runtime.emit_audit(Events.decision_decided(successor))
+    Runtime.emit_audit(Events.intent_state_changed(intent, prior_intent_state, intent.state))
+
+    Notifier.approval_queue(
+      if(successor.outcome == :auto_exec, do: :approved, else: :rejected),
+      prior,
+      %{
+        successor_decision_envelope_id: successor.id,
+        final_outcome: successor.outcome,
+        actor_id: actor_id
+      }
+    )
+
+    Notifier.intent_lifecycle(intent, :decision_updated, %{
+      decision_envelope_id: successor.id,
+      outcome: successor.outcome,
+      actor_id: actor_id
+    })
+  end
+
+  defp maybe_enqueue_execution(%DecisionEnvelope{outcome: :auto_exec, id: id}) do
+    _ = Runtime.enqueue_execution(id)
+    :ok
+  end
+
+  defp maybe_enqueue_execution(_), do: :ok
 
   # --- Manual execution ---------------------------------------------------
 

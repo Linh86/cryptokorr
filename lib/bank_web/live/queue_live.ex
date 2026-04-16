@@ -5,9 +5,10 @@ defmodule BankWeb.QueueLive do
   Shows three sections:
 
     * **Pending approvals** — decisions with outcome `:approval_required`
-      whose approval window has not expired. Approve/reject buttons are
-      rendered but disabled because the approval backend endpoints are
-      not yet implemented (stubs return 501).
+      whose approval window has not expired. Approve/reject buttons
+      call `Bank.Decisions.approve/2` and `reject/2` directly; the
+      successor envelope, intent pointer, audit events, and downstream
+      execution enqueue all commit in a single transaction.
 
     * **Held actions** — decisions with outcome `:hold` that the trust
       engine held for manual review.
@@ -35,6 +36,8 @@ defmodule BankWeb.QueueLive do
     socket =
       socket
       |> assign(page_title: "Action Queue")
+      |> assign(:expanded_decisions, MapSet.new())
+      |> assign(:operator_id, "console")
       |> load_state()
 
     {:ok, socket}
@@ -46,6 +49,69 @@ defmodule BankWeb.QueueLive do
   def handle_event("refresh", _params, socket) do
     {:noreply, socket |> load_state() |> put_flash(:info, "Queue refreshed")}
   end
+
+  def handle_event("approve_decision", %{"decision-id" => id} = params, socket) do
+    opts = approval_opts(socket, params)
+
+    case Decisions.approve(id, opts) do
+      {:ok, _successor} ->
+        {:noreply,
+         socket
+         |> load_state()
+         |> put_flash(:info, "Approval recorded. Execution enqueued.")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, approval_error_message("Approve", reason))}
+    end
+  end
+
+  def handle_event("reject_decision", %{"decision-id" => id} = params, socket) do
+    opts = approval_opts(socket, params)
+
+    case Decisions.reject(id, opts) do
+      {:ok, _successor} ->
+        {:noreply,
+         socket
+         |> load_state()
+         |> put_flash(:info, "Decision rejected. Intent blocked.")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, approval_error_message("Reject", reason))}
+    end
+  end
+
+  def handle_event("toggle_details", %{"decision-id" => id}, socket) do
+    open = socket.assigns.expanded_decisions
+
+    open =
+      if MapSet.member?(open, id),
+        do: MapSet.delete(open, id),
+        else: MapSet.put(open, id)
+
+    {:noreply, assign(socket, :expanded_decisions, open)}
+  end
+
+  defp approval_opts(socket, params) do
+    actor_id =
+      Map.get(params, "actor_id") ||
+        Map.get(socket.assigns, :operator_id) ||
+        "console"
+
+    [actor_id: actor_id, reason: Map.get(params, "reason")]
+    |> Enum.reject(fn {_, v} -> is_nil(v) or v == "" end)
+  end
+
+  defp approval_error_message(action, :not_found),
+    do: "#{action} failed: decision not found"
+
+  defp approval_error_message(action, :already_superseded),
+    do: "#{action} failed: decision is no longer current"
+
+  defp approval_error_message(action, {:wrong_outcome, outcome}),
+    do: "#{action} failed: wrong outcome (#{outcome})"
+
+  defp approval_error_message(action, reason),
+    do: "#{action} failed: #{inspect(reason)}"
 
   # --- PubSub handlers ------------------------------------------------------
 
@@ -121,7 +187,11 @@ defmodule BankWeb.QueueLive do
         badge_class="badge-info"
       >
         <div class="divide-y divide-base-300">
-          <.approval_row :for={decision <- @pending_approvals} decision={decision} />
+          <.approval_row
+            :for={decision <- @pending_approvals}
+            decision={decision}
+            expanded={MapSet.member?(@expanded_decisions, decision.id)}
+          />
         </div>
       </.queue_section>
 
@@ -201,46 +271,164 @@ defmodule BankWeb.QueueLive do
   # --- Component: approval row -----------------------------------------------
 
   attr :decision, :map, required: true
+  attr :expanded, :boolean, default: false
 
   defp approval_row(assigns) do
     ~H"""
-    <div class="flex items-center justify-between px-6 py-4">
-      <div class="flex items-center gap-3 min-w-0">
-        <div class="w-8 h-8 rounded-md bg-info/15 text-info flex items-center justify-center shrink-0">
-          <.icon name="hero-clock-solid" class="size-4" />
+    <div id={"approval-row-" <> @decision.id} class="px-6 py-4">
+      <div class="flex items-start justify-between gap-3">
+        <div class="flex items-start gap-3 min-w-0">
+          <div class="w-8 h-8 rounded-md bg-info/15 text-info flex items-center justify-center shrink-0">
+            <.icon name="hero-clock-solid" class="size-4" />
+          </div>
+          <div class="min-w-0">
+            <p class="text-sm font-medium truncate">
+              Approval required
+              <span class="text-base-content/40 font-normal">
+                &middot; {risk_label(@decision.risk_tier)}
+              </span>
+            </p>
+            <p class="text-xs text-base-content/40 font-mono truncate">
+              {short_id(@decision.id)}
+              <span :if={@decision.intent}>
+                &middot; {intent_summary(@decision.intent)}
+              </span>
+            </p>
+            <p :if={@decision.approval_expires_at} class="text-xs text-base-content/40 mt-0.5">
+              {approval_expiry_label(@decision.approval_expires_at)}
+            </p>
+          </div>
         </div>
-        <div class="min-w-0">
-          <p class="text-sm font-medium truncate">
-            Approval required
-            <span class="text-base-content/40 font-normal">
-              &middot; {risk_label(@decision.risk_tier)}
-            </span>
-          </p>
-          <p class="text-xs text-base-content/40 font-mono truncate">
-            {short_id(@decision.id)}
-            {if @decision.intent, do: " &middot; #{intent_summary(@decision.intent)}", else: ""}
-          </p>
-          <p :if={@decision.approval_expires_at} class="text-xs text-base-content/40 mt-0.5">
-            Expires: {format_datetime(@decision.approval_expires_at)}
-          </p>
+        <div class="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            id={"details-btn-" <> @decision.id}
+            phx-click="toggle_details"
+            phx-value-decision-id={@decision.id}
+            class="btn btn-ghost btn-xs gap-1"
+          >
+            <.icon
+              name={if @expanded, do: "hero-chevron-up", else: "hero-chevron-down"}
+              class="size-3"
+            />
+            {if @expanded, do: "Hide", else: "Details"}
+          </button>
+          <button
+            type="button"
+            id={"approve-btn-" <> @decision.id}
+            phx-click="approve_decision"
+            phx-value-decision-id={@decision.id}
+            data-confirm="Approve this decision? Execution will be enqueued immediately."
+            class="btn btn-success btn-soft btn-xs gap-1"
+          >
+            <.icon name="hero-check" class="size-3" /> Approve
+          </button>
+          <button
+            type="button"
+            id={"reject-btn-" <> @decision.id}
+            phx-click="reject_decision"
+            phx-value-decision-id={@decision.id}
+            data-confirm="Reject this decision? The intent will be blocked."
+            class="btn btn-error btn-soft btn-xs gap-1"
+          >
+            <.icon name="hero-x-mark" class="size-3" /> Reject
+          </button>
         </div>
       </div>
-      <div class="flex items-center gap-2 shrink-0 ml-3">
-        <button
-          class="btn btn-success btn-soft btn-xs gap-1 opacity-50 cursor-not-allowed"
-          disabled
-          title="Approval backend not yet implemented"
-        >
-          <.icon name="hero-check" class="size-3" /> Approve
-        </button>
-        <button
-          class="btn btn-error btn-soft btn-xs gap-1 opacity-50 cursor-not-allowed"
-          disabled
-          title="Approval backend not yet implemented"
-        >
-          <.icon name="hero-x-mark" class="size-3" /> Reject
-        </button>
+
+      <div
+        :if={@expanded}
+        id={"approval-details-" <> @decision.id}
+        class="mt-4 ml-11 rounded-lg bg-base-200/40 border border-base-300 p-4 text-xs space-y-3"
+      >
+        <.approval_intent_facts :if={@decision.intent} intent={@decision.intent} />
+        <.approval_reasons reasons={@decision.reasons} />
+        <.approval_policy_snapshot decision={@decision} />
       </div>
+    </div>
+    """
+  end
+
+  attr :intent, :map, required: true
+
+  defp approval_intent_facts(assigns) do
+    ~H"""
+    <div>
+      <h4 class="text-[0.65rem] uppercase tracking-wider text-base-content/50 mb-1">Intent</h4>
+      <dl class="grid grid-cols-2 gap-x-4 gap-y-1">
+        <div>
+          <dt class="text-base-content/40">Agent</dt>
+          <dd class="font-mono">{@intent.agent_id}</dd>
+        </div>
+        <div>
+          <dt class="text-base-content/40">Kind</dt>
+          <dd>{@intent.kind}</dd>
+        </div>
+        <div>
+          <dt class="text-base-content/40">Amount</dt>
+          <dd>{@intent.amount} {@intent.asset}</dd>
+        </div>
+        <div :if={Map.get(@intent, :target_raw_address)}>
+          <dt class="text-base-content/40">Target</dt>
+          <dd class="font-mono">{short_hash(@intent.target_raw_address)}</dd>
+        </div>
+      </dl>
+    </div>
+    """
+  end
+
+  attr :reasons, :map, required: true
+
+  defp approval_reasons(assigns) do
+    items = reason_items(assigns.reasons)
+    assigns = assign(assigns, :items, items)
+
+    ~H"""
+    <div :if={@items != []}>
+      <h4 class="text-[0.65rem] uppercase tracking-wider text-base-content/50 mb-1">
+        Why approval?
+      </h4>
+      <ul class="space-y-0.5">
+        <li :for={r <- @items} class="flex items-start gap-1.5">
+          <span class="font-mono text-base-content/40">{r["code"] || "reason"}:</span>
+          <span class="text-base-content/70">{r["message"] || ""}</span>
+        </li>
+      </ul>
+    </div>
+    """
+  end
+
+  attr :decision, :map, required: true
+
+  defp approval_policy_snapshot(assigns) do
+    rule_count = rule_count(assigns.decision.policy_snapshot_ref)
+    assigns = assign(assigns, :rule_count, rule_count)
+
+    ~H"""
+    <div>
+      <h4 class="text-[0.65rem] uppercase tracking-wider text-base-content/50 mb-1">Context</h4>
+      <dl class="grid grid-cols-2 gap-x-4 gap-y-1">
+        <div>
+          <dt class="text-base-content/40">Decided at</dt>
+          <dd class="font-mono">{format_datetime(@decision.decided_at)}</dd>
+        </div>
+        <div>
+          <dt class="text-base-content/40">Policy rules</dt>
+          <dd class="font-mono">{@rule_count} referenced</dd>
+        </div>
+        <div class="col-span-2">
+          <dt class="text-base-content/40">Intent replay</dt>
+          <dd>
+            <.link
+              :if={@decision.intent_id}
+              navigate={~p"/audit/replay/#{@decision.intent_id}"}
+              class="link link-primary"
+            >
+              Open timeline
+            </.link>
+          </dd>
+        </div>
+      </dl>
     </div>
     """
   end
@@ -361,6 +549,34 @@ defmodule BankWeb.QueueLive do
   defp short_id(nil), do: "-"
   defp short_id(id) when byte_size(id) > 12, do: String.slice(id, 0, 8) <> "..."
   defp short_id(id), do: id
+
+  defp short_hash(nil), do: "-"
+  defp short_hash(hash) when byte_size(hash) > 14, do: String.slice(hash, 0, 10) <> "..."
+  defp short_hash(hash), do: hash
+
+  defp reason_items(%{"items" => items}) when is_list(items), do: items
+  defp reason_items(_), do: []
+
+  defp rule_count(%{"rule_ids" => ids}) when is_list(ids), do: length(ids)
+  defp rule_count(_), do: 0
+
+  defp approval_expiry_label(%DateTime{} = expires_at) do
+    now = DateTime.utc_now()
+
+    case DateTime.diff(expires_at, now, :second) do
+      s when s <= 0 ->
+        "Expired · #{format_datetime(expires_at)}"
+
+      s when s < 3600 ->
+        "Expires in #{div(s, 60)}m · #{format_datetime(expires_at)}"
+
+      s when s < 86_400 ->
+        "Expires in #{div(s, 3600)}h · #{format_datetime(expires_at)}"
+
+      s ->
+        "Expires in #{div(s, 86_400)}d · #{format_datetime(expires_at)}"
+    end
+  end
 
   defp format_datetime(nil), do: "-"
 

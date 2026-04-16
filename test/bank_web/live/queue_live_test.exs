@@ -76,13 +76,17 @@ defmodule BankWeb.QueueLiveTest do
       assert html =~ String.slice(envelope.id, 0, 8)
     end
 
-    test "shows disabled approve/reject buttons", %{conn: conn} do
+    test "shows active approve/reject buttons wired to LiveView events", %{
+      conn: conn,
+      envelope: envelope
+    } do
       {:ok, _view, html} = live(conn, "/queue")
 
       assert html =~ "Approve"
       assert html =~ "Reject"
-      assert html =~ "disabled"
-      assert html =~ "Approval backend not yet implemented"
+      assert html =~ ~s(id="approve-btn-#{envelope.id}")
+      assert html =~ ~s(id="reject-btn-#{envelope.id}")
+      refute html =~ "Approval backend not yet implemented"
     end
 
     test "shows risk tier", %{conn: conn} do
@@ -94,7 +98,7 @@ defmodule BankWeb.QueueLiveTest do
     test "shows approval expiry", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/queue")
 
-      assert html =~ "Expires:"
+      assert html =~ "Expires in"
       assert html =~ "2030-01-01"
     end
 
@@ -239,6 +243,95 @@ defmodule BankWeb.QueueLiveTest do
       html = view |> element("button", "Refresh") |> render_click()
 
       assert html =~ "Queue refreshed"
+    end
+  end
+
+  # --- Approve / reject actions ---------------------------------------------
+
+  describe "approve action" do
+    setup do
+      intent = agent_intent()
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          risk_tier: :moderate,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      %{intent: intent, envelope: envelope}
+    end
+
+    test "clicking Approve records the decision and removes the row", %{
+      conn: conn,
+      envelope: envelope,
+      intent: intent
+    } do
+      {:ok, view, _html} = live(conn, "/queue")
+
+      html =
+        view
+        |> element("#approve-btn-" <> envelope.id)
+        |> render_click()
+
+      refute html =~ envelope.id
+      assert html =~ "Approval recorded"
+
+      # DB state reflects the successor envelope.
+      successor =
+        Bank.Repo.get_by(Bank.Decisions.DecisionEnvelope, intent_id: intent.id, current: true)
+
+      assert successor.outcome == :auto_exec
+      assert successor.decided_by == :user
+      assert successor.supersedes_id == envelope.id
+    end
+
+    test "clicking Reject blocks the intent", %{
+      conn: conn,
+      envelope: envelope,
+      intent: intent
+    } do
+      {:ok, view, _html} = live(conn, "/queue")
+
+      html =
+        view
+        |> element("#reject-btn-" <> envelope.id)
+        |> render_click()
+
+      assert html =~ "rejected"
+
+      successor =
+        Bank.Repo.get_by(Bank.Decisions.DecisionEnvelope, intent_id: intent.id, current: true)
+
+      assert successor.outcome == :block
+      assert successor.decided_by == :user
+
+      updated_intent = Bank.Repo.get!(Bank.Intents.AgentIntent, intent.id)
+      assert updated_intent.state == :blocked
+    end
+
+    test "toggling details reveals and hides the context panel", %{
+      conn: conn,
+      envelope: envelope
+    } do
+      {:ok, view, html} = live(conn, "/queue")
+      refute html =~ ~s(id="approval-details-#{envelope.id}")
+
+      html =
+        view
+        |> element("#details-btn-" <> envelope.id)
+        |> render_click()
+
+      assert html =~ ~s(id="approval-details-#{envelope.id}")
+
+      html =
+        view
+        |> element("#details-btn-" <> envelope.id)
+        |> render_click()
+
+      refute html =~ ~s(id="approval-details-#{envelope.id}")
     end
   end
 
