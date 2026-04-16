@@ -113,6 +113,45 @@ skeleton:
   event (`Bank.Runtime.emit_audit/1` publishes here after the DB insert
   succeeds).
 
+## Web control tower
+
+The operator-facing web UI is a Phoenix LiveView application served
+from the browser scope. Issue #13 delivers the first screen — the
+connection and delegation dashboard at `/`.
+
+**`BankWeb.ControlLive` (`/`)**
+
+The landing page shows:
+
+* **System status bar** — execution readiness and global pause state.
+* **Delegation card** — the primary smart-account delegation with
+  state badge (active / pending / revoking), chain, asset, delegation
+  ID, timestamps, and scope.
+* **Next-steps panel** — context-sensitive guidance based on the
+  current delegation and runtime state.
+* **Runtime card** — pause / resume controls with confirmation.
+* **Architecture callout** — explains the non-custodial three-layer
+  architecture (control plane, chain adapter, on-chain guardrails).
+
+All state is loaded from the real backend contexts (`Bank.Delegations`,
+`Bank.Security`). The LiveView subscribes to `security:events` via
+PubSub and re-renders on pause/resume/revoke broadcasts without
+polling.
+
+**What is not yet included:**
+
+* **Browser wallet integration.** The repo does not yet include a
+  client-side wallet SDK (WalletConnect, wagmi). Delegation is
+  established through the adapter callback flow; the UI reflects
+  the state the backend already tracks. This limitation is made
+  explicit in the UI.
+* **Remaining tower pages.** Intents, Policies, Counterparties,
+  Action Queue, and Audit/Replay screens are scaffolded in the
+  sidebar as disabled items and land with issues #14-#16.
+
+The sidebar layout, theme toggle, and navigation shell are shared
+infrastructure that future pages will reuse.
+
 ## `/v1/` API surface
 
 Every endpoint from the runtime-flow doc has a routed home and a typed
@@ -658,10 +697,14 @@ deferred:
   enqueue side. The remaining work is HTTP dispatch from those workers to
   the adapter's `/dispatch/*` routes and wiring `ConfirmExecution` to
   poll real terminal outcomes.
-* **LiveView and channel consumers.** PubSub producers broadcast on all
-  five topic contracts, but the Dashboard, Action Queue, Audit tail,
-  and Security Console that consume them land with the web control
-  tower.
+* **Remaining control tower pages.** The connection/delegation page
+  (issue #13) is the first LiveView consumer of PubSub. Intents,
+  Policies, Counterparties, Action Queue, and Audit/Replay screens
+  land with issues #14-#16.
+* **Browser wallet integration.** The connection page shows delegation
+  state from the backend but does not yet include a client-side
+  wallet SDK. A browser-native "connect wallet" flow (WalletConnect
+  / wagmi) is a follow-up once the adapter supports it.
 * **Integrity anchoring.** `payload_hash` is the substrate, but signing
   or external-service anchoring (Merkle chain, witness service) lands
   with issue #12 alongside the final security hardening pass.

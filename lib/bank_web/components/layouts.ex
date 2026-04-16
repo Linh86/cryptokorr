@@ -1,22 +1,16 @@
 defmodule BankWeb.Layouts do
   @moduledoc """
-  This module holds layouts and related functionality
-  used by your application.
+  Application layouts and layout components for the Bank control tower.
   """
   use BankWeb, :html
 
-  # Embed all files in layouts/* within this module.
-  # The default root.html.heex file contains the HTML
-  # skeleton of your application, namely HTML headers
-  # and other static content.
   embed_templates "layouts/*"
 
   @doc """
-  Renders your app layout.
+  Renders the control tower app shell.
 
-  This function is typically invoked from every template,
-  and it often contains your application menu, sidebar,
-  or similar.
+  This is the outermost frame for every page: a fixed sidebar for
+  navigation and a scrolling main area for content.
 
   ## Examples
 
@@ -35,40 +29,94 @@ defmodule BankWeb.Layouts do
 
   def app(assigns) do
     ~H"""
-    <header class="navbar px-4 sm:px-6 lg:px-8">
-      <div class="flex-1">
-        <a href="/" class="flex-1 flex w-fit items-center gap-2">
-          <img src={~p"/images/logo.svg"} width="36" />
-          <span class="text-sm font-semibold">v{Application.spec(:phoenix, :vsn)}</span>
-        </a>
-      </div>
-      <div class="flex-none">
-        <ul class="flex flex-column px-1 space-x-4 items-center">
-          <li>
-            <a href="https://phoenixframework.org/" class="btn btn-ghost">Website</a>
-          </li>
-          <li>
-            <a href="https://github.com/phoenixframework/phoenix" class="btn btn-ghost">GitHub</a>
-          </li>
-          <li>
-            <.theme_toggle />
-          </li>
-          <li>
-            <a href="https://hexdocs.pm/phoenix/overview.html" class="btn btn-primary">
-              Get Started <span aria-hidden="true">&rarr;</span>
-            </a>
-          </li>
-        </ul>
-      </div>
-    </header>
+    <div id="app-shell" class="flex h-screen bg-base-100">
+      <%!-- Sidebar --%>
+      <aside
+        id="sidebar"
+        class="hidden lg:flex flex-col w-64 border-r border-base-300 bg-base-200/50"
+      >
+        <div class="flex items-center gap-3 px-5 py-5 border-b border-base-300">
+          <div class="flex items-center justify-center w-8 h-8 rounded-lg bg-primary text-primary-content font-bold text-sm">
+            B
+          </div>
+          <div>
+            <p class="text-sm font-semibold tracking-tight">Bank v0.1</p>
+            <p class="text-[0.65rem] text-base-content/50 uppercase tracking-widest">
+              Control Tower
+            </p>
+          </div>
+        </div>
 
-    <main class="px-4 py-20 sm:px-6 lg:px-8">
-      <div class="mx-auto max-w-2xl space-y-4">
-        {render_slot(@inner_block)}
+        <nav class="flex-1 px-3 py-4 space-y-1">
+          <.nav_item href="/" icon="hero-signal" label="Connection" active />
+          <.nav_item href="#" icon="hero-document-text" label="Intents" disabled />
+          <.nav_item href="#" icon="hero-scale" label="Policies" disabled />
+          <.nav_item href="#" icon="hero-users" label="Counterparties" disabled />
+          <.nav_item href="#" icon="hero-queue-list" label="Action Queue" disabled />
+          <.nav_item href="#" icon="hero-document-magnifying-glass" label="Audit" disabled />
+        </nav>
+
+        <div class="px-3 py-4 border-t border-base-300">
+          <.theme_toggle />
+        </div>
+      </aside>
+
+      <%!-- Main --%>
+      <div class="flex-1 flex flex-col min-w-0 overflow-hidden">
+        <%!-- Top bar (mobile & desktop) --%>
+        <header class="flex items-center justify-between h-14 px-4 lg:px-6 border-b border-base-300 bg-base-100/80 backdrop-blur-sm shrink-0">
+          <div class="flex items-center gap-3 lg:hidden">
+            <div class="flex items-center justify-center w-7 h-7 rounded-md bg-primary text-primary-content font-bold text-xs">
+              B
+            </div>
+            <span class="text-sm font-semibold">Bank v0.1</span>
+          </div>
+          <div class="hidden lg:block" />
+          <div class="flex items-center gap-2">
+            <span class="badge badge-sm badge-ghost font-mono text-[0.65rem]">Base</span>
+            <span class="badge badge-sm badge-ghost font-mono text-[0.65rem]">USDC</span>
+            <div class="lg:hidden"><.theme_toggle /></div>
+          </div>
+        </header>
+
+        <%!-- Scrollable content area --%>
+        <main class="flex-1 overflow-y-auto">
+          <div class="mx-auto max-w-5xl px-4 py-6 lg:px-8 lg:py-8">
+            {render_slot(@inner_block)}
+          </div>
+        </main>
       </div>
-    </main>
+    </div>
 
     <.flash_group flash={@flash} />
+    """
+  end
+
+  # --- Nav helpers ----------------------------------------------------------
+
+  attr :href, :string, required: true
+  attr :icon, :string, required: true
+  attr :label, :string, required: true
+  attr :active, :boolean, default: false
+  attr :disabled, :boolean, default: false
+
+  defp nav_item(assigns) do
+    ~H"""
+    <a
+      href={unless @disabled, do: @href}
+      class={[
+        "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
+        @active && "bg-primary/10 text-primary",
+        !@active && !@disabled && "text-base-content/70 hover:bg-base-300/50 hover:text-base-content",
+        @disabled && "text-base-content/30 cursor-not-allowed"
+      ]}
+    >
+      <.icon name={@icon} class="size-4 shrink-0" />
+      <span>{@label}</span>
+      <span :if={@disabled} class="ml-auto text-[0.6rem] uppercase tracking-wider opacity-50">
+        Soon
+      </span>
+    </a>
     """
   end
 

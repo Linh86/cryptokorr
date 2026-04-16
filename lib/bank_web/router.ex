@@ -86,13 +86,15 @@ defmodule BankWeb.Router do
     post "/callback", AdapterCallbackController, :callback
   end
 
-  # Default HTML-serving scope. The web control tower (Dashboard,
-  # Counterparties, Policies, Action Queue, Audit/Replay, Security
-  # Console) will live here. Issue #3 keeps the generated landing page.
+  # Web control tower — LiveView-based operator console.
+  # Issue #13 replaces the default landing page with the
+  # connection/delegation dashboard. Remaining tower pages
+  # (Intents, Policies, Counterparties, Action Queue, Audit)
+  # land with issues #14-#16.
   scope "/", BankWeb do
     pipe_through :browser
 
-    get "/", PageController, :home
+    live "/", ControlLive
   end
 
   # Enable LiveDashboard in development

@@ -61,6 +61,20 @@ defmodule Bank.Delegations do
   # --- Read API -----------------------------------------------------------
 
   @doc """
+  List all non-terminal delegations across all smart accounts.
+  Returns a list of `Delegation` structs ordered by most recently created.
+  """
+  @spec list_active() :: [Delegation.t()]
+  def list_active do
+    Repo.all(
+      from(d in Delegation,
+        where: d.state in [:pending, :active, :revoking],
+        order_by: [desc: d.inserted_at]
+      )
+    )
+  end
+
+  @doc """
   Fetch the current (non-terminal) delegation for a smart account.
   Returns `nil` if no non-terminal delegation exists.
   """
