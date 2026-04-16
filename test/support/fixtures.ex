@@ -8,6 +8,7 @@ defmodule Bank.Fixtures do
   alias Bank.Audit.AuditEvent
   alias Bank.Counterparties.{AddressLabel, Counterparty, EvidenceArtifact, TrustAssertion}
   alias Bank.Decisions.{DecisionEnvelope, TrustAssessment, ExecutionPlan, SimulationReport}
+  alias Bank.Delegations.Delegation
   alias Bank.Intents.AgentIntent
   alias Bank.Policies.PolicyRule
   alias Bank.Repo
@@ -238,6 +239,24 @@ defmodule Bank.Fixtures do
       |> Repo.insert()
 
     plan
+  end
+
+  def delegation(attrs \\ %{}) do
+    attrs =
+      attrs
+      |> to_map()
+      |> Map.put_new(:smart_account_id, "sa-#{unique_int()}")
+      |> Map.put_new(:delegation_id, "del-#{unique_int()}")
+      |> Map.put_new(:state, :active)
+      |> Map.put_new(:chain, "base")
+      |> Map.put_new(:granted_at, monotonic_now())
+
+    {:ok, delegation} =
+      %Delegation{}
+      |> Delegation.changeset(attrs)
+      |> Repo.insert()
+
+    delegation
   end
 
   def audit_event(attrs \\ %{}) do

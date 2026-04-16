@@ -63,6 +63,7 @@ public functions, not through each other's schemas.
 | `Bank.Decisions`       | `DecisionEnvelope` writing and the approval state machine. |
 | `Bank.Audit`           | Append-only `AuditEvent` stream and per-intent replay bundles. |
 | `Bank.Runtime`         | Workflow orchestration (Oban queues) and realtime fan-out (PubSub topics). |
+| `Bank.Delegations`     | Durable smart-account delegation projection + execution gating. |
 | `Bank.Security`        | Pause / resume and delegation revocation. |
 
 Full module-level docstrings live alongside each file under `lib/bank/`.
@@ -529,6 +530,55 @@ The eight rule types above are the v1 surface — extending it is a code
 + doc change, not a runtime one. The engine is deliberately narrow and
 sufficient for transfers and whitelist-only swaps.
 
+## Delegation state model
+
+`Bank.Delegations` is the durable Postgres projection of on-chain smart-
+account delegation state. The adapter is the source of truth; this context
+survives restart and answers three questions without an adapter round-trip:
+
+1. Does this smart account have an active delegation?
+2. Is a revoke in flight?
+3. When does the delegation window expire?
+
+**State machine.**
+
+```
+pending ──grant──▶ active ──revoke_requested──▶ revoking ──revoked──▶ revoked
+                     │
+                     └──expire──▶ expired
+```
+
+Terminal states: `:revoked`, `:expired`. A new grant for the same smart
+account creates a new row; a partial unique index on `smart_account_id
+WHERE state IN ('pending','active','revoking')` enforces at-most-one
+non-terminal delegation.
+
+**Execution gating.** `Delegations.executable?/1` returns `true` only for
+`:active` state with a non-expired window. Every other state fails closed.
+
+**Adapter callbacks.** `POST /internal/adapter/callback` with
+`kind: "delegation.state_changed"` routes through `Delegations.apply_callback/1`,
+which maps adapter states (`granted`, `revoking`, `revoked`, `expired`) to
+context transitions. Execution callbacks (`broadcast`, `confirmed`,
+`reverted`, `aborted`) are acknowledged at the HTTP layer; plan progression
+is handled by `ConfirmExecution`.
+
+## Manual execution
+
+`POST /v1/decisions/:id/execute` is the operator path for triggering
+execution of a decided envelope. It runs four sequential gates:
+
+1. **Envelope current + auto_exec** — the envelope must be `current: true`
+   and `outcome: :auto_exec`.
+2. **No active plan** — no active `ExecutionPlan` for this decision.
+3. **Not paused** — the global runtime must not be paused.
+4. **Delegation active** — the smart account must have an active,
+   non-expired delegation.
+
+Each gate returns a distinct error code so the API can surface precise
+feedback. On success, an `ExecutionPlan` is created in `:prepared` state
+and enqueued for adapter dispatch.
+
 ## Workers and realtime fan-out
 
 `Bank.Runtime` is the connective tissue: it enqueues async work through
@@ -602,11 +652,12 @@ deferred:
   boundary and cancel as `:engines_pending` because the trust and
   simulation engines that sit alongside policy in the pipeline land with
   later engine issues. Decisioning wires all three together.
-* **TypeScript adapter.** `RunExecution` and `RevokeDelegation` stop at
-  `:adapter_pending`; `ConfirmExecution` treats `:prepared` the same
-  way. Once the adapter is wired, those branches flip from "cancel" to
-  "dispatch" and `ConfirmExecution` starts polling for real terminal
-  outcomes.
+* **TypeScript adapter dispatch.** The adapter service exists (separate
+  repo) and the internal callback endpoint is wired, but `RunExecution`
+  and `RevokeDelegation` still stop at `:adapter_pending` on the
+  enqueue side. The remaining work is HTTP dispatch from those workers to
+  the adapter's `/dispatch/*` routes and wiring `ConfirmExecution` to
+  poll real terminal outcomes.
 * **LiveView and channel consumers.** PubSub producers broadcast on all
   five topic contracts, but the Dashboard, Action Queue, Audit tail,
   and Security Console that consume them land with the web control

@@ -176,7 +176,9 @@ defmodule Bank.Security do
         # adapter confirms. `:not_found` is acceptable here: not
         # every smart account is grant-tracked in v0.1 (tests, new
         # accounts not yet granted through the projection).
-        _ = Delegations.record_revoke_requested(smart_account_id, reason: reason)
+        _ =
+          Delegations.record_revoke_requested(smart_account_id, %{last_reason: to_string(reason)})
+
         emit_revoke_requested(smart_account_id, reason, actor, actor_id, correlation_id)
         _ = job
         ok

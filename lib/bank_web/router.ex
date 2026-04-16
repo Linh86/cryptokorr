@@ -78,6 +78,14 @@ defmodule BankWeb.Router do
     post "/security/revoke_delegation", SecurityController, :revoke_delegation
   end
 
+  # Internal adapter callback — private network, not part of /v1/.
+  # Authenticated via shared bearer secret (mTLS in production).
+  scope "/internal/adapter", BankWeb.Internal do
+    pipe_through :api
+
+    post "/callback", AdapterCallbackController, :callback
+  end
+
   # Default HTML-serving scope. The web control tower (Dashboard,
   # Counterparties, Policies, Action Queue, Audit/Replay, Security
   # Console) will live here. Issue #3 keeps the generated landing page.

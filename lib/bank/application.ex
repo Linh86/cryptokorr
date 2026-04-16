@@ -14,8 +14,7 @@ defmodule Bank.Application do
       {Phoenix.PubSub, name: Bank.PubSub},
       # In-memory registry for pause/resume (see Bank.Security.PauseState).
       Bank.Security.PauseState,
-      # In-memory delegation-state projection (see Bank.Delegations).
-      Bank.Delegations,
+      # Delegation state is now durable in Postgres (see Bank.Delegations).
       # Background workers for runtime orchestration (see Bank.Runtime).
       {Oban, Application.fetch_env!(:bank, Oban)},
       # Start to serve requests, typically the last entry

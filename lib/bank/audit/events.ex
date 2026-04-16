@@ -18,6 +18,7 @@ defmodule Bank.Audit.Events do
 
   alias Bank.Counterparties.{AddressLabel, Counterparty, EvidenceArtifact, TrustAssertion}
   alias Bank.Decisions.{DecisionEnvelope, TrustAssessment, ExecutionPlan, SimulationReport}
+  alias Bank.Delegations.Delegation
   alias Bank.Intents.AgentIntent
   alias Bank.Policies.PolicyRule
 
@@ -407,6 +408,47 @@ defmodule Bank.Audit.Events do
     }
   end
 
+  @doc """
+  `delegation.state_changed` — the delegation projection transitioned
+  to a new state (granted, revoking, revoked, expired). Correlation
+  is nil (runtime-scoped, same as security events).
+  """
+  @spec delegation_state_changed(Delegation.t(), atom() | nil, keyword()) :: attrs()
+  def delegation_state_changed(%Delegation{} = delegation, prior_state, opts \\ []) do
+    %{
+      actor: Keyword.get(opts, :actor, :adapter),
+      actor_id: Keyword.get(opts, :actor_id),
+      event_type: "delegation.state_changed",
+      subject_type: "delegation",
+      subject_id: delegation.id,
+      correlation_id: nil,
+      before_ref: maybe_delegation_state_ref(prior_state),
+      after_ref: delegation_snapshot(delegation)
+    }
+  end
+
+  @doc """
+  `execution.manually_requested` — an operator triggered manual
+  execution for a decision envelope.
+  """
+  @spec execution_manually_requested(ExecutionPlan.t(), keyword()) :: attrs()
+  def execution_manually_requested(%ExecutionPlan{} = plan, opts \\ []) do
+    %{
+      actor: Keyword.get(opts, :actor, :user),
+      actor_id: Keyword.get(opts, :actor_id),
+      event_type: "execution.manually_requested",
+      subject_type: "execution_plan",
+      subject_id: plan.id,
+      correlation_id: plan.intent_id,
+      after_ref: %{
+        id: plan.id,
+        decision_id: plan.decision_id,
+        execution_status: atom_or_nil(plan.execution_status),
+        smart_account_id: plan.smart_account_id
+      }
+    }
+  end
+
   # --- snapshot builders ------------------------------------------------
 
   defp intent_snapshot(%AgentIntent{} = intent) do
@@ -508,6 +550,19 @@ defmodule Bank.Audit.Events do
       policy_snapshot_ref: envelope.policy_snapshot_ref
     }
   end
+
+  defp delegation_snapshot(%Delegation{} = d) do
+    %{
+      id: d.id,
+      smart_account_id: d.smart_account_id,
+      delegation_id: d.delegation_id,
+      state: atom_or_nil(d.state),
+      chain: d.chain
+    }
+  end
+
+  defp maybe_delegation_state_ref(nil), do: nil
+  defp maybe_delegation_state_ref(state), do: %{state: atom_or_nil(state)}
 
   defp ref_from_supersedes(nil, _subject_type), do: nil
 
