@@ -135,11 +135,7 @@ defmodule BankWeb.AuditLiveTest do
     end
 
     test "filters by event_type", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/audit")
-
-      view
-      |> form("#audit-filters form", filters: %{event_type: "intent.submitted"})
-      |> render_change()
+      {:ok, view, _html} = live(conn, "/audit?event_type=intent.submitted")
 
       html = render(view)
       assert html =~ "intent.submitted"
@@ -148,11 +144,7 @@ defmodule BankWeb.AuditLiveTest do
     end
 
     test "filters by correlation_id", %{conn: conn, intent_a: intent_a} do
-      {:ok, view, _html} = live(conn, "/audit")
-
-      view
-      |> form("#audit-filters form", filters: %{correlation_id: intent_a.id})
-      |> render_change()
+      {:ok, view, _html} = live(conn, "/audit?correlation_id=#{intent_a.id}")
 
       html = render(view)
       assert html =~ "intent.submitted"
@@ -160,11 +152,7 @@ defmodule BankWeb.AuditLiveTest do
     end
 
     test "invalid uuid in correlation_id is gracefully ignored", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/audit")
-
-      view
-      |> form("#audit-filters form", filters: %{correlation_id: "not-a-uuid"})
-      |> render_change()
+      {:ok, view, _html} = live(conn, "/audit?correlation_id=not-a-uuid")
 
       html = render(view)
       # No filter applied -> still see all events
@@ -173,22 +161,14 @@ defmodule BankWeb.AuditLiveTest do
     end
 
     test "empty filters when nothing matches shows filtered empty state", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/audit")
-
-      view
-      |> form("#audit-filters form", filters: %{event_type: "something.does.not.exist"})
-      |> render_change()
+      {:ok, view, _html} = live(conn, "/audit?event_type=something.does.not.exist")
 
       html = render(view)
       assert html =~ "No events match the current filters"
     end
 
     test "clear_filters resets to all events", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/audit")
-
-      view
-      |> form("#audit-filters form", filters: %{event_type: "intent.submitted"})
-      |> render_change()
+      {:ok, view, _html} = live(conn, "/audit?event_type=intent.submitted")
 
       view |> element("#clear-filters-btn") |> render_click()
 
@@ -197,6 +177,50 @@ defmodule BankWeb.AuditLiveTest do
       assert html =~ "decision.decided"
       assert html =~ "security.paused"
       refute html =~ ~s(id="clear-filters-btn")
+    end
+
+    test "filters by actor", %{conn: conn} do
+      audit_event(
+        event_type: "approval.recorded",
+        subject_type: "decision_envelope",
+        subject_id: Ecto.UUID.generate(),
+        actor: :user
+      )
+
+      {:ok, _view, html} = live(conn, "/audit?actor=user")
+
+      assert html =~ "approval.recorded"
+      refute html =~ "decision.decided"
+    end
+
+    test "filters by from/to date window", %{conn: conn} do
+      today = Date.utc_today() |> Date.to_iso8601()
+
+      {:ok, _view, html} = live(conn, "/audit?from=#{today}&to=#{today}")
+
+      # All fixture events were inserted today in UTC, so all still show.
+      assert html =~ "intent.submitted"
+    end
+  end
+
+  describe "pagination" do
+    test "renders pagination controls when there are events", %{conn: conn} do
+      audit_event(event_type: "intent.submitted", subject_id: Ecto.UUID.generate())
+
+      {:ok, _view, html} = live(conn, "/audit")
+
+      assert html =~ ~s(id="audit-pagination")
+      assert html =~ "Previous"
+      assert html =~ "Next"
+    end
+
+    test "next/prev buttons are disabled when there is only one page", %{conn: conn} do
+      audit_event(event_type: "intent.submitted", subject_id: Ecto.UUID.generate())
+
+      {:ok, view, _html} = live(conn, "/audit")
+
+      assert view |> element("#audit-next-page[disabled]") |> has_element?()
+      assert view |> element("#audit-prev-page[disabled]") |> has_element?()
     end
   end
 

@@ -149,6 +149,7 @@ defmodule Bank.Audit do
     * `:subject_id` — string (uuid for domain rows, opaque id for
       smart accounts / on-chain subjects).
     * `:event_type` — string. Exact match; no wildcard in v1.
+    * `:actor` — atom (`:user` | `:agent` | `:runtime` | `:adapter`).
     * `:from`, `:to` — `DateTime`s (inclusive); bound `ts`.
 
   ## Options
@@ -356,6 +357,8 @@ defmodule Bank.Audit do
       {:from, %DateTime{} = ts}, q -> where(q, [e], e.ts >= ^ts)
       {:to, nil}, q -> q
       {:to, %DateTime{} = ts}, q -> where(q, [e], e.ts <= ^ts)
+      {:actor, nil}, q -> q
+      {:actor, actor}, q when is_atom(actor) -> where(q, [e], e.actor == ^actor)
       {_unknown, _}, q -> q
     end)
   end
