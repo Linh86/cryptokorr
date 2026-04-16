@@ -272,4 +272,75 @@ defmodule BankWeb.ControlLiveTest do
       assert html =~ "USDC"
     end
   end
+
+  # --- Multi-account support -----------------------------------------------
+
+  describe "multiple delegations" do
+    setup do
+      {:ok, d1} = Delegations.grant("sa_primary", "del_primary")
+      {:ok, d2} = Delegations.grant("sa_secondary", "del_secondary")
+      %{primary: d1, secondary: d2}
+    end
+
+    test "renders account selector when more than one delegation exists", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/")
+
+      assert html =~ ~s(id="account-selector")
+      assert html =~ ~s(id="account-tab-sa_primary")
+      assert html =~ ~s(id="account-tab-sa_secondary")
+    end
+
+    test "defaults to the first delegation from list_active", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/")
+
+      # list_active orders by desc inserted_at, so sa_secondary is first.
+      assert html =~ "sa_secondary"
+    end
+
+    test "select_account switches the rendered delegation", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      html =
+        view
+        |> element("#account-tab-sa_primary")
+        |> render_click()
+
+      assert html =~ ~s(id="delegation-card")
+      assert html =~ "sa_primary"
+    end
+
+    test "revoke uses the selected account id", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      _ = view |> element("#account-tab-sa_primary") |> render_click()
+      html = view |> element("#revoke-btn") |> render_click()
+
+      assert html =~ "Revoking"
+      assert Delegations.get("sa_primary").state == :revoking
+      assert Delegations.get("sa_secondary").state == :active
+    end
+
+    test "selecting an unknown account id is ignored", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      render_hook(view, "select_account", %{"smart-account-id" => "sa_not_real"})
+
+      html = render(view)
+      assert html =~ ~s(id="delegation-card")
+    end
+  end
+
+  describe "account selector absent for single delegation" do
+    setup do
+      {:ok, _del} = Delegations.grant("sa_solo", "del_solo")
+      :ok
+    end
+
+    test "no selector when there is only one delegation", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/")
+
+      refute html =~ ~s(id="account-selector")
+      assert html =~ "sa_solo"
+    end
+  end
 end

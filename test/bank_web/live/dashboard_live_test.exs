@@ -145,6 +145,31 @@ defmodule BankWeb.DashboardLiveTest do
     end
   end
 
+  # --- Multi-account ---------------------------------------------------------
+
+  describe "multi-account delegations" do
+    test "stat card shows fraction when multiple delegations attached", %{conn: conn} do
+      {:ok, _d1} = Delegations.grant("sa_a", "del_a")
+      {:ok, _d2} = Delegations.grant("sa_b", "del_b")
+
+      {:ok, _view, html} = live(conn, "/dashboard")
+
+      assert html =~ "2/2 active"
+    end
+
+    test "readiness stays ready if at least one delegation is executable", %{conn: conn} do
+      {:ok, _d1} = Delegations.grant("sa_ready", "del_ready")
+      {:ok, _d2} = Delegations.grant("sa_rev", "del_rev")
+      {:ok, _} = Delegations.record_revoke_requested("sa_rev")
+
+      {:ok, _view, html} = live(conn, "/dashboard")
+
+      assert html =~ "Ready"
+      assert html =~ "1/2 executable"
+      assert html =~ "Delegation revocation"
+    end
+  end
+
   # --- Pending approvals count ----------------------------------------------
 
   describe "pending approvals" do

@@ -66,24 +66,26 @@ defmodule BankWeb.DashboardLive do
   defp load_state(socket) do
     delegations = Delegations.list_active()
     paused? = Security.paused?(:global)
-    primary = List.first(delegations)
 
-    execution_ready? =
-      case primary do
-        %{smart_account_id: sa_id, state: :active} -> Delegations.executable?(sa_id)
+    executable_count =
+      Enum.count(delegations, fn
+        %{state: :active, smart_account_id: sa_id} -> Delegations.executable?(sa_id)
         _ -> false
-      end
+      end)
+
+    execution_ready? = executable_count > 0
 
     pending_approvals = Decisions.count_pending_approvals()
     active_executions = Decisions.count_active_executions()
     recent_decisions = Decisions.list_recent_decisions(8)
 
     attention_items =
-      build_attention_items(paused?, primary, pending_approvals, active_executions)
+      build_attention_items(paused?, delegations, pending_approvals, active_executions)
 
     socket
     |> assign(:paused, paused?)
-    |> assign(:primary_delegation, primary)
+    |> assign(:delegations, delegations)
+    |> assign(:executable_count, executable_count)
     |> assign(:execution_ready, execution_ready?)
     |> assign(:pending_approvals, pending_approvals)
     |> assign(:active_executions, active_executions)
@@ -91,7 +93,7 @@ defmodule BankWeb.DashboardLive do
     |> assign(:attention_items, attention_items)
   end
 
-  defp build_attention_items(paused?, delegation, pending_approvals, active_executions) do
+  defp build_attention_items(paused?, delegations, pending_approvals, active_executions) do
     items = []
 
     items =
@@ -103,16 +105,28 @@ defmodule BankWeb.DashboardLive do
         else: items
 
     items =
-      if is_nil(delegation),
+      if delegations == [],
         do: [
           %{severity: :error, text: "No delegation connected — execution is impossible"} | items
         ],
         else: items
 
+    revoking_count = Enum.count(delegations, &(&1.state == :revoking))
+
     items =
-      if delegation && delegation.state == :revoking,
-        do: [%{severity: :warning, text: "Delegation revocation in flight"} | items],
-        else: items
+      cond do
+        revoking_count == 1 ->
+          [%{severity: :warning, text: "Delegation revocation in flight"} | items]
+
+        revoking_count > 1 ->
+          [
+            %{severity: :warning, text: "Delegation revocations in flight (#{revoking_count})"}
+            | items
+          ]
+
+        true ->
+          items
+      end
 
     items =
       if pending_approvals > 0,
@@ -162,10 +176,10 @@ defmodule BankWeb.DashboardLive do
         />
         <.stat_card
           id="delegation-status-card"
-          label="Delegation"
-          value={delegation_summary(@primary_delegation)}
+          label={delegation_stat_label(@delegations)}
+          value={delegation_stat_value(@delegations, @executable_count)}
           icon="hero-signal"
-          color={delegation_color(@primary_delegation)}
+          color={delegation_stat_color(@delegations, @executable_count)}
         />
         <.stat_card
           id="pending-approvals-card"
@@ -194,7 +208,8 @@ defmodule BankWeb.DashboardLive do
         <div class="space-y-6">
           <.readiness_card
             paused={@paused}
-            delegation={@primary_delegation}
+            delegations={@delegations}
+            executable_count={@executable_count}
             execution_ready={@execution_ready}
           />
         </div>
@@ -302,7 +317,8 @@ defmodule BankWeb.DashboardLive do
   # --- Component: readiness card ---------------------------------------------
 
   attr :paused, :boolean, required: true
-  attr :delegation, :map, required: true
+  attr :delegations, :list, required: true
+  attr :executable_count, :integer, required: true
   attr :execution_ready, :boolean, required: true
 
   defp readiness_card(assigns) do
@@ -318,9 +334,9 @@ defmodule BankWeb.DashboardLive do
           detail={if @paused, do: "Paused", else: "Running"}
         />
         <.readiness_item
-          label="Delegation"
-          ok={@delegation != nil && @delegation.state == :active}
-          detail={delegation_summary(@delegation)}
+          label="Delegations"
+          ok={@executable_count > 0}
+          detail={delegations_detail(@delegations, @executable_count)}
         />
         <.readiness_item
           label="Execution"
@@ -372,17 +388,35 @@ defmodule BankWeb.DashboardLive do
 
   # --- View helpers -----------------------------------------------------------
 
-  defp delegation_summary(nil), do: "Not connected"
-  defp delegation_summary(%{state: :active}), do: "Active"
-  defp delegation_summary(%{state: :pending}), do: "Pending"
-  defp delegation_summary(%{state: :revoking}), do: "Revoking"
-  defp delegation_summary(%{state: state}), do: to_string(state)
+  defp delegation_stat_label([]), do: "Delegations"
+  defp delegation_stat_label([_]), do: "Delegation"
+  defp delegation_stat_label(_), do: "Delegations"
 
-  defp delegation_color(nil), do: "error"
-  defp delegation_color(%{state: :active}), do: "success"
-  defp delegation_color(%{state: :pending}), do: "warning"
-  defp delegation_color(%{state: :revoking}), do: "error"
-  defp delegation_color(_), do: "ghost"
+  defp delegation_stat_value([], _), do: "Not connected"
+  defp delegation_stat_value([%{state: state}], _), do: state_word(state)
+
+  defp delegation_stat_value(delegations, executable_count) do
+    "#{executable_count}/#{length(delegations)} active"
+  end
+
+  defp delegation_stat_color([], _), do: "error"
+  defp delegation_stat_color([%{state: :active}], _), do: "success"
+  defp delegation_stat_color([%{state: :pending}], _), do: "warning"
+  defp delegation_stat_color([%{state: :revoking}], _), do: "error"
+  defp delegation_stat_color(_, 0), do: "warning"
+  defp delegation_stat_color(_, _), do: "success"
+
+  defp state_word(:active), do: "Active"
+  defp state_word(:pending), do: "Pending"
+  defp state_word(:revoking), do: "Revoking"
+  defp state_word(state), do: state |> to_string() |> String.capitalize()
+
+  defp delegations_detail([], _), do: "None"
+  defp delegations_detail([%{state: state}], _), do: state_word(state)
+
+  defp delegations_detail(delegations, executable_count) do
+    "#{executable_count}/#{length(delegations)} executable"
+  end
 
   defp outcome_label(:auto_exec), do: "Auto-execute"
   defp outcome_label(:hold), do: "Hold"

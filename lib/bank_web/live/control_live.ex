@@ -23,10 +23,14 @@ defmodule BankWeb.ControlLive do
   explicit and shows the delegation state the backend already
   tracks.
 
-  **Single smart account focus.** The MVP flow assumes one primary
-  smart account. The UI shows the first non-terminal delegation
-  if one exists, or a clear "not connected" state if none does.
-  Multi-account management is a follow-up.
+  **Multi-account aware.** Operators routinely run more than one
+  smart account (e.g. production treasury plus a sandbox account).
+  When there is at least one non-terminal delegation the page shows
+  a selector row across every account and renders the delegation
+  card + next-steps panel for whichever is currently selected. The
+  first delegation is selected by default; selection persists in
+  socket assigns and is preserved across PubSub refreshes when the
+  account still exists.
   """
 
   use BankWeb, :live_view
@@ -51,6 +55,16 @@ defmodule BankWeb.ControlLive do
   @impl true
   def handle_event("refresh", _params, socket) do
     {:noreply, socket |> load_state() |> put_flash(:info, "Status refreshed")}
+  end
+
+  def handle_event("select_account", %{"smart-account-id" => sa_id}, socket) do
+    ids = Enum.map(socket.assigns.delegations, & &1.smart_account_id)
+
+    if sa_id in ids do
+      {:noreply, socket |> assign(:selected_smart_account_id, sa_id) |> refresh_selected()}
+    else
+      {:noreply, socket}
+    end
   end
 
   def handle_event("revoke_delegation", %{"smart-account-id" => sa_id}, socket) do
@@ -139,18 +153,39 @@ defmodule BankWeb.ControlLive do
   defp load_state(socket) do
     delegations = Delegations.list_active()
     paused? = Security.paused?(:global)
-    primary = List.first(delegations)
+
+    current = Map.get(socket.assigns, :selected_smart_account_id)
+    ids = Enum.map(delegations, & &1.smart_account_id)
+
+    selected_id =
+      cond do
+        current != nil and current in ids -> current
+        delegations != [] -> hd(delegations).smart_account_id
+        true -> nil
+      end
+
+    socket
+    |> assign(:delegations, delegations)
+    |> assign(:selected_smart_account_id, selected_id)
+    |> assign(:paused, paused?)
+    |> refresh_selected()
+  end
+
+  defp refresh_selected(socket) do
+    selected =
+      Enum.find(
+        socket.assigns.delegations,
+        &(&1.smart_account_id == socket.assigns.selected_smart_account_id)
+      )
 
     execution_ready? =
-      case primary do
+      case selected do
         %{smart_account_id: sa_id, state: :active} -> Delegations.executable?(sa_id)
         _ -> false
       end
 
     socket
-    |> assign(:delegations, delegations)
-    |> assign(:primary_delegation, primary)
-    |> assign(:paused, paused?)
+    |> assign(:selected_delegation, selected)
     |> assign(:execution_ready, execution_ready?)
   end
 
@@ -171,17 +206,24 @@ defmodule BankWeb.ControlLive do
         </p>
       </div>
 
+      <%!-- Account selector --%>
+      <.account_selector
+        :if={length(@delegations) > 1}
+        delegations={@delegations}
+        selected={@selected_smart_account_id}
+      />
+
       <%!-- Main grid --%>
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <%!-- Left column: delegation card (spans 2) --%>
         <div class="lg:col-span-2 space-y-6">
-          <.delegation_card delegation={@primary_delegation} paused={@paused} />
+          <.delegation_card delegation={@selected_delegation} paused={@paused} />
         </div>
 
         <%!-- Right column: status + actions --%>
         <div class="space-y-6">
           <.next_steps_card
-            delegation={@primary_delegation}
+            delegation={@selected_delegation}
             paused={@paused}
             execution_ready={@execution_ready}
           />
@@ -252,6 +294,41 @@ defmodule BankWeb.ControlLive do
       >
         <.icon name="hero-minus-circle-solid" class="size-3.5" /> Execution blocked
       </div>
+    </div>
+    """
+  end
+
+  # --- Component: account selector -----------------------------------------
+
+  attr :delegations, :list, required: true
+  attr :selected, :string, required: true
+
+  defp account_selector(assigns) do
+    ~H"""
+    <div
+      id="account-selector"
+      class="mt-4 flex flex-wrap items-center gap-2 rounded-xl border border-base-300 bg-base-200/40 p-3"
+    >
+      <span class="text-xs uppercase tracking-wider text-base-content/50 mr-1">Account</span>
+      <button
+        :for={delegation <- @delegations}
+        type="button"
+        id={"account-tab-" <> delegation.smart_account_id}
+        phx-click="select_account"
+        phx-value-smart-account-id={delegation.smart_account_id}
+        class={[
+          "btn btn-xs gap-1.5 font-mono",
+          if(delegation.smart_account_id == @selected,
+            do: "btn-primary",
+            else: "btn-ghost border border-base-300"
+          )
+        ]}
+      >
+        {short_id(delegation.smart_account_id)}
+        <span class={["badge badge-xs", delegation_badge_class(delegation.state)]}>
+          {delegation_label(delegation.state)}
+        </span>
+      </button>
     </div>
     """
   end

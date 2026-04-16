@@ -114,13 +114,13 @@ defmodule BankWeb.SecurityLive do
     paused? = Security.paused?(:global)
     pause_snapshot = Security.snapshot()
 
-    primary = List.first(delegations)
-
-    execution_ready? =
-      case primary do
-        %{smart_account_id: sa_id, state: :active} -> Delegations.executable?(sa_id)
+    executable_count =
+      Enum.count(delegations, fn
+        %{state: :active, smart_account_id: sa_id} -> Delegations.executable?(sa_id)
         _ -> false
-      end
+      end)
+
+    execution_ready? = not paused? and executable_count > 0
 
     safety_events = load_safety_events()
 
@@ -128,6 +128,7 @@ defmodule BankWeb.SecurityLive do
     |> assign(:paused, paused?)
     |> assign(:pause_snapshot, pause_snapshot)
     |> assign(:delegations, delegations)
+    |> assign(:executable_count, executable_count)
     |> assign(:execution_ready, execution_ready?)
     |> assign(:safety_events, safety_events)
   end
@@ -244,8 +245,12 @@ defmodule BankWeb.SecurityLive do
       <div>
         <h2 class="text-sm font-semibold text-success">Runtime is safe and execution-ready</h2>
         <p class="mt-1 text-xs text-base-content/70">
-          The primary delegation is active and the runtime is running. Auto-execute
-          decisions will proceed; held and approval-required ones still need operator review.
+          <%= if @delegation_count > 1 do %>
+            {@delegation_count} delegation(s) attached, at least one executable, runtime running.
+          <% else %>
+            A delegation is active and the runtime is running.
+          <% end %>
+          Auto-execute decisions will proceed; held and approval-required ones still need operator review.
         </p>
       </div>
     </div>
@@ -263,8 +268,8 @@ defmodule BankWeb.SecurityLive do
       <div>
         <h2 class="text-sm font-semibold text-base-content/80">Execution blocked</h2>
         <p class="mt-1 text-xs text-base-content/60">
-          A delegation exists but is not in the active state. Check the delegation
-          panel below for the current state.
+          {@delegation_count} delegation(s) attached, but none are currently executable.
+          Check the delegation panel below for per-account state.
         </p>
       </div>
     </div>
