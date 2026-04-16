@@ -35,3 +35,8 @@ bank-*.tar
 npm-debug.log
 /assets/node_modules/
 
+# Local env files (never commit secrets). The *.example files are tracked.
+.env
+.env.*
+!.env.*.example
+
