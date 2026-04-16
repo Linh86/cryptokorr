@@ -33,6 +33,31 @@ defmodule BankWeb.HealthController do
     |> json(%{status: overall, service: "bank", version: @app_version, checks: checks})
   end
 
+  @doc """
+  Deep readiness probe — runs every operational check: Postgres,
+  adapter reachability, stuck-plan count. Returns 503 if any check is
+  degraded. Safe to alert on.
+  """
+  def deep(conn, _params) do
+    %{status: overall, checks: checks} = Bank.Ops.Health.snapshot()
+    status_code = if overall == :ok, do: 200, else: 503
+
+    conn
+    |> put_status(status_code)
+    |> json(%{
+      status: Atom.to_string(overall),
+      service: "bank",
+      version: @app_version,
+      checks: render_checks(checks)
+    })
+  end
+
+  defp render_checks(checks) do
+    Map.new(checks, fn {name, %{status: status} = v} ->
+      {name, Map.put(v, :status, Atom.to_string(status))}
+    end)
+  end
+
   defp database_check do
     case Ecto.Adapters.SQL.query(Bank.Repo, "SELECT 1", []) do
       {:ok, _} -> "ok"

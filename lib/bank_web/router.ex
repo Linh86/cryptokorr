@@ -36,6 +36,7 @@ defmodule BankWeb.Router do
     pipe_through :api
 
     get "/health", HealthController, :readiness
+    get "/health/deep", HealthController, :deep
   end
 
   # External v1 API. Controllers are scaffolded in issue #3; individual

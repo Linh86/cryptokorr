@@ -117,15 +117,27 @@ defmodule BankWeb.Telemetry do
       summary("oban.job.stop.duration",
         unit: {:native, :millisecond},
         tags: [:queue, :state]
+      ),
+
+      # --- Operational health (issue #37) -----------------------------
+      # Emitted by Bank.Ops.Health.emit_telemetry/0, invoked by the
+      # telemetry poller. `last_value` so dashboards read the current
+      # value rather than aggregating across time.
+      last_value("bank.ops.health.stuck_plans",
+        description: "Execution plans non-terminal past threshold minutes"
+      ),
+      last_value("bank.ops.health.adapter_up",
+        description: "1 if the adapter's /healthz returned <500, 0 otherwise"
+      ),
+      last_value("bank.ops.health.database_up",
+        description: "1 if SELECT 1 succeeded, 0 otherwise"
       )
     ]
   end
 
   defp periodic_measurements do
     [
-      # A module, function and arguments to be invoked periodically.
-      # This function must call :telemetry.execute/3 and a metric must be added above.
-      # {BankWeb, :count_users, []}
+      {Bank.Ops.Health, :emit_telemetry, []}
     ]
   end
 end
