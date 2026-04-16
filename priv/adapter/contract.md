@@ -19,8 +19,26 @@ The transfer dispatch path is **wired end-to-end** on Base + USDC:
   `.aborted`) on every tx.
 
 Still deferred (explicitly out of scope for #30): swap execution,
-on-chain delegation revoke hardening, bundler / AA migration, any
-staging or production deploy pipeline.
+bundler / AA migration, any staging or production deploy pipeline.
+
+## Status (issue #31)
+
+On-chain delegation revoke is wired end-to-end:
+
+- Phoenix-side outbound dispatch:
+  `Bank.AdapterClient.dispatch_revoke_delegation/1` (POSTs
+  `/dispatch/revoke_delegation`, same typed error surface as transfer).
+- Worker: `Bank.Runtime.Workers.RevokeDelegation` emits the security
+  broadcast + `security.revoke_requested` audit, then dispatches. It
+  retries on transport + 5xx, cancels on 4xx and invalid responses.
+- Inbound `delegation.state_changed` callbacks already flow through
+  `Bank.Delegations.apply_callback/1` (unchanged from v0.1). The
+  adapter is expected to emit `revoking` then `revoked` for a revoke
+  request; Phoenix keeps the `:granted → :revoking → :revoked`
+  lifecycle visible on the control tower through those callbacks.
+- Fail-closed posture is preserved: until the adapter confirms
+  `revoked`, policy evaluation keeps treating the delegation as
+  in-flight (operator-visible) rather than assuming revoke completed.
 
 ## Service boundary
 

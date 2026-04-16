@@ -63,12 +63,18 @@ defmodule Bank.AdapterClient do
   @default_timeout_ms 5_000
 
   @type transfer_ok :: %{accepted: true, execution_plan_id: String.t()}
+  @type revoke_ok :: %{accepted: true, smart_account_id: String.t()}
   @type transfer_error ::
           :adapter_unavailable
           | :invalid_response
           | {:adapter_rejected, pos_integer(), map() | String.t()}
           | {:adapter_error, pos_integer(), map() | String.t()}
           | {:target_not_resolvable, atom()}
+  @type revoke_error ::
+          :adapter_unavailable
+          | :invalid_response
+          | {:adapter_rejected, pos_integer(), map() | String.t()}
+          | {:adapter_error, pos_integer(), map() | String.t()}
 
   @doc """
   Dispatch a transfer execution plan to the adapter.
@@ -82,8 +88,35 @@ defmodule Bank.AdapterClient do
           {:ok, transfer_ok()} | {:error, transfer_error()}
   def dispatch_transfer(%ExecutionPlan{} = plan, opts \\ []) do
     with {:ok, payload} <- build_transfer_payload(plan) do
-      post("/dispatch/transfer", payload, opts)
+      post("/dispatch/transfer", payload, :transfer, opts)
     end
+  end
+
+  @doc """
+  Dispatch an on-chain delegation revoke for a smart account.
+
+  The adapter is expected to sign and broadcast the revoke transaction
+  and report progress via `delegation.state_changed` callbacks
+  (`revoking` → `revoked`). The revoke is runtime-scoped and carries a
+  `null` correlation id per the contract.
+
+  Accepts a map with `:smart_account_id` (required) and `:reason`
+  (optional; defaults to `"unspecified"`).
+  """
+  @spec dispatch_revoke_delegation(map(), keyword()) ::
+          {:ok, revoke_ok()} | {:error, revoke_error()}
+  def dispatch_revoke_delegation(%{smart_account_id: smart_account_id} = args, opts \\ [])
+      when is_binary(smart_account_id) do
+    payload = %{
+      contract_version: @contract_version,
+      action: "revoke_delegation",
+      smart_account_id: smart_account_id,
+      reason: Map.get(args, :reason, "unspecified"),
+      correlation_id: nil,
+      emitted_at: DateTime.utc_now() |> DateTime.to_iso8601()
+    }
+
+    post("/dispatch/revoke_delegation", payload, :revoke, opts)
   end
 
   # --- Payload shaping ---------------------------------------------------
@@ -168,7 +201,7 @@ defmodule Bank.AdapterClient do
 
   # --- HTTP --------------------------------------------------------------
 
-  defp post(path, payload, opts) do
+  defp post(path, payload, kind, opts) do
     config = Application.fetch_env!(:bank, __MODULE__)
     base_url = Keyword.fetch!(config, :base_url)
     secret = Keyword.fetch!(config, :auth_secret)
@@ -192,7 +225,7 @@ defmodule Bank.AdapterClient do
 
     case Req.request(req_opts) do
       {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
-        parse_accepted(body)
+        parse_accepted(kind, body)
 
       {:ok, %Req.Response{status: status, body: body}} when status in 400..499 ->
         {:error, {:adapter_rejected, status, body}}
@@ -207,11 +240,17 @@ defmodule Bank.AdapterClient do
     end
   end
 
-  defp parse_accepted(%{"accepted" => true, "execution_plan_id" => id}) when is_binary(id) do
+  defp parse_accepted(:transfer, %{"accepted" => true, "execution_plan_id" => id})
+       when is_binary(id) do
     {:ok, %{accepted: true, execution_plan_id: id}}
   end
 
-  defp parse_accepted(body) do
+  defp parse_accepted(:revoke, %{"accepted" => true, "smart_account_id" => id})
+       when is_binary(id) do
+    {:ok, %{accepted: true, smart_account_id: id}}
+  end
+
+  defp parse_accepted(_, body) do
     Logger.warning("Bank.AdapterClient: unexpected 2xx body: #{inspect(body)}")
     {:error, :invalid_response}
   end
