@@ -6,6 +6,7 @@ defmodule BankWeb.Internal.AdapterCallbackControllerTest do
   use BankWeb.ConnCase, async: true
 
   import Ecto.Query
+  import Plug.Conn, only: [put_req_header: 3]
 
   alias Bank.Audit.AuditEvent
   alias Bank.Decisions.ExecutionPlan
@@ -14,6 +15,11 @@ defmodule BankWeb.Internal.AdapterCallbackControllerTest do
   alias Bank.Intents.AgentIntent
   alias Bank.Repo
   alias Bank.Runtime.PubSub
+
+  setup %{conn: conn} do
+    secret = Application.fetch_env!(:bank, Bank.AdapterClient) |> Keyword.fetch!(:auth_secret)
+    {:ok, conn: put_req_header(conn, "authorization", "Bearer " <> secret)}
+  end
 
   # Build an in-flight plan at `status` with the owning intent at
   # `:executing`, mirroring the state after RunExecution has dispatched.

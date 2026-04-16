@@ -14,6 +14,15 @@ defmodule BankWeb.Router do
     plug :accepts, ["json"]
   end
 
+  # Adapter callback pipeline — shared bearer secret check on top of
+  # the JSON API pipeline. In production mTLS is terminated at the
+  # ingress; this plug is defense in depth. See
+  # `BankWeb.Plugs.VerifyAdapterAuth` and `docs/security.md`.
+  pipeline :internal_adapter do
+    plug :accepts, ["json"]
+    plug BankWeb.Plugs.VerifyAdapterAuth
+  end
+
   # Liveness probe — no DB touch, safe for a load balancer.
   scope "/", BankWeb do
     pipe_through :api
@@ -79,9 +88,9 @@ defmodule BankWeb.Router do
   end
 
   # Internal adapter callback — private network, not part of /v1/.
-  # Authenticated via shared bearer secret (mTLS in production).
+  # Authenticated via shared bearer secret; mTLS at ingress in prod.
   scope "/internal/adapter", BankWeb.Internal do
-    pipe_through :api
+    pipe_through :internal_adapter
 
     post "/callback", AdapterCallbackController, :callback
   end

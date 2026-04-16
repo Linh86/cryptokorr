@@ -11,8 +11,10 @@ defmodule BankWeb.Internal.AdapterCallbackController do
   state). The context returns enough information for this controller
   to emit audit + runtime broadcasts without re-reading state.
 
-  Not part of the external `/v1/` API surface. Authenticated via a
-  shared bearer secret (mTLS in production).
+  Not part of the external `/v1/` API surface. Enforced by
+  `BankWeb.Plugs.VerifyAdapterAuth` (shared bearer secret, constant-time
+  comparison). mTLS is terminated at the ingress in production; see
+  `docs/security.md`.
   """
 
   use BankWeb, :controller
