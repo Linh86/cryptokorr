@@ -19,7 +19,9 @@ defmodule Bank.Delegations do
 
       pending ──grant──▶ active ──revoke_requested──▶ revoking
                            │                             │
-                           │                             └──revoked──▶ revoked
+                           │                             ├──success──▶ revoked
+                           │                             │
+                           │                             └──failure──▶ revoke_failed ──retry──▶ revoking
                            │
                            └──expire──▶ expired
 
@@ -30,6 +32,12 @@ defmodule Bank.Delegations do
     * `:revoking` is treated as non-executable, because the revoke
       request is a commitment to stop using this delegation even
       before the chain confirms.
+    * `:revoke_failed` means the adapter's on-chain revoke attempt
+      could not complete cleanly (send rejected, confirmation
+      timeout, sentinel reverted). The on-chain delegation is still
+      live, so the row stays non-terminal, non-executable, and the
+      operator can retry — `record_revoke_requested/2` accepts
+      `:revoke_failed` as a prior state for that reason.
     * `:expired` prevents execution from reusing a stale window.
     * `:revoked` is terminal; a new grant produces a *new* record.
 
@@ -43,6 +51,7 @@ defmodule Bank.Delegations do
 
       grant(smart_account_id, delegation_id, attrs)
       record_revoke_requested(smart_account_id, attrs)
+      record_revoke_failed(smart_account_id, attrs)
       record_revoked(smart_account_id, attrs)
       record_expired(smart_account_id)
       get(smart_account_id)
@@ -68,7 +77,7 @@ defmodule Bank.Delegations do
   def list_active do
     Repo.all(
       from(d in Delegation,
-        where: d.state in [:pending, :active, :revoking],
+        where: d.state in [:pending, :active, :revoking, :revoke_failed],
         order_by: [desc: d.inserted_at]
       )
     )
@@ -84,7 +93,7 @@ defmodule Bank.Delegations do
       from(d in Delegation,
         where:
           d.smart_account_id == ^smart_account_id and
-            d.state in [:pending, :active, :revoking],
+            d.state in [:pending, :active, :revoking, :revoke_failed],
         order_by: [desc: d.inserted_at],
         limit: 1
       )
@@ -159,6 +168,11 @@ defmodule Bank.Delegations do
   Mark a delegation as revoke-requested. From this moment the smart
   account is non-executable, even if the chain hasn't confirmed.
 
+  `:revoke_failed` is also accepted here as a prior state: it means a
+  previous revoke attempt failed on-chain and the operator is
+  retrying, so the row returns to `:revoking` and the adapter will
+  submit a fresh tx.
+
   Returns `{:ok, delegation}` or `{:error, :not_found}`.
   """
   @spec record_revoke_requested(smart_account_id(), map()) ::
@@ -168,7 +182,8 @@ defmodule Bank.Delegations do
       nil ->
         {:error, :not_found}
 
-      %Delegation{state: state} = delegation when state in [:active, :pending] ->
+      %Delegation{state: state} = delegation
+      when state in [:active, :pending, :revoke_failed] ->
         delegation
         |> Delegation.revoke_requested_changeset(attrs)
         |> Repo.update()
@@ -178,7 +193,41 @@ defmodule Bank.Delegations do
     end
   end
 
-  @doc "Mark a delegation as confirmed-revoked on-chain."
+  @doc """
+  Mark a delegation's on-chain revoke attempt as failed.
+
+  Transitions `:revoking` → `:revoke_failed`. The on-chain delegation
+  is still live, so the row stays non-terminal (non-executable, still
+  occupying the per-smart-account uniqueness slot). The operator may
+  call `record_revoke_requested/2` again to retry.
+
+  Only `:revoking` is accepted as a prior state — reporting a failure
+  without first acknowledging the revoke attempt would be meaningless.
+  """
+  @spec record_revoke_failed(smart_account_id(), map()) ::
+          {:ok, Delegation.t()} | {:error, :not_found | :invalid_transition}
+  def record_revoke_failed(smart_account_id, attrs \\ %{}) do
+    case get(smart_account_id) do
+      nil ->
+        {:error, :not_found}
+
+      %Delegation{state: :revoking} = delegation ->
+        delegation
+        |> Delegation.revoke_failed_changeset(attrs)
+        |> Repo.update()
+
+      %Delegation{} ->
+        {:error, :invalid_transition}
+    end
+  end
+
+  @doc """
+  Mark a delegation as confirmed-revoked on-chain.
+
+  Only `:revoking` is accepted as a prior state. Failures of the
+  revoke attempt itself go through `record_revoke_failed/2`, so
+  reaching `:revoked` means the chain confirmed the revoke succeeded.
+  """
   @spec record_revoked(smart_account_id(), map()) ::
           {:ok, Delegation.t()} | {:error, :not_found | :invalid_transition}
   def record_revoked(smart_account_id, attrs \\ %{}) do
@@ -186,7 +235,7 @@ defmodule Bank.Delegations do
       nil ->
         {:error, :not_found}
 
-      %Delegation{state: state} = delegation when state in [:revoking, :active, :pending] ->
+      %Delegation{state: :revoking} = delegation ->
         delegation
         |> Delegation.revoked_changeset(attrs)
         |> Repo.update()
@@ -220,7 +269,8 @@ defmodule Bank.Delegations do
   Maps adapter states to context transitions:
     - "granted" → grant (upsert: creates if not found)
     - "revoking" → record_revoke_requested
-    - "revoked" → record_revoked
+    - "revoke_failed" → record_revoke_failed
+    - "revoked" → record_revoked (success only)
     - "expired" → record_expired
 
   Returns `{:ok, delegation}` or `{:error, reason}`.
@@ -260,6 +310,12 @@ defmodule Bank.Delegations do
       "revoking" ->
         record_revoke_requested(smart_account_id, %{
           last_reason: reason
+        })
+
+      "revoke_failed" ->
+        record_revoke_failed(smart_account_id, %{
+          last_reason: reason,
+          last_tx_hash: tx_hash
         })
 
       "revoked" ->

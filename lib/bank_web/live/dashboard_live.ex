@@ -128,6 +128,33 @@ defmodule BankWeb.DashboardLive do
           items
       end
 
+    revoke_failed_count = Enum.count(delegations, &(&1.state == :revoke_failed))
+
+    items =
+      cond do
+        revoke_failed_count == 1 ->
+          [
+            %{
+              severity: :error,
+              text: "Delegation revoke failed on-chain — operator retry required"
+            }
+            | items
+          ]
+
+        revoke_failed_count > 1 ->
+          [
+            %{
+              severity: :error,
+              text:
+                "#{revoke_failed_count} delegations in revoke_failed — operator retry required"
+            }
+            | items
+          ]
+
+        true ->
+          items
+      end
+
     items =
       if pending_approvals > 0,
         do: [
@@ -403,12 +430,14 @@ defmodule BankWeb.DashboardLive do
   defp delegation_stat_color([%{state: :active}], _), do: "success"
   defp delegation_stat_color([%{state: :pending}], _), do: "warning"
   defp delegation_stat_color([%{state: :revoking}], _), do: "error"
+  defp delegation_stat_color([%{state: :revoke_failed}], _), do: "error"
   defp delegation_stat_color(_, 0), do: "warning"
   defp delegation_stat_color(_, _), do: "success"
 
   defp state_word(:active), do: "Active"
   defp state_word(:pending), do: "Pending"
   defp state_word(:revoking), do: "Revoking"
+  defp state_word(:revoke_failed), do: "Revoke failed"
   defp state_word(state), do: state |> to_string() |> String.capitalize()
 
   defp delegations_detail([], _), do: "None"

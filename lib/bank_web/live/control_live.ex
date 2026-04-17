@@ -435,6 +435,16 @@ defmodule BankWeb.ControlLive do
         >
           <.icon name="hero-shield-exclamation" class="size-3.5" /> Revoke delegation
         </.button>
+        <.button
+          :if={@delegation.state == :revoke_failed}
+          id="revoke-retry-btn"
+          phx-click="revoke_delegation"
+          phx-value-smart-account-id={@delegation.smart_account_id}
+          data-confirm="Retry the revoke? The previous attempt failed on-chain and this delegation is still live."
+          class="btn btn-error btn-soft btn-sm gap-1.5"
+        >
+          <.icon name="hero-arrow-path" class="size-3.5" /> Retry revoke
+        </.button>
       </div>
     </div>
     """
@@ -507,6 +517,11 @@ defmodule BankWeb.ControlLive do
           :if={@delegation && @delegation.state == :revoking}
           status={:waiting}
           text="Revocation in flight — awaiting on-chain confirmation"
+        />
+        <.step_item
+          :if={@delegation && @delegation.state == :revoke_failed}
+          status={:action}
+          text="Previous revoke attempt failed on-chain — operator must retry to disable this delegation"
         />
         <.step_item
           :if={@execution_ready}
@@ -609,11 +624,13 @@ defmodule BankWeb.ControlLive do
   defp delegation_badge_class(:active), do: "badge-success"
   defp delegation_badge_class(:pending), do: "badge-warning"
   defp delegation_badge_class(:revoking), do: "badge-error"
+  defp delegation_badge_class(:revoke_failed), do: "badge-error"
   defp delegation_badge_class(_), do: "badge-ghost"
 
   defp delegation_label(:active), do: "Active"
   defp delegation_label(:pending), do: "Pending"
   defp delegation_label(:revoking), do: "Revoking"
+  defp delegation_label(:revoke_failed), do: "Revoke failed"
   defp delegation_label(:revoked), do: "Revoked"
   defp delegation_label(:expired), do: "Expired"
   defp delegation_label(_), do: "Unknown"
@@ -621,11 +638,13 @@ defmodule BankWeb.ControlLive do
   defp delegation_icon(:active), do: "hero-link-solid"
   defp delegation_icon(:pending), do: "hero-clock"
   defp delegation_icon(:revoking), do: "hero-shield-exclamation"
+  defp delegation_icon(:revoke_failed), do: "hero-exclamation-triangle"
   defp delegation_icon(_), do: "hero-link-slash"
 
   defp delegation_icon_bg(:active), do: "bg-success/15 text-success"
   defp delegation_icon_bg(:pending), do: "bg-warning/15 text-warning"
   defp delegation_icon_bg(:revoking), do: "bg-error/15 text-error"
+  defp delegation_icon_bg(:revoke_failed), do: "bg-error/15 text-error"
   defp delegation_icon_bg(_), do: "bg-base-300/50 text-base-content/40"
 
   defp short_id(nil), do: "-"

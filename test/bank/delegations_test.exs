@@ -25,6 +25,7 @@ defmodule Bank.DelegationsTest do
 
     test "allows re-grant after prior delegation is revoked" do
       {:ok, _} = Delegations.grant("sa_1", "del_1")
+      {:ok, _} = Delegations.record_revoke_requested("sa_1")
       {:ok, _} = Delegations.record_revoked("sa_1")
 
       assert {:ok, re} = Delegations.grant("sa_1", "del_2")
@@ -52,6 +53,7 @@ defmodule Bank.DelegationsTest do
 
     test "returns nil after delegation is revoked" do
       {:ok, _} = Delegations.grant("sa_1", "del_1")
+      {:ok, _} = Delegations.record_revoke_requested("sa_1")
       {:ok, _} = Delegations.record_revoked("sa_1")
 
       assert is_nil(Delegations.get("sa_1"))
@@ -86,17 +88,78 @@ defmodule Bank.DelegationsTest do
                Delegations.record_revoked("sa_1")
     end
 
+    test "record_revoked refuses to bypass :revoking (no fast-fail path)" do
+      # Confirmed revoke means the chain said the revoke succeeded, so
+      # :revoking must always be the prior state. Any failure of the
+      # attempt itself routes through record_revoke_failed.
+      {:ok, _} = Delegations.grant("sa_fast", "del_fast")
+
+      assert {:error, :invalid_transition} = Delegations.record_revoked("sa_fast")
+    end
+
     test "revoke on unknown smart account returns :not_found" do
       assert {:error, :not_found} = Delegations.record_revoke_requested("sa_missing")
       assert {:error, :not_found} = Delegations.record_revoked("sa_missing")
+      assert {:error, :not_found} = Delegations.record_revoke_failed("sa_missing")
     end
 
     test "revoke on already-revoked delegation returns :not_found" do
       {:ok, _} = Delegations.grant("sa_1", "del_1")
+      {:ok, _} = Delegations.record_revoke_requested("sa_1")
       {:ok, _} = Delegations.record_revoked("sa_1")
 
       # get/1 returns nil for terminal states, so this is :not_found
       assert {:error, :not_found} = Delegations.record_revoke_requested("sa_1")
+    end
+  end
+
+  describe "revoke_failed flow (issue #31)" do
+    test "revoking → revoke_failed records reason and tx hash" do
+      {:ok, _} = Delegations.grant("sa_fail", "del_fail")
+      {:ok, _} = Delegations.record_revoke_requested("sa_fail")
+
+      tx_hash = "0x" <> String.duplicate("ab", 32)
+
+      assert {:ok, delegation} =
+               Delegations.record_revoke_failed("sa_fail", %{
+                 last_reason: "sentinel_reverted",
+                 last_tx_hash: tx_hash
+               })
+
+      assert delegation.state == :revoke_failed
+      assert delegation.last_reason == "sentinel_reverted"
+      assert delegation.last_tx_hash == tx_hash
+    end
+
+    test "revoke_failed from anything other than :revoking is :invalid_transition" do
+      {:ok, _} = Delegations.grant("sa_ny", "del_ny")
+      assert {:error, :invalid_transition} = Delegations.record_revoke_failed("sa_ny")
+    end
+
+    test "operator retry: revoke_failed → revoking → revoked" do
+      {:ok, _} = Delegations.grant("sa_retry", "del_retry")
+      {:ok, _} = Delegations.record_revoke_requested("sa_retry")
+      {:ok, _} = Delegations.record_revoke_failed("sa_retry", %{last_reason: "send_failed: rpc"})
+
+      # Operator retries via record_revoke_requested
+      assert {:ok, %{state: :revoking}} =
+               Delegations.record_revoke_requested("sa_retry", %{last_reason: "operator_retry"})
+
+      # Subsequent success lands in :revoked
+      assert {:ok, %{state: :revoked}} = Delegations.record_revoked("sa_retry")
+    end
+
+    test "revoke_failed is non-executable and non-terminal" do
+      {:ok, _} = Delegations.grant("sa_exec", "del_exec")
+      {:ok, _} = Delegations.record_revoke_requested("sa_exec")
+      {:ok, _} = Delegations.record_revoke_failed("sa_exec")
+
+      # Fail-closed: not executable.
+      refute Delegations.executable?("sa_exec")
+
+      # Non-terminal: still visible to get/1 and blocks re-grant.
+      assert %{state: :revoke_failed} = Delegations.get("sa_exec")
+      assert {:error, :already_exists} = Delegations.grant("sa_exec", "del_new")
     end
   end
 
@@ -146,6 +209,7 @@ defmodule Bank.DelegationsTest do
       refute Delegations.executable?("sa_r1")
 
       {:ok, _} = Delegations.grant("sa_r2", "del_2")
+      {:ok, _} = Delegations.record_revoke_requested("sa_r2")
       {:ok, _} = Delegations.record_revoked("sa_r2")
       refute Delegations.executable?("sa_r2")
 
@@ -245,6 +309,97 @@ defmodule Bank.DelegationsTest do
 
     test "invalid callback shape returns error" do
       assert {:error, :invalid_callback} = Delegations.apply_callback(%{"bad" => "shape"})
+    end
+  end
+
+  describe "revoke callback tx_ref propagation (issue #31)" do
+    test "revoked callback with full tx_refs records the on-chain hash and reason" do
+      {:ok, _} = Delegations.grant("sa_ref", "del_ref")
+      {:ok, _} = Delegations.record_revoke_requested("sa_ref")
+
+      tx_hash = "0x" <> String.duplicate("ef", 32)
+
+      assert {:ok, delegation} =
+               Delegations.apply_callback(%{
+                 "smart_account_id" => "sa_ref",
+                 "delegation_id" => "del_ref",
+                 "state" => "revoked",
+                 "reason" => "operator_requested",
+                 "tx_refs" => [
+                   %{
+                     "chain" => "base",
+                     "hash" => tx_hash,
+                     "block_number" => 12_345_678,
+                     "status" => "success"
+                   }
+                 ]
+               })
+
+      assert delegation.state == :revoked
+      assert delegation.last_tx_hash == tx_hash
+      assert delegation.last_reason == "operator_requested"
+      assert %DateTime{} = delegation.revoked_at
+    end
+
+    test "revoke_failed callback from :revoking records the failure and stays fail-closed" do
+      # When the adapter's revoke attempt fails on-chain (send rejected,
+      # confirmation timeout, sentinel reverted) it emits
+      # state=revoke_failed — NOT revoked. Phoenix records the failure
+      # on the existing :revoking row so the operator can retry.
+      {:ok, _} = Delegations.grant("sa_fail_cb", "del_x")
+      {:ok, _} = Delegations.record_revoke_requested("sa_fail_cb")
+
+      tx_hash = "0x" <> String.duplicate("cd", 32)
+
+      assert {:ok, delegation} =
+               Delegations.apply_callback(%{
+                 "smart_account_id" => "sa_fail_cb",
+                 "delegation_id" => "del_x",
+                 "state" => "revoke_failed",
+                 "reason" => "send_failed: insufficient funds",
+                 "tx_refs" => [%{"chain" => "base", "hash" => tx_hash, "status" => "unknown"}]
+               })
+
+      assert delegation.state == :revoke_failed
+      assert delegation.last_reason == "send_failed: insufficient funds"
+      assert delegation.last_tx_hash == tx_hash
+      refute Delegations.executable?("sa_fail_cb")
+    end
+
+    test "revoked callback from :active is refused (:invalid_transition)" do
+      # Success must always follow :revoking. A direct :active → :revoked
+      # would mean the adapter somehow confirmed a revoke it never
+      # acknowledged starting — that's a contract violation, not a
+      # recoverable state.
+      {:ok, _} = Delegations.grant("sa_direct", "del_x")
+
+      assert {:error, :invalid_transition} =
+               Delegations.apply_callback(%{
+                 "smart_account_id" => "sa_direct",
+                 "delegation_id" => "del_x",
+                 "state" => "revoked",
+                 "reason" => "operator_requested"
+               })
+    end
+
+    test "a duplicate revoked callback is a benign :invalid_transition" do
+      {:ok, _} = Delegations.grant("sa_dup", "del_dup")
+      {:ok, _} = Delegations.record_revoke_requested("sa_dup")
+
+      payload = %{
+        "smart_account_id" => "sa_dup",
+        "delegation_id" => "del_dup",
+        "state" => "revoked",
+        "reason" => "operator_requested"
+      }
+
+      assert {:ok, d} = Delegations.apply_callback(payload)
+      assert d.state == :revoked
+
+      # The second callback finds no non-terminal row and reports
+      # :not_found rather than double-recording. The controller treats
+      # this as accepted_with_warning.
+      assert {:error, :not_found} = Delegations.apply_callback(payload)
     end
   end
 end

@@ -410,8 +410,8 @@ defmodule Bank.Audit.Events do
 
   @doc """
   `delegation.state_changed` — the delegation projection transitioned
-  to a new state (granted, revoking, revoked, expired). Correlation
-  is nil (runtime-scoped, same as security events).
+  to a new state (granted, revoking, revoke_failed, revoked, expired).
+  Correlation is nil (runtime-scoped, same as security events).
   """
   @spec delegation_state_changed(Delegation.t(), atom() | nil, keyword()) :: attrs()
   def delegation_state_changed(%Delegation{} = delegation, prior_state, opts \\ []) do
@@ -557,7 +557,9 @@ defmodule Bank.Audit.Events do
       smart_account_id: d.smart_account_id,
       delegation_id: d.delegation_id,
       state: atom_or_nil(d.state),
-      chain: d.chain
+      chain: d.chain,
+      last_tx_hash: d.last_tx_hash,
+      last_reason: d.last_reason
     }
   end
 

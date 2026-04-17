@@ -5,8 +5,10 @@ defmodule Bank.Runtime.Workers.RevokeDelegation do
   The actual revoke is an on-chain transaction routed through the
   TypeScript adapter. This worker owns the enqueue-side of that
   contract: record the operator intent, dispatch to the adapter, and
-  let the adapter drive the `:granted → :revoking → :revoked`
-  lifecycle via `delegation.state_changed` callbacks.
+  let the adapter drive the `:granted → :revoking → :revoked` (or
+  `:revoke_failed` on chain-level failure) lifecycle via
+  `delegation.state_changed` callbacks. An operator may retry from
+  `:revoke_failed` by re-enqueueing this worker.
 
   Sequence:
 

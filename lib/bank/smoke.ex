@@ -295,6 +295,13 @@ defmodule Bank.Smoke do
       %Delegation{state: :revoked} = d ->
         {:ok, d}
 
+      # A terminal failure of the revoke attempt: the chain-level
+      # attempt did not complete (send rejected, confirmation timeout,
+      # sentinel reverted). The smoke run should surface this instead
+      # of hanging until the polling deadline.
+      %Delegation{state: :revoke_failed} = d ->
+        {:error, {:revoke_failed, d.last_reason}}
+
       %Delegation{} = d ->
         maybe_continue(
           smart_account_id,

@@ -88,9 +88,10 @@ Exit code 0.
 | `reason`                          | Likely cause                                              |
 | --------------------------------- | --------------------------------------------------------- |
 | `:no_active_delegation`           | No delegation row exists for this smart account; grant first. |
-| `{:delegation_not_active, state}` | Delegation is already `:revoking`, `:revoked`, or `:expired`. |
+| `{:delegation_not_active, state}` | Delegation is already `:revoking`, `:revoke_failed`, `:revoked`, or `:expired`. |
 | `{:dispatch_failed, :adapter_unavailable}` | Adapter unreachable. |
-| `{:timeout, :revoking}`           | Adapter accepted but no on-chain revoke landed. Check the adapter + bundler. |
+| `{:timeout, :revoking}`           | Adapter accepted but no terminal callback yet. Check the adapter + bundler. |
+| `{:revoke_failed, reason}`        | Adapter attempted the revoke but the chain-level attempt failed (send rejected, confirmation timeout, sentinel reverted). `reason` is the `last_reason` recorded on the delegation row. Operator must retry. |
 
 ## After a smoke run
 

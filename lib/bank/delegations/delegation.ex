@@ -11,17 +11,24 @@ defmodule Bank.Delegations.Delegation do
 
       pending ──grant──▶ active ──revoke_requested──▶ revoking
                            │                             │
-                           │                             └──revoked──▶ revoked
+                           │                             ├──success──▶ revoked
+                           │                             │
+                           │                             └──failure──▶ revoke_failed ──retry──▶ revoking
                            │
                            └──expire──▶ expired
 
-  Terminal states: `:revoked`, `:expired`. A new grant for the same
-  smart account creates a new row.
+  Terminal states: `:revoked`, `:expired`. `:revoke_failed` is
+  non-terminal on purpose — the on-chain delegation is still live when
+  a revoke attempt fails (send rejected, confirmation timeout, sentinel
+  reverted), so the operator must be able to retry and the smart
+  account must remain fail-closed. A new grant for the same smart
+  account creates a new row only after the prior record reaches a
+  terminal state.
   """
 
   use Bank.Schema
 
-  @states [:pending, :active, :revoking, :revoked, :expired]
+  @states [:pending, :active, :revoking, :revoke_failed, :revoked, :expired]
   @terminal_states [:revoked, :expired]
 
   @type t :: %__MODULE__{}
@@ -89,6 +96,19 @@ defmodule Bank.Delegations.Delegation do
     |> cast(attrs, [:last_reason, :last_tx_hash, :revoked_at])
     |> put_change(:state, :revoked)
     |> put_change(:revoked_at, Map.get(attrs, :revoked_at, DateTime.utc_now()))
+  end
+
+  @doc """
+  Changeset for transitioning to :revoke_failed.
+
+  Used when the adapter's on-chain revoke attempt fails (send rejected,
+  confirmation timeout, sentinel reverted). The delegation stays
+  fail-closed (non-executable) but an operator can retry the revoke.
+  """
+  def revoke_failed_changeset(delegation, attrs \\ %{}) do
+    delegation
+    |> cast(attrs, [:last_reason, :last_tx_hash])
+    |> put_change(:state, :revoke_failed)
   end
 
   @doc "Changeset for transitioning to :expired."

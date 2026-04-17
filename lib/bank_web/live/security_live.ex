@@ -425,6 +425,16 @@ defmodule BankWeb.SecurityLive do
       >
         <.icon name="hero-shield-exclamation" class="size-3" /> Revoke
       </.button>
+      <.button
+        :if={@delegation.state == :revoke_failed}
+        id={"revoke-retry-btn-#{@delegation.smart_account_id}"}
+        phx-click="revoke_delegation"
+        phx-value-smart-account-id={@delegation.smart_account_id}
+        data-confirm="Retry the revoke? The previous attempt failed on-chain."
+        class="btn btn-error btn-soft btn-xs gap-1.5"
+      >
+        <.icon name="hero-arrow-path" class="size-3" /> Retry
+      </.button>
     </div>
     """
   end
@@ -483,6 +493,7 @@ defmodule BankWeb.SecurityLive do
   defp delegation_badge_class(:active), do: "badge-success"
   defp delegation_badge_class(:pending), do: "badge-warning"
   defp delegation_badge_class(:revoking), do: "badge-error"
+  defp delegation_badge_class(:revoke_failed), do: "badge-error"
   defp delegation_badge_class(:revoked), do: "badge-ghost"
   defp delegation_badge_class(:expired), do: "badge-ghost"
   defp delegation_badge_class(_), do: "badge-ghost"

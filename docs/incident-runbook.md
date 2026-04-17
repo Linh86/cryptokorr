@@ -244,7 +244,16 @@ seconds.
 ## Revoke did not land
 
 **Signal**: operator called `POST /v1/security/revoke_delegation` but
-the delegation row stays `:revoking`, no on-chain tx.
+either the delegation row stays `:revoking` with no terminal
+callback, or it transitioned to `:revoke_failed` (meaning the adapter
+attempted the revoke and the chain-level attempt could not complete).
+
+Note: Phoenix stays fail-closed the whole time — `RunExecution`
+refuses to dispatch transfers from this smart account the moment the
+`:revoking` projection is written, before the adapter has even
+broadcast the sentinel, and continues to refuse through any
+`:revoke_failed` retries. The operator risk here is visibility and
+audit, not a window of unguarded execution.
 
 ### Immediate actions
 
@@ -254,22 +263,57 @@ the delegation row stays `:revoking`, no on-chain tx.
    ```
 2. Look for recent `Bank.AdapterClient /dispatch/revoke_delegation
    unavailable` warnings.
+3. Query `delegations` for the smart account and inspect `state`
+   plus `last_reason` — the adapter encodes the failure class in
+   `last_reason` and the state is the source of truth for whether
+   the revoke succeeded:
+    - `state: :revoked` — chain confirmed; the revoke attempt
+      succeeded. (Cryptographic enforcement still requires #32.)
+    - `state: :revoke_failed` — chain-level attempt failed; the
+      delegation is still live on-chain.
+    - `state: :revoking` with no recent callback — adapter is
+      probably down or slow.
 
 ### Diagnose
 
-- Adapter outage: see [Adapter outage](#adapter-outage) first; the
-  revoke will drive forward once the adapter is back.
-- Adapter rejected the payload: look for
+- Adapter outage (no callback at all): see [Adapter outage](#adapter-outage)
+  first; the worker will retry and the revoke drives forward when the
+  adapter is back.
+- Adapter rejected the dispatch (4xx): look for
   `RevokeDelegation: adapter rejected smart_account ... (HTTP 4xx)`.
   4xx rejections are NOT retried — the delegation is stuck and needs
   manual investigation.
+- `state: :revoke_failed`, `last_reason: send_failed: ...`: the
+  adapter wallet couldn't broadcast the sentinel tx (nonce mismatch,
+  insufficient gas funds on the adapter operator key, RPC outage).
+  No tx hash to check on chain. Adapter logs have the underlying
+  error; most common fix is topping up the adapter operator key.
+- `state: :revoke_failed`, `last_reason: confirmation_failed: ...`:
+  the sentinel tx was broadcast (hash is in `last_tx_hash`) but the
+  adapter gave up waiting for 2 confirmations. Verify on Basescan —
+  the tx usually did land a few blocks later; the callback just
+  reported before the chain caught up.
+- `state: :revoke_failed`, `last_reason: sentinel_reverted`: the
+  sentinel self-transfer reverted. Rare (0-wei self-transfer almost
+  never reverts); indicates adapter misconfiguration. Escalate to
+  the adapter on-call.
 
 ### Recovery
 
 - Once the adapter is healthy, Oban retries drain naturally.
 - For a 4xx-rejected revoke, fix the root cause (the adapter's
   `error.code` tells you what), then re-issue the revoke.
-- If the operator cannot get the revoke through and the situation is
+- For `:revoke_failed`, an operator can **retry the revoke** on the
+  same delegation row: call `POST /v1/security/revoke_delegation`
+  again (or click "Retry revoke" on the control tower). Phoenix
+  re-transitions the row `:revoke_failed → :revoking` and the
+  adapter submits a fresh sentinel tx. Retry as many times as
+  needed; each attempt appends a fresh audit trail.
+- **This sentinel does not cryptographically revoke the delegation
+  key at the smart-account level** — that enforcement is tracked in
+  #32 (smart-account permission module). Until #32 ships, Phoenix's
+  fail-closed posture is the only safeguard for the delegation key.
+  If the operator cannot get the revoke through and the situation is
   dangerous, the fallback is to **rotate the smart account's
   delegation off chain** — an adapter-side operator procedure that
   lives in the adapter repo.

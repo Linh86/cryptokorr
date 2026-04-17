@@ -106,6 +106,92 @@ defmodule BankWeb.Internal.AdapterCallbackControllerTest do
       body = json_response(conn, 200)
       assert body["status"] == "accepted_with_warning"
     end
+
+    test "revoked with tx_refs records the on-chain hash and emits audit+broadcast",
+         %{conn: conn} do
+      delegation("sa_done", "del_done")
+      {:ok, _} = Delegations.record_revoke_requested("sa_done")
+
+      :ok = PubSub.subscribe(PubSub.security_events())
+      :ok = PubSub.subscribe(PubSub.audit_stream())
+
+      tx_hash = "0x" <> String.duplicate("f1", 32)
+
+      conn =
+        post(conn, "/internal/adapter/callback", %{
+          "contract_version" => 1,
+          "kind" => "delegation.state_changed",
+          "smart_account_id" => "sa_done",
+          "delegation_id" => "del_done",
+          "state" => "revoked",
+          "reason" => "operator_requested",
+          "tx_refs" => [
+            %{
+              "chain" => "base",
+              "hash" => tx_hash,
+              "block_number" => 42_424_242,
+              "status" => "success"
+            }
+          ]
+        })
+
+      assert json_response(conn, 200)["status"] == "accepted"
+
+      d = Repo.get_by(Bank.Delegations.Delegation, smart_account_id: "sa_done")
+      assert d.state == :revoked
+      assert d.last_tx_hash == tx_hash
+
+      assert_receive %{
+        topic: :security_events,
+        event: :delegation_state_changed,
+        payload: %{state: :revoked, smart_account_id: "sa_done"}
+      }
+
+      assert_receive %{topic: :audit_stream, event: :appended}
+
+      [event] =
+        Repo.all(
+          from e in AuditEvent,
+            where: e.subject_type == "delegation" and e.event_type == "delegation.state_changed"
+        )
+
+      assert event.actor == :adapter
+      assert event.after_ref["last_tx_hash"] == tx_hash
+      assert event.after_ref["state"] == "revoked"
+    end
+
+    test "duplicate revoked callback returns accepted_with_warning without side effects",
+         %{conn: conn} do
+      delegation("sa_idemp", "del_idemp")
+      {:ok, _} = Delegations.record_revoke_requested("sa_idemp")
+
+      payload = %{
+        "contract_version" => 1,
+        "kind" => "delegation.state_changed",
+        "smart_account_id" => "sa_idemp",
+        "delegation_id" => "del_idemp",
+        "state" => "revoked",
+        "reason" => "operator_requested"
+      }
+
+      first = post(conn, "/internal/adapter/callback", payload)
+      assert json_response(first, 200)["status"] == "accepted"
+
+      second = post(conn, "/internal/adapter/callback", payload)
+      body = json_response(second, 200)
+      assert body["status"] == "accepted_with_warning"
+
+      # Only one delegation.state_changed audit event from the first callback.
+      events =
+        Repo.all(
+          from e in AuditEvent,
+            where:
+              e.event_type == "delegation.state_changed" and
+                fragment("?->>'smart_account_id' = ?", e.after_ref, "sa_idemp")
+        )
+
+      assert length(events) == 1
+    end
   end
 
   describe "POST /internal/adapter/callback — execution.broadcast" do
