@@ -402,4 +402,76 @@ defmodule Bank.DelegationsTest do
       assert {:error, :not_found} = Delegations.apply_callback(payload)
     end
   end
+
+  describe "ERC-4337 v0.7 AA-shaped callbacks (issue #32)" do
+    # The adapter's AA path emits `tx_refs` carrying both `userop_hash`
+    # (EntryPoint identity) and `hash` (chain-level tx hash) on
+    # confirmed receipts, plus `bundler` + hex `nonce`. Phoenix only
+    # keeps one identifier on the delegation row; the invariant is
+    # "prefer `hash` when present, fall back to `userop_hash`". That
+    # keeps pre-inclusion states (broadcast, confirmation_failed)
+    # navigable in the control tower instead of showing a blank anchor.
+    test "revoked callback with AA tx_refs records the on-chain hash (prefers hash over userop_hash)" do
+      {:ok, _} = Delegations.grant("sa_aa_ok", "del_aa")
+      {:ok, _} = Delegations.record_revoke_requested("sa_aa_ok")
+
+      userop_hash = "0x" <> String.duplicate("aa", 32)
+      tx_hash = "0x" <> String.duplicate("bb", 32)
+
+      assert {:ok, delegation} =
+               Delegations.apply_callback(%{
+                 "smart_account_id" => "sa_aa_ok",
+                 "delegation_id" => "del_aa",
+                 "state" => "revoked",
+                 "reason" => "operator_requested",
+                 "tx_refs" => [
+                   %{
+                     "chain" => "base",
+                     "userop_hash" => userop_hash,
+                     "hash" => tx_hash,
+                     "nonce" => "0x7",
+                     "bundler" => "base-v07-bundler",
+                     "block_number" => 42_000,
+                     "status" => "success"
+                   }
+                 ]
+               })
+
+      assert delegation.state == :revoked
+      assert delegation.last_tx_hash == tx_hash
+    end
+
+    test "revoke_failed with confirmation_failed (userop_hash only) records the user-op hash" do
+      # `confirmation_failed` fires when the bundler accepted the
+      # user-op but `waitForUserOperationReceipt` timed out — we have
+      # a user-op hash to look up later but no on-chain tx hash yet.
+      # Without the fallback, last_tx_hash would be nil and the
+      # operator would have no anchor to resume the investigation.
+      {:ok, _} = Delegations.grant("sa_aa_pend", "del_aa_pend")
+      {:ok, _} = Delegations.record_revoke_requested("sa_aa_pend")
+
+      userop_hash = "0x" <> String.duplicate("cc", 32)
+
+      assert {:ok, delegation} =
+               Delegations.apply_callback(%{
+                 "smart_account_id" => "sa_aa_pend",
+                 "delegation_id" => "del_aa_pend",
+                 "state" => "revoke_failed",
+                 "reason" => "confirmation_failed: timeout",
+                 "tx_refs" => [
+                   %{
+                     "chain" => "base",
+                     "userop_hash" => userop_hash,
+                     "nonce" => "0x7",
+                     "bundler" => "base-v07-bundler",
+                     "status" => "unknown"
+                   }
+                 ]
+               })
+
+      assert delegation.state == :revoke_failed
+      assert delegation.last_tx_hash == userop_hash
+      refute Delegations.executable?("sa_aa_pend")
+    end
+  end
 end

@@ -388,6 +388,19 @@ defmodule Bank.Delegations do
 
   # --- Private helpers ----------------------------------------------------
 
-  defp extract_tx_hash(%{"tx_refs" => [%{"hash" => hash} | _]}), do: hash
+  # Prefer the on-chain transaction hash (`hash`) when present; fall back to
+  # the AA UserOperation hash (`userop_hash`) for pre-inclusion callbacks
+  # (`broadcast`, `confirmation_failed`). The delegation table only keeps a
+  # single identifier, so this gives us the strongest available anchor at
+  # each lifecycle step. Full tx_refs (including both hashes, bundler, and
+  # nonce) remain in the audit trail.
+  defp extract_tx_hash(%{"tx_refs" => refs}) when is_list(refs) do
+    Enum.find_value(refs, fn
+      %{"hash" => hash} when is_binary(hash) -> hash
+      %{"userop_hash" => userop} when is_binary(userop) -> userop
+      _ -> nil
+    end)
+  end
+
   defp extract_tx_hash(_), do: nil
 end

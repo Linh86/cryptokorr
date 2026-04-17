@@ -670,12 +670,36 @@ defmodule Bank.Decisions do
   defp target_intent_state("execution.reverted"), do: :blocked
   defp target_intent_state("execution.aborted"), do: :blocked
 
+  # tx_refs now carry *either* an on-chain `hash` (EOA path) or an
+  # EntryPoint `userop_hash` (ERC-4337 v0.7 AA path). The AA confirmed
+  # callback carries both: the user-op hash anchors the bundler-side
+  # identity, the tx hash anchors the chain-side inclusion. Phoenix
+  # persists the union so audit / replay can reconstruct the full
+  # lifecycle; ordering keeps `userop_hash` first so Basescan-style
+  # links in the control tower default to the AA identifier when both
+  # are present.
   defp tx_hashes(%{"tx_refs" => refs}) when is_list(refs) do
-    for %{"hash" => hash} <- refs, is_binary(hash), do: hash
+    refs
+    |> Enum.flat_map(fn
+      ref when is_map(ref) ->
+        userop = Map.get(ref, "userop_hash")
+        hash = Map.get(ref, "hash")
+
+        [userop, hash]
+        |> Enum.filter(&is_binary/1)
+
+      _ ->
+        []
+    end)
+    |> Enum.uniq()
   end
 
   defp tx_hashes(_), do: []
 
+  # AA 2D nonces are 256-bit values that don't fit the plan's
+  # `:integer` column. When the adapter emits a hex nonce (AA path) we
+  # leave `plan.nonce` nil and rely on `tx_refs` for full fidelity;
+  # integer nonces (EOA path) are still persisted as before.
   defp first_nonce(%{"tx_refs" => [%{"nonce" => nonce} | _]}) when is_integer(nonce), do: nonce
   defp first_nonce(_), do: nil
 end

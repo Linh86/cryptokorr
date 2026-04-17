@@ -305,6 +305,82 @@ defmodule BankWeb.Internal.AdapterCallbackControllerTest do
     end
   end
 
+  describe "POST /internal/adapter/callback — ERC-4337 v0.7 AA-shaped tx_refs (issue #32)" do
+    # The adapter's AA path carries BOTH `userop_hash` (EntryPoint
+    # identity) and `hash` (chain-level tx hash) on confirmed receipts,
+    # plus `bundler` + hex-string `nonce`. Phoenix's `tx_refs` column is
+    # `{:array, :string}` — the handler flattens each ref into both
+    # hashes (userop first, then tx hash) so the control tower and
+    # audit trail can link either identifier. The plan's `nonce`
+    # column is `:integer` and does NOT fit AA 2D nonces, so we leave
+    # it nil and rely on `tx_refs` for the full hex fidelity.
+    test "execution.broadcast with AA-shaped tx_refs stores userop_hash and leaves nonce nil",
+         %{conn: conn} do
+      %{plan: plan} = in_flight_plan(:signing)
+
+      userop_hash = "0x" <> String.duplicate("aa", 32)
+
+      conn =
+        post(conn, "/internal/adapter/callback", %{
+          "contract_version" => 1,
+          "kind" => "execution.broadcast",
+          "execution_plan_id" => plan.id,
+          "tx_refs" => [
+            %{
+              "chain" => "base",
+              "userop_hash" => userop_hash,
+              "nonce" => "0x7",
+              "bundler" => "base-v07-bundler"
+            }
+          ]
+        })
+
+      assert json_response(conn, 200)["status"] == "accepted"
+
+      reloaded = Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :broadcasting
+      assert reloaded.tx_refs == [userop_hash]
+      # AA 2D nonce is a hex string; the :integer column can't hold it.
+      assert reloaded.nonce == nil
+    end
+
+    test "execution.confirmed with AA-shaped tx_refs stores userop_hash and tx hash (userop first)",
+         %{conn: conn} do
+      %{intent: intent, plan: plan} = in_flight_plan(:pending_confirmation)
+
+      userop_hash = "0x" <> String.duplicate("bb", 32)
+      tx_hash = "0x" <> String.duplicate("cc", 32)
+
+      conn =
+        post(conn, "/internal/adapter/callback", %{
+          "contract_version" => 1,
+          "kind" => "execution.confirmed",
+          "execution_plan_id" => plan.id,
+          "tx_refs" => [
+            %{
+              "chain" => "base",
+              "userop_hash" => userop_hash,
+              "hash" => tx_hash,
+              "nonce" => "0x7",
+              "bundler" => "base-v07-bundler",
+              "block_number" => 42_000,
+              "status" => "success"
+            }
+          ]
+        })
+
+      assert json_response(conn, 200)["status"] == "accepted"
+
+      reloaded = Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :confirmed
+      assert reloaded.final_outcome == :confirmed
+      assert reloaded.tx_refs == [userop_hash, tx_hash]
+      assert reloaded.nonce == nil
+
+      assert %AgentIntent{state: :executed} = Repo.get!(AgentIntent, intent.id)
+    end
+  end
+
   describe "POST /internal/adapter/callback — execution.reverted" do
     test "moves plan to :reverted and intent to :blocked", %{conn: conn} do
       %{intent: intent, plan: plan} = in_flight_plan(:pending_confirmation)

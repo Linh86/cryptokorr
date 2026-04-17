@@ -90,30 +90,51 @@ What landed under #31:
   benign: the second call finds no non-terminal row, returns
   `:not_found`, and the controller maps it to `accepted_with_warning`.
 
-**Still deferred to #32 (blocker for closing #31):**
+**What changed under #32 (does NOT close #31):**
+
+- ERC-4337 / bundler integration landed in the adapter. The revoke
+  path now routes through the same AA pipeline as transfers — inner
+  call is `SimpleAccount.execute(self, 0, 0x)`, a sentinel self-call
+  with zero value and zero calldata. Callback shape is now identical
+  between transfer and revoke (both carry `userop_hash`, `nonce`,
+  `bundler`, and — on confirmed — the chain-level `hash` and
+  `block_number`).
+- The full failure taxonomy (`userop_build_failed`, `bundler_rejected`,
+  `confirmation_failed`, `sentinel_reverted`) is now exercised
+  end-to-end on the same plumbing a real permission-module revoke
+  will use.
+
+**Still deferred (blocker for closing #31):**
 
 - Cryptographic revocation at the smart-account level. The sentinel
-  tx does not prevent the delegation key from signing another userop.
-- ERC-4337 / bundler / paymaster integration. The adapter today uses
-  a direct `walletClient`; the permission-module revoke will go
-  through the bundler.
-
-Once #32 lands, the adapter will replace the sentinel body with a
-call into the permission module that revokes the delegation on-chain
-while keeping the same callback shape; Phoenix will then be able to
-close #31.
+  user-op does not prevent the delegation key from signing another
+  user-op — there is no permission-module ABI to call. When that
+  module ships, the only adapter-side change is the inner calldata:
+  swap `execute(self, 0, 0x)` for
+  `execute(permissionModule, 0, revokeSignature(delegationId))`.
+  Phoenix's callback contract and state machine do NOT need to
+  change.
+- Phoenix continues to treat `revoked` (via the sentinel path) as
+  "on-chain anchored, trust downgraded", NOT as "cryptographically
+  impossible". Fail-closed posture is unchanged until #31 closes.
 
 ## Status (issue #32)
 
-Base execution assumes **ERC-4337 account abstraction** (EntryPoint
-v0.7+). Phoenix no longer speaks EOA transactions on Base: the adapter
-assembles a UserOperation, signs it against the active delegation,
-submits through a bundler, and reports progress through the same
-callback kinds used for EOA flow.
+Base execution uses **ERC-4337 account abstraction v0.7** (EntryPoint
+`0x0000000071727De22E5E9d8BAf0edAc6f37da032`). The adapter assembles
+a UserOperation whose inner call is
+`SimpleAccount.execute(target, value, data)`, signs the canonical
+v0.7 user-op hash with the active delegation key, and submits
+through a configured bundler. Phoenix does not speak EOA
+transactions on Base — every Base execution (transfer, sentinel
+revoke) flows through the same AA pipeline and surfaces the same
+callback kinds.
 
-**In-repo scope for #32 is the contract + data model.** The bundler /
-EntryPoint / paymaster integration itself lives in the TypeScript
-adapter (separate repo / service) and is tracked there.
+**Adapter-side AA plumbing has landed** (`src/chains/base/userop.ts`
++ `src/chains/base/bundler.ts` + `src/chains/base/entrypoint.ts`).
+Paymaster / sponsored flow is not wired (self-funded only in v0.1);
+the paymaster denial path remains part of the contract for when
+sponsored flow ships, but no code emits it yet.
 
 ### Lifecycle mapping
 
@@ -128,6 +149,25 @@ Phoenix's `%ExecutionPlan{tx_refs: [text]}` already accepts
 per-chain-string references (see `execution_plan.ex` module doc) —
 userop hashes, final tx hashes, or bundler ids all coexist.
 
+**Field names and shapes:**
+
+- `userop_hash` — EntryPoint v0.7 canonical user-op hash (32-byte hex).
+- `hash` — on-chain transaction hash returned by the bundler receipt.
+  Present on `execution.confirmed` / `execution.reverted`, and on
+  `revoke_failed` when the user-op made it on chain but reverted.
+- `nonce` — hex-string serialization of the v0.7 2D nonce (e.g.
+  `"0x7"`). It is a full 256-bit value and therefore does NOT fit
+  the `execution_plans.nonce :: :integer` column; Phoenix leaves
+  that column nil and relies on `tx_refs` for nonce fidelity on the
+  AA path. On the EOA path (non-Base chains, future work), the
+  column is still populated from an integer nonce.
+- `bundler` — opaque non-secret label identifying the bundler
+  provider (e.g. `"base-v07-bundler"`). The bundler RPC URL itself
+  may contain API keys, so it is never emitted directly.
+- `status` — `"success" | "reverted" | "unknown"`; `"unknown"` when
+  the bundler accepted the user-op but Phoenix could not confirm
+  inclusion (confirmation timeout).
+
 ### Pre-submission denial taxonomy (`execution.aborted` reasons)
 
 The adapter MUST report one of the following `reason` values so
@@ -135,9 +175,14 @@ Phoenix can distinguish operator-facing incidents from chain-level
 failures. Matches the enum already used by
 `Bank.Decisions.apply_execution_callback/1`:
 
+- `userop_build_failed` — UserOperation construction or signing
+  raised before submission (e.g. nonce read failed, gas estimation
+  failed, signer rejected). `tx_refs` is empty.
 - `bundler_rejected` — bundler refused the userop (sim failure,
   insufficient prefund, invalid signature).
 - `paymaster_denied` — sponsored flow denied by the paymaster policy.
+  (Paymaster support itself is not yet wired in v0.1; reserved for
+  when sponsored flow lands.)
 - `delegation_revoked` — signing refused because the active delegation
   is no longer `granted`. Adapter MUST emit `delegation.state_changed`
   after the abort.
@@ -145,8 +190,29 @@ failures. Matches the enum already used by
 - `replaced` — a prior userop with the same sender+nonce was mined
   first (typically an operator-driven replacement). Phoenix stops
   waiting on the original plan.
+- `confirmation_failed: <detail>` — bundler accepted the user-op but
+  `waitForUserOperationReceipt` timed out or errored. `tx_refs`
+  carries the `userop_hash` with `status: "unknown"` so operators
+  can look up the user-op out-of-band.
 - `timeout` — submission attempt exceeded the adapter's bundler
   timeout; Phoenix may re-dispatch a fresh plan after operator review.
+
+### Revoke failure taxonomy (`revoke_failed` reasons)
+
+The sentinel revoke path emits `delegation.state_changed` with
+`state=revoke_failed` on any failure branch, carrying a diagnostic
+`reason` prefix that mirrors the transfer taxonomy:
+
+- `userop_build_failed: <detail>`
+- `bundler_rejected: <detail>`
+- `confirmation_failed: <detail>` — `tx_refs` carries
+  `userop_hash` with `status: "unknown"`.
+- `sentinel_reverted` (or the bundler-reported revert reason) — the
+  user-op made it on chain but reverted. `tx_refs` carries both
+  `userop_hash` and `hash` with `status: "reverted"`.
+
+Phoenix treats `revoke_failed` as non-terminal, non-executable, and
+retryable. The adapter MUST NOT emit `revoked` on any failure path.
 
 ### `signing_requirements` (AA conventions)
 
