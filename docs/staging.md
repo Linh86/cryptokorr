@@ -63,8 +63,8 @@ Required for Phoenix in staging/prod:
 | `PHX_HOST`              | External hostname, used for URL generation                 |
 | `PHX_SERVER`            | `true` to start the HTTP server on boot                    |
 | `PORT`                  | HTTP listen port (default 4000)                            |
-| `ADAPTER_BASE_URL`      | URL where Phoenix dispatches to the adapter                |
-| `ADAPTER_AUTH_SECRET`   | Shared bearer; must match the adapter's expected value     |
+| `ADAPTER_BASE_URL`      | URL where Phoenix dispatches to the adapter (prod boot fails if unset) |
+| `ADAPTER_AUTH_SECRET`   | Shared bearer; must match the adapter's expected value (prod boot fails if unset) |
 | `DNS_CLUSTER_QUERY`     | Optional `dns_cluster` query for clustering                |
 | `POOL_SIZE`             | Ecto pool size (default 10)                                |
 | `ECTO_IPV6`             | `true`/`1` to add `:inet6` to socket options               |

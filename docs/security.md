@@ -97,6 +97,21 @@ authenticate each request at both network and application layers.
   secret will reject the adapter until the adapter is updated; plan
   the rollout accordingly (adapter rotates first, then Phoenix).
 
+### Required adapter configuration in production
+
+Phoenix `config/runtime.exs` raises on boot in `:prod` if either
+`ADAPTER_BASE_URL` or `ADAPTER_AUTH_SECRET` is missing. There is no
+compile-time fallback for these values — `config/config.exs` does not
+set defaults for `:bank, Bank.AdapterClient`, and the dev defaults
+live only in `config/dev.exs`. This guard exists so that a
+misconfigured production deploy fails immediately rather than booting
+with a development secret that any caller on the private network
+could replay against `/internal/adapter/callback`. If the inbound
+plug ever finds the config absent at request time (defense in
+depth), it returns `401 server_misconfigured` and refuses the
+callback. The behavior is regression-tested by
+`Bank.AdapterConfigTest` and `BankWeb.Plugs.VerifyAdapterAuthTest`.
+
 ## Operator console (`/`, `/dashboard`, …)
 
 - Served over HTTPS.

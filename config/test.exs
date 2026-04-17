@@ -43,3 +43,13 @@ config :bank, Bank.AdapterClient,
   base_url: "http://adapter.test",
   auth_secret: "test-adapter-secret",
   req_options: [plug: {Req.Test, Bank.AdapterClient}]
+
+# Disable the operational health telemetry poller in tests.
+# `Bank.Ops.Health.emit_telemetry/0` issues an HTTP call to the
+# adapter via `Req.Test`, whose stubs are per-process. The poller
+# runs in its own process with no stub installed, which would
+# otherwise produce a `cannot find mock/stub Bank.AdapterClient`
+# error every time it fired during a test run. The deep health
+# endpoint and `emit_telemetry/0` itself are still exercised
+# directly by tests that own the calling process.
+config :bank, BankWeb.Telemetry, periodic_measurements: []

@@ -8,8 +8,11 @@ defmodule BankWeb.IntentsLive do
 
   The page shows:
 
-    * A status breakdown (counts per `AgentIntent.state`) across the
-      page's filters.
+    * A status breakdown (counts per `AgentIntent.state`) scoped by
+      the current `kind` and `search` filters. The `state` filter is
+      intentionally excluded from the breakdown so every chip stays
+      meaningful — each chip represents "how many rows would I see if
+      I switched state to this, keeping kind + search as-is".
     * A filterable, paginated table of intents with direct links into
       the replay view for each row.
 
@@ -91,17 +94,20 @@ defmodule BankWeb.IntentsLive do
   # --- State loading -------------------------------------------------------
 
   defp load_state(socket) do
+    kind_filter = socket.assigns.kind_filter
+    search = socket.assigns.search
+
     intents =
       Intents.list(
         state: socket.assigns.state_filter,
-        kind: socket.assigns.kind_filter,
-        search: socket.assigns.search,
+        kind: kind_filter,
+        search: search,
         limit: 100
       )
 
     socket
     |> assign(:intents, intents)
-    |> assign(:counts, Intents.counts_by_state())
+    |> assign(:counts, Intents.counts_by_state(kind: kind_filter, search: search))
     |> assign(:total_in_view, length(intents))
   end
 

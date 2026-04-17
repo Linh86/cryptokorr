@@ -1,5 +1,7 @@
 defmodule BankWeb.Plugs.VerifyAdapterAuthTest do
-  use BankWeb.ConnCase, async: true
+  # async: false because one test mutates Application env for
+  # :bank, Bank.AdapterClient and restores it afterwards.
+  use BankWeb.ConnCase, async: false
 
   import Plug.Conn, only: [put_req_header: 3]
 
@@ -49,6 +51,26 @@ defmodule BankWeb.Plugs.VerifyAdapterAuthTest do
 
       # Past the plug — the controller handles it.
       json_response(conn, 200)
+    end
+
+    test "401 server_misconfigured when adapter config is absent", %{conn: conn} do
+      original = Application.get_env(:bank, Bank.AdapterClient)
+
+      try do
+        Application.delete_env(:bank, Bank.AdapterClient)
+
+        conn =
+          conn
+          |> put_req_header("authorization", "Bearer anything")
+          |> post("/internal/adapter/callback", %{})
+
+        body = json_response(conn, 401)
+        assert body["error"]["code"] == "server_misconfigured"
+      after
+        if original do
+          Application.put_env(:bank, Bank.AdapterClient, original)
+        end
+      end
     end
   end
 end

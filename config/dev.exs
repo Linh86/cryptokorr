@@ -85,3 +85,11 @@ config :phoenix_live_view,
   debug_attributes: true,
   # Enable helpful, but potentially expensive runtime checks
   enable_expensive_runtime_checks: true
+
+# Default connection to the TypeScript chain adapter for local dev.
+# Production must set ADAPTER_BASE_URL / ADAPTER_AUTH_SECRET in env;
+# see config/runtime.exs.
+config :bank, Bank.AdapterClient,
+  base_url: "http://localhost:4100",
+  auth_secret: "dev-adapter-secret",
+  req_options: []

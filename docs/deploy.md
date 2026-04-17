@@ -28,8 +28,8 @@ update this table and the `.env.staging.example` template.
 | `PHX_HOST`             | prod     | `config/runtime.exs`               | External hostname for URL generation.                 |
 | `PHX_SERVER`           | release  | `config/runtime.exs`, `bin/server` | `true` starts the HTTP listener.                      |
 | `PORT`                 | no       | `config/runtime.exs`               | HTTP listen port. Default 4000.                       |
-| `ADAPTER_BASE_URL`     | prod     | `config/runtime.exs`               | URL where Phoenix dispatches to the adapter.          |
-| `ADAPTER_AUTH_SECRET`  | prod     | `config/runtime.exs`               | Bearer shared with the adapter (both directions).     |
+| `ADAPTER_BASE_URL`     | prod     | `config/runtime.exs`               | URL where Phoenix dispatches to the adapter. Boot fails if missing in `:prod`. |
+| `ADAPTER_AUTH_SECRET`  | prod     | `config/runtime.exs`               | Bearer shared with the adapter (both directions). Boot fails if missing in `:prod`. |
 | `POOL_SIZE`            | no       | `config/runtime.exs`               | Ecto pool size. Default 10.                           |
 | `ECTO_IPV6`            | no       | `config/runtime.exs`               | `true`/`1` to bind Ecto sockets over IPv6.            |
 | `DNS_CLUSTER_QUERY`    | no       | `config/runtime.exs`               | DNS query for node clustering via `dns_cluster`.      |

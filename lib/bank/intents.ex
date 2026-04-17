@@ -65,14 +65,30 @@ defmodule Bank.Intents do
   end
 
   @doc """
-  Count intents grouped by state. Used by the intents page header to
-  show an at-a-glance breakdown.
+  Count intents grouped by state, optionally scoped by the same
+  non-state filters the intents page exposes.
+
+  The breakdown itself slices by state, so the `:state` filter is
+  intentionally ignored — applying it would leave every chip at zero
+  except the one currently selected, which is useless. `:kind` and
+  `:search` ARE applied, so an operator viewing `kind=transfer` sees
+  the state distribution *within* their current scope rather than the
+  global distribution across all kinds.
+
+  Opts:
+
+    * `:kind`   — single `AgentIntent` kind atom (or `:all`, default)
+    * `:search` — case-insensitive substring match on agent_id or
+      intent id
 
   Returns a map keyed by state atom with integer counts; all known
   states are present (missing states map to 0).
   """
-  @spec counts_by_state() :: %{atom() => non_neg_integer()}
-  def counts_by_state do
+  @spec counts_by_state(keyword()) :: %{atom() => non_neg_integer()}
+  def counts_by_state(opts \\ []) do
+    kind = Keyword.get(opts, :kind, :all)
+    search = opts |> Keyword.get(:search) |> normalise_search()
+
     base = %{
       submitted: 0,
       evaluating: 0,
@@ -85,6 +101,8 @@ defmodule Bank.Intents do
     }
 
     from(i in AgentIntent, group_by: i.state, select: {i.state, count(i.id)})
+    |> apply_kind_filter(kind)
+    |> apply_search_filter(search)
     |> Repo.all()
     |> Enum.reduce(base, fn {state, n}, acc -> Map.put(acc, state, n) end)
   end

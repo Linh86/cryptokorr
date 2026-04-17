@@ -22,20 +22,49 @@ end
 
 config :bank, BankWeb.Endpoint, http: [port: String.to_integer(System.get_env("PORT", "4000"))]
 
-# Bank.AdapterClient: read adapter connection from env in non-test envs.
-# ADAPTER_BASE_URL / ADAPTER_AUTH_SECRET are required in production; dev
-# falls back to the defaults compiled into config/config.exs.
-if config_env() != :test do
-  adapter_base_url = System.get_env("ADAPTER_BASE_URL")
-  adapter_auth_secret = System.get_env("ADAPTER_AUTH_SECRET")
+# Bank.AdapterClient: connection to the TypeScript chain adapter.
+#
+# - :prod  — ADAPTER_BASE_URL and ADAPTER_AUTH_SECRET MUST be set, or
+#            the boot fails. Both the outbound dispatch client and the
+#            inbound `VerifyAdapterAuth` plug read from this single
+#            config key, so a missing env var would otherwise leave the
+#            inbound surface open to anyone reachable on the private
+#            network.
+# - :dev   — falls back to the local defaults in config/dev.exs; an
+#            env var override is honored if supplied.
+# - :test  — config/test.exs is authoritative (Req.Test stubbing).
+case config_env() do
+  :prod ->
+    adapter_base_url =
+      System.get_env("ADAPTER_BASE_URL") ||
+        raise """
+        environment variable ADAPTER_BASE_URL is missing.
+        For example: https://adapter.internal:4100
+        """
 
-  if adapter_base_url do
-    config :bank, Bank.AdapterClient, base_url: adapter_base_url
-  end
+    adapter_auth_secret =
+      System.get_env("ADAPTER_AUTH_SECRET") ||
+        raise """
+        environment variable ADAPTER_AUTH_SECRET is missing.
+        Generate one with: openssl rand -hex 32
+        """
 
-  if adapter_auth_secret do
-    config :bank, Bank.AdapterClient, auth_secret: adapter_auth_secret
-  end
+    config :bank, Bank.AdapterClient,
+      base_url: adapter_base_url,
+      auth_secret: adapter_auth_secret,
+      req_options: []
+
+  :dev ->
+    if base_url = System.get_env("ADAPTER_BASE_URL") do
+      config :bank, Bank.AdapterClient, base_url: base_url
+    end
+
+    if auth_secret = System.get_env("ADAPTER_AUTH_SECRET") do
+      config :bank, Bank.AdapterClient, auth_secret: auth_secret
+    end
+
+  :test ->
+    :ok
 end
 
 if config_env() == :prod do

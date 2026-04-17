@@ -135,9 +135,25 @@ defmodule BankWeb.Telemetry do
     ]
   end
 
-  defp periodic_measurements do
-    [
+  @doc """
+  Measurements the `:telemetry_poller` invokes on a fixed period.
+
+  Read from app config so the poller can be tuned per environment. In
+  `:test` we override this to an empty list (see `config/test.exs`) —
+  `Bank.Ops.Health.adapter/0` issues an HTTP call through `Req.Test`
+  whose stubs are per-process, and the poller runs in its own process
+  with no stub installed. Disabling the periodic measurement avoids
+  the `cannot find mock/stub Bank.AdapterClient` noise without
+  weakening the deep health endpoint, which controller tests still
+  exercise directly via stubs in the test process.
+  """
+  @spec periodic_measurements() :: [
+          {module(), atom(), [term()]}
+        ]
+  def periodic_measurements do
+    Application.get_env(:bank, __MODULE__, [])
+    |> Keyword.get(:periodic_measurements, [
       {Bank.Ops.Health, :emit_telemetry, []}
-    ]
+    ])
   end
 end

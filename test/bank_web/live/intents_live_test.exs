@@ -71,4 +71,54 @@ defmodule BankWeb.IntentsLiveTest do
       assert html =~ "intent-row-" <> intent.id
     end
   end
+
+  # --- Count semantics (issue #53) ------------------------------------------
+
+  describe "state breakdown respects kind + search filters" do
+    test "kind filter scopes the chip counts", %{conn: conn} do
+      # Three transfers + one swap; every intent starts in :submitted.
+      _t1 = agent_intent(kind: :transfer)
+      _t2 = agent_intent(kind: :transfer)
+      _t3 = agent_intent(kind: :transfer)
+      _swap = agent_intent(kind: :swap)
+
+      {:ok, view, _html} = live(conn, "/intents?kind=transfer")
+
+      # The submitted chip inside the breakdown must show 3, not 4.
+      breakdown = view |> element("#state-breakdown") |> render()
+
+      assert breakdown =~ ~r/Submitted.*3/s
+      refute breakdown =~ ~r/Submitted.*4/s
+    end
+
+    test "search filter scopes the chip counts", %{conn: conn} do
+      _alpha = agent_intent(agent_id: "agent-alpha")
+      _beta1 = agent_intent(agent_id: "agent-beta-1")
+      _beta2 = agent_intent(agent_id: "agent-beta-2")
+
+      {:ok, view, _html} = live(conn, "/intents?q=beta")
+
+      breakdown = view |> element("#state-breakdown") |> render()
+      assert breakdown =~ ~r/Submitted.*2/s
+    end
+
+    test "state filter does NOT scope the chip counts (chips stay navigable)",
+         %{conn: conn} do
+      submitted = agent_intent()
+      blocked = agent_intent()
+      {:ok, _} = blocked |> Ecto.Changeset.change(%{state: :blocked}) |> Bank.Repo.update()
+
+      {:ok, view, _html} = live(conn, "/intents?state=blocked")
+
+      breakdown = view |> element("#state-breakdown") |> render()
+
+      # Even when filtering the table to blocked, the chips still show
+      # the submitted count so the operator can see where switching
+      # would land them.
+      assert breakdown =~ ~r/Submitted.*1/s
+      assert breakdown =~ ~r/Blocked.*1/s
+
+      _ = submitted
+    end
+  end
 end
