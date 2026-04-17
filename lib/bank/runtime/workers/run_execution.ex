@@ -16,17 +16,25 @@ defmodule Bank.Runtime.Workers.RunExecution do
        between plan creation and dispatch is a hard stop: we mark the
        plan aborted and emit `execution.aborted` locally rather than
        ever touching the adapter.
-    4. POST the dispatch to `{adapter_base}/dispatch/transfer` via
+    4. Re-verify the runtime is not globally paused. The pause is
+       checked again here — independent of any earlier check — to
+       cover the race where pause is toggled on between plan
+       enqueue and worker dispatch. If paused, we mark the plan
+       aborted with `final_reason: "runtime_paused"` and never call
+       the adapter. This is the canonical fail-closed gate that
+       keeps the invariant "nothing enters `:executing` while paused"
+       intact end-to-end.
+    5. POST the dispatch to `{adapter_base}/dispatch/transfer` via
        `Bank.AdapterClient.dispatch_transfer/1`.
-    5. On adapter 202, atomically advance the plan `:prepared` →
+    6. On adapter 202, atomically advance the plan `:prepared` →
        `:signing` and the intent `:decided` → `:executing`. Emit an
        `execution.signing` audit event, broadcast the lifecycle
        update, and return `:ok`.
-    6. On adapter rejection (4xx), mark the plan `:aborted` with
+    7. On adapter rejection (4xx), mark the plan `:aborted` with
        `final_reason: "adapter_rejected:<status>"`, advance the
        intent to `:blocked`, emit the matching audit pair, and cancel
        the job.
-    7. On adapter unavailability (network, 5xx), return `{:error,
+    8. On adapter unavailability (network, 5xx), return `{:error,
        :adapter_unavailable}` so Oban backs off and retries. `max_attempts:
        5` keeps this bounded.
 
@@ -42,8 +50,8 @@ defmodule Bank.Runtime.Workers.RunExecution do
     * `{:cancel, reason}` — deterministic terminal:
       `:not_found`, `:not_current`, `{:wrong_outcome, outcome}`,
       `:no_active_plan`, `{:already_dispatched, status}`,
-      `:delegation_not_active`, `:target_not_resolvable`,
-      `:adapter_rejected`, `:malformed_args`.
+      `:delegation_not_active`, `:runtime_paused`,
+      `:target_not_resolvable`, `:adapter_rejected`, `:malformed_args`.
   """
 
   use Oban.Worker,
@@ -62,12 +70,14 @@ defmodule Bank.Runtime.Workers.RunExecution do
   alias Bank.Repo
   alias Bank.Runtime
   alias Bank.Runtime.Notifier
+  alias Bank.Security
 
   @impl Oban.Worker
   def perform(%Oban.Job{args: %{"decision_id" => decision_id}}) do
     with {:ok, envelope} <- load_envelope(decision_id),
          {:ok, plan} <- load_active_plan(envelope),
-         :ok <- verify_delegation(plan) do
+         :ok <- verify_delegation(plan),
+         :ok <- verify_not_paused(plan) do
       dispatch_and_progress(envelope, plan)
     end
   end
@@ -137,6 +147,32 @@ defmodule Bank.Runtime.Workers.RunExecution do
       {:error, changeset} ->
         Logger.error(
           "RunExecution: abort-for-delegation update failed for plan #{plan.id}: #{inspect(changeset.errors)}"
+        )
+
+        {:error, changeset}
+    end
+  end
+
+  defp verify_not_paused(%ExecutionPlan{} = plan) do
+    if Security.paused?(:global) do
+      abort_for_pause(plan)
+    else
+      :ok
+    end
+  end
+
+  defp abort_for_pause(%ExecutionPlan{} = plan) do
+    prior_status = plan.execution_status
+    reason = "runtime_paused"
+
+    case mark_plan_aborted(plan, reason) do
+      {:ok, updated_plan, intent_transition} ->
+        emit_aborted_side_effects(updated_plan, prior_status, intent_transition, reason)
+        {:cancel, :runtime_paused}
+
+      {:error, changeset} ->
+        Logger.error(
+          "RunExecution: abort-for-pause update failed for plan #{plan.id}: #{inspect(changeset.errors)}"
         )
 
         {:error, changeset}

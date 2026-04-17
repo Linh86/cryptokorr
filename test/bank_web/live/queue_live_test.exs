@@ -278,6 +278,7 @@ defmodule BankWeb.QueueLiveTest do
 
       refute html =~ envelope.id
       assert html =~ "Approval recorded"
+      assert html =~ "Trigger execution from the decision page"
 
       # DB state reflects the successor envelope.
       successor =
@@ -286,6 +287,10 @@ defmodule BankWeb.QueueLiveTest do
       assert successor.outcome == :auto_exec
       assert successor.decided_by == :user
       assert successor.supersedes_id == envelope.id
+
+      # No active execution plan was created — operator must trigger
+      # /v1/decisions/{id}/execute manually.
+      assert is_nil(Bank.Decisions.active_plan_for(successor.id))
     end
 
     test "clicking Reject blocks the intent", %{

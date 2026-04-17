@@ -1,10 +1,13 @@
 defmodule BankWeb.API.V1.ApprovalControllerTest do
   use BankWeb.ConnCase, async: false
+  use Oban.Testing, repo: Bank.Repo
 
   import Bank.Fixtures
 
   alias Bank.Decisions.DecisionEnvelope
   alias Bank.Repo
+  alias Bank.Runtime.Workers.RunExecution
+  alias Bank.Security
   alias Bank.Security.PauseState
 
   setup do
@@ -51,6 +54,12 @@ defmodule BankWeb.API.V1.ApprovalControllerTest do
 
       body = json_response(conn, 200)
       assert body["decision"]["outcome"] == "auto_exec"
+      assert body["dispatch"] == "recorded"
+
+      assert %{"endpoint" => endpoint, "message" => message} = body["next_step"]
+      assert endpoint =~ "/v1/decisions/"
+      assert endpoint =~ "/execute"
+      assert message =~ "smart_account_id"
 
       successor =
         Repo.get_by(DecisionEnvelope, intent_id: intent.id, current: true)
@@ -58,6 +67,55 @@ defmodule BankWeb.API.V1.ApprovalControllerTest do
       assert successor.id != envelope.id
       assert successor.outcome == :auto_exec
       assert successor.supersedes_id == envelope.id
+
+      # Approval is now record-only — no plan, no enqueue. Operator
+      # must follow up with POST /v1/decisions/{id}/execute.
+      refute_enqueued(worker: RunExecution)
+      assert is_nil(Bank.Decisions.active_plan_for(successor.id))
+    end
+
+    test "approve while paused still records (paused does not block decisions)", %{conn: conn} do
+      intent = agent_intent()
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      {:ok, :paused} = Security.pause(:global)
+
+      conn =
+        post(conn, ~p"/v1/approvals/#{envelope.id}/approve", %{
+          "actor_id" => "op-paused"
+        })
+
+      body = json_response(conn, 200)
+      assert body["decision"]["outcome"] == "auto_exec"
+      assert body["dispatch"] == "recorded"
+
+      refute_enqueued(worker: RunExecution)
+    end
+
+    test "reject response carries no_dispatch", %{conn: conn} do
+      intent = agent_intent()
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      conn =
+        post(conn, ~p"/v1/approvals/#{envelope.id}/reject", %{"actor_id" => "op"})
+
+      body = json_response(conn, 200)
+      assert body["dispatch"] == "no_dispatch"
+      refute_enqueued(worker: RunExecution)
     end
 
     test "requires actor_id", %{conn: conn} do

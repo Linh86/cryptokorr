@@ -13,6 +13,22 @@ defmodule BankWeb.API.V1.ApprovalController do
   Both mutating endpoints require an `actor_id` in the body — the
   operator id is captured on the successor envelope and every audit
   event so the approval trail is reconstructible.
+
+  ## Dispatch field
+
+  The success response carries a `dispatch` field describing what
+  happened next:
+
+    * `"recorded"` — approve path; the successor envelope was written
+      but no `ExecutionPlan` was created and no execution was
+      enqueued. The operator must follow up with
+      `POST /v1/decisions/{id}/execute` (passing `smart_account_id`)
+      to actually start execution. This is the v0.1 default; future
+      tiered-autonomy modes may change it.
+    * `"no_dispatch"` — reject path; nothing to execute.
+
+  The `next_step` field on `"recorded"` responses is a hint
+  pointing the operator at the execute endpoint.
   """
 
   use BankWeb, :controller
@@ -37,8 +53,10 @@ defmodule BankWeb.API.V1.ApprovalController do
           |> maybe_put(:reason, Map.get(params, "reason"))
 
         case apply_action(action, id, opts) do
-          {:ok, successor} ->
-            conn |> put_status(:ok) |> json(%{decision: summarize(successor)})
+          {:ok, successor, dispatch} ->
+            conn
+            |> put_status(:ok)
+            |> json(success_body(successor, dispatch))
 
           {:error, reason} ->
             render_action_error(conn, reason)
@@ -88,6 +106,24 @@ defmodule BankWeb.API.V1.ApprovalController do
     conn
     |> put_status(:unprocessable_entity)
     |> json(%{error: %{code: "approval_failed", message: inspect(reason)}})
+  end
+
+  defp success_body(%DecisionEnvelope{} = successor, :recorded) do
+    %{
+      decision: summarize(successor),
+      dispatch: "recorded",
+      next_step: %{
+        endpoint: "POST /v1/decisions/#{successor.id}/execute",
+        message: "approval recorded; execute manually with smart_account_id when ready"
+      }
+    }
+  end
+
+  defp success_body(%DecisionEnvelope{} = successor, :no_dispatch) do
+    %{
+      decision: summarize(successor),
+      dispatch: "no_dispatch"
+    }
   end
 
   defp summarize(%DecisionEnvelope{} = e) do

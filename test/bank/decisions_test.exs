@@ -1,14 +1,19 @@
 defmodule Bank.DecisionsTest do
   @moduledoc """
-  Context-level tests for `Bank.Decisions` — manual execution gates.
+  Context-level tests for `Bank.Decisions` — approval state machine
+  and manual execution gates.
   """
 
   use Bank.DataCase, async: false
+  use Oban.Testing, repo: Bank.Repo
 
   import Bank.Fixtures
 
   alias Bank.Decisions
+  alias Bank.Decisions.DecisionEnvelope
   alias Bank.Delegations
+  alias Bank.Intents.AgentIntent
+  alias Bank.Runtime.Workers.RunExecution
   alias Bank.Security
   alias Bank.Security.PauseState
 
@@ -59,6 +64,138 @@ defmodule Bank.DecisionsTest do
     test "returns nil when no plans exist" do
       envelope = decision_envelope()
       assert is_nil(Decisions.active_plan_for(envelope.id))
+    end
+  end
+
+  describe "approve/2" do
+    setup do
+      intent = agent_intent()
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          state: :pending_decision,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      %{intent: intent, envelope: envelope}
+    end
+
+    test "happy path: writes auto_exec successor and does NOT enqueue execution", %{
+      intent: intent,
+      envelope: envelope
+    } do
+      assert {:ok, successor, :recorded} =
+               Decisions.approve(envelope.id, actor_id: "op-test")
+
+      assert successor.outcome == :auto_exec
+      assert successor.state == :decided
+      assert successor.supersedes_id == envelope.id
+      assert successor.current == true
+
+      # Prior envelope is no longer current.
+      reloaded_prior = Repo.get!(DecisionEnvelope, envelope.id)
+      refute reloaded_prior.current
+
+      # Intent points at the successor and is :decided.
+      reloaded_intent = Repo.get!(AgentIntent, intent.id)
+      assert reloaded_intent.current_decision_id == successor.id
+      assert reloaded_intent.state == :decided
+
+      # No execution plan was implicitly created.
+      assert is_nil(Decisions.active_plan_for(successor.id))
+
+      # No RunExecution job was enqueued. Operator must follow up with
+      # POST /v1/decisions/{id}/execute.
+      refute_enqueued(worker: RunExecution)
+    end
+
+    test "while runtime paused: still records the approval (paused does not block decisions)",
+         %{
+           envelope: envelope
+         } do
+      {:ok, :paused} = Security.pause(:global)
+
+      assert {:ok, successor, :recorded} =
+               Decisions.approve(envelope.id, actor_id: "op-pause")
+
+      assert successor.outcome == :auto_exec
+      assert successor.state == :decided
+      assert successor.current == true
+
+      # Approval no longer attempts dispatch, so pause has no extra
+      # effect on its side.
+      refute_enqueued(worker: RunExecution)
+      assert is_nil(Decisions.active_plan_for(successor.id))
+    end
+
+    test "rejects already-superseded envelope", %{envelope: envelope} do
+      {:ok, _, _} = Decisions.approve(envelope.id, actor_id: "op-1")
+
+      assert {:error, :already_superseded} =
+               Decisions.approve(envelope.id, actor_id: "op-2")
+    end
+
+    test "rejects when outcome is not approval_required" do
+      intent = agent_intent()
+      envelope = decision_envelope(intent: intent, outcome: :auto_exec, current: true)
+
+      assert {:error, {:wrong_outcome, :auto_exec}} =
+               Decisions.approve(envelope.id, actor_id: "op")
+    end
+
+    test "approved envelope is executable via request_manual_execution", %{
+      envelope: envelope
+    } do
+      {:ok, successor, :recorded} =
+        Decisions.approve(envelope.id, actor_id: "op-test")
+
+      {:ok, _del} = Delegations.grant("sa_handoff", "del_handoff")
+
+      assert {:ok, plan} =
+               Decisions.request_manual_execution(successor.id, "sa_handoff",
+                 reason: "post_approval"
+               )
+
+      assert plan.decision_id == successor.id
+      assert plan.execution_status == :prepared
+      assert plan.active == true
+
+      assert_enqueued(
+        worker: RunExecution,
+        queue: :executions_run,
+        args: %{"decision_id" => successor.id}
+      )
+    end
+  end
+
+  describe "reject/2" do
+    test "while runtime paused: rejection still records and blocks intent" do
+      intent = agent_intent()
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          state: :pending_decision,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      {:ok, :paused} = Security.pause(:global)
+
+      assert {:ok, successor, :no_dispatch} =
+               Decisions.reject(envelope.id, actor_id: "op-rej")
+
+      assert successor.outcome == :block
+
+      reloaded_intent = Repo.get!(AgentIntent, intent.id)
+      assert reloaded_intent.state == :blocked
+
+      # Reject never enqueues, paused or not.
+      refute_enqueued(worker: RunExecution)
     end
   end
 

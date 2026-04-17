@@ -54,11 +54,14 @@ defmodule BankWeb.QueueLive do
     opts = approval_opts(socket, params)
 
     case Decisions.approve(id, opts) do
-      {:ok, _successor} ->
+      {:ok, _successor, :recorded} ->
         {:noreply,
          socket
          |> load_state()
-         |> put_flash(:info, "Approval recorded. Execution enqueued.")}
+         |> put_flash(
+           :info,
+           "Approval recorded. Trigger execution from the decision page when ready."
+         )}
 
       {:error, reason} ->
         {:noreply, put_flash(socket, :error, approval_error_message("Approve", reason))}
@@ -69,7 +72,7 @@ defmodule BankWeb.QueueLive do
     opts = approval_opts(socket, params)
 
     case Decisions.reject(id, opts) do
-      {:ok, _successor} ->
+      {:ok, _successor, :no_dispatch} ->
         {:noreply,
          socket
          |> load_state()

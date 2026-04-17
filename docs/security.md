@@ -32,9 +32,12 @@ authenticate each request at both network and application layers.
 
 `POST /internal/adapter/callback`
 
-1. **Transport** — mTLS terminated at the ingress. Only the adapter's
-   client certificate is accepted. Phoenix itself does not terminate
-   TLS in the alpha deployment; the ingress does.
+1. **Transport** — the production target is mTLS terminated at the
+   ingress (only the adapter's client certificate accepted; Phoenix
+   itself does not terminate TLS). v0.1 does not yet ship an ingress
+   with mTLS configured — see the staging "TODO" list in
+   [docs/staging.md](staging.md). The bearer check below is the only
+   live trust check in the current deployment.
 2. **Application auth** — `Authorization: Bearer <secret>` checked
    via `BankWeb.Plugs.VerifyAdapterAuth`, which uses
    `Plug.Crypto.secure_compare/2` to avoid timing leaks. The secret
@@ -49,12 +52,14 @@ authenticate each request at both network and application layers.
 
 `Bank.AdapterClient.dispatch_transfer/1`, `dispatch_revoke_delegation/1`
 
-1. **Transport** — TLS with certificate verification. In production
-   the adapter presents a server certificate that Phoenix pins via
-   CA bundle. mTLS is configured by merging `transport_opts` into
-   `:bank, Bank.AdapterClient, :req_options`:
+1. **Transport** — TLS with certificate verification is the production
+   target. In v0.1, `config/runtime.exs` does not wire
+   `req_options.transport_opts`, so the dispatch defaults to plain TLS
+   (or HTTP, if `ADAPTER_BASE_URL` is `http://`). The mTLS shape is
+   illustrated below for when it is wired:
 
    ```elixir
+   # Illustrative — not currently set by runtime.exs.
    config :bank, Bank.AdapterClient,
      base_url: "https://adapter.internal:4100",
      auth_secret: System.fetch_env!("ADAPTER_AUTH_SECRET"),
@@ -71,8 +76,11 @@ authenticate each request at both network and application layers.
      ]
    ```
 
-2. **Application auth** — bearer header set by the client on every
-   request.
+2. **Application auth** — Phoenix sets `Authorization: Bearer <secret>`
+   on every request. **The TS adapter does not currently validate this
+   header on its dispatch endpoints in v0.1** — anything reachable on
+   the adapter's private network can post to `/dispatch/*`. Tightening
+   the dispatch-side check is tracked in #33.
 3. **Timeouts** — 5s receive timeout by default. Retries are owned
    by the caller's Oban worker, not `Req`.
 

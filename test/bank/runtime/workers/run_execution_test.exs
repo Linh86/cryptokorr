@@ -1,5 +1,7 @@
 defmodule Bank.Runtime.Workers.RunExecutionTest do
-  use Bank.DataCase, async: true
+  # async: false because the pause-state GenServer is global and
+  # tests in this module mutate it.
+  use Bank.DataCase, async: false
   use Oban.Testing, repo: Bank.Repo
 
   alias Bank.Audit.AuditEvent
@@ -8,6 +10,13 @@ defmodule Bank.Runtime.Workers.RunExecutionTest do
   alias Bank.Intents.AgentIntent
   alias Bank.Runtime.PubSub
   alias Bank.Runtime.Workers.RunExecution
+  alias Bank.Security
+  alias Bank.Security.PauseState
+
+  setup do
+    PauseState.reset()
+    :ok
+  end
 
   # Build a decided auto_exec envelope + active plan + active delegation
   # with the intent already at :decided — the state RunExecution expects
@@ -283,6 +292,80 @@ defmodule Bank.Runtime.Workers.RunExecutionTest do
              } = Repo.get!(ExecutionPlan, plan.id)
 
       assert %AgentIntent{state: :blocked} = Repo.get!(AgentIntent, intent.id)
+    end
+  end
+
+  describe "pause gate" do
+    test "pause toggled before perform aborts the plan and never reaches the adapter" do
+      %{decision: decision, plan: plan, intent: intent} = scenario()
+
+      :ok = PubSub.subscribe(PubSub.intent(intent.id))
+
+      Req.Test.stub(Bank.AdapterClient, fn _ ->
+        flunk("AdapterClient called despite paused runtime")
+      end)
+
+      # Pause flips on after enqueue (simulating the race the gate
+      # exists to close).
+      {:ok, :paused} = Security.pause(:global)
+
+      assert {:cancel, :runtime_paused} =
+               perform_job(RunExecution, %{"decision_id" => decision.id})
+
+      assert %ExecutionPlan{
+               execution_status: :aborted,
+               final_outcome: :aborted,
+               final_reason: "runtime_paused"
+             } = Repo.get!(ExecutionPlan, plan.id)
+
+      assert %AgentIntent{state: :blocked} = Repo.get!(AgentIntent, intent.id)
+
+      # Audit + realtime reflect the actual outcome (aborted), not a
+      # fictional dispatch.
+      assert_receive %{
+        topic: :intent_lifecycle,
+        event: :execution_updated,
+        payload: %{execution_status: :aborted}
+      }
+
+      assert_receive %{
+        topic: :intent_lifecycle,
+        event: :state_changed,
+        payload: %{from: :decided, to: :blocked, reason: "runtime_paused"}
+      }
+
+      aborted_events =
+        Repo.all(from e in AuditEvent, where: e.event_type == "execution.aborted")
+
+      assert length(aborted_events) == 1
+    end
+
+    test "delegation gate runs before pause gate when both fail" do
+      # Both delegation revoked AND runtime paused — delegation is the
+      # more permanent condition and should be reported.
+      %{decision: decision, plan: plan} = scenario(delegation_state: :revoking)
+
+      Req.Test.stub(Bank.AdapterClient, fn _ ->
+        flunk("AdapterClient called")
+      end)
+
+      {:ok, :paused} = Security.pause(:global)
+
+      assert {:cancel, :delegation_not_active} =
+               perform_job(RunExecution, %{"decision_id" => decision.id})
+
+      assert %ExecutionPlan{final_reason: "delegation_not_active"} =
+               Repo.get!(ExecutionPlan, plan.id)
+    end
+
+    test "regression: unpaused runtime still dispatches normally" do
+      %{decision: decision, plan: plan} = scenario()
+
+      stub_adapter_response(202, %{"accepted" => true, "execution_plan_id" => plan.id})
+
+      assert :ok = perform_job(RunExecution, %{"decision_id" => decision.id})
+
+      assert %ExecutionPlan{execution_status: :signing} = Repo.get!(ExecutionPlan, plan.id)
     end
   end
 

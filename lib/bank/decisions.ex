@@ -184,9 +184,29 @@ defmodule Bank.Decisions do
 
   Produces a successor envelope with outcome `:auto_exec`, re-pointing
   the intent to the successor. All effects (envelope supersede, intent
-  pointer, audits, PubSub, execution enqueue) run inside a single
-  `Ecto.Multi` so the partial unique index stays valid at every commit
-  boundary.
+  pointer, audits, PubSub) run inside a single `Ecto.Multi` so the
+  partial unique index stays valid at every commit boundary.
+
+  ## Execution handoff (v0.1)
+
+  Approval *only records the decision*. It does not create an
+  `ExecutionPlan` and does not enqueue the `RunExecution` worker. The
+  reason is structural: `ExecutionPlan` requires a `smart_account_id`,
+  which is bound at execution time by the operator (see
+  `request_manual_execution/3`), not at intent or decision time.
+
+  The follow-up flow is therefore explicit: an approved envelope sits
+  in `:auto_exec` / `:decided` until the operator triggers
+  `POST /v1/decisions/{id}/execute` with the chosen smart account. That
+  endpoint runs all the gates (current envelope, no active plan,
+  runtime not paused, delegation active) and creates the active plan
+  before enqueueing the worker.
+
+  Pause state is irrelevant to approval — there is nothing to dispatch.
+  The pause check lives on the manual-execution path and inside the
+  `RunExecution` worker (see `Bank.Runtime.Workers.RunExecution`), so
+  the invariant "nothing enters `:executing` while paused" stays
+  intact.
 
   ## Options
 
@@ -194,10 +214,13 @@ defmodule Bank.Decisions do
     * `:reason`   — optional string stored on the successor's reasons
       list.
 
-  Returns `{:ok, successor}` or `{:error, reason}`.
+  Returns `{:ok, successor, :recorded}` on success, or
+  `{:error, reason}`. The third tuple element is intentionally an atom
+  rather than a boolean so future tiered-autonomy modes can extend the
+  vocabulary without breaking call sites.
   """
   @spec approve(String.t(), keyword()) ::
-          {:ok, DecisionEnvelope.t()} | {:error, term()}
+          {:ok, DecisionEnvelope.t(), :recorded} | {:error, term()}
   def approve(envelope_id, opts) when is_binary(envelope_id) and is_list(opts) do
     actor_id = Keyword.fetch!(opts, :actor_id)
     reason = Keyword.get(opts, :reason, "operator_approved")
@@ -209,10 +232,14 @@ defmodule Bank.Decisions do
   Operator rejection of an `:approval_required` envelope.
 
   Produces a successor with outcome `:block`, moving the intent to
-  `:blocked`. Same guarantees as `approve/2`.
+  `:blocked`. Same transactional guarantees as `approve/2`.
+
+  Rejection never dispatches execution, so the disposition is always
+  `:no_dispatch`. Pause state is irrelevant — operators can reject
+  approvals while the runtime is paused.
   """
   @spec reject(String.t(), keyword()) ::
-          {:ok, DecisionEnvelope.t()} | {:error, term()}
+          {:ok, DecisionEnvelope.t(), :no_dispatch} | {:error, term()}
   def reject(envelope_id, opts) when is_binary(envelope_id) and is_list(opts) do
     actor_id = Keyword.fetch!(opts, :actor_id)
     reason = Keyword.get(opts, :reason, "operator_rejected")
@@ -275,9 +302,7 @@ defmodule Bank.Decisions do
             actor_id
           )
 
-          maybe_enqueue_execution(successor)
-
-          {:ok, successor}
+          {:ok, successor, post_decision_disposition(successor)}
 
         {:error, step, reason, _changes} ->
           Logger.error(
@@ -288,6 +313,9 @@ defmodule Bank.Decisions do
       end
     end
   end
+
+  defp post_decision_disposition(%DecisionEnvelope{outcome: :auto_exec}), do: :recorded
+  defp post_decision_disposition(%DecisionEnvelope{outcome: :block}), do: :no_dispatch
 
   defp load_for_approval(envelope_id) do
     case Repo.get(DecisionEnvelope, envelope_id) do
@@ -345,13 +373,6 @@ defmodule Bank.Decisions do
       actor_id: actor_id
     })
   end
-
-  defp maybe_enqueue_execution(%DecisionEnvelope{outcome: :auto_exec, id: id}) do
-    _ = Runtime.enqueue_execution(id)
-    :ok
-  end
-
-  defp maybe_enqueue_execution(_), do: :ok
 
   # --- Manual execution ---------------------------------------------------
 
