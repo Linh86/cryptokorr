@@ -118,10 +118,13 @@ defmodule BankWeb.ApiSpec do
   end
 
   defp servers do
+    # The server URL is the Phoenix endpoint root — NOT `/v1` — so
+    # operation paths (which start with `/v1/...` per the router) do
+    # not double-prefix as `/v1/v1/...` once #88/#89 attach them.
     [
       %Server{
-        url: "{scheme}://{host}/v1",
-        description: "External `/v1` API surface",
+        url: "{scheme}://{host}",
+        description: "Phoenix endpoint; external API lives under `/v1/`.",
         variables: %{
           "scheme" => %ServerVariable{
             default: "http",

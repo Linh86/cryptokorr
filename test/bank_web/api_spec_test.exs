@@ -58,9 +58,14 @@ defmodule BankWeb.ApiSpecTest do
   end
 
   describe "servers" do
-    test "declares a single templated server rooted at /v1" do
+    test "declares a single templated server at the endpoint root (NOT /v1)" do
+      # The server URL must end at the host so operation paths like
+      # `/v1/intents` compose to `{scheme}://{host}/v1/intents` rather
+      # than `{scheme}://{host}/v1/v1/intents`. This is the #86
+      # variant-1 base-path fix.
       assert [%Server{url: url, variables: vars}] = ApiSpec.spec().servers
-      assert url == "{scheme}://{host}/v1"
+      assert url == "{scheme}://{host}"
+      refute String.ends_with?(url, "/v1")
       assert Map.has_key?(vars, "scheme")
       assert Map.has_key?(vars, "host")
     end
