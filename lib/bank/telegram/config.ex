@@ -297,7 +297,10 @@ defmodule Bank.Telegram.Config do
   end
 
   defp allow?(:admin, _action), do: true
-  defp allow?(:security_operator, action) when action in [:read, :approve_reject, :pause_resume], do: true
+
+  defp allow?(:security_operator, action) when action in [:read, :approve_reject, :pause_resume],
+    do: true
+
   defp allow?(:approver, action) when action in [:read, :approve_reject], do: true
   defp allow?(:viewer, :read), do: true
   defp allow?(_role, _action), do: false
