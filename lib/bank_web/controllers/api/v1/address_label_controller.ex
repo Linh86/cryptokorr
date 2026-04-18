@@ -17,11 +17,50 @@ defmodule BankWeb.API.V1.AddressLabelController do
   """
 
   use BankWeb, :controller
+  use OpenApiSpex.ControllerSpecs
 
   alias Bank.Counterparties
   alias Bank.Counterparties.AddressLabel
   alias Bank.Repo
   alias BankWeb.API.V1.CounterpartyJSON
+  alias OpenApiSpex.{Parameter, Reference}
+
+  @id_ref %Reference{"$ref": "#/components/schemas/Id"}
+  @request_id_in_ref %Reference{"$ref": "#/components/parameters/RequestIdIn"}
+  @idempotency_key_ref %Reference{"$ref": "#/components/parameters/IdempotencyKey"}
+  @not_found_ref %Reference{"$ref": "#/components/responses/NotFound"}
+  @conflict_ref %Reference{"$ref": "#/components/responses/Conflict"}
+  @unprocessable_ref %Reference{"$ref": "#/components/responses/UnprocessableEntity"}
+
+  @label_id_param %Parameter{
+    name: :id,
+    in: :path,
+    required: true,
+    description: "Opaque runtime-assigned address label id (UUID).",
+    schema: @id_ref
+  }
+
+  operation(:update,
+    summary: "Update an address label",
+    description: """
+    Patch the label's alias / role / verified flag, or retire it.
+    The address value itself is immutable — wrong addresses require
+    retiring the label and attaching a new one.
+    """,
+    tags: ["AddressLabels"],
+    parameters: [@label_id_param, @idempotency_key_ref, @request_id_in_ref],
+    request_body:
+      {"Update address label body", "application/json",
+       BankWeb.OpenApi.Schemas.UpdateAddressLabelRequest},
+    responses: %{
+      200 =>
+        {"Updated address label", "application/json",
+         BankWeb.OpenApi.Schemas.AddressLabelResponse},
+      404 => @not_found_ref,
+      409 => @conflict_ref,
+      422 => @unprocessable_ref
+    }
+  )
 
   def update(conn, %{"id" => id} = params) do
     with {:ok, uuid} <- cast_uuid(id),
