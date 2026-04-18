@@ -23,6 +23,16 @@ defmodule BankWeb.Router do
     plug BankWeb.Plugs.VerifyAdapterAuth
   end
 
+  # Dev-only pipeline that attaches the external `/v1` OpenAPI spec to
+  # `conn.private` so `OpenApiSpex.Plug.RenderSpec` can serve it (see
+  # `BankWeb.ApiSpec`, issue #86). The route is mounted under the
+  # `dev_routes`-gated block below; the pipeline itself is always
+  # compiled so prod builds stay one code path.
+  pipeline :dev_openapi do
+    plug :accepts, ["json"]
+    plug OpenApiSpex.Plug.PutApiSpec, module: BankWeb.ApiSpec
+  end
+
   # Liveness probe — no DB touch, safe for a load balancer.
   scope "/", BankWeb do
     pipe_through :api
@@ -133,6 +143,15 @@ defmodule BankWeb.Router do
       pipe_through :browser
 
       live_dashboard "/dashboard", metrics: BankWeb.Telemetry
+    end
+
+    # Inspection-only handle on the generated external `/v1` OpenAPI
+    # document. Dev-gated on purpose — the artifact path for SDK /
+    # CI consumers lands with issue #90.
+    scope "/dev" do
+      pipe_through :dev_openapi
+
+      get "/openapi.json", OpenApiSpex.Plug.RenderSpec, []
     end
   end
 end
