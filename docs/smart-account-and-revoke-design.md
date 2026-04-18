@@ -16,6 +16,44 @@ module's address, ABI fragment, and `delegation_id` ↔ on-chain mapping)
 and #58 (replace the sentinel inner calldata with a real revoke and
 update the tripwire). #31 stays open until #58 ships end-to-end.
 
+**#57 status — landed.** The adapter-side scaffolding for the
+Permission Validator is in place:
+
+- ABI fragment + selector pin:
+  [`cryptobank-ts-adapter/src/chains/base/permission_validator.ts`](../../cryptobank-ts-adapter/src/chains/base/permission_validator.ts)
+  exports `KERNEL_PERMISSION_VALIDATOR_ABI` (`disablePermission(bytes32)`,
+  selector `0x727e011e`) and `KERNEL_PERMISSION_DISABLE_FUNCTION`.
+- `delegation_id` ↔ `permissionId` mapping helpers
+  (`permissionIdFromDelegationId`, `delegationIdFromPermissionId`) plus
+  the inner-disable encoder (`encodePermissionDisable`) and the full
+  outer-wrap helper (`buildKernelPermissionDisableCallData`) that #58
+  will plug into `executeRevoke`.
+- Adapter env key `PERMISSION_VALIDATOR_ADDRESS` (optional in v0.1)
+  and a strict accessor `requirePermissionValidatorAddress(config)`
+  that throws a `#58`-referencing error when unset, so the live
+  revoke cannot silently degrade back to a sentinel after #58 ships.
+- Tripwire test
+  [`cryptobank-ts-adapter/test/permission-validator.test.ts`](../../cryptobank-ts-adapter/test/permission-validator.test.ts)
+  pins the ABI signature, selector, mapping round trip, and encoder
+  output byte-for-byte against the canonical Phoenix fixture
+  [`priv/adapter/fixtures/permission_id_mapping.json`](../priv/adapter/fixtures/permission_id_mapping.json).
+- Phoenix-side, no schema or runtime change is needed:
+  `delegations.delegation_id` is already a free-form string column,
+  so the only updates were documentation (this ADR,
+  `priv/adapter/contract.md`, the delegation moduledocs) and the
+  fixture above.
+
+**Sentinel revoke path is unchanged.** The live `executeRevoke` still
+calls `buildSentinelRevokeCallData(self)`; no adapter execution logic
+moved at #57. The swap point is marked inline with a `TODO(#58)`
+block showing the exact replacement.
+
+#58 remains pending: it deploys / pins a Permission Validator
+address on Base, swaps the sentinel inner call for
+`buildKernelPermissionDisableCallData(requirePermissionValidatorAddress(config), permissionIdFromDelegationId(delegationId))`,
+updates the sentinel-pin tripwire, and runs the full revoke flow
+end-to-end. When that lands, #31 closes.
+
 ## Decision
 
 Adopt a **Kernel v3 (ERC-7579) modular smart account** on Base, with

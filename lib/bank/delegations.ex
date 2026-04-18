@@ -47,6 +47,27 @@ defmodule Bank.Delegations do
   adapter is the source of truth on chain; this context is a
   projection that survives restart.
 
+  ## `delegation_id` and the on-chain authority record
+
+  `delegations.delegation_id` is an opaque string from Phoenix's
+  perspective — Phoenix never parses or interprets it. The adapter
+  owns its meaning. After GitHub #58 ships against a Kernel v3
+  smart account, fresh `delegation_id` values are the lowercase
+  hex form of the Permission Validator's `bytes32 permissionId`
+  (`0x` + 64 lowercase hex digits, 66 characters total). The
+  cryptographic revoke is then a single ERC-7579 `execute(...)`
+  call against that validator using that id; everything Phoenix
+  observes — `:revoking → :revoked`, the `tx_refs` carried in the
+  callback, the audit chain — is unchanged from the v0.1 sentinel
+  path.
+
+  The decision behind that mapping lives in
+  `docs/smart-account-and-revoke-design.md` (#56); the adapter-side
+  ABI fragment, mapping helpers, and tripwire test landed under
+  GitHub #57. Pre-Kernel grants continue to use the v0.1 `del_…`
+  placeholder shape and remain stuck on the sentinel revoke until
+  the smart account is migrated.
+
   ## Public API
 
       grant(smart_account_id, delegation_id, attrs)

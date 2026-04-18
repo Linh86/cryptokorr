@@ -24,6 +24,17 @@ defmodule Bank.Delegations.Delegation do
   account must remain fail-closed. A new grant for the same smart
   account creates a new row only after the prior record reaches a
   terminal state.
+
+  ## `delegation_id` field
+
+  Free-form string column. Phoenix never parses it; it is the
+  adapter's identifier for the on-chain authority record being
+  managed. After GitHub #58 ships against a Kernel v3 modular
+  account, fresh `delegation_id` values are the lowercase
+  0x-prefixed hex form of the Permission Validator's `bytes32
+  permissionId` (66 chars total). The full mapping rationale lives
+  in `docs/smart-account-and-revoke-design.md` (#56); the adapter
+  helpers that implement the round trip landed under #57.
   """
 
   use Bank.Schema

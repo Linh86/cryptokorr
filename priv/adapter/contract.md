@@ -120,20 +120,49 @@ The remaining work is split across three concrete follow-up issues:
 
 1. **#56 — chosen.** Smart-account + permission-model decision.
    Captured in the ADR above.
-2. **#57 — pending.** Wire the chosen Permission Validator's address,
-   ABI fragment, and the `delegation_id` ↔ `permissionId` round trip
-   into the adapter env and Phoenix.
-3. **#58 — pending.** Replace the sentinel inner calldata with the
-   real permission-disable call and update the tripwire pin.
+2. **#57 — landed.** Adapter-side scaffolding for the validator: ABI
+   fragment, `delegation_id` ↔ `permissionId` mapping helpers,
+   strict env accessor, and a tripwire test pinning the
+   `disablePermission(bytes32)` selector. See
+   `cryptobank-ts-adapter/src/chains/base/permission_validator.ts`
+   and the new `PERMISSION_VALIDATOR_ADDRESS` env (optional in v0.1;
+   the strict accessor `requirePermissionValidatorAddress` fails
+   loudly when the live revoke begins reading it). Phoenix-side, the
+   only change is documentation + a fixture
+   (`priv/adapter/fixtures/permission_id_mapping.json`) — no schema
+   or runtime change is needed because `delegations.delegation_id`
+   was already a free-form string column.
+3. **#58 — pending.** Replace the sentinel inner calldata in
+   `executeRevoke` with the real permission-disable call (using the
+   #57 helpers) and update the tripwire pin. The swap point is
+   marked inline in `cryptobank-ts-adapter/src/chains/base/revoke.ts`
+   with a `TODO(#58)` block showing the exact replacement.
 
-When #57 + #58 land, the only adapter-side change is the inner
-calldata: swap `buildSentinelRevokeCallData(self)` for
-`buildExecuteCallData(permissionValidator, 0n, encodePermissionDisable(permissionId))`.
+When #58 lands, the only adapter-side change is the inner calldata:
+swap `buildSentinelRevokeCallData(self)` for
+`buildKernelPermissionDisableCallData(requirePermissionValidatorAddress(config), permissionIdFromDelegationId(delegationId))`.
 Phoenix's callback contract and state machine do NOT need to change.
 The adapter's tripwire test
 (`test/base-revoke-sentinel-pin.test.ts`) will fail loudly the
 moment the inner call shape changes, forcing whoever makes the
 change to also update this contract, the runbook, and close #31.
+
+### `delegation_id` semantics post-Kernel provisioning
+
+Phoenix stores `delegations.delegation_id` as an opaque string column.
+After #58 ships, fresh grants against a Kernel-provisioned smart
+account emit `delegation_id` values that are the lowercase hex form
+of the Permission Validator's `bytes32 permissionId` (`0x` + 64
+lowercase hex digits, 66 chars total). The mapping is documented in
+`docs/smart-account-and-revoke-design.md` and pinned by fixture in
+`priv/adapter/fixtures/permission_id_mapping.json`.
+
+Pre-Kernel grants continue to use the v0.1 `del_…` placeholder shape;
+the adapter's mapping helpers explicitly reject those, so a Kernel
+revoke against a pre-Kernel id surfaces as a `userop_build_failed`
+rather than silently degrading to a sentinel write. This is
+intentional — see the "fail-closed for #58" rationale in the
+adapter's `permission_validator.ts`.
 
 Phoenix continues to treat `revoked` (via the sentinel path) as
 "on-chain anchored, trust downgraded", NOT as "cryptographically
