@@ -22,6 +22,10 @@ defmodule BankWeb.OpenApi.Responses do
     * `UnprocessableEntity` — 422, request shape is valid but a
       semantic guard rejected it (unsupported chain, asset,
       decision outcome not `auto_exec`, …).
+    * `NotImplemented` — 501, endpoint is scaffolded but its owning
+      engine has not landed yet. Added in #88 for the intent
+      endpoints that currently route through
+      `BankWeb.API.V1.FallbackController.not_implemented/3`.
     * `ServiceUnavailable` — 503, runtime is paused or otherwise
       refusing to advance execution at the door.
     * `BadGateway` — 502, adapter / upstream provider failure
@@ -69,6 +73,15 @@ defmodule BankWeb.OpenApi.Responses do
       error_response(
         "Request was structurally valid but a semantic guard rejected it (unsupported chain, " <>
           "asset not whitelisted by active policy, decision not currently `auto_exec`, …)."
+      )
+
+  @doc "501 — endpoint scaffolded, owning engine not yet landed."
+  @spec not_implemented() :: Response.t()
+  def not_implemented,
+    do:
+      error_response(
+        "Endpoint is scaffolded but its owning engine has not landed yet. The body is the " <>
+          "standard `ErrorEnvelope` with `code: \"not_implemented\"`."
       )
 
   @doc "503 — runtime paused or refusing to advance at the door."

@@ -32,16 +32,92 @@ defmodule BankWeb.API.V1.ApprovalController do
   """
 
   use BankWeb, :controller
+  use OpenApiSpex.ControllerSpecs
 
   alias Bank.Decisions
   alias Bank.Decisions.DecisionEnvelope
+  alias OpenApiSpex.{Parameter, Reference}
+
+  @id_ref %Reference{"$ref": "#/components/schemas/Id"}
+  @request_id_in_ref %Reference{"$ref": "#/components/parameters/RequestIdIn"}
+  @idempotency_key_ref %Reference{"$ref": "#/components/parameters/IdempotencyKey"}
+  @not_found_ref %Reference{"$ref": "#/components/responses/NotFound"}
+  @conflict_ref %Reference{"$ref": "#/components/responses/Conflict"}
+  @unprocessable_ref %Reference{"$ref": "#/components/responses/UnprocessableEntity"}
+
+  @decision_id_param %Parameter{
+    name: :decision_id,
+    in: :path,
+    required: true,
+    description: "Opaque runtime-assigned decision envelope id (UUID).",
+    schema: @id_ref
+  }
+
+  operation(:index,
+    summary: "List pending approvals",
+    description: """
+    Returns every decision envelope currently in `approval_required`.
+    The `decisions` array is unpaged today; a future issue may
+    introduce cursor-based pagination.
+    """,
+    tags: ["Approvals"],
+    parameters: [@request_id_in_ref],
+    responses: %{
+      200 =>
+        {"Pending approval queue", "application/json",
+         BankWeb.OpenApi.Schemas.ApprovalQueueResponse}
+    }
+  )
 
   def index(conn, _params) do
     decisions = Decisions.list_pending_approvals()
     json(conn, %{decisions: Enum.map(decisions, &summarize/1)})
   end
 
+  operation(:approve,
+    summary: "Approve a decision in the queue",
+    description: """
+    Writes a successor envelope with outcome `auto_exec`. Returns
+    `200` with `dispatch: "recorded"` and a `next_step` hint
+    pointing at the execute endpoint; v0.1 does not auto-dispatch
+    after approval. Requires `actor_id` in the body.
+    """,
+    tags: ["Approvals"],
+    parameters: [@decision_id_param, @idempotency_key_ref, @request_id_in_ref],
+    request_body:
+      {"Approval action body", "application/json", BankWeb.OpenApi.Schemas.ApprovalActionRequest},
+    responses: %{
+      200 =>
+        {"Successor envelope + dispatch", "application/json",
+         BankWeb.OpenApi.Schemas.ApprovalActionResponse},
+      404 => @not_found_ref,
+      409 => @conflict_ref,
+      422 => @unprocessable_ref
+    }
+  )
+
   def approve(conn, params), do: handle_action(conn, params, :approve)
+
+  operation(:reject,
+    summary: "Reject a decision in the queue",
+    description: """
+    Writes a successor envelope with outcome `block`. Returns `200`
+    with `dispatch: "no_dispatch"`. Requires `actor_id` in the body;
+    `reason` is optional and is persisted to audit.
+    """,
+    tags: ["Approvals"],
+    parameters: [@decision_id_param, @idempotency_key_ref, @request_id_in_ref],
+    request_body:
+      {"Approval action body", "application/json", BankWeb.OpenApi.Schemas.ApprovalActionRequest},
+    responses: %{
+      200 =>
+        {"Successor envelope + dispatch", "application/json",
+         BankWeb.OpenApi.Schemas.ApprovalActionResponse},
+      404 => @not_found_ref,
+      409 => @conflict_ref,
+      422 => @unprocessable_ref
+    }
+  )
 
   def reject(conn, params), do: handle_action(conn, params, :reject)
 

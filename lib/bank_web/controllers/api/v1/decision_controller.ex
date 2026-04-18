@@ -10,10 +10,45 @@ defmodule BankWeb.API.V1.DecisionController do
   """
 
   use BankWeb, :controller
+  use OpenApiSpex.ControllerSpecs
 
   alias Bank.Decisions
+  alias OpenApiSpex.{Parameter, Reference}
+
+  @id_ref %Reference{"$ref": "#/components/schemas/Id"}
+  @request_id_in_ref %Reference{"$ref": "#/components/parameters/RequestIdIn"}
+  @idempotency_key_ref %Reference{"$ref": "#/components/parameters/IdempotencyKey"}
+  @not_found_ref %Reference{"$ref": "#/components/responses/NotFound"}
+  @conflict_ref %Reference{"$ref": "#/components/responses/Conflict"}
+  @unprocessable_ref %Reference{"$ref": "#/components/responses/UnprocessableEntity"}
+  @service_unavailable_ref %Reference{"$ref": "#/components/responses/ServiceUnavailable"}
+
+  @decision_id_param %Parameter{
+    name: :id,
+    in: :path,
+    required: true,
+    description: "Opaque runtime-assigned decision envelope id (UUID).",
+    schema: @id_ref
+  }
 
   # --- GET /v1/decisions/:id -------------------------------------------
+
+  operation(:show,
+    summary: "Get a decision envelope",
+    description: """
+    Returns a decision envelope's detail plus the execution plans
+    currently linked to it. This endpoint is live.
+    """,
+    tags: ["Decisions"],
+    parameters: [@decision_id_param, @request_id_in_ref],
+    responses: %{
+      200 =>
+        {"Decision envelope detail", "application/json",
+         BankWeb.OpenApi.Schemas.DecisionShowResponse},
+      404 => @not_found_ref,
+      422 => @unprocessable_ref
+    }
+  )
 
   def show(conn, %{"id" => id}) do
     with {:ok, uuid} <- cast_uuid(id),
@@ -58,6 +93,31 @@ defmodule BankWeb.API.V1.DecisionController do
   end
 
   # --- POST /v1/decisions/:id/execute ----------------------------------
+
+  operation(:execute,
+    summary: "Manually execute an auto_exec decision",
+    description: """
+    Triggers execution on an `auto_exec` envelope. Used for hold
+    release, retry after an aborted plan, and tiered-autonomy
+    manual confirm. Requires `smart_account_id` in the body; the
+    adapter will sign with the delegation bound to that account.
+    Returns `202` with the new execution plan on success.
+    """,
+    tags: ["Decisions"],
+    parameters: [@decision_id_param, @idempotency_key_ref, @request_id_in_ref],
+    request_body:
+      {"Execute decision body", "application/json",
+       BankWeb.OpenApi.Schemas.ExecuteDecisionRequest},
+    responses: %{
+      202 =>
+        {"Execution plan enqueued", "application/json",
+         BankWeb.OpenApi.Schemas.ExecuteDecisionResponse},
+      404 => @not_found_ref,
+      409 => @conflict_ref,
+      422 => @unprocessable_ref,
+      503 => @service_unavailable_ref
+    }
+  )
 
   def execute(conn, %{"id" => id} = params) do
     smart_account_id = Map.get(params, "smart_account_id")

@@ -128,23 +128,43 @@ defmodule BankWeb.ApiSpecTest do
     end
   end
 
-  describe "components.schemas — populated by #87" do
-    test "includes the full shared primitive / enum / envelope set" do
-      # These are the shapes #88/#89 will $ref by name; a rename or
-      # drop must surface as a test failure here. `ErrorEnvelope`
-      # is the outer `{error: ErrorDetail}` wrapper that matches
-      # what `/v1` controllers actually emit; `ErrorDetail` is the
-      # inner object, registered so later issues can $ref either
-      # layer.
-      expected_schema_keys = ~w(
+  describe "components.schemas — populated by #87 + #88" do
+    test "includes the shared #87 primitives / enums / envelopes" do
+      # These are the #87 shapes #88/#89 $ref by name. `ErrorEnvelope`
+      # is the outer `{error: ErrorDetail}` wrapper; `ErrorDetail` is
+      # the inner object.
+      expected_shared = ~w(
         Id Timestamp AmountString EvmAddress
         Chain Asset IntentState DecisionOutcome
         TrustLevel TrustConfidence
         Links ErrorDetail ErrorEnvelope
       )
 
-      actual_keys = ApiSpec.spec().components.schemas |> Map.keys() |> Enum.sort()
-      assert actual_keys == Enum.sort(expected_schema_keys)
+      actual = ApiSpec.spec().components.schemas |> Map.keys()
+
+      for title <- expected_shared do
+        assert title in actual, "shared schema #{inspect(title)} missing from components.schemas"
+      end
+    end
+
+    test "includes the per-domain schemas added in #88" do
+      # Health + Intents + Decisions + Approvals domain shapes. Later
+      # issues cover remaining operator / configuration endpoints.
+      expected_domain = ~w(
+        HealthReadinessResponse HealthDeepResponse
+        IntentTarget IntentSubmissionRequest SimulationRequest
+        CancelRequest IntentReplayResponse
+        ExecutionPlanSummary DecisionEnvelopeDetail DecisionShowResponse
+        ExecuteDecisionRequest ExecuteDecisionResponse
+        ApprovalDecisionSummary ApprovalQueueResponse
+        ApprovalActionRequest ApprovalNextStep ApprovalActionResponse
+      )
+
+      actual = ApiSpec.spec().components.schemas |> Map.keys()
+
+      for title <- expected_domain do
+        assert title in actual, "#88 schema #{inspect(title)} missing from components.schemas"
+      end
     end
   end
 end
