@@ -97,21 +97,46 @@ defmodule BankWeb.OpenApiComponentsTest do
   end
 
   describe "shared schemas — envelopes" do
-    test "ErrorEnvelope has the four documented fields with the three required ones" do
+    test "ErrorEnvelope is the outer {error: ErrorDetail} wrapper" do
+      # Matches what every /v1 controller actually emits today:
+      # `{ "error": { ... } }`. The `error` property references the
+      # inner `ErrorDetail` schema by $ref.
       assert %Schema{
                title: "ErrorEnvelope",
                type: :object,
-               required: required,
-               properties: props
+               required: [:error],
+               properties: %{error: error_property}
              } = components().schemas["ErrorEnvelope"]
 
-      assert Enum.sort(required) == Enum.sort([:code, :message, :retryable])
-      assert Map.keys(props) |> Enum.sort() == Enum.sort([:code, :message, :hint, :retryable])
+      assert %Reference{"$ref": "#/components/schemas/ErrorDetail"} = error_property
+    end
+
+    test "ErrorDetail requires only code + message (truthful floor)" do
+      # Only `code` and `message` are required because every /v1
+      # error path sets both. `hint`, `retryable`, and `details`
+      # are deliberately optional — #87 does not pin a stricter
+      # contract than the runtime actually delivers.
+      assert %Schema{
+               title: "ErrorDetail",
+               type: :object,
+               required: required,
+               properties: props
+             } = components().schemas["ErrorDetail"]
+
+      assert Enum.sort(required) == Enum.sort([:code, :message])
+      assert :hint not in required
+      assert :retryable not in required
+      assert :details not in required
+
+      expected_props = [:code, :message, :hint, :retryable, :details]
+      assert Map.keys(props) |> Enum.sort() == Enum.sort(expected_props)
 
       assert %Schema{type: :string} = props[:code]
       assert %Schema{type: :string} = props[:message]
       assert %Schema{type: :string, nullable: true} = props[:hint]
       assert %Schema{type: :boolean} = props[:retryable]
+      assert %Schema{type: :object, additionalProperties: details_inner} = props[:details]
+      assert %Schema{type: :array, items: %Schema{type: :string}} = details_inner
     end
 
     test "Links is an open object of string values" do
@@ -212,10 +237,35 @@ defmodule BankWeb.OpenApiComponentsTest do
       decoded = Jason.decode!(json)
 
       assert decoded["components"]["schemas"]["ErrorEnvelope"]["title"] == "ErrorEnvelope"
+      assert decoded["components"]["schemas"]["ErrorDetail"]["title"] == "ErrorDetail"
       assert decoded["components"]["responses"]["Conflict"]["description"] =~ "Idempotency"
 
       assert decoded["components"]["securitySchemes"]["operator_bearer"]["type"] == "http"
       assert decoded["components"]["securitySchemes"]["agent_api_key"]["type"] == "apiKey"
+    end
+
+    test "ErrorEnvelope's error property serializes as a $ref to ErrorDetail" do
+      # End-to-end JSON check: the outer envelope's `error` property
+      # must land as `{"$ref": "#/components/schemas/ErrorDetail"}`
+      # in the final document, not as an inlined schema.
+      json = ApiSpec.spec() |> Jason.encode!()
+      decoded = Jason.decode!(json)
+
+      envelope = decoded["components"]["schemas"]["ErrorEnvelope"]
+      assert envelope["required"] == ["error"]
+      assert envelope["properties"]["error"]["$ref"] == "#/components/schemas/ErrorDetail"
+    end
+
+    test "ErrorDetail's required-field set is exactly [code, message] in JSON" do
+      json = ApiSpec.spec() |> Jason.encode!()
+      decoded = Jason.decode!(json)
+
+      detail = decoded["components"]["schemas"]["ErrorDetail"]
+      assert Enum.sort(detail["required"]) == ["code", "message"]
+      # Opportunistic fields exist as optional properties.
+      for key <- ~w(code message hint retryable details) do
+        assert Map.has_key?(detail["properties"], key), "ErrorDetail missing property #{key}"
+      end
     end
   end
 end

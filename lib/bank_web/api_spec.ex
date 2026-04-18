@@ -36,7 +36,14 @@ defmodule BankWeb.ApiSpec do
 
           BankWeb.OpenApi.Schemas.{Id, Timestamp, AmountString,
             EvmAddress, Chain, Asset, IntentState, DecisionOutcome,
-            TrustLevel, TrustConfidence, Links, ErrorEnvelope}
+            TrustLevel, TrustConfidence, Links, ErrorDetail,
+            ErrorEnvelope}
+
+      `ErrorEnvelope` is the outer `{error: ErrorDetail}` wrapper
+      that every non-2xx `/v1` response actually emits today;
+      `ErrorDetail` carries the inner object. Later issues
+      `$ref` either layer depending on whether they describe the
+      full response body or just the inner error.
 
     * Shared reusable components live under
       `lib/bank_web/open_api/`:
@@ -91,6 +98,7 @@ defmodule BankWeb.ApiSpec do
     Asset,
     Chain,
     DecisionOutcome,
+    ErrorDetail,
     ErrorEnvelope,
     EvmAddress,
     Id,
@@ -216,6 +224,7 @@ defmodule BankWeb.ApiSpec do
       "TrustLevel" => TrustLevel.schema(),
       "TrustConfidence" => TrustConfidence.schema(),
       "Links" => Links.schema(),
+      "ErrorDetail" => ErrorDetail.schema(),
       "ErrorEnvelope" => ErrorEnvelope.schema()
     }
   end
