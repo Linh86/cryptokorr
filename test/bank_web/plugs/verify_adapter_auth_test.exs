@@ -35,7 +35,7 @@ defmodule BankWeb.Plugs.VerifyAdapterAuthTest do
 
     test "200 accepted when bearer matches the configured secret", %{conn: conn} do
       secret =
-        Application.fetch_env!(:bank, Bank.AdapterClient) |> Keyword.fetch!(:auth_secret)
+        Application.fetch_env!(:bank, Bank.AdapterClient) |> Keyword.fetch!(:callback_secret)
 
       conn =
         conn

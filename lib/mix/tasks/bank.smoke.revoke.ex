@@ -8,7 +8,9 @@ defmodule Mix.Tasks.Bank.Smoke.Revoke do
 
   ## Required env
 
-    * `ADAPTER_BASE_URL` / `ADAPTER_AUTH_SECRET` — adapter connection
+    * `ADAPTER_BASE_URL` / `ADAPTER_DISPATCH_SECRET` /
+      `ADAPTER_CALLBACK_SECRET` — adapter connection (dispatch outbound,
+      callback inbound)
     * `SMART_ACCOUNT_ID` — smart account with an active delegation
 
   ## Optional env

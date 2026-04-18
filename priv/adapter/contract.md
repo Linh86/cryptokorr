@@ -279,9 +279,26 @@ record for everything except live chain state.
 
 ## Transport
 
-JSON over HTTPS, mutually authenticated (mTLS in production, shared
-bearer secret in dev). No public internet exposure — the adapter and
-Phoenix coexist on a private network.
+JSON over HTTP(S). No public internet exposure — the adapter and
+Phoenix coexist on a private network. Transport encryption (TLS / mTLS)
+is operator-supplied at the ingress; both sides accept either `http://`
+or `https://` for their counterpart's base URL.
+
+Each direction is authenticated at the application layer with a
+distinct bearer secret, so each rotates independently and a leak in
+one direction does not authenticate the other:
+
+| Direction              | Bearer header (set by sender, validated by receiver) | Env var (both services) |
+| ---------------------- | ---------------------------------------------------- | ----------------------- |
+| Phoenix → Adapter      | `Authorization: Bearer <ADAPTER_DISPATCH_SECRET>`    | `ADAPTER_DISPATCH_SECRET` |
+| Adapter → Phoenix      | `Authorization: Bearer <ADAPTER_CALLBACK_SECRET>`    | `ADAPTER_CALLBACK_SECRET` |
+
+Missing, malformed, or wrong bearer is rejected with `401` and the
+body `{"error": {"code": "missing_authorization" | "invalid_authorization_scheme" | "invalid_credentials"}}`.
+The bearer comparison is constant-time on both sides.
+
+The adapter's `GET /health` deliberately stays public so liveness
+probes do not need credentials.
 
 Phoenix → Adapter: `POST {adapter_base}/dispatch/{action}`
 Adapter → Phoenix: `POST {phoenix_base}/internal/adapter/callback`

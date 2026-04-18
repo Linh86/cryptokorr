@@ -3,11 +3,16 @@ defmodule Bank.AdapterClient do
   Thin HTTP client for dispatching work to the TypeScript chain adapter.
 
   The adapter is a separate service at `{base_url}`; Phoenix dispatches
-  a transfer via `POST {base_url}/dispatch/transfer` with a shared
-  bearer secret (mTLS in production). On success the adapter returns
-  `HTTP 202 {accepted: true, execution_plan_id}` and reports chain
-  progress asynchronously via `POST /internal/adapter/callback` back
-  into Phoenix.
+  a transfer via `POST {base_url}/dispatch/transfer` with the
+  dispatch-direction bearer secret in the `Authorization` header. On
+  success the adapter returns `HTTP 202 {accepted: true,
+  execution_plan_id}` and reports chain progress asynchronously via
+  `POST /internal/adapter/callback` back into Phoenix.
+
+  Transport security (TLS / mTLS) is operator-supplied via the optional
+  `:req_options` keyword (see `Configuration` below); the dispatch
+  client does not pin a transport on its own — `ADAPTER_BASE_URL`
+  decides whether the connection runs over `http://` or `https://`.
 
   This module owns the three concerns of the outbound half of that
   contract:
@@ -42,8 +47,16 @@ defmodule Bank.AdapterClient do
 
       config :bank, Bank.AdapterClient,
         base_url: "http://localhost:4100",
-        auth_secret: "dev-secret",
-        # Optional: extra options passed to Req (e.g. a test plug)
+        # Bearer Phoenix sends on outbound /dispatch/*; the adapter
+        # validates this. NOT the same secret the adapter uses on its
+        # callbacks back to Phoenix — that is `:callback_secret` and is
+        # consumed by `BankWeb.Plugs.VerifyAdapterAuth`.
+        dispatch_secret: "dev-dispatch-secret",
+        callback_secret: "dev-callback-secret",
+        # Optional: extra options passed to Req (e.g. a test plug, or
+        # `connect_options: [transport_opts: [...]]` for client-side
+        # mTLS). Phoenix does not ship a default mTLS configuration;
+        # see docs/security.md for the operator-supplied shape.
         req_options: []
 
   Tests override `:req_options` with `{Req.Test, Bank.AdapterClient}`
@@ -204,7 +217,7 @@ defmodule Bank.AdapterClient do
   defp post(path, payload, kind, opts) do
     config = Application.fetch_env!(:bank, __MODULE__)
     base_url = Keyword.fetch!(config, :base_url)
-    secret = Keyword.fetch!(config, :auth_secret)
+    secret = Keyword.fetch!(config, :dispatch_secret)
     extra_req_options = Keyword.get(config, :req_options, [])
 
     req_opts =

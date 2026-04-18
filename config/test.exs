@@ -39,9 +39,12 @@ config :bank, Oban, testing: :manual
 
 # Adapter HTTP requests are routed to Req.Test under the test env so
 # individual tests can stub per-test responses without a real server.
+# Two distinct secrets so tests can see (and assert on) which direction
+# of the trust boundary is being exercised.
 config :bank, Bank.AdapterClient,
   base_url: "http://adapter.test",
-  auth_secret: "test-adapter-secret",
+  dispatch_secret: "test-adapter-dispatch-secret",
+  callback_secret: "test-adapter-callback-secret",
   req_options: [plug: {Req.Test, Bank.AdapterClient}]
 
 # Disable the operational health telemetry poller in tests.

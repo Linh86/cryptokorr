@@ -79,7 +79,7 @@ defmodule Bank.AdapterClientTest do
 
       assert_received {:dispatch, payload, "POST", "/dispatch/transfer", headers}
 
-      assert {"authorization", "Bearer test-adapter-secret"} in headers
+      assert {"authorization", "Bearer test-adapter-dispatch-secret"} in headers
 
       assert payload["contract_version"] == 1
       assert payload["action"] == "transfer"

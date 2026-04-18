@@ -3,13 +3,18 @@ defmodule BankWeb.Plugs.VerifyAdapterAuth do
   Gatekeeper for the internal adapter callback endpoint.
 
   The TypeScript adapter posts to `POST /internal/adapter/callback`
-  over a private network. This plug enforces a shared bearer secret
-  that both sides agree on via `:bank, Bank.AdapterClient, auth_secret`
+  over a private network. This plug enforces a bearer secret that both
+  sides agree on via `:bank, Bank.AdapterClient, callback_secret`
   config.
 
-  In production the transport is expected to be mTLS terminated at the
-  ingress (see `docs/security.md`). The bearer check remains as
-  defense in depth.
+  This is the *callback* direction of the trust boundary. The opposite
+  direction — Phoenix → adapter on `/dispatch/*` — uses a separate
+  `:dispatch_secret` so each direction can be rotated independently
+  and a leak in one direction does not authenticate the other.
+
+  Transport security is operator-supplied (see `docs/security.md`):
+  Phoenix can be fronted by a TLS-terminating ingress, and the bearer
+  check here remains as defense in depth regardless.
 
   ## Behaviour
 
@@ -40,7 +45,7 @@ defmodule BankWeb.Plugs.VerifyAdapterAuth do
     else
       :no_expected_secret ->
         Logger.error(
-          "BankWeb.Plugs.VerifyAdapterAuth: no :auth_secret configured; refusing callback"
+          "BankWeb.Plugs.VerifyAdapterAuth: no :callback_secret configured; refusing callback"
         )
 
         halt_with(conn, "server_misconfigured")
@@ -83,7 +88,7 @@ defmodule BankWeb.Plugs.VerifyAdapterAuth do
         :no_expected_secret
 
       config ->
-        case Keyword.get(config, :auth_secret) do
+        case Keyword.get(config, :callback_secret) do
           value when is_binary(value) and byte_size(value) > 0 -> {:ok, value}
           _ -> :no_expected_secret
         end

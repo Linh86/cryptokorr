@@ -25,8 +25,10 @@ defmodule Bank.Smoke do
   ## Preconditions
 
     * Phoenix can reach the adapter at `ADAPTER_BASE_URL`.
-    * `ADAPTER_AUTH_SECRET` is set to the same value the adapter
-      expects.
+    * `ADAPTER_DISPATCH_SECRET` is set to the same value the adapter
+      expects on inbound `/dispatch/*`.
+    * `ADAPTER_CALLBACK_SECRET` is set to the same value the adapter
+      uses on outbound `/internal/adapter/callback`.
     * The adapter is configured against a funded smart account on the
       target chain (Base Sepolia for staging).
     * `Bank.AdapterClient` config in the current runtime points at that

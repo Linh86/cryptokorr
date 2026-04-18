@@ -86,10 +86,10 @@ config :bank, Oban,
 
 # Bank.AdapterClient: connection to the TypeScript chain adapter is
 # configured per-environment. dev/test set local defaults below;
-# production must provide ADAPTER_BASE_URL and ADAPTER_AUTH_SECRET
-# via env (see config/runtime.exs). No default is set here so that a
-# misconfigured production boot fails fast instead of silently using
-# a development secret.
+# production must provide ADAPTER_BASE_URL, ADAPTER_DISPATCH_SECRET
+# and ADAPTER_CALLBACK_SECRET via env (see config/runtime.exs). No
+# default is set here so that a misconfigured production boot fails
+# fast instead of silently using a development secret.
 
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.

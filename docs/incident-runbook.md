@@ -137,15 +137,17 @@ mismatch` or `missing_authorization` warnings; 401 rate on
 
 ### Immediate actions
 
-1. Confirm which side is wrong:
+1. Confirm which side is wrong. The callback direction uses
+   `ADAPTER_CALLBACK_SECRET`:
    ```sh
    # On the Phoenix host:
-   /app/bin/bank eval 'Application.get_env(:bank, Bank.AdapterClient)[:auth_secret] |> String.slice(0, 6) |> IO.puts()'
+   /app/bin/bank eval 'Application.get_env(:bank, Bank.AdapterClient)[:callback_secret] |> String.slice(0, 6) |> IO.puts()'
    # On the adapter host:
-   echo "$ADAPTER_AUTH_SECRET" | cut -c1-6
+   echo "$ADAPTER_CALLBACK_SECRET" | cut -c1-6
    ```
    The first 6 chars must match. If they don't, one side has the wrong
-   secret.
+   secret. (For the dispatch direction the equivalent vars are
+   `:dispatch_secret` / `ADAPTER_DISPATCH_SECRET`.)
 2. If Phoenix is rejecting valid adapter traffic, pause intake so you
    don't pile up ambiguous state:
    ```sh
@@ -157,7 +159,7 @@ mismatch` or `missing_authorization` warnings; 401 rate on
 ### Recovery
 
 Redo the rotation procedure from
-[docs/security.md](security.md#rotating-adapter_auth_secret). Key
+[docs/security.md](security.md#shared-secret-management). Key
 points:
 
 - Roll **both sides together** within the same window.

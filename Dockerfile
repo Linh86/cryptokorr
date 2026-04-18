@@ -7,7 +7,8 @@
 #            -e DATABASE_URL=... \
 #            -e SECRET_KEY_BASE=... \
 #            -e ADAPTER_BASE_URL=... \
-#            -e ADAPTER_AUTH_SECRET=... \
+#            -e ADAPTER_DISPATCH_SECRET=... \
+#            -e ADAPTER_CALLBACK_SECRET=... \
 #            -e PHX_HOST=... \
 #            -e PHX_SERVER=true \
 #            bank:staging

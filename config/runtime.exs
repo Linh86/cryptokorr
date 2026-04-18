@@ -24,14 +24,21 @@ config :bank, BankWeb.Endpoint, http: [port: String.to_integer(System.get_env("P
 
 # Bank.AdapterClient: connection to the TypeScript chain adapter.
 #
-# - :prod  — ADAPTER_BASE_URL and ADAPTER_AUTH_SECRET MUST be set, or
-#            the boot fails. Both the outbound dispatch client and the
-#            inbound `VerifyAdapterAuth` plug read from this single
-#            config key, so a missing env var would otherwise leave the
-#            inbound surface open to anyone reachable on the private
-#            network.
-# - :dev   — falls back to the local defaults in config/dev.exs; an
-#            env var override is honored if supplied.
+# Two distinct secrets gate the two directions of the trust boundary so
+# either can be rotated independently and a leak in one direction does
+# not let an attacker speak both ways:
+#
+#   * ADAPTER_DISPATCH_SECRET — Phoenix sends this on outbound
+#     `POST /dispatch/*` requests; the TS adapter validates it.
+#   * ADAPTER_CALLBACK_SECRET — the TS adapter sends this on inbound
+#     `POST /internal/adapter/callback` requests; Phoenix's
+#     `VerifyAdapterAuth` plug validates it.
+#
+# - :prod  — all four env vars MUST be set or the boot fails. A missing
+#            secret would otherwise leave the corresponding direction
+#            open to anyone reachable on the private network.
+# - :dev   — falls back to the local defaults in config/dev.exs; env
+#            var overrides are honored individually.
 # - :test  — config/test.exs is authoritative (Req.Test stubbing).
 case config_env() do
   :prod ->
@@ -42,16 +49,27 @@ case config_env() do
         For example: https://adapter.internal:4100
         """
 
-    adapter_auth_secret =
-      System.get_env("ADAPTER_AUTH_SECRET") ||
+    adapter_dispatch_secret =
+      System.get_env("ADAPTER_DISPATCH_SECRET") ||
         raise """
-        environment variable ADAPTER_AUTH_SECRET is missing.
-        Generate one with: openssl rand -hex 32
+        environment variable ADAPTER_DISPATCH_SECRET is missing.
+        Bearer that Phoenix sends on outbound POST /dispatch/* and the
+        adapter validates. Generate with: openssl rand -hex 32
+        """
+
+    adapter_callback_secret =
+      System.get_env("ADAPTER_CALLBACK_SECRET") ||
+        raise """
+        environment variable ADAPTER_CALLBACK_SECRET is missing.
+        Bearer that the adapter sends on inbound POST
+        /internal/adapter/callback and Phoenix validates. Generate
+        with: openssl rand -hex 32
         """
 
     config :bank, Bank.AdapterClient,
       base_url: adapter_base_url,
-      auth_secret: adapter_auth_secret,
+      dispatch_secret: adapter_dispatch_secret,
+      callback_secret: adapter_callback_secret,
       req_options: []
 
   :dev ->
@@ -59,8 +77,12 @@ case config_env() do
       config :bank, Bank.AdapterClient, base_url: base_url
     end
 
-    if auth_secret = System.get_env("ADAPTER_AUTH_SECRET") do
-      config :bank, Bank.AdapterClient, auth_secret: auth_secret
+    if dispatch_secret = System.get_env("ADAPTER_DISPATCH_SECRET") do
+      config :bank, Bank.AdapterClient, dispatch_secret: dispatch_secret
+    end
+
+    if callback_secret = System.get_env("ADAPTER_CALLBACK_SECRET") do
+      config :bank, Bank.AdapterClient, callback_secret: callback_secret
     end
 
   :test ->

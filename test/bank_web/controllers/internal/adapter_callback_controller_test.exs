@@ -17,7 +17,7 @@ defmodule BankWeb.Internal.AdapterCallbackControllerTest do
   alias Bank.Runtime.PubSub
 
   setup %{conn: conn} do
-    secret = Application.fetch_env!(:bank, Bank.AdapterClient) |> Keyword.fetch!(:auth_secret)
+    secret = Application.fetch_env!(:bank, Bank.AdapterClient) |> Keyword.fetch!(:callback_secret)
     {:ok, conn: put_req_header(conn, "authorization", "Bearer " <> secret)}
   end
 

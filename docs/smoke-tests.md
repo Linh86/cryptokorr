@@ -9,8 +9,9 @@ smart account, so they live behind explicit Mix tasks.
 
 - After every adapter deploy that touches dispatch or callback code.
 - Before starting a design-partner pilot session.
-- After rotating the adapter's `ADAPTER_AUTH_SECRET` — confirms both
-  sides rehydrated the new value.
+- After rotating either `ADAPTER_DISPATCH_SECRET` or
+  `ADAPTER_CALLBACK_SECRET` — the transfer smoke exercises both
+  directions and confirms both sides rehydrated the new values.
 - As the final gate before cutting an alpha release.
 
 ## Preconditions
@@ -18,8 +19,9 @@ smart account, so they live behind explicit Mix tasks.
 1. Staging Phoenix is running and pointing at the staging adapter.
 2. The adapter is running against a bundler (Base Sepolia is the
    default staging chain).
-3. `ADAPTER_BASE_URL` and `ADAPTER_AUTH_SECRET` are set on the host
-   that runs the smoke task (or `config/runtime.exs` env is equivalent).
+3. `ADAPTER_BASE_URL`, `ADAPTER_DISPATCH_SECRET`, and
+   `ADAPTER_CALLBACK_SECRET` are set on the host that runs the smoke
+   task (or `config/runtime.exs` env is equivalent).
 4. The smart account under test:
     - Exists on chain.
     - Has been funded with enough USDC + gas to cover the smoke
@@ -31,7 +33,8 @@ smart account, so they live behind explicit Mix tasks.
 
 ```shell
 ADAPTER_BASE_URL=https://adapter-staging.internal \
-ADAPTER_AUTH_SECRET=<staging-secret> \
+ADAPTER_DISPATCH_SECRET=<staging-dispatch-secret> \
+ADAPTER_CALLBACK_SECRET=<staging-callback-secret> \
 SMART_ACCOUNT_ID=sa_alpha_01 \
 DELEGATION_ID=del_alpha_01 \
 TARGET_ADDRESS=0x0000000000000000000000000000000000000DeAD \
@@ -66,7 +69,8 @@ Exit code 0.
 
 ```shell
 ADAPTER_BASE_URL=https://adapter-staging.internal \
-ADAPTER_AUTH_SECRET=<staging-secret> \
+ADAPTER_DISPATCH_SECRET=<staging-dispatch-secret> \
+ADAPTER_CALLBACK_SECRET=<staging-callback-secret> \
 SMART_ACCOUNT_ID=sa_alpha_01 \
 mix bank.smoke.revoke
 ```

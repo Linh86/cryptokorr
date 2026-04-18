@@ -9,7 +9,9 @@ defmodule Mix.Tasks.Bank.Smoke.Transfer do
   ## Required env
 
     * `ADAPTER_BASE_URL` — where Phoenix dispatches to
-    * `ADAPTER_AUTH_SECRET` — matches the adapter's expected bearer
+    * `ADAPTER_DISPATCH_SECRET` — bearer Phoenix sends on `/dispatch/*`
+    * `ADAPTER_CALLBACK_SECRET` — bearer the adapter sends on
+      `/internal/adapter/callback`
     * `SMART_ACCOUNT_ID` — funded smart account the adapter signs for
     * `DELEGATION_ID` — active delegation the adapter knows about
     * `TARGET_ADDRESS` — counterparty address to send to

@@ -35,13 +35,16 @@ published out of its own repo and owns all chain-facing concerns
 bidirectional:
 
 - **Phoenix → adapter**: outbound dispatch (`POST /dispatch/transfer`,
-  `/dispatch/revoke_delegation`). Authenticated with `ADAPTER_AUTH_SECRET`.
+  `/dispatch/revoke_delegation`). Authenticated with
+  `ADAPTER_DISPATCH_SECRET`; enforced by the adapter's Fastify
+  preHandler.
 - **Adapter → Phoenix**: callbacks (`POST /internal/adapter/callback`).
-  Authenticated with the same shared secret; enforced by
+  Authenticated with `ADAPTER_CALLBACK_SECRET`; enforced by
   [`BankWeb.Plugs.VerifyAdapterAuth`](../lib/bank_web/plugs/verify_adapter_auth.ex).
 
-mTLS terminates at the cloud ingress. See [docs/security.md](security.md)
-for the full auth model.
+The two secrets gate the two directions independently. Transport
+encryption (TLS / mTLS) is operator-supplied at the ingress. See
+[docs/security.md](security.md) for the full auth model.
 
 ## Service inventory
 
@@ -64,7 +67,8 @@ Required for Phoenix in staging/prod:
 | `PHX_SERVER`            | `true` to start the HTTP server on boot                    |
 | `PORT`                  | HTTP listen port (default 4000)                            |
 | `ADAPTER_BASE_URL`      | URL where Phoenix dispatches to the adapter (prod boot fails if unset) |
-| `ADAPTER_AUTH_SECRET`   | Shared bearer; must match the adapter's expected value (prod boot fails if unset) |
+| `ADAPTER_DISPATCH_SECRET` | Bearer Phoenix sends on outbound `/dispatch/*`; must match the adapter's expected value (prod boot fails if unset) |
+| `ADAPTER_CALLBACK_SECRET` | Bearer the adapter sends on inbound `/internal/adapter/callback`; must match the value the adapter is configured with (prod boot fails if unset) |
 | `DNS_CLUSTER_QUERY`     | Optional `dns_cluster` query for clustering                |
 | `POOL_SIZE`             | Ecto pool size (default 10)                                |
 | `ECTO_IPV6`             | `true`/`1` to add `:inet6` to socket options               |
@@ -76,7 +80,8 @@ stack; the cloud staging values live in the operator's secret store.
 
 ```sh
 cp .env.staging.example .env.staging
-# fill in SECRET_KEY_BASE (mix phx.gen.secret) + ADAPTER_AUTH_SECRET
+# fill in SECRET_KEY_BASE (mix phx.gen.secret) + ADAPTER_DISPATCH_SECRET
+# + ADAPTER_CALLBACK_SECRET (each `openssl rand -hex 32`)
 docker compose --env-file .env.staging up --build
 ```
 
@@ -104,11 +109,15 @@ The in-repo artifacts are ready. What's left is:
    that repo's deploy doc). Must be reachable from Phoenix over an
    internal network and vice versa.
 5. **Issue and distribute secrets.** `SECRET_KEY_BASE`,
-   `ADAPTER_AUTH_SECRET`, bundler API keys, paymaster API keys. See
-   [docs/security.md](security.md) for the rotation policy.
-6. **Wire mTLS at the ingress.** Generate a staging CA, issue client
-   certs for Phoenix↔adapter, configure the LB to enforce peer
-   verification.
+   `ADAPTER_DISPATCH_SECRET`, `ADAPTER_CALLBACK_SECRET`, bundler API
+   keys, paymaster API keys. See [docs/security.md](security.md) for
+   the rotation policy.
+6. **Terminate TLS at the ingress.** A standard TLS-terminating load
+   balancer in front of each service is sufficient for v0.1; the
+   bearer secrets are what authenticate each request. Operators who
+   want client-side mTLS as well can wire `req_options.transport_opts`
+   on the Phoenix side and a Fastify HTTPS listen on the adapter side
+   — both are documented in `docs/security.md`.
 7. **Point a DNS record** at the LB (e.g. `bank-staging.internal`).
 8. **Smoke test end-to-end.** `mix bank.smoke.transfer` +
    `mix bank.smoke.revoke` from the operator host; see

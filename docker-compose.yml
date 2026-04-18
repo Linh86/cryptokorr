@@ -39,7 +39,8 @@ services:
       PHX_SERVER: "true"
       PORT: "4000"
       ADAPTER_BASE_URL: ${ADAPTER_BASE_URL:-http://adapter:3000}
-      ADAPTER_AUTH_SECRET: ${ADAPTER_AUTH_SECRET:?ADAPTER_AUTH_SECRET required — must match adapter}
+      ADAPTER_DISPATCH_SECRET: ${ADAPTER_DISPATCH_SECRET:?ADAPTER_DISPATCH_SECRET required — must match adapter}
+      ADAPTER_CALLBACK_SECRET: ${ADAPTER_CALLBACK_SECRET:?ADAPTER_CALLBACK_SECRET required — must match adapter}
     ports:
       - "4000:4000"
     # Run migrations on boot, then start the server.
@@ -51,7 +52,8 @@ services:
     # .env.staging once that repo publishes a tag.
     image: ${ADAPTER_IMAGE:-ghcr.io/cryptobank/adapter:placeholder}
     environment:
-      ADAPTER_AUTH_SECRET: ${ADAPTER_AUTH_SECRET:?}
+      ADAPTER_DISPATCH_SECRET: ${ADAPTER_DISPATCH_SECRET:?}
+      ADAPTER_CALLBACK_SECRET: ${ADAPTER_CALLBACK_SECRET:?}
       PHOENIX_CALLBACK_URL: http://phoenix:4000/internal/adapter/callback
       BUNDLER_URL: ${BUNDLER_URL:-}
       CHAIN: ${CHAIN:-base-sepolia}

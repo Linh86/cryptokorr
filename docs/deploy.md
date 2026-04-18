@@ -28,8 +28,9 @@ update this table and the `.env.staging.example` template.
 | `PHX_HOST`             | prod     | `config/runtime.exs`               | External hostname for URL generation.                 |
 | `PHX_SERVER`           | release  | `config/runtime.exs`, `bin/server` | `true` starts the HTTP listener.                      |
 | `PORT`                 | no       | `config/runtime.exs`               | HTTP listen port. Default 4000.                       |
-| `ADAPTER_BASE_URL`     | prod     | `config/runtime.exs`               | URL where Phoenix dispatches to the adapter. Boot fails if missing in `:prod`. |
-| `ADAPTER_AUTH_SECRET`  | prod     | `config/runtime.exs`               | Bearer shared with the adapter (both directions). Boot fails if missing in `:prod`. |
+| `ADAPTER_BASE_URL`         | prod     | `config/runtime.exs`               | URL where Phoenix dispatches to the adapter. Boot fails if missing in `:prod`. |
+| `ADAPTER_DISPATCH_SECRET`  | prod     | `config/runtime.exs`               | Bearer Phoenix sends on outbound `/dispatch/*`. Boot fails if missing in `:prod`. |
+| `ADAPTER_CALLBACK_SECRET`  | prod     | `config/runtime.exs`               | Bearer the adapter sends on inbound `/internal/adapter/callback`. Boot fails if missing in `:prod`. |
 | `POOL_SIZE`            | no       | `config/runtime.exs`               | Ecto pool size. Default 10.                           |
 | `ECTO_IPV6`            | no       | `config/runtime.exs`               | `true`/`1` to bind Ecto sockets over IPv6.            |
 | `DNS_CLUSTER_QUERY`    | no       | `config/runtime.exs`               | DNS query for node clustering via `dns_cluster`.      |
@@ -41,8 +42,10 @@ update this table and the `.env.staging.example` template.
   a `.env` committed anywhere.
 - The repo ships `.env.staging.example` with placeholders — the real
   `.env.staging` is git-ignored.
-- Rotation procedure for `ADAPTER_AUTH_SECRET`: see
-  [docs/security.md](security.md#rotating-adapter_auth_secret).
+- Rotation procedure for `ADAPTER_DISPATCH_SECRET` /
+  `ADAPTER_CALLBACK_SECRET`: see
+  [docs/security.md](security.md#shared-secret-management). Each
+  rotates independently.
 - `SECRET_KEY_BASE` rotation is disruptive (invalidates sessions). Roll
   it only when compromised; generate with `mix phx.gen.secret`.
 
@@ -64,12 +67,12 @@ The happy path:
    non-zero and compose keeps the old one up (pinned image digest).
 4. **Run the smoke checks** from the operator host:
    ```sh
-   ADAPTER_BASE_URL=... ADAPTER_AUTH_SECRET=... \
+   ADAPTER_BASE_URL=... ADAPTER_DISPATCH_SECRET=... ADAPTER_CALLBACK_SECRET=... \
    SMART_ACCOUNT_ID=... DELEGATION_ID=... TARGET_ADDRESS=... \
    mix bank.smoke.transfer
 
-   ADAPTER_BASE_URL=... ADAPTER_AUTH_SECRET=... SMART_ACCOUNT_ID=... \
-   mix bank.smoke.revoke
+   ADAPTER_BASE_URL=... ADAPTER_DISPATCH_SECRET=... ADAPTER_CALLBACK_SECRET=... \
+   SMART_ACCOUNT_ID=... mix bank.smoke.revoke
    ```
    Both must PASS (exit 0) before declaring the deploy healthy.
 5. **Monitor for 10 minutes.** Watch logs, Oban retry counts, and the
