@@ -49,6 +49,29 @@ update this table and the `.env.staging.example` template.
 - `SECRET_KEY_BASE` rotation is disruptive (invalidates sessions). Roll
   it only when compromised; generate with `mix phx.gen.secret`.
 
+## Smart-account provisioning prerequisite
+
+The adapter binds to an on-chain smart account (`SMART_ACCOUNT_ADDRESS`
+in the adapter's env) and, once #58 ships, to a Permission Validator
+module installed against that account
+(`PERMISSION_VALIDATOR_ADDRESS`). Both must exist on the target chain
+**before** any deploy can run end-to-end smokes.
+
+Provisioning is a one-shot operator procedure, not part of the
+release-time release flow. It is documented in
+[`docs/provisioning-kernel-v3.md`](provisioning-kernel-v3.md), with
+operator templates under
+[`cryptobank-ts-adapter/scripts/`](../../cryptobank-ts-adapter/scripts/).
+That runbook is the source of truth; this section is just a deploy-
+time pointer at it. Tracked in #84 (provisioning) and #83 (validator
+ABI verification).
+
+The deploy-time check is `cryptobank-ts-adapter/scripts/check-env.sh`,
+which reports whether the adapter is in `SENTINEL-ERA` mode (no
+validator address bound — fine for v0.1) or `KERNEL-PROVISIONED` mode
+(validator address bound — required once #58 ships). Run it on the
+adapter host before declaring a deploy healthy.
+
 ## Release / update procedure
 
 The happy path:
@@ -78,6 +101,15 @@ The happy path:
 5. **Monitor for 10 minutes.** Watch logs, Oban retry counts, and the
    `/internal/adapter/callback` 4xx rate (see
    [docs/monitoring.md](monitoring.md) once #37 lands).
+
+> **Note on the revoke smoke:** until #58 ships, `bank.smoke.revoke`
+> exercises the adapter's sentinel revoke path (real on-chain anchor,
+> AA callback plumbing) but does NOT cryptographically disable the
+> delegation. A successful smoke under sentinel-era mode does not
+> imply that the on-chain authority is gone — see
+> [docs/smart-account-and-revoke-design.md](smart-account-and-revoke-design.md)
+> and the "Adapter mode" output of
+> `cryptobank-ts-adapter/scripts/check-env.sh`.
 
 ## Rollback
 

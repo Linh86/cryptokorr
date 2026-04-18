@@ -270,7 +270,9 @@ audit, not a window of unguarded execution.
    `last_reason` and the state is the source of truth for whether
    the revoke succeeded:
     - `state: :revoked` — chain confirmed; the revoke attempt
-      succeeded. (Cryptographic enforcement still requires #32.)
+      succeeded. (Cryptographic enforcement still requires the
+      #84 → #83 → #58 sequence; until then, the on-chain anchor is
+      a sentinel UserOp.)
     - `state: :revoke_failed` — chain-level attempt failed; the
       delegation is still live on-chain.
     - `state: :revoking` with no recent callback — adapter is
@@ -313,18 +315,36 @@ audit, not a window of unguarded execution.
   needed; each attempt appends a fresh audit trail.
 - **This sentinel does not cryptographically revoke the delegation
   key at the smart-account level** — that enforcement is tracked in
-  #31 and is blocked on three concrete missing artifacts:
-  (a) a smart-account implementation choice that supports modules
-  (Kernel / Safe / Biconomy Nexus / custom — v0.1 ships against a
-  SimpleAccount-shaped ABI in which the signing key IS the owner);
-  (b) a deployed permission-module address on Base; and
-  (c) the module's revoke ABI plus the `delegation_id` ↔ on-chain
-  authority mapping. Until #31 closes, Phoenix's fail-closed posture
-  is the only safeguard for the delegation key. If the operator
-  cannot get the revoke through and the situation is dangerous, the
-  fallback is to **rotate the smart account's delegation off chain**
-  — an adapter-side operator procedure that lives in the adapter
-  repo.
+  #31 and is currently sequenced through three concrete pieces of
+  work:
+  - **#56 (DECIDED)** — chose Kernel v3 (ERC-7579 modular account)
+    with a Permission Validator module installed against it. See
+    [docs/smart-account-and-revoke-design.md](smart-account-and-revoke-design.md).
+  - **#57 (LANDED, narrowed)** — adapter-side mapping
+    (`delegation_id` ↔ `permissionId`), config key
+    (`PERMISSION_VALIDATOR_ADDRESS` + strict accessor), and the
+    EIP-7579 outer execute envelope. The validator's INNER disable
+    ABI was deliberately not pinned without a verified deployment.
+  - **#84 (provisioning)** — deploy a Kernel v3 smart account on
+    Base + install a Permission Validator against it. Operator
+    runbook: [docs/provisioning-kernel-v3.md](provisioning-kernel-v3.md);
+    templates under `cryptobank-ts-adapter/scripts/`.
+  - **#83 (verification)** — pin the validator's disable ABI
+    against a verified deployment (audit / source / on-chain
+    bytecode hash). The verify script
+    `cryptobank-ts-adapter/scripts/verify-installed-validator.ts`
+    emits the bytecode keccak hash that #83 binds as a tripwire
+    fixture.
+  - **#58 (wiring)** — swap the sentinel inner call for the real
+    disable call in `executeRevoke`. Blocked on #84 + #83.
+
+  Until #58 closes, Phoenix's fail-closed posture (delegations
+  marked `:revoking`/`:revoke_failed`/`:revoked` are non-executable
+  for `RunExecution`) is the only safeguard for the delegation key.
+  If the operator cannot get the revoke through and the situation
+  is dangerous, the fallback is to **rotate the smart account's
+  delegation off chain** — an adapter-side operator procedure that
+  lives in the adapter repo.
 
 ---
 

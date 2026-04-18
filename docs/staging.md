@@ -108,20 +108,34 @@ The in-repo artifacts are ready. What's left is:
 4. **Provision the adapter.** Deploy from the TS adapter repo (see
    that repo's deploy doc). Must be reachable from Phoenix over an
    internal network and vice versa.
-5. **Issue and distribute secrets.** `SECRET_KEY_BASE`,
+5. **Provision the on-chain smart account.** A Kernel v3 modular
+   account on Base, with a Permission Validator module installed
+   against it. This is a one-shot operator procedure — see
+   [`docs/provisioning-kernel-v3.md`](provisioning-kernel-v3.md) for
+   the runbook. The output addresses (`SMART_ACCOUNT_ADDRESS`,
+   `PERMISSION_VALIDATOR_ADDRESS`) feed the adapter's env in step 6.
+   Tracked in #84 (provisioning) and #83 (validator ABI verification);
+   the cryptographic revoke that consumes the validator is #58. Until
+   #58 ships, leaving `PERMISSION_VALIDATOR_ADDRESS` unset is
+   intentional and selects the sentinel revoke path.
+6. **Issue and distribute secrets.** `SECRET_KEY_BASE`,
    `ADAPTER_DISPATCH_SECRET`, `ADAPTER_CALLBACK_SECRET`, bundler API
    keys, paymaster API keys. See [docs/security.md](security.md) for
    the rotation policy.
-6. **Terminate TLS at the ingress.** A standard TLS-terminating load
+7. **Terminate TLS at the ingress.** A standard TLS-terminating load
    balancer in front of each service is sufficient for v0.1; the
    bearer secrets are what authenticate each request. Operators who
    want client-side mTLS as well can wire `req_options.transport_opts`
    on the Phoenix side and a Fastify HTTPS listen on the adapter side
    — both are documented in `docs/security.md`.
-7. **Point a DNS record** at the LB (e.g. `bank-staging.internal`).
-8. **Smoke test end-to-end.** `mix bank.smoke.transfer` +
+8. **Point a DNS record** at the LB (e.g. `bank-staging.internal`).
+9. **Smoke test end-to-end.** `mix bank.smoke.transfer` +
    `mix bank.smoke.revoke` from the operator host; see
-   [docs/smoke-tests.md](smoke-tests.md).
+   [docs/smoke-tests.md](smoke-tests.md). Run
+   `cryptobank-ts-adapter/scripts/check-env.sh` on the adapter host
+   first to confirm whether the deploy is in `SENTINEL-ERA` or
+   `KERNEL-PROVISIONED` mode — the smoke result must be interpreted
+   in light of that mode.
 
 ## Blocker note for issue #35
 

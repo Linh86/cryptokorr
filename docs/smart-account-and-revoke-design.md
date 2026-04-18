@@ -1,6 +1,7 @@
 # Smart-account + permission-model design (alpha)
 
-Tracks: GitHub #56 (decision), #57 (config + ABI + mapping), #58
+Tracks: GitHub #56 (decision), #57 (config + ABI + mapping), #84
+(provisioning), #83 (validator ABI verification), #58
 (implementation), #31 (umbrella).
 
 This document records the architectural decision behind a true
@@ -11,10 +12,14 @@ for that answer; the runbook only describes operator behavior.
 
 ## Status
 
-Decided. Implementation tracked separately in #57 (wire the chosen
-module's address, ABI fragment, and `delegation_id` ↔ on-chain mapping)
+Decided. Implementation tracked through a chain of follow-ups: #57
+(wire the chosen module's mapping, config key, and outer envelope —
+landed, narrowed scope), #84 (provision Kernel v3 + install
+validator on Base — runbook + templates landed; on-chain action
+external), #83 (pin the validator's verified disable ABI fragment),
 and #58 (replace the sentinel inner calldata with a real revoke and
-update the tripwire). #31 stays open until #58 ships end-to-end.
+update the tripwire — depends on #84 + #83). #31 stays open until
+#58 ships end-to-end against a Kernel-provisioned account.
 
 **#57 status — landed (narrowed scope).** The adapter-side
 scaffolding for the parts of the Permission Validator path that are
@@ -73,16 +78,67 @@ calls `buildSentinelRevokeCallData(self)`; no adapter execution logic
 moved at #57. The swap point is marked inline with a `TODO(#58)`
 block enumerating the remaining sub-prereqs.
 
-#58 remains pending. It is NOT a one-liner: it has three sub-prereqs
-in order — (a) migrate the live smart account from SimpleAccount to
-Kernel v3 / ERC-7579 on Base, (b) pick + verify a Permission
-Validator deployment, capture its disable ABI fragment + selector
-against the deployed bytecode, and add a tripwire test pinning that
-fragment alongside `permission_validator.ts`, (c) wire `executeRevoke`
-to call
-`buildErc7579ExecuteCallData(validatorAddress, 0n, <verified inner
-disable body>)`, update the sentinel-pin tripwire, and run the full
-revoke flow end-to-end. When that lands, #31 closes.
+**#84 status — provisioning runbook + templates landed; no on-chain
+state changed.** The work that #58 marks as sub-prereq (a) — migrate
+the live smart account from SimpleAccount to Kernel v3 — is itself
+not adapter code work; it is operator action against Base. #84
+delivers the operator-facing artifacts that make that action
+reproducible and verifiable, without faking a deployment that needs
+real funded keys + RPC + bundler credentials this repo does not have:
+
+- **Operator runbook.** [`docs/provisioning-kernel-v3.md`](provisioning-kernel-v3.md)
+  — the step-by-step procedure for deploying a Kernel v3 modular
+  account on Base, deploying / picking a Permission Validator,
+  installing it against the account, verifying the install, and
+  binding the resulting addresses to the adapter's runtime env.
+  Sequenced Sepolia-first then mainnet promotion.
+- **Provisioning template.**
+  [`cryptobank-ts-adapter/scripts/provision-kernel.ts`](../../cryptobank-ts-adapter/scripts/provision-kernel.ts)
+  — viem-based template with the ZeroDev SDK call sequence
+  documented inline as comments. Two phases gated on
+  `INSTALL_VALIDATOR=true` so Phase 1 (deploy account) can be
+  verified before committing to Phase 2 (install validator). Refuses
+  to run with placeholder env values.
+- **Verification template.**
+  [`cryptobank-ts-adapter/scripts/verify-installed-validator.ts`](../../cryptobank-ts-adapter/scripts/verify-installed-validator.ts)
+  — read-only check that the smart account has bytecode, the
+  validator has bytecode, and the smart account reports the
+  validator as installed via the ERC-7579 standard
+  `isModuleInstalled(uint256, address, bytes)` (moduleType=1). Emits
+  the validator's bytecode keccak256 — that hash is the artifact
+  #83 pins as a tripwire fixture.
+- **Env hygiene.**
+  [`cryptobank-ts-adapter/scripts/check-env.sh`](../../cryptobank-ts-adapter/scripts/check-env.sh)
+  — confirms every required adapter env is set and reports whether
+  the host is in `SENTINEL-ERA` mode (no validator address) or
+  `KERNEL-PROVISIONED` mode. Run it from the staging deploy
+  procedure before declaring a deploy healthy.
+- **Doc cross-references.** `docs/deploy.md`, `docs/staging.md`,
+  `docs/incident-runbook.md`, and the adapter `README.md` /
+  `.env.example` now point at the runbook + scripts. The adapter's
+  scripts directory is excluded from the runtime build and tests
+  (tsconfig + vitest) — these artifacts are intentionally
+  documentation-that-runs, not runtime code.
+
+#84 deliberately does NOT pin a vendor-specific factory address or
+bind a real `SMART_ACCOUNT_ADDRESS` / `PERMISSION_VALIDATOR_ADDRESS`
+into the runtime config. Those values are operator-supplied at
+provisioning time, with the runbook as the contract.
+
+#58 remains pending and now has a clearer chain of prereqs:
+
+- **(a) Provisioned Kernel v3 smart account on Base.** Tracked in
+  #84. The runbook is in place; on-chain action belongs to an
+  operator with funded keys.
+- **(b) Pinned validator disable ABI fragment.** Tracked in #83.
+  The bytecode hash from `verify-installed-validator.ts` is the
+  artifact that fixture binds to.
+- **(c) Wire `executeRevoke` to call
+  `buildErc7579ExecuteCallData(validatorAddress, 0n, <verified
+  inner disable body>)`.** Update the sentinel-pin tripwire and run
+  the full revoke flow end-to-end. This is #58 itself.
+
+When (a)+(b)+(c) all land, #31 closes.
 
 ## Decision
 
