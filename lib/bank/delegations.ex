@@ -62,11 +62,17 @@ defmodule Bank.Delegations do
   path.
 
   The decision behind that mapping lives in
-  `docs/smart-account-and-revoke-design.md` (#56); the adapter-side
-  ABI fragment, mapping helpers, and tripwire test landed under
-  GitHub #57. Pre-Kernel grants continue to use the v0.1 `del_…`
-  placeholder shape and remain stuck on the sentinel revoke until
-  the smart account is migrated.
+  `docs/smart-account-and-revoke-design.md` (#56). What landed under
+  #57 is the verifiable scaffolding — the `delegation_id` ↔
+  `permissionId` mapping helpers, the ERC-7579 outer execute envelope
+  pin, the strict adapter env accessor for the validator address, and
+  tripwire tests pinning each. The Permission Validator's own disable
+  ABI was deliberately not pinned at #57: it depends on the specific
+  validator deployment #58 picks, and pinning a function name without
+  a verified deployment would surface as a silent on-chain revert at
+  the first real revoke. Pre-Kernel grants continue to use the v0.1
+  `del_…` placeholder shape and remain stuck on the sentinel revoke
+  until the smart account is migrated.
 
   ## Public API
 

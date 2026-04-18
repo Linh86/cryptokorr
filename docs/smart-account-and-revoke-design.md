@@ -16,26 +16,42 @@ module's address, ABI fragment, and `delegation_id` ↔ on-chain mapping)
 and #58 (replace the sentinel inner calldata with a real revoke and
 update the tripwire). #31 stays open until #58 ships end-to-end.
 
-**#57 status — landed.** The adapter-side scaffolding for the
-Permission Validator is in place:
+**#57 status — landed (narrowed scope).** The adapter-side
+scaffolding for the parts of the Permission Validator path that are
+verifiable today, independently of any specific validator
+deployment, is in place:
 
-- ABI fragment + selector pin:
+- **Mapping convention.** `delegation_id` ↔ `permissionId` round
+  trip in
   [`cryptobank-ts-adapter/src/chains/base/permission_validator.ts`](../../cryptobank-ts-adapter/src/chains/base/permission_validator.ts)
-  exports `KERNEL_PERMISSION_VALIDATOR_ABI` (`disablePermission(bytes32)`,
-  selector `0x727e011e`) and `KERNEL_PERMISSION_DISABLE_FUNCTION`.
-- `delegation_id` ↔ `permissionId` mapping helpers
-  (`permissionIdFromDelegationId`, `delegationIdFromPermissionId`) plus
-  the inner-disable encoder (`encodePermissionDisable`) and the full
-  outer-wrap helper (`buildKernelPermissionDisableCallData`) that #58
-  will plug into `executeRevoke`.
-- Adapter env key `PERMISSION_VALIDATOR_ADDRESS` (optional in v0.1)
-  and a strict accessor `requirePermissionValidatorAddress(config)`
-  that throws a `#58`-referencing error when unset, so the live
-  revoke cannot silently degrade back to a sentinel after #58 ships.
-- Tripwire test
+  (`permissionIdFromDelegationId`, `delegationIdFromPermissionId`).
+  The convention — lowercase 0x-prefixed hex form of `bytes32`, 66
+  chars total — is our design choice and does not depend on which
+  Permission Validator deployment #58 picks. Pre-Kernel `del_…`
+  placeholder ids are rejected explicitly so a Kernel revoke against
+  one fails loudly rather than silently degrading.
+- **ERC-7579 outer envelope.** Pinned in
+  [`cryptobank-ts-adapter/src/chains/base/erc7579.ts`](../../cryptobank-ts-adapter/src/chains/base/erc7579.ts)
+  against EIP-7579's normative `execute(bytes32 mode, bytes
+  executionCalldata)` signature (selector `0xe9ae5c53`), the
+  all-zeros single-call ModeCode, and the packed body layout
+  `target ‖ value ‖ callData`. Distinct from the SimpleAccount
+  envelope (`execute(address,uint256,bytes)`, selector `0xb61d27f6`)
+  the v0.1 paths use today, so a Kernel call cannot be wrapped with
+  the wrong outer shape by accident.
+- **Adapter env key + strict accessor.** `PERMISSION_VALIDATOR_ADDRESS`
+  (optional in v0.1) plus
+  `requirePermissionValidatorAddress(config)` that throws a
+  `#58`-referencing error when unset — so the live revoke cannot
+  silently degrade back to a sentinel after #58 ships.
+- **Tripwire tests.**
   [`cryptobank-ts-adapter/test/permission-validator.test.ts`](../../cryptobank-ts-adapter/test/permission-validator.test.ts)
-  pins the ABI signature, selector, mapping round trip, and encoder
-  output byte-for-byte against the canonical Phoenix fixture
+  pins the mapping round trip and the strict accessor;
+  [`cryptobank-ts-adapter/test/erc7579.test.ts`](../../cryptobank-ts-adapter/test/erc7579.test.ts)
+  pins the ERC-7579 selector, mode constant, packed body shape, and
+  structural distinction from the SimpleAccount envelope.
+- **Fixture.** The mapping is pinned byte-for-byte against the
+  canonical Phoenix fixture
   [`priv/adapter/fixtures/permission_id_mapping.json`](../priv/adapter/fixtures/permission_id_mapping.json).
 - Phoenix-side, no schema or runtime change is needed:
   `delegations.delegation_id` is already a free-form string column,
@@ -43,16 +59,30 @@ Permission Validator is in place:
   `priv/adapter/contract.md`, the delegation moduledocs) and the
   fixture above.
 
+**What #57 deliberately did NOT pin: the validator's own disable
+ABI.** The Permission Validator's per-permission disable function
+name + selector + ABI fragment depends on the specific deployment
+#58 picks. Pinning a name like `disablePermission(bytes32)` from a
+plausible reference implementation, without verifying it against the
+bytecode of an actual deployment we will use, would be speculation;
+a wrong selector would surface as a silent on-chain revert at the
+first real revoke. That pin is part of #58 and gates the swap below.
+
 **Sentinel revoke path is unchanged.** The live `executeRevoke` still
 calls `buildSentinelRevokeCallData(self)`; no adapter execution logic
 moved at #57. The swap point is marked inline with a `TODO(#58)`
-block showing the exact replacement.
+block enumerating the remaining sub-prereqs.
 
-#58 remains pending: it deploys / pins a Permission Validator
-address on Base, swaps the sentinel inner call for
-`buildKernelPermissionDisableCallData(requirePermissionValidatorAddress(config), permissionIdFromDelegationId(delegationId))`,
-updates the sentinel-pin tripwire, and runs the full revoke flow
-end-to-end. When that lands, #31 closes.
+#58 remains pending. It is NOT a one-liner: it has three sub-prereqs
+in order — (a) migrate the live smart account from SimpleAccount to
+Kernel v3 / ERC-7579 on Base, (b) pick + verify a Permission
+Validator deployment, capture its disable ABI fragment + selector
+against the deployed bytecode, and add a tripwire test pinning that
+fragment alongside `permission_validator.ts`, (c) wire `executeRevoke`
+to call
+`buildErc7579ExecuteCallData(validatorAddress, 0n, <verified inner
+disable body>)`, update the sentinel-pin tripwire, and run the full
+revoke flow end-to-end. When that lands, #31 closes.
 
 ## Decision
 
@@ -225,29 +255,38 @@ After #58 ships:
 ## What revoke must call
 
 The contract-level revoke is a single ERC-7579 call against the
-Permission Validator, wrapped in the smart account's `execute`:
+Permission Validator, wrapped in the smart account's standard
+ERC-7579 `execute` envelope:
 
 ```
 smartAccount.execute(
-  PERMISSION_VALIDATOR_ADDRESS,
-  0,
-  encodePermissionDisable(permissionId)
+  ERC_7579_SINGLE_CALL_MODE,           // bytes32: 0x000…000
+  abi.encodePacked(
+    PERMISSION_VALIDATOR_ADDRESS,      // 20 bytes
+    uint256(0),                        // 32 bytes
+    encodePermissionDisable(permissionId)
+  )
 )
 ```
 
 Where `encodePermissionDisable` is the ABI-encoded call to the
-Permission Validator's permission-disable entry. The exact function
-selector, signature, and `permissionId` derivation are #57's
-responsibility — those depend on the specific validator deployment
-chosen and are deliberately not pinned here, because pinning a
-specific selector before #57 has confirmed module availability would
-be premature.
+Permission Validator's permission-disable entry. The function name +
+selector + ABI shape of that inner call depend on the specific
+validator deployment #58 picks and are deliberately not pinned here
+or in `permission_validator.ts`, because pinning a specific selector
+before a deployment is verified would surface as a silent on-chain
+revert at the first real revoke. The OUTER ERC-7579 envelope IS
+pinned (in `cryptobank-ts-adapter/src/chains/base/erc7579.ts`)
+because it is normative in EIP-7579 and stable across every
+candidate ERC-7579 implementation.
 
-The outer `execute(target, value, data)` envelope is unchanged from
-v0.1 — the adapter already wraps every action that way. Once #58
-swaps the inner calldata, the entire AA pipeline (UserOperation
-build, sign, bundler submit, receipt wait, callback emission) is
-the same code path that already runs for transfers.
+Note that the outer `execute(bytes32, bytes)` envelope above is
+**structurally distinct** from the v0.1 SimpleAccount-shaped
+`execute(address, uint256, bytes)` envelope (selectors `0xe9ae5c53`
+vs `0xb61d27f6` respectively). The smart-account migration in #58
+swaps the outer envelope as well as the inner body. The AA pipeline
+itself (UserOperation build, sign, bundler submit, receipt wait,
+callback emission) is unchanged — only `callData` differs.
 
 ## What does NOT need to change
 
@@ -269,14 +308,24 @@ These are explicitly stable across #57/#58:
 - **Adapter idempotency** — in-flight set keyed by
   `smart_account_id` continues to suppress duplicate sends.
 
-The only thing that changes at the byte level is the inner calldata
-returned by `buildSentinelRevokeCallData` (renamed at that point to
-`buildPermissionDisableCallData` or similar). The tripwire test
+What changes at the byte level is the entire `callData` field of the
+revoke UserOperation: the OUTER envelope swaps from SimpleAccount's
+`execute(address,uint256,bytes)` (selector `0xb61d27f6`) to
+ERC-7579's `execute(bytes32,bytes)` (selector `0xe9ae5c53`), and the
+INNER body swaps from a no-op self-call to a verified Permission
+Validator disable. The tripwire test
 `test/base-revoke-sentinel-pin.test.ts` exists to fail loudly at
 that exact moment and force whoever lands #58 to update this doc,
 the contract spec, and the runbook in lockstep.
 
-## Implementation target for #57
+## Implementation target for #57 (as originally scoped)
+
+> **Update — 2026-04-18.** #57 ultimately landed in narrowed form
+> after a deep review found that pinning the Permission Validator's
+> disable ABI fragment was speculative without a verified deployment
+> to bind it against. See the **#57 status — landed (narrowed scope)**
+> subsection above for what actually shipped, and what was deferred
+> to #58. The original target list below is preserved for context.
 
 #57 is the bridge between this decision and the implementable
 revoke. It must land:
@@ -284,30 +333,44 @@ revoke. It must land:
 1. **Smart-account provisioning notes** — how the operator deploys a
    Kernel v3 account on Base, installs the Permission Validator, and
    binds the resulting addresses to adapter env. Either as a section
-   in `docs/deploy.md` or as a sibling doc; either is fine.
+   in `docs/deploy.md` or as a sibling doc; either is fine. *(Status:
+   deferred to #58 — the operator workflow depends on the chosen
+   validator deployment, which is part of #58.)*
 2. **Adapter env keys** — at minimum
    `PERMISSION_VALIDATOR_ADDRESS` (Base mainnet address of the
    chosen Permission Validator). Document fallback behavior in the
    adapter when unset (must fail closed at startup, not at request
    time, since the missing module would silently degrade revoke
-   back to a sentinel).
+   back to a sentinel). *(Status: landed in #57 with a strict
+   per-revoke-call accessor in place of a startup gate, since
+   leaving the env unset must remain valid in v0.1 — the live
+   sentinel path does not read it.)*
 3. **Module ABI fragment** — the Permission Validator's
    permission-disable signature, captured as a TypeScript ABI in the
    adapter alongside the existing `SIMPLE_ACCOUNT_EXECUTE_ABI`. Pin
    the exact signature in a Zod schema or unit test so a typo
-   surfaces at build time.
+   surfaces at build time. *(Status: deferred to #58 — pinning a
+   specific function name + selector before the deployment is
+   verified would surface as a silent on-chain revert at the first
+   real revoke; #57 instead pinned the verifiable ERC-7579 OUTER
+   `execute(bytes32,bytes)` envelope, which is normative across
+   every ERC-7579 deployment.)*
 4. **`delegation_id` ↔ `permissionId` mapping** — Phoenix already
    stores `delegation_id` as a string. #57 documents that this
    string is the hex-encoded `bytes32 permissionId` returned at
    permission-install time, and verifies the round trip with a
-   contract test against the canonical Phoenix fixtures.
+   contract test against the canonical Phoenix fixtures. *(Status:
+   landed in #57.)*
 5. **Contract-doc alignment** — `priv/adapter/contract.md` updated
    to describe the new revoke call shape and reference this ADR.
+   *(Status: landed in #57 with the narrowed-scope language.)*
 
-#58 then becomes a small, focused change: swap the sentinel encoder
-for a real one, update the tripwire pin, and run the full end-to-end
-revoke flow against a Kernel-shaped account on a test network. When
-#58 lands, #31 closes.
+#58 then becomes a focused but multi-step change: pick + verify a
+Permission Validator deployment, pin its disable ABI fragment in a
+new tripwire test, swap the sentinel encoder for the real
+ERC-7579-wrapped disable call, update the existing sentinel-pin
+tripwire, and run the full end-to-end revoke flow against a
+Kernel-shaped account on a test network. When #58 lands, #31 closes.
 
 ## Why this fits the bank runtime model
 

@@ -33,8 +33,11 @@ defmodule Bank.Delegations.Delegation do
   account, fresh `delegation_id` values are the lowercase
   0x-prefixed hex form of the Permission Validator's `bytes32
   permissionId` (66 chars total). The full mapping rationale lives
-  in `docs/smart-account-and-revoke-design.md` (#56); the adapter
-  helpers that implement the round trip landed under #57.
+  in `docs/smart-account-and-revoke-design.md` (#56); the
+  `delegation_id` ↔ `permissionId` round-trip helpers and the
+  ERC-7579 outer-execute pin landed under #57. The validator's own
+  disable ABI is pinned later, by #58, against a specific verified
+  deployment — see the adapter's `permission_validator.ts` for why.
   """
 
   use Bank.Schema
