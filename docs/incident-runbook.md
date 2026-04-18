@@ -313,12 +313,18 @@ audit, not a window of unguarded execution.
   needed; each attempt appends a fresh audit trail.
 - **This sentinel does not cryptographically revoke the delegation
   key at the smart-account level** — that enforcement is tracked in
-  #32 (smart-account permission module). Until #32 ships, Phoenix's
-  fail-closed posture is the only safeguard for the delegation key.
-  If the operator cannot get the revoke through and the situation is
-  dangerous, the fallback is to **rotate the smart account's
-  delegation off chain** — an adapter-side operator procedure that
-  lives in the adapter repo.
+  #31 and is blocked on three concrete missing artifacts:
+  (a) a smart-account implementation choice that supports modules
+  (Kernel / Safe / Biconomy Nexus / custom — v0.1 ships against a
+  SimpleAccount-shaped ABI in which the signing key IS the owner);
+  (b) a deployed permission-module address on Base; and
+  (c) the module's revoke ABI plus the `delegation_id` ↔ on-chain
+  authority mapping. Until #31 closes, Phoenix's fail-closed posture
+  is the only safeguard for the delegation key. If the operator
+  cannot get the revoke through and the situation is dangerous, the
+  fallback is to **rotate the smart account's delegation off chain**
+  — an adapter-side operator procedure that lives in the adapter
+  repo.
 
 ---
 

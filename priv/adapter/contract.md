@@ -24,10 +24,10 @@ staging or production deploy pipeline.
 ## Status (issue #31)
 
 **Issue #31 is NOT closed.** A true contract-level delegation revoke
-requires the smart-account permission module from #32, which is not
-wired in this repo. The work under #31 improves the revoke plumbing
-and state model so Phoenix stays truthful while the real primitive is
-missing, but does not provide cryptographic revocation.
+is blocked on three concrete missing artifacts — see the **Still
+deferred** subsection below for the exact list. The work under #31
+keeps the revoke plumbing and state model truthful while those are
+missing; it does NOT provide cryptographic revocation.
 
 The adapter submits a **sentinel self-transfer of 0 wei** on Base.
 The sentinel is NOT a cryptographic revocation — it is a real
@@ -106,17 +106,35 @@ What landed under #31:
 
 **Still deferred (blocker for closing #31):**
 
-- Cryptographic revocation at the smart-account level. The sentinel
-  user-op does not prevent the delegation key from signing another
-  user-op — there is no permission-module ABI to call. When that
-  module ships, the only adapter-side change is the inner calldata:
-  swap `execute(self, 0, 0x)` for
-  `execute(permissionModule, 0, revokeSignature(delegationId))`.
-  Phoenix's callback contract and state machine do NOT need to
-  change.
-- Phoenix continues to treat `revoked` (via the sentinel path) as
-  "on-chain anchored, trust downgraded", NOT as "cryptographically
-  impossible". Fail-closed posture is unchanged until #31 closes.
+Cryptographic revocation at the smart-account level. The sentinel
+user-op does not prevent the delegation key from signing another
+user-op. **Three concrete artifacts are missing**, and #31 stays
+open until all three land:
+
+1. **Smart-account implementation choice.** v0.1 ships against a
+   SimpleAccount-shaped `execute(target, value, data)` ABI. In
+   SimpleAccount the signing key IS the owner — there is no separate
+   delegation authority to disable. A modular smart-account
+   implementation (Kernel / Safe / Biconomy Nexus / custom) is a
+   prerequisite.
+2. **Deployed permission-module address on Base**, surfaced as a
+   config key on the adapter (TBD; e.g. `PERMISSION_MODULE_ADDRESS`).
+3. **Module revoke ABI** plus the `delegation_id` ↔ on-chain
+   authority-record mapping the adapter must use to identify which
+   authority to disable.
+
+When those land the only adapter-side change is the inner calldata:
+swap `buildSentinelRevokeCallData(self)` for
+`buildExecuteCallData(permissionModule, 0n, encodePermissionModuleRevoke(delegationId))`.
+Phoenix's callback contract and state machine do NOT need to change.
+The adapter's tripwire test
+(`test/base-revoke-sentinel-pin.test.ts`) will fail loudly the
+moment the inner call shape changes, forcing whoever makes the
+change to also update this contract, the runbook, and close #31.
+
+Phoenix continues to treat `revoked` (via the sentinel path) as
+"on-chain anchored, trust downgraded", NOT as "cryptographically
+impossible". Fail-closed posture is unchanged until #31 closes.
 
 ## Status (issue #32)
 
