@@ -180,6 +180,13 @@ failures. Matches the enum already used by
   failed, signer rejected). `tx_refs` is empty.
 - `bundler_rejected` — bundler refused the userop (sim failure,
   insufficient prefund, invalid signature).
+- `bundler_hash_mismatch` — the bundler accepted the user-op but
+  returned a hash that disagrees with the locally computed canonical
+  EIP-4337 hash. Treated as a contract / infrastructure error
+  (buggy bundler, MITM proxy, or chain-id divergence). The adapter
+  fails closed before emitting `execution.broadcast` so Phoenix
+  never anchors a misleading user-op hash. `tx_refs` is empty;
+  the `reason` includes both hashes for the operator.
 - `paymaster_denied` — sponsored flow denied by the paymaster policy.
   (Paymaster support itself is not yet wired in v0.1; reserved for
   when sponsored flow lands.)
@@ -205,6 +212,10 @@ The sentinel revoke path emits `delegation.state_changed` with
 
 - `userop_build_failed: <detail>`
 - `bundler_rejected: <detail>`
+- `bundler_hash_mismatch: <detail>` — same semantics as the
+  transfer path: locally computed user-op hash diverged from the
+  bundler-returned hash; adapter aborts before emitting any other
+  callback. `tx_refs` is empty.
 - `confirmation_failed: <detail>` — `tx_refs` carries
   `userop_hash` with `status: "unknown"`.
 - `sentinel_reverted` (or the bundler-reported revert reason) — the
