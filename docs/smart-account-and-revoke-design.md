@@ -125,6 +125,60 @@ bind a real `SMART_ACCOUNT_ADDRESS` / `PERMISSION_VALIDATOR_ADDRESS`
 into the runtime config. Those values are operator-supplied at
 provisioning time, with the runbook as the contract.
 
+**#83 status — blocker on operator artifact; pin contract documented;
+no validator interface pinned.** The work that #58 marks as sub-prereq
+(b) — verify the Permission Validator deployment artifact and pin the
+disable ABI fragment + selector — cannot be done from this environment
+because the prerequisite chain-side artifact does not yet exist:
+
+- No operator has executed `provision-kernel.ts` (#84) end-to-end
+  against Base, so there is no `PERMISSION_VALIDATOR_ADDRESS` bound
+  to a real deployment, no `eth_getCode` to hash, and no Basescan
+  page to verify against. `verify-installed-validator.ts` is the
+  read-only check that produces the chain-side input #83 needs; until
+  it has been run by an operator, #83 has nothing concrete to bind to.
+- No canonical audited package is installed in the adapter — the
+  package.json deps remain `viem`, `fastify`, `zod`. Adding a
+  speculative SDK dependency just to lift an ABI from it would not
+  satisfy the artifact rule (the fragment must be tied to one
+  specific deployed validator's bytecode hash, not "the SDK we hope
+  matches").
+- No vendor-published deployment manifest pinning bytecode hash + ABI
+  is available in either repo.
+
+What landed under #83 to make the eventual pin frictionless when the
+artifact arrives, without introducing speculation:
+
+- **Pin contract.** [`cryptobank-ts-adapter/src/chains/base/permission_validator.ts`](../../cryptobank-ts-adapter/src/chains/base/permission_validator.ts)
+  now documents the exact `VerifiedPermissionValidator` shape #83's
+  pin must populate: `chainId`, `address`, `deployedBytecodeKeccak256`,
+  `artifactSource{kind,url,note}`, and the `disableFunction` ABI
+  fragment. The contract specifies the four allowed `artifactSource.kind`
+  values, the bytecode-tripwire behaviour the runtime will enforce
+  on startup, and what #83 MUST NOT do (pin from a plausible name
+  without provenance; pin against an undeployed chain).
+- **Receipt → pin handoff.** [`cryptobank-ts-adapter/scripts/verify-installed-validator.ts`](../../cryptobank-ts-adapter/scripts/verify-installed-validator.ts)
+  emits a JSON receipt whose three load-bearing fields
+  (`chain_id`, `permission_validator_address`,
+  `permission_validator_bytecode_keccak256`) map 1:1 to the
+  `chainId` / `address` / `deployedBytecodeKeccak256` fields of the
+  pin contract. It also prints a `chain_explorer_url` (Basescan or
+  Sepolia Basescan) for the operator to paste-verify the contract
+  source from, plus a "Next steps for #83" instruction block that
+  describes the chain-side vs artifact-side handoff explicitly.
+- **Sub-prereq enumeration.** The `TODO(#58)` block in
+  [`cryptobank-ts-adapter/src/chains/base/revoke.ts`](../../cryptobank-ts-adapter/src/chains/base/revoke.ts)
+  now references #84 (provisioning), #83 (artifact + ABI pin), and
+  #58 (the wire-up here) so the next implementer sees the full
+  tracked chain.
+
+#83 deliberately does NOT pin a function name or selector. The
+specific function signature (`disablePermission(bytes32)`,
+`revokePermission(bytes32)`, `_revokePermission(uint256,bytes32)`,
+or anything else) depends entirely on which validator the operator
+actually installs and verifies against — the pin lands when the
+artifact lands, not before.
+
 #58 remains pending and now has a clearer chain of prereqs:
 
 - **(a) Provisioned Kernel v3 smart account on Base.** Tracked in

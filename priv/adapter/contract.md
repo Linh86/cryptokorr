@@ -150,16 +150,23 @@ The remaining work is split across three concrete follow-up issues:
    (`priv/adapter/fixtures/permission_id_mapping.json`) — no schema
    or runtime change is needed because `delegations.delegation_id`
    was already a free-form string column.
-3. **#58 — pending. NOT a one-liner.** Three sub-prereqs in order:
-   (a) migrate the live smart account from the v0.1 SimpleAccount
-   shape to a Kernel v3 / ERC-7579 deployment on Base; (b) pick +
-   verify a Permission Validator deployment, capture its disable
-   ABI fragment + selector against the deployed bytecode, and add
-   a tripwire test pinning that fragment alongside
-   `permission_validator.ts`; (c) wire `executeRevoke` to call
+3. **#58 — pending. NOT a one-liner.** Three sub-prereqs in order,
+   each tracked separately so the prerequisites do not silently bundle:
+   (a) provision a Kernel v3 / ERC-7579 deployment on Base and install
+   a Permission Validator against it — **tracked in #84** (runbook +
+   templates landed; on-chain action operator-side); (b) verify the
+   Permission Validator deployment artifact and pin its disable ABI
+   fragment + selector against a concrete artifact (verified contract
+   / canonical audited package / vendor-published deployment manifest),
+   add a tripwire test pinning that fragment alongside
+   `permission_validator.ts` — **tracked in #83** (pin contract
+   documented in
+   `cryptobank-ts-adapter/src/chains/base/permission_validator.ts`
+   under "What #83 must populate"; blocker is the chain-side artifact
+   from #84); (c) wire `executeRevoke` to call
    `buildErc7579ExecuteCallData(validatorAddress, 0n, <verified
-   inner disable body>)` and update the sentinel-pin tripwire. The
-   swap point is marked inline in
+   inner disable body>)` and update the sentinel-pin tripwire —
+   **tracked in #58 itself**. The swap point is marked inline in
    `cryptobank-ts-adapter/src/chains/base/revoke.ts` with a
    `TODO(#58)` block enumerating those three sub-prereqs.
 
