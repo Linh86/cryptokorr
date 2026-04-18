@@ -47,6 +47,15 @@ config :bank, Bank.AdapterClient,
   callback_secret: "test-adapter-callback-secret",
   req_options: [plug: {Req.Test, Bank.AdapterClient}]
 
+# Telegram operator bot (epic #54): disabled by default under the test
+# env. Tests that exercise the config boundary opt in explicitly via
+# `Application.put_env/3` under `async: false` — see
+# test/bank/telegram/config_test.exs.
+config :bank, Bank.Telegram.Config,
+  enabled: false,
+  bot_token: nil,
+  operators: []
+
 # Disable the operational health telemetry poller in tests.
 # `Bank.Ops.Health.emit_telemetry/0` issues an HTTP call to the
 # adapter via `Req.Test`, whose stubs are per-process. The poller
