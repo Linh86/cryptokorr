@@ -89,6 +89,72 @@ case config_env() do
     :ok
 end
 
+# Bank.Telegram.Config: identity / allowlist / role / secrets boundary
+# for the operator Telegram bot (epic #54, issue #70).
+#
+#   * TELEGRAM_BOT_ENABLED must be the literal string "true" to enable
+#     the bot in :prod. Anything else is treated as disabled so a boot
+#     with a missing value fails closed.
+#   * TELEGRAM_BOT_TOKEN is the bot token issued by BotFather. Required
+#     when enabled; rotated on staff change or milestone end.
+#   * TELEGRAM_OPERATORS is a pipe-separated allowlist of
+#     USER_ID:CHAT_ID:ROLE:AUDIT_ACTOR records. Roles: viewer,
+#     approver, security_operator, admin. See
+#     `Bank.Telegram.Config.parse_operators_env!/1`.
+#
+# When the bot is explicitly disabled we still write a well-formed
+# config with `enabled: false` so `Bank.Telegram.Config.load/0` can
+# return a deterministic answer without touching env again.
+#
+# dev and test use the defaults in their own config files; env-var
+# overrides are not currently honored there to keep local boots
+# reproducible.
+case config_env() do
+  :prod ->
+    telegram_enabled = System.get_env("TELEGRAM_BOT_ENABLED") == "true"
+
+    if telegram_enabled do
+      bot_token =
+        System.get_env("TELEGRAM_BOT_TOKEN") ||
+          raise """
+          environment variable TELEGRAM_BOT_TOKEN is missing.
+          TELEGRAM_BOT_ENABLED=true requires a bot token issued by
+          BotFather. Rotate on staff change or milestone end.
+          """
+
+      operators_raw =
+        System.get_env("TELEGRAM_OPERATORS") ||
+          raise """
+          environment variable TELEGRAM_OPERATORS is missing.
+
+          Format: pipe-separated records, each record colon-separated:
+            USER_ID:CHAT_ID:ROLE:AUDIT_ACTOR
+
+          ROLE is one of: viewer, approver, security_operator, admin.
+          Example:
+            100200300:100200300:approver:ops-alice|100200301:-1001234567890:security_operator:ops-bob
+
+          To disable the bot, set TELEGRAM_BOT_ENABLED to anything other
+          than "true" instead of leaving this empty.
+          """
+
+      operators = Bank.Telegram.Config.parse_operators_env!(operators_raw)
+
+      config :bank, Bank.Telegram.Config,
+        enabled: true,
+        bot_token: bot_token,
+        operators: operators
+    else
+      config :bank, Bank.Telegram.Config,
+        enabled: false,
+        bot_token: nil,
+        operators: []
+    end
+
+  _ ->
+    :ok
+end
+
 if config_env() == :prod do
   database_url =
     System.get_env("DATABASE_URL") ||

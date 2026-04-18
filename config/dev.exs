@@ -94,3 +94,12 @@ config :bank, Bank.AdapterClient,
   dispatch_secret: "dev-adapter-dispatch-secret",
   callback_secret: "dev-adapter-callback-secret",
   req_options: []
+
+# Telegram operator bot (epic #54): disabled by default in dev.
+# Flip `enabled: true` and populate `operators` locally to exercise the
+# bot against a development chat. Production wiring is env-driven in
+# config/runtime.exs; see `Bank.Telegram.Config`.
+config :bank, Bank.Telegram.Config,
+  enabled: false,
+  bot_token: nil,
+  operators: []
