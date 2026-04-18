@@ -151,7 +151,8 @@ defmodule BankWeb.ApiSpec do
     {"Policies", "Policy catalog, revisions, and archival."},
     {"Audit", "Append-only runtime audit event stream."},
     {"Security", "Runtime pause, resume, and delegation revoke."},
-    {"Connect", "Browser-wallet / smart-account connection scaffolding."}
+    {"Connect", "Browser-wallet / smart-account connection scaffolding."},
+    {"Health", "Readiness and deep operational-health probes under `/v1/health`."}
   ]
 
   @impl OpenApi
@@ -166,7 +167,7 @@ defmodule BankWeb.ApiSpec do
     }
   end
 
-  @doc "The ten external-domain tag names. Canonical, used by tests and later issues."
+  @doc "Canonical top-level tag names (ten business domains + `Health`)."
   @spec domain_tag_names() :: [String.t()]
   def domain_tag_names, do: Enum.map(@domain_tags, fn {name, _} -> name end)
 
