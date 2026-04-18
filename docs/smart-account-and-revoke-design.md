@@ -71,7 +71,7 @@ name + selector + ABI fragment depends on the specific deployment
 plausible reference implementation, without verifying it against the
 bytecode of an actual deployment we will use, would be speculation;
 a wrong selector would surface as a silent on-chain revert at the
-first real revoke. That pin is part of #58 and gates the swap below.
+first real revoke. That pin is part of #83 and gates the #58 swap below.
 
 **Sentinel revoke path is unchanged.** The live `executeRevoke` still
 calls `buildSentinelRevokeCallData(self)`; no adapter execution logic
@@ -444,8 +444,9 @@ revoke. It must land:
    Kernel v3 account on Base, installs the Permission Validator, and
    binds the resulting addresses to adapter env. Either as a section
    in `docs/deploy.md` or as a sibling doc; either is fine. *(Status:
-   deferred to #58 — the operator workflow depends on the chosen
-   validator deployment, which is part of #58.)*
+   deferred to #84 — the operator workflow depends on provisioning a
+   Kernel v3 account on Base and installing a Permission Validator
+   against it.)*
 2. **Adapter env keys** — at minimum
    `PERMISSION_VALIDATOR_ADDRESS` (Base mainnet address of the
    chosen Permission Validator). Document fallback behavior in the
@@ -459,7 +460,7 @@ revoke. It must land:
    permission-disable signature, captured as a TypeScript ABI in the
    adapter alongside the existing `SIMPLE_ACCOUNT_EXECUTE_ABI`. Pin
    the exact signature in a Zod schema or unit test so a typo
-   surfaces at build time. *(Status: deferred to #58 — pinning a
+   surfaces at build time. *(Status: deferred to #83 — pinning a
    specific function name + selector before the deployment is
    verified would surface as a silent on-chain revert at the first
    real revoke; #57 instead pinned the verifiable ERC-7579 OUTER
