@@ -35,7 +35,7 @@ on-chain tx that anchors the revoke attempt in a block with a real
 hash, real confirmations, and real failure modes (send error,
 confirmation timeout, revert), exercising the same plumbing the
 permission-module revoke will use. The delegation key can still sign
-another userop until #32 lands; Phoenix enforces fail-closed on its
+another userop until those three missing artifacts land; Phoenix enforces fail-closed on its
 side for the entire window.
 
 What landed under #31:
@@ -108,24 +108,27 @@ What landed under #31:
 
 Cryptographic revocation at the smart-account level. The sentinel
 user-op does not prevent the delegation key from signing another
-user-op. **Three concrete artifacts are missing**, and #31 stays
-open until all three land:
+user-op. The architectural decision behind a real revoke now lives in
+[`docs/smart-account-and-revoke-design.md`](../../docs/smart-account-and-revoke-design.md)
+(GitHub #56) — Kernel v3 (ERC-7579) modular account on Base, with
+per-delegation permissions registered on a Permission Validator
+module; the on-chain authority record is the validator's `bytes32
+permissionId`, and `delegation_id` maps to the hex-encoded form of
+that id.
 
-1. **Smart-account implementation choice.** v0.1 ships against a
-   SimpleAccount-shaped `execute(target, value, data)` ABI. In
-   SimpleAccount the signing key IS the owner — there is no separate
-   delegation authority to disable. A modular smart-account
-   implementation (Kernel / Safe / Biconomy Nexus / custom) is a
-   prerequisite.
-2. **Deployed permission-module address on Base**, surfaced as a
-   config key on the adapter (TBD; e.g. `PERMISSION_MODULE_ADDRESS`).
-3. **Module revoke ABI** plus the `delegation_id` ↔ on-chain
-   authority-record mapping the adapter must use to identify which
-   authority to disable.
+The remaining work is split across three concrete follow-up issues:
 
-When those land the only adapter-side change is the inner calldata:
-swap `buildSentinelRevokeCallData(self)` for
-`buildExecuteCallData(permissionModule, 0n, encodePermissionModuleRevoke(delegationId))`.
+1. **#56 — chosen.** Smart-account + permission-model decision.
+   Captured in the ADR above.
+2. **#57 — pending.** Wire the chosen Permission Validator's address,
+   ABI fragment, and the `delegation_id` ↔ `permissionId` round trip
+   into the adapter env and Phoenix.
+3. **#58 — pending.** Replace the sentinel inner calldata with the
+   real permission-disable call and update the tripwire pin.
+
+When #57 + #58 land, the only adapter-side change is the inner
+calldata: swap `buildSentinelRevokeCallData(self)` for
+`buildExecuteCallData(permissionValidator, 0n, encodePermissionDisable(permissionId))`.
 Phoenix's callback contract and state machine do NOT need to change.
 The adapter's tripwire test
 (`test/base-revoke-sentinel-pin.test.ts`) will fail loudly the
