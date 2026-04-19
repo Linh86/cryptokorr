@@ -1,0 +1,3421 @@
+{
+  "components": {
+    "headers": {
+      "RequestIdOut": {
+        "description": "Correlation id for this response. Mirrors the request's\n`X-Request-Id` when one was supplied; otherwise carries the\nid Phoenix generated for this request. Use for log and\naudit correlation.\n",
+        "required": true,
+        "schema": {
+          "example": "GKd2jN1eZDCQUvIAACHD",
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        },
+        "style": "simple"
+      }
+    },
+    "parameters": {
+      "IdempotencyKey": {
+        "description": "Client-supplied idempotency key. Required on every `/v1`\nwrite. The runtime dedupes retries by `(key, payload)`:\na duplicate key with a matching body replays the original\nresult, a duplicate key with a mismatched body returns\n`409 Conflict`.\n",
+        "in": "header",
+        "name": "Idempotency-Key",
+        "required": true,
+        "schema": {
+          "example": "8f0b3c82-2e6e-4f80-bb35-4a0f02d9d5d9",
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "RequestIdIn": {
+        "description": "Optional client-supplied request correlation id. The\nPhoenix endpoint generates a fresh id when this header is\nabsent. Whether client-supplied or server-generated, the\nvalue is echoed back on the response as `X-Request-Id`\nand written into the audit trail for this request.\n",
+        "in": "header",
+        "name": "X-Request-Id",
+        "required": false,
+        "schema": {
+          "example": "GKd2jN1eZDCQUvIAACHD",
+          "maxLength": 255,
+          "minLength": 1,
+          "type": "string"
+        }
+      }
+    },
+    "responses": {
+      "BadGateway": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        },
+        "description": "Adapter or upstream provider returned a failure response. Treated as a caution-widening input (`retryable: false`); callers must not loop.",
+        "headers": {
+          "X-Request-Id": {
+            "$ref": "#/components/headers/RequestIdOut"
+          }
+        }
+      },
+      "BadRequest": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        },
+        "description": "Malformed request body or missing required field.",
+        "headers": {
+          "X-Request-Id": {
+            "$ref": "#/components/headers/RequestIdOut"
+          }
+        }
+      },
+      "Conflict": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        },
+        "description": "Idempotency-Key replay with a mismatched payload, or a state-machine conflict (e.g. approving an already-resolved decision, cancelling an executing intent).",
+        "headers": {
+          "X-Request-Id": {
+            "$ref": "#/components/headers/RequestIdOut"
+          }
+        }
+      },
+      "Forbidden": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        },
+        "description": "Caller scope does not cover the subject (e.g. agent trying to read another agent's intent).",
+        "headers": {
+          "X-Request-Id": {
+            "$ref": "#/components/headers/RequestIdOut"
+          }
+        }
+      },
+      "GatewayTimeout": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        },
+        "description": "Adapter or upstream provider did not respond in time. Treated as a caution-widening input (`retryable: false`); callers must not loop.",
+        "headers": {
+          "X-Request-Id": {
+            "$ref": "#/components/headers/RequestIdOut"
+          }
+        }
+      },
+      "NotFound": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        },
+        "description": "Subject does not exist or is not visible to the caller.",
+        "headers": {
+          "X-Request-Id": {
+            "$ref": "#/components/headers/RequestIdOut"
+          }
+        }
+      },
+      "NotImplemented": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        },
+        "description": "Endpoint is scaffolded but its owning engine has not landed yet. The body is the standard `ErrorEnvelope` with `code: \"not_implemented\"`.",
+        "headers": {
+          "X-Request-Id": {
+            "$ref": "#/components/headers/RequestIdOut"
+          }
+        }
+      },
+      "ServiceUnavailable": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        },
+        "description": "Runtime is paused (global or scoped) and is refusing to advance execution. Callers must not retry into autonomy — the pause is lifted only by operator action.",
+        "headers": {
+          "X-Request-Id": {
+            "$ref": "#/components/headers/RequestIdOut"
+          }
+        }
+      },
+      "UnprocessableEntity": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        },
+        "description": "Request was structurally valid but a semantic guard rejected it (unsupported chain, asset not whitelisted by active policy, decision not currently `auto_exec`, …).",
+        "headers": {
+          "X-Request-Id": {
+            "$ref": "#/components/headers/RequestIdOut"
+          }
+        }
+      }
+    },
+    "schemas": {
+      "AddEvidenceRequest": {
+        "description": "Pin a new evidence artifact to a counterparty. Append-only: this endpoint never edits prior artifacts.",
+        "properties": {
+          "content_uri": {
+            "example": "https://...",
+            "type": "string"
+          },
+          "kind": {
+            "example": "manual_note",
+            "type": "string"
+          },
+          "payload_hash": {
+            "nullable": true,
+            "type": "string"
+          },
+          "source": {
+            "example": "operator",
+            "type": "string"
+          },
+          "weight": {
+            "example": 1.0,
+            "nullable": true,
+            "type": "number"
+          }
+        },
+        "required": [
+          "kind",
+          "content_uri",
+          "source"
+        ],
+        "title": "AddEvidenceRequest",
+        "type": "object"
+      },
+      "AddressLabelEntity": {
+        "description": "Address label projected by\n`CounterpartyJSON.address_label/1`. `retired_at` is non-null when\nthe label has been retired; retired labels are immutable.\n",
+        "properties": {
+          "address": {
+            "$ref": "#/components/schemas/EvmAddress"
+          },
+          "alias": {
+            "example": "treasury-ops",
+            "nullable": true,
+            "type": "string"
+          },
+          "chain": {
+            "$ref": "#/components/schemas/Chain"
+          },
+          "counterparty_id": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "id": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "inserted_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "retired_at": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              }
+            ],
+            "nullable": true
+          },
+          "role": {
+            "description": "Operator-chosen role label (free text).",
+            "example": "recipient",
+            "nullable": true,
+            "type": "string"
+          },
+          "updated_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "verified": {
+            "example": true,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "id",
+          "counterparty_id",
+          "chain",
+          "address",
+          "verified"
+        ],
+        "title": "AddressLabelEntity",
+        "type": "object"
+      },
+      "AddressLabelResponse": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/AddressLabelEntity"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "AddressLabelResponse",
+        "type": "object"
+      },
+      "AmountString": {
+        "description": "Decimal amount as a plain string (no scientific notation,\nno thousands separators). The `/v1` contract transmits amounts\nas strings so JavaScript clients and scale-sensitive asset\nmath do not silently round through 64-bit floats. Example:\n`\"250.00\"`.\n",
+        "example": "250.00",
+        "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+        "title": "AmountString",
+        "type": "string"
+      },
+      "ApprovalActionRequest": {
+        "description": "Shared body shape for the approve and reject endpoints.\n`actor_id` is required — it is captured on the successor\nenvelope and every audit event. `reason` is optional and is\npersisted to the audit trail; reject paths typically set it.\n",
+        "properties": {
+          "actor_id": {
+            "example": "ops-alice",
+            "type": "string"
+          },
+          "reason": {
+            "example": "counterparty mismatch",
+            "type": "string"
+          }
+        },
+        "required": [
+          "actor_id"
+        ],
+        "title": "ApprovalActionRequest",
+        "type": "object"
+      },
+      "ApprovalActionResponse": {
+        "description": "Unified approve / reject response. `decision` carries the\nsuccessor envelope; `dispatch` discriminates the branch:\n\n  * `\"recorded\"` — approve path, emitted with a `next_step`\n    hint pointing at the execute endpoint. v0.1 does not\n    auto-dispatch after approval — the operator must follow\n    up with `POST /v1/decisions/{id}/execute`.\n  * `\"no_dispatch\"` — reject path; the successor is a `block`\n    envelope and nothing is scheduled.\n",
+        "properties": {
+          "decision": {
+            "$ref": "#/components/schemas/ApprovalDecisionSummary"
+          },
+          "dispatch": {
+            "enum": [
+              "recorded",
+              "no_dispatch"
+            ],
+            "example": "recorded",
+            "type": "string"
+          },
+          "next_step": {
+            "$ref": "#/components/schemas/ApprovalNextStep"
+          }
+        },
+        "required": [
+          "decision",
+          "dispatch"
+        ],
+        "title": "ApprovalActionResponse",
+        "type": "object"
+      },
+      "ApprovalDecisionSummary": {
+        "description": "Condensed decision view projected by\n`BankWeb.API.V1.ApprovalController.summarize/1`. The field set is\ndeliberately narrower than `DecisionEnvelopeDetail` — queue\nentries do not need the policy-snapshot reference or the\nexecution-plan list.\n",
+        "properties": {
+          "approval_expires_at": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              }
+            ],
+            "nullable": true
+          },
+          "decided_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "decided_by": {
+            "nullable": true,
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "intent_id": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/DecisionOutcome"
+          },
+          "reasons": {
+            "description": "Decision-engine reason codes carried on the envelope.",
+            "example": [
+              "trust_sensitive"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "risk_tier": {
+            "example": "elevated",
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "intent_id",
+          "outcome"
+        ],
+        "title": "ApprovalDecisionSummary",
+        "type": "object"
+      },
+      "ApprovalNextStep": {
+        "description": "Operator-facing hint returned on the `\"recorded\"` dispatch\nbranch. Points at `POST /v1/decisions/{id}/execute` since v0.1\ndoes not auto-dispatch after approval.\n",
+        "properties": {
+          "endpoint": {
+            "example": "POST /v1/decisions/b6a10f53-8c6e-4d79-9bb9-3e1e5b1f1a11/execute",
+            "type": "string"
+          },
+          "message": {
+            "example": "approval recorded; execute manually with smart_account_id when ready",
+            "type": "string"
+          }
+        },
+        "required": [
+          "endpoint",
+          "message"
+        ],
+        "title": "ApprovalNextStep",
+        "type": "object"
+      },
+      "ApprovalQueueResponse": {
+        "description": "List response returning every decision envelope currently in `approval_required`. The `decisions` array is unpaged today; a future issue may introduce cursor-based pagination.",
+        "properties": {
+          "decisions": {
+            "items": {
+              "$ref": "#/components/schemas/ApprovalDecisionSummary"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "decisions"
+        ],
+        "title": "ApprovalQueueResponse",
+        "type": "object"
+      },
+      "Asset": {
+        "description": "Asset symbol. `\"USDC\"` is first-class on the default policy;\nother values may be modelled but must be whitelisted by an\nactive `PolicyRule` before they are accepted at `/v1/intents`.\n",
+        "example": "USDC",
+        "title": "Asset",
+        "type": "string"
+      },
+      "AttachAddressRequest": {
+        "properties": {
+          "address": {
+            "$ref": "#/components/schemas/EvmAddress"
+          },
+          "alias": {
+            "example": "treasury-ops",
+            "nullable": true,
+            "type": "string"
+          },
+          "chain": {
+            "$ref": "#/components/schemas/Chain"
+          },
+          "role": {
+            "example": "recipient",
+            "nullable": true,
+            "type": "string"
+          },
+          "verified": {
+            "example": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "chain",
+          "address"
+        ],
+        "title": "AttachAddressRequest",
+        "type": "object"
+      },
+      "AuditEventEntity": {
+        "description": "Audit event projected by `AuditJSON.render_event/1`.\n`correlation_id` is the intent id that ties related events\ntogether across the runtime flow.\n",
+        "properties": {
+          "actor": {
+            "description": "Actor category (`\"user\"`, `\"adapter\"`, `\"system\"`, …).",
+            "example": "user",
+            "nullable": true,
+            "type": "string"
+          },
+          "actor_id": {
+            "nullable": true,
+            "type": "string"
+          },
+          "after_ref": {
+            "nullable": true,
+            "type": "string"
+          },
+          "before_ref": {
+            "nullable": true,
+            "type": "string"
+          },
+          "correlation_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Id"
+              }
+            ],
+            "description": "Intent id the event is correlated to, when applicable.",
+            "nullable": true
+          },
+          "event_type": {
+            "example": "intent.submitted",
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "payload_hash": {
+            "nullable": true,
+            "type": "string"
+          },
+          "schema_version": {
+            "example": 1,
+            "nullable": true,
+            "type": "integer"
+          },
+          "subject_id": {
+            "description": "Opaque id of the event subject. Typically a UUID; may also be a smart-account id or an on-chain address for non-intent subjects.",
+            "nullable": true,
+            "type": "string"
+          },
+          "subject_type": {
+            "example": "agent_intent",
+            "nullable": true,
+            "type": "string"
+          },
+          "ts": {
+            "$ref": "#/components/schemas/Timestamp"
+          }
+        },
+        "required": [
+          "id",
+          "ts",
+          "event_type"
+        ],
+        "title": "AuditEventEntity",
+        "type": "object"
+      },
+      "AuditListResponse": {
+        "description": "Paged audit stream. `next_cursor` is an opaque string; callers pass it back as `?cursor=...` to retrieve the next page.",
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/AuditEventEntity"
+            },
+            "type": "array"
+          },
+          "page": {
+            "properties": {
+              "next_cursor": {
+                "nullable": true,
+                "type": "string"
+              }
+            },
+            "required": [
+              "next_cursor"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "data",
+          "page"
+        ],
+        "title": "AuditListResponse",
+        "type": "object"
+      },
+      "CancelRequest": {
+        "description": "Operator cancellation body. `reason` is required and is\npersisted to the audit trail.\n",
+        "properties": {
+          "reason": {
+            "example": "superseded by updated intent",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "CancelRequest",
+        "type": "object"
+      },
+      "Chain": {
+        "description": "EVM chain identifier. The schema permits additional values\nso operators can extend the allowlist without a schema\nchange, but at runtime `/v1` v1 accepts only `\"base\"`.\n",
+        "enum": [
+          "base"
+        ],
+        "example": "base",
+        "title": "Chain",
+        "type": "string"
+      },
+      "ConnectSmartAccountRequest": {
+        "description": "Browser-built smart-account connect payload. The three required\nfields identify the smart account, the signer, and the chain;\n`delegation_payload` is the signed delegation object from the JS\nhook (see `assets/js/hooks/wallet_connect.js` and\n`docs/wallet-connect.md`).\n",
+        "properties": {
+          "account": {
+            "description": "Signer account address. The controller currently accepts any\nnon-empty string — format validation is intentionally loose\nbecause `assets/js/hooks/wallet_connect.js` forwards\n`accounts[0]` directly from the wallet, which is typically\nan EIP-55 mixed-case EVM address (`0x` followed by 40 hex\nchars with case-encoded checksum). The shared `EvmAddress`\nschema's lowercase-only pattern would reject those payloads,\nso this field intentionally does NOT `$ref` it. A future\nissue may tighten this to a checksum-aware pattern once the\nbrowser flow is fully signed.\n",
+            "example": "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01",
+            "minLength": 1,
+            "type": "string"
+          },
+          "chain_id": {
+            "description": "EIP-155 chain id. Currently accepted: `8453` (Base) and `84532` (Base Sepolia); other values are rejected with `422 unsupported_chain`.",
+            "example": 8453,
+            "type": "integer"
+          },
+          "delegation_payload": {
+            "additionalProperties": true,
+            "description": "Signed delegation payload from the JS hook. Left as an open object; the shape is defined in `docs/wallet-connect.md`.",
+            "nullable": true,
+            "type": "object"
+          },
+          "smart_account_id": {
+            "example": "sa_primary",
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "smart_account_id",
+          "account",
+          "chain_id"
+        ],
+        "title": "ConnectSmartAccountRequest",
+        "type": "object"
+      },
+      "ConnectSmartAccountResponse": {
+        "description": "Synchronous receipt for the connect request. Until the adapter's\n`POST /dispatch/grant_delegation` route lands, the runtime\npersists the connect intent and emits an audit event but does\nNOT actually grant a delegation on-chain. The `note` field\nstates this truthfully.\n",
+        "properties": {
+          "note": {
+            "example": "Adapter dispatch is stubbed in v1.1 — see docs/wallet-connect.md.",
+            "type": "string"
+          },
+          "smart_account_id": {
+            "example": "sa_primary",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "accepted"
+            ],
+            "example": "accepted",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "smart_account_id",
+          "note"
+        ],
+        "title": "ConnectSmartAccountResponse",
+        "type": "object"
+      },
+      "CounterpartyDetail": {
+        "description": "Counterparty with preloaded active address labels, effective\ntrust assertions, and evidence artifacts. Produced by\n`CounterpartyJSON.counterparty_with_preloads/1` on create /\nupdate responses.\n",
+        "properties": {
+          "active": {
+            "type": "boolean"
+          },
+          "active_address_labels": {
+            "items": {
+              "$ref": "#/components/schemas/AddressLabelEntity"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "created_by": {
+            "nullable": true,
+            "type": "string"
+          },
+          "current_trust_level": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TrustLevel"
+              }
+            ],
+            "nullable": true
+          },
+          "effective_trust_assertions": {
+            "items": {
+              "$ref": "#/components/schemas/TrustAssertionEntity"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceArtifactEntity"
+            },
+            "nullable": true,
+            "type": "array"
+          },
+          "id": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "inserted_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "name": {
+            "type": "string"
+          },
+          "notes": {
+            "nullable": true,
+            "type": "string"
+          },
+          "ownership_context": {
+            "nullable": true,
+            "type": "string"
+          },
+          "updated_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "active"
+        ],
+        "title": "CounterpartyDetail",
+        "type": "object"
+      },
+      "CounterpartyListResponse": {
+        "description": "Paged list of counterparty summaries.",
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/CounterpartySummary"
+            },
+            "type": "array"
+          },
+          "page": {
+            "properties": {
+              "next_cursor": {
+                "nullable": true,
+                "type": "string"
+              }
+            },
+            "required": [
+              "next_cursor"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "data",
+          "page"
+        ],
+        "title": "CounterpartyListResponse",
+        "type": "object"
+      },
+      "CounterpartyResponse": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/CounterpartyDetail"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "CounterpartyResponse",
+        "type": "object"
+      },
+      "CounterpartySummary": {
+        "description": "Counterparty fields projected by `CounterpartyJSON.counterparty/1`.\nThe list endpoint emits this bare object; single-counterparty\nresponses also carry preloaded associations (see\n`CounterpartyDetail`).\n",
+        "properties": {
+          "active": {
+            "example": true,
+            "type": "boolean"
+          },
+          "created_by": {
+            "example": "user",
+            "nullable": true,
+            "type": "string"
+          },
+          "current_trust_level": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/TrustLevel"
+              }
+            ],
+            "nullable": true
+          },
+          "id": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "inserted_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "name": {
+            "example": "Acme Payments",
+            "type": "string"
+          },
+          "notes": {
+            "nullable": true,
+            "type": "string"
+          },
+          "ownership_context": {
+            "example": "Treasury counterparty",
+            "nullable": true,
+            "type": "string"
+          },
+          "updated_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "active"
+        ],
+        "title": "CounterpartySummary",
+        "type": "object"
+      },
+      "CreateCounterpartyRequest": {
+        "properties": {
+          "name": {
+            "example": "Acme Payments",
+            "type": "string"
+          },
+          "notes": {
+            "nullable": true,
+            "type": "string"
+          },
+          "ownership_context": {
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "CreateCounterpartyRequest",
+        "type": "object"
+      },
+      "CreatePolicyRequest": {
+        "description": "Create a new policy rule. `rule_type` is required; `params` and\n`scope` shape depend on the rule type and the decision engine\nvalidates them at the context boundary.\n",
+        "properties": {
+          "created_by": {
+            "example": "user",
+            "type": "string"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "priority": {
+            "example": 0,
+            "type": "integer"
+          },
+          "rule_type": {
+            "enum": [
+              "amount_limit",
+              "rolling_spend_cap",
+              "slippage_ceiling",
+              "allowed_router",
+              "allowed_asset",
+              "allowed_chain",
+              "autonomy_tier",
+              "time_window"
+            ],
+            "type": "string"
+          },
+          "scope": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "state": {
+            "description": "Initial state. Defaults to `active`.",
+            "enum": [
+              "draft",
+              "active",
+              "superseded",
+              "archived"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "rule_type"
+        ],
+        "title": "CreatePolicyRequest",
+        "type": "object"
+      },
+      "DecisionEnvelopeDetail": {
+        "description": "Decision envelope detail returned under the `data` key of\n`GET /v1/decisions/{id}`. Mirrors the fields projected by\n`BankWeb.API.V1.DecisionController.show/2` — including the\ncurrent-envelope flag, the supersession pointer, the policy\nsnapshot reference, and the current execution plan list.\n",
+        "properties": {
+          "approval_expires_at": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              }
+            ],
+            "nullable": true
+          },
+          "current": {
+            "example": true,
+            "type": "boolean"
+          },
+          "decided_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "decided_by": {
+            "example": "decision_engine",
+            "nullable": true,
+            "type": "string"
+          },
+          "execution_plans": {
+            "items": {
+              "$ref": "#/components/schemas/ExecutionPlanSummary"
+            },
+            "type": "array"
+          },
+          "id": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "intent_id": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/DecisionOutcome"
+          },
+          "policy_snapshot_ref": {
+            "nullable": true,
+            "type": "string"
+          },
+          "risk_tier": {
+            "example": "elevated",
+            "nullable": true,
+            "type": "string"
+          },
+          "state": {
+            "description": "Envelope state.",
+            "example": "decided",
+            "type": "string"
+          },
+          "supersedes_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Id"
+              }
+            ],
+            "nullable": true
+          }
+        },
+        "required": [
+          "id",
+          "intent_id",
+          "outcome",
+          "state",
+          "current",
+          "execution_plans"
+        ],
+        "title": "DecisionEnvelopeDetail",
+        "type": "object"
+      },
+      "DecisionOutcome": {
+        "description": "Outcome written by the decision engine:\n\n  * `auto_exec` — within policy, trust engine reports trusted,\n    simulation healthy.\n  * `hold` — permissions pass but something is temporarily off\n    (stale simulation, cooldown window, trust re-check needed).\n  * `approval_required` — sensitive trust, autonomy-tier\n    threshold, or simulation flag routes to the operator\n    approval queue.\n  * `block` — terminal rejection; a new intent is required\n    to retry.\n",
+        "enum": [
+          "auto_exec",
+          "hold",
+          "approval_required",
+          "block"
+        ],
+        "example": "approval_required",
+        "title": "DecisionOutcome",
+        "type": "string"
+      },
+      "DecisionShowResponse": {
+        "description": "Outer envelope around the decision detail. `data` carries the `DecisionEnvelopeDetail`; no other top-level keys are currently set.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/DecisionEnvelopeDetail"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "DecisionShowResponse",
+        "type": "object"
+      },
+      "ErrorDetail": {
+        "description": "Inner error object carried inside `ErrorEnvelope.error`.\n\n`code` and `message` are guaranteed on every non-2xx `/v1`\nresponse. `hint`, `retryable`, and `details` are\nopportunistic — clients MUST NOT assume they are present.\nAbsence of `retryable` means the caller has to decide from\nthe status code alone; it does NOT imply `false`.\n\n`details` appears on 422 responses produced by changeset\nvalidation: a map from field path to the list of error\nmessages for that field.\n",
+        "example": {
+          "code": "not_found",
+          "message": "decision envelope not found"
+        },
+        "properties": {
+          "code": {
+            "description": "Stable machine-readable error code.",
+            "example": "idempotency_conflict",
+            "type": "string"
+          },
+          "details": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "description": "Optional; only present on 422 responses produced by changeset validation. Maps a field path (e.g. `\"scope.amount_ceiling\"`) to the list of error messages for that field.",
+            "example": {
+              "scope.amount_ceiling": [
+                "must be greater than 0"
+              ]
+            },
+            "type": "object"
+          },
+          "hint": {
+            "description": "Optional operator-facing remediation hint. Some paths set this to `null` explicitly; callers should treat `null` and absence as the same signal.",
+            "example": "Retry with a fresh Idempotency-Key or resend the original payload.",
+            "nullable": true,
+            "type": "string"
+          },
+          "message": {
+            "description": "Human-readable explanation.",
+            "example": "Idempotency-Key reused with a mismatched payload.",
+            "type": "string"
+          },
+          "retryable": {
+            "description": "Optional. Present when the controller opts in; absence does NOT imply `false`. When present, callers must not loop on `false`.",
+            "example": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "ErrorDetail",
+        "type": "object"
+      },
+      "ErrorEnvelope": {
+        "description": "Outer response body returned on every non-2xx `/v1` response.\nA single `error` key wraps an `ErrorDetail`; every reusable\nerror response in `BankWeb.OpenApi.Responses` references this\nschema as its JSON body.\n",
+        "example": {
+          "error": {
+            "code": "idempotency_conflict",
+            "hint": "Retry with a fresh Idempotency-Key or resend the original payload.",
+            "message": "Idempotency-Key reused with a mismatched payload.",
+            "retryable": false
+          }
+        },
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorDetail"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "ErrorEnvelope",
+        "type": "object"
+      },
+      "EvidenceArtifactEntity": {
+        "description": "Evidence artifact projected by\n`CounterpartyJSON.evidence_artifact/1`. Evidence is append-only;\nthis endpoint never edits prior artifacts.\n",
+        "properties": {
+          "captured_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "captured_by": {
+            "example": "user",
+            "nullable": true,
+            "type": "string"
+          },
+          "content_uri": {
+            "example": "https://...",
+            "nullable": true,
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "inserted_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "kind": {
+            "example": "manual_note",
+            "type": "string"
+          },
+          "payload_hash": {
+            "nullable": true,
+            "type": "string"
+          },
+          "source": {
+            "example": "operator",
+            "type": "string"
+          },
+          "subject_id": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "subject_type": {
+            "example": "counterparty",
+            "type": "string"
+          },
+          "supersedes_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Id"
+              }
+            ],
+            "nullable": true
+          },
+          "weight": {
+            "description": "Operator-assigned weight; interpretation is context-specific.",
+            "example": 1.0,
+            "nullable": true,
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "source",
+          "captured_at"
+        ],
+        "title": "EvidenceArtifactEntity",
+        "type": "object"
+      },
+      "EvidenceResponse": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/EvidenceArtifactEntity"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "EvidenceResponse",
+        "type": "object"
+      },
+      "EvmAddress": {
+        "description": "EVM address as a lowercase `0x`-prefixed 40-hex-character\nstring. Used on the `/v1` contract only as the `raw_address`\nfallback when no counterparty / label is known; raw addresses\nalways evaluate at trust `unknown`.\n",
+        "example": "0x1234567890abcdef1234567890abcdef12345678",
+        "pattern": "^0x[0-9a-f]{40}$",
+        "title": "EvmAddress",
+        "type": "string"
+      },
+      "ExecuteDecisionRequest": {
+        "description": "Body for manual execute. `smart_account_id` is required and\nselects the delegation / smart account the adapter should sign\nwith. `reason` is optional and is persisted to audit; it\ndefaults to `\"manual_confirm\"` when absent.\n",
+        "properties": {
+          "reason": {
+            "enum": [
+              "hold_release",
+              "retry",
+              "manual_confirm"
+            ],
+            "example": "manual_confirm",
+            "type": "string"
+          },
+          "smart_account_id": {
+            "example": "sa_primary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "smart_account_id"
+        ],
+        "title": "ExecuteDecisionRequest",
+        "type": "object"
+      },
+      "ExecuteDecisionResponse": {
+        "description": "202 response body: the newly enqueued execution plan under `data`, plus a fixed `status` tag used by the runtime as a step marker.",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ExecutionPlanSummary"
+          },
+          "status": {
+            "enum": [
+              "execution_enqueued"
+            ],
+            "example": "execution_enqueued",
+            "type": "string"
+          }
+        },
+        "required": [
+          "data",
+          "status"
+        ],
+        "title": "ExecuteDecisionResponse",
+        "type": "object"
+      },
+      "ExecutionPlanSummary": {
+        "description": "Summary fields surfaced on execution plans by the `/v1/decisions`\nendpoints today. Mirrors the keys produced in\n`BankWeb.API.V1.DecisionController.show/2` and `execute/2`.\n",
+        "properties": {
+          "active": {
+            "example": true,
+            "type": "boolean"
+          },
+          "decision_id": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "execution_status": {
+            "description": "Lifecycle state of the execution plan.",
+            "example": "prepared",
+            "type": "string"
+          },
+          "final_outcome": {
+            "description": "Terminal chain outcome once known.",
+            "nullable": true,
+            "type": "string"
+          },
+          "final_reason": {
+            "nullable": true,
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "intent_id": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "smart_account_id": {
+            "example": "sa_primary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "execution_status",
+          "active",
+          "smart_account_id"
+        ],
+        "title": "ExecutionPlanSummary",
+        "type": "object"
+      },
+      "HealthDeepResponse": {
+        "description": "Deep health probe payload returned by `GET /v1/health/deep`. Runs\nevery operational check in `Bank.Ops.Health.snapshot/0` (Postgres,\nadapter reachability, stuck-plan count, …) and returns `503` with a\nnon-`\"ok\"` overall `status` if any check is degraded. `checks` maps\ncheck name to a check-object whose required field is `status`;\nindividual checks may add fields additively.\n",
+        "properties": {
+          "checks": {
+            "additionalProperties": {
+              "additionalProperties": true,
+              "properties": {
+                "status": {
+                  "example": "ok",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "status"
+              ],
+              "type": "object"
+            },
+            "description": "Map of check name to check-object.",
+            "example": {
+              "adapter": {
+                "status": "ok"
+              },
+              "database": {
+                "status": "ok"
+              }
+            },
+            "type": "object"
+          },
+          "service": {
+            "example": "bank",
+            "type": "string"
+          },
+          "status": {
+            "description": "Overall health — stringified snapshot status.",
+            "example": "ok",
+            "type": "string"
+          },
+          "version": {
+            "example": "0.1.0",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "service",
+          "version",
+          "checks"
+        ],
+        "title": "HealthDeepResponse",
+        "type": "object"
+      },
+      "HealthReadinessResponse": {
+        "description": "Readiness probe payload returned by `GET /v1/health`. `status` is\n`\"ok\"` when every check reports `\"ok\"` and `\"degraded\"` otherwise;\nthe endpoint returns `503` with a `\"degraded\"` body when any check\nfails. `checks` currently contains only `database`, whose value is\n`\"ok\"` on a reachable Postgres connection and `\"error\"` otherwise.\n",
+        "properties": {
+          "checks": {
+            "additionalProperties": {
+              "enum": [
+                "ok",
+                "error"
+              ],
+              "type": "string"
+            },
+            "description": "Map of check name to status string.",
+            "example": {
+              "database": "ok"
+            },
+            "type": "object"
+          },
+          "service": {
+            "example": "bank",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "ok",
+              "degraded"
+            ],
+            "example": "ok",
+            "type": "string"
+          },
+          "version": {
+            "example": "0.1.0",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "service",
+          "version",
+          "checks"
+        ],
+        "title": "HealthReadinessResponse",
+        "type": "object"
+      },
+      "Id": {
+        "description": "Opaque runtime-assigned identifier. Always a lowercase\ncanonical UUID v4 string. Set by Phoenix at persistence time;\ncallers never write it.\n",
+        "example": "b6a10f53-8c6e-4d79-9bb9-3e1e5b1f1a11",
+        "format": "uuid",
+        "title": "Id",
+        "type": "string"
+      },
+      "IntentReplayResponse": {
+        "description": "Full replay bundle for an intent: the original intent record,\nthe policy snapshot each decision referenced, the trust\nassessment chain, the simulation chain, the decision envelope\nchain, the execution plan chain, and the audit events. Rendered\nby `BankWeb.API.V1.AuditJSON.replay/1`.\n\nIndividual item shapes (intent, policy_rule, trust_assessment,\nsimulation, decision, plan, audit_event) are left as permissive\nobjects in this foundation-level spec; per-entity sub-schemas\nare a follow-up once the dedicated entity schemas are needed\nelsewhere.\n",
+        "properties": {
+          "audit": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "decisions": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "intent": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "plans": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "policy_snapshot": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "simulations": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "trust_assessments": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "intent",
+          "policy_snapshot",
+          "trust_assessments",
+          "simulations",
+          "decisions",
+          "plans",
+          "audit"
+        ],
+        "title": "IntentReplayResponse",
+        "type": "object"
+      },
+      "IntentState": {
+        "description": "Lifecycle state of an `AgentIntent`. The flow is\n`submitted → evaluating → decided → executing → executed`\non the happy path, with `blocked` and `cancelled` as\nterminal side branches.\n",
+        "enum": [
+          "submitted",
+          "evaluating",
+          "decided",
+          "executing",
+          "executed",
+          "blocked",
+          "cancelled"
+        ],
+        "example": "decided",
+        "title": "IntentState",
+        "type": "string"
+      },
+      "IntentSubmissionRequest": {
+        "description": "Agent-supplied intent submission body. Matches the shape pinned\nin `docs/bank-v0.1-runtime-flow-and-api.md`.\n\n`idempotency_key` is required in the body even though the\ncontract also requires the `Idempotency-Key` header — the body\nfield is what the runtime persists for deterministic dedupe.\n`chain` accepts the full chain enum at the schema level; the\nruntime rejects non-`\"base\"` values at the boundary today.\n",
+        "properties": {
+          "agent_id": {
+            "example": "agent-alice",
+            "type": "string"
+          },
+          "amount": {
+            "$ref": "#/components/schemas/AmountString"
+          },
+          "asset": {
+            "$ref": "#/components/schemas/Asset"
+          },
+          "chain": {
+            "$ref": "#/components/schemas/Chain"
+          },
+          "idempotency_key": {
+            "example": "8f0b3c82-2e6e-4f80-bb35-4a0f02d9d5d9",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "transfer",
+              "swap",
+              "scheduled_transfer"
+            ],
+            "example": "transfer",
+            "type": "string"
+          },
+          "notes": {
+            "nullable": true,
+            "type": "string"
+          },
+          "source": {
+            "example": "agent-cli@1.2.0",
+            "type": "string"
+          },
+          "target": {
+            "$ref": "#/components/schemas/IntentTarget"
+          }
+        },
+        "required": [
+          "idempotency_key",
+          "source",
+          "agent_id",
+          "kind",
+          "asset",
+          "chain",
+          "amount",
+          "target"
+        ],
+        "title": "IntentSubmissionRequest",
+        "type": "object"
+      },
+      "IntentTarget": {
+        "description": "Target of an agent intent. The contract requires exactly one of:\n\n  * a `counterparty_id` (optionally with `address_label_id` when\n    the counterparty has multiple labels), or\n  * a `raw_address`, which is always evaluated at trust `unknown`.\n\nOpenAPI cannot perfectly express \"exactly one of these two\ndisjoint field groups\"; validation happens in `Bank.Intents` at\nthe runtime boundary. The shape below allows either set of fields\nso tooling can describe the contract without over-constraining.\n",
+        "example": {
+          "counterparty_id": "b6a10f53-8c6e-4d79-9bb9-3e1e5b1f1a11"
+        },
+        "properties": {
+          "address_label_id": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "counterparty_id": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "raw_address": {
+            "$ref": "#/components/schemas/EvmAddress"
+          }
+        },
+        "title": "IntentTarget",
+        "type": "object"
+      },
+      "IssueTrustAssertionRequest": {
+        "description": "Operator-issued trust assertion. The runtime supersedes any\nprior active assertion with overlapping scope. Trust-engine-\nderived assertions take the same internal shape but never come\nthrough this endpoint — `issued_by` on the response distinguishes\nthe two sources.\n",
+        "properties": {
+          "evidence_ids": {
+            "description": "Ids of supporting evidence artifacts (optional).",
+            "items": {
+              "$ref": "#/components/schemas/Id"
+            },
+            "type": "array"
+          },
+          "expires_at": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              }
+            ],
+            "nullable": true
+          },
+          "level": {
+            "$ref": "#/components/schemas/TrustLevel"
+          },
+          "rationale": {
+            "nullable": true,
+            "type": "string"
+          },
+          "scope": {
+            "additionalProperties": true,
+            "description": "Optional scope object — asset / chain / amount_ceiling / time_window. Unscoped `trusted` is accepted but surfaced in the response as `coarse: true`.",
+            "example": {
+              "asset": "USDC",
+              "chain": "base"
+            },
+            "type": "object"
+          },
+          "subject": {
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/Id"
+              },
+              "type": {
+                "enum": [
+                  "counterparty",
+                  "address_label"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "id"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "subject",
+          "level"
+        ],
+        "title": "IssueTrustAssertionRequest",
+        "type": "object"
+      },
+      "IssueTrustAssertionResponse": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/TrustAssertionEntity"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "IssueTrustAssertionResponse",
+        "type": "object"
+      },
+      "Links": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "description": "Related-resource links returned alongside write responses on\nthe `/v1` contract (e.g. `{ \"self\": \"/v1/intents/...\", \"replay\":\n\"/v1/intents/.../replay\" }`). Keys are well-known relation\nnames; values are relative URL strings. Callers should treat\nthe key set as additive — new relations may appear without\nbeing breaking changes.\n",
+        "example": {
+          "replay": "/v1/intents/b6a10f53-8c6e-4d79-9bb9-3e1e5b1f1a11/replay",
+          "self": "/v1/intents/b6a10f53-8c6e-4d79-9bb9-3e1e5b1f1a11"
+        },
+        "title": "Links",
+        "type": "object"
+      },
+      "PolicyListResponse": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/PolicyRuleEntity"
+            },
+            "type": "array"
+          },
+          "page": {
+            "properties": {
+              "next_cursor": {
+                "nullable": true,
+                "type": "string"
+              }
+            },
+            "required": [
+              "next_cursor"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "data",
+          "page"
+        ],
+        "title": "PolicyListResponse",
+        "type": "object"
+      },
+      "PolicyResponse": {
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/PolicyRuleEntity"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "PolicyResponse",
+        "type": "object"
+      },
+      "PolicyRuleEntity": {
+        "description": "Policy rule as rendered by `PolicyJSON.rule/1`. `state` reflects\nthe row's position in the supersession chain\n(`draft | active | superseded | archived`); `supersedes_id`\npoints at the prior version when a rule has been revised.\n",
+        "properties": {
+          "created_by": {
+            "example": "user",
+            "nullable": true,
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "inserted_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "params": {
+            "additionalProperties": true,
+            "description": "Rule-specific parameters. Decimal values are emitted as strings (JSON has no native decimal).",
+            "type": "object"
+          },
+          "priority": {
+            "example": 0,
+            "type": "integer"
+          },
+          "rule_type": {
+            "enum": [
+              "amount_limit",
+              "rolling_spend_cap",
+              "slippage_ceiling",
+              "allowed_router",
+              "allowed_asset",
+              "allowed_chain",
+              "autonomy_tier",
+              "time_window"
+            ],
+            "example": "amount_limit",
+            "type": "string"
+          },
+          "scope": {
+            "additionalProperties": true,
+            "description": "Rule scope object (e.g. `{counterparty_id: ...}` or `{asset: \"USDC\"}`). Shape is rule-specific.",
+            "type": "object"
+          },
+          "state": {
+            "enum": [
+              "draft",
+              "active",
+              "superseded",
+              "archived"
+            ],
+            "example": "active",
+            "type": "string"
+          },
+          "supersedes_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Id"
+              }
+            ],
+            "nullable": true
+          },
+          "updated_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "version": {
+            "example": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "version",
+          "state",
+          "rule_type",
+          "params"
+        ],
+        "title": "PolicyRuleEntity",
+        "type": "object"
+      },
+      "RevisePolicyRequest": {
+        "description": "Write a new version of an active policy rule. The prior version\nflips to `superseded`; in-flight evaluations continue to use\ntheir captured snapshot. `rule_type` cannot change across a\nrevision (the prior value is carried forward).\n",
+        "properties": {
+          "created_by": {
+            "type": "string"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "priority": {
+            "type": "integer"
+          },
+          "scope": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "state": {
+            "enum": [
+              "draft",
+              "active",
+              "superseded",
+              "archived"
+            ],
+            "type": "string"
+          }
+        },
+        "title": "RevisePolicyRequest",
+        "type": "object"
+      },
+      "RevokeDelegationRequest": {
+        "properties": {
+          "reason": {
+            "description": "Audit-persisted reason. Defaults to `\"operator_requested\"` when absent.",
+            "example": "operator_requested",
+            "type": "string"
+          },
+          "smart_account_id": {
+            "example": "sa_primary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "smart_account_id"
+        ],
+        "title": "RevokeDelegationRequest",
+        "type": "object"
+      },
+      "RevokeDelegationResponse": {
+        "description": "Synchronous response is a receipt — the chain-side state change\nhas NOT yet landed. The adapter has been asked to submit the\nrevoke; final state (`revoked` / `revoke_failed`) is delivered\nasynchronously via the `security:events` channel and the audit\nstream. Revoke is one-way at the API: re-delegation is not a v1\n`/v1/security` operation.\n",
+        "properties": {
+          "smart_account_id": {
+            "example": "sa_primary",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "revoke_enqueued"
+            ],
+            "example": "revoke_enqueued",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "smart_account_id"
+        ],
+        "title": "RevokeDelegationResponse",
+        "type": "object"
+      },
+      "SecurityPauseRequest": {
+        "description": "Request body for `pause`. `reason` defaults to\n`\"operator_requested\"`; the value is persisted to audit. See\nthe `scope` property for the truthful parse semantics — the\nruntime does NOT reject unrecognised scope values today.\n",
+        "properties": {
+          "reason": {
+            "example": "operator_requested",
+            "type": "string"
+          },
+          "scope": {
+            "description": "Pause scope. The controller parses two shapes:\n\n  * `\"counterparty:{id}\"` → counterparty-scoped pause.\n  * anything else (omitted, `null`, `\"global\"`, or any\n    unrecognised value) → global pause.\n\nThe runtime does NOT currently reject unknown `scope`\nvalues — a string that does not match\n`\"counterparty:{id}\"` is silently treated as global. This\nfield is documented as a plain string rather than an enum\nto stay truthful to that parse behavior. A future issue\nmay tighten the runtime to reject unknown values.\n",
+            "example": "global",
+            "type": "string"
+          }
+        },
+        "title": "SecurityPauseRequest",
+        "type": "object"
+      },
+      "SecurityResumeRequest": {
+        "description": "Request body for `resume`. Same `scope` parse semantics as\npause — the runtime does not reject unrecognised values.\n",
+        "properties": {
+          "scope": {
+            "description": "Resume scope. Controller recognises `\"counterparty:{id}\"` and treats every other value (including omitted, `\"global\"`, or any unrecognised string) as a global resume. Unknown values are NOT rejected at the runtime today.",
+            "example": "global",
+            "type": "string"
+          }
+        },
+        "title": "SecurityResumeRequest",
+        "type": "object"
+      },
+      "SecurityStateResponse": {
+        "description": "Pause / resume response. `status` carries both the successful\ntransition (`\"paused\"` / `\"resumed\"`) and the already-in-state\nidempotent case (`\"already_paused\"` / `\"already_running\"`). The\nalready-in-state cases still return `200` — they are not\nerrors.\n",
+        "properties": {
+          "scope": {
+            "description": "Echoed scope. Always either `\"global\"` or `\"counterparty:{id}\"` — the response renders the parsed scope, so unrecognised request-side values appear here as `\"global\"` (see the request schemas' `scope` notes).",
+            "example": "global",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "paused",
+              "already_paused",
+              "resumed",
+              "already_running"
+            ],
+            "example": "paused",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "scope"
+        ],
+        "title": "SecurityStateResponse",
+        "type": "object"
+      },
+      "SimulationRequest": {
+        "description": "Body for an on-demand simulation request. `reason` describes why\nthe simulation was requested; `\"refresh\"` resets the active\nreport used for decisioning.\n",
+        "properties": {
+          "reason": {
+            "enum": [
+              "pre_submit_dry_run",
+              "refresh",
+              "operator_inspection"
+            ],
+            "example": "refresh",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "SimulationRequest",
+        "type": "object"
+      },
+      "Timestamp": {
+        "description": "ISO-8601 UTC timestamp with microsecond precision. Timestamps\nare runtime-authoritative: caller-supplied timestamps are\naccepted only as notes metadata and never drive decisions.\n",
+        "example": "2026-04-18T13:33:50.123456Z",
+        "format": "date-time",
+        "title": "Timestamp",
+        "type": "string"
+      },
+      "TrustAssertionEntity": {
+        "description": "Trust assertion projected by\n`CounterpartyJSON.trust_assertion/1`. `coarse` is `true` when the\nassertion is `trusted` and unscoped — a hint for the operator\nconsole to ask for a tighter scope.\n",
+        "properties": {
+          "coarse": {
+            "example": false,
+            "type": "boolean"
+          },
+          "evidence_ids": {
+            "items": {
+              "$ref": "#/components/schemas/Id"
+            },
+            "type": "array"
+          },
+          "expires_at": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              }
+            ],
+            "nullable": true
+          },
+          "id": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "issued_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "issued_by": {
+            "description": "`\"user\"` for operator-issued; `\"trust_engine\"` for derived.",
+            "example": "user",
+            "type": "string"
+          },
+          "level": {
+            "$ref": "#/components/schemas/TrustLevel"
+          },
+          "rationale": {
+            "nullable": true,
+            "type": "string"
+          },
+          "scope": {
+            "additionalProperties": true,
+            "description": "Free-form scope object (asset / chain / amount_ceiling / time_window). Unscoped `trusted` is accepted but flagged as `coarse: true`.",
+            "example": {
+              "asset": "USDC",
+              "chain": "base"
+            },
+            "type": "object"
+          },
+          "subject": {
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/Id"
+              },
+              "type": {
+                "enum": [
+                  "counterparty",
+                  "address_label"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "id"
+            ],
+            "type": "object"
+          },
+          "superseded_at": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              }
+            ],
+            "nullable": true
+          },
+          "supersedes_id": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Id"
+              }
+            ],
+            "nullable": true
+          }
+        },
+        "required": [
+          "id",
+          "subject",
+          "level",
+          "coarse"
+        ],
+        "title": "TrustAssertionEntity",
+        "type": "object"
+      },
+      "TrustConfidence": {
+        "description": "Qualitative confidence of the trust engine's assessment of a\ntarget. `low` / `medium` / `high` map to widening-caution\nbehavior on downstream routing.\n",
+        "enum": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "example": "high",
+        "title": "TrustConfidence",
+        "type": "string"
+      },
+      "TrustLevel": {
+        "description": "Derived trust level from the trust engine's assessment.\nUnknown addresses (raw or otherwise unattributed) default\nto `unknown`; conflicted means the evidence base disagrees\nand an operator must resolve the trust state before\nauto-execution can proceed.\n",
+        "enum": [
+          "trusted",
+          "sensitive",
+          "unknown",
+          "conflicted"
+        ],
+        "example": "trusted",
+        "title": "TrustLevel",
+        "type": "string"
+      },
+      "UpdateAddressLabelRequest": {
+        "description": "Patch body. The address value itself is immutable — correcting a\nwrong address requires retiring this label (`retired: true`) and\nattaching a new one.\n",
+        "properties": {
+          "alias": {
+            "nullable": true,
+            "type": "string"
+          },
+          "retired": {
+            "type": "boolean"
+          },
+          "role": {
+            "nullable": true,
+            "type": "string"
+          },
+          "verified": {
+            "type": "boolean"
+          }
+        },
+        "title": "UpdateAddressLabelRequest",
+        "type": "object"
+      },
+      "UpdateCounterpartyRequest": {
+        "description": "Patch body. Every field is optional; `active: false` soft-archives the counterparty. Attaching to an archived counterparty is rejected.",
+        "properties": {
+          "active": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "notes": {
+            "nullable": true,
+            "type": "string"
+          },
+          "ownership_context": {
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "title": "UpdateCounterpartyRequest",
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "agent_api_key": {
+        "description": "Placeholder for future agent API-key auth on agent-facing endpoints (`POST /v1/intents`, `GET /v1/intents/{id}`, `POST /v1/intents/{id}/simulate`). Not currently enforced on `/v1/` at runtime — declared here so later issues can attach `security: [%{\"agent_api_key\" => []}]` to agent operations without a second components-level change when the auth layer ships.",
+        "in": "header",
+        "name": "X-Agent-Key",
+        "type": "apiKey"
+      },
+      "operator_bearer": {
+        "description": "Placeholder for future operator bearer auth. Not currently enforced on `/v1/` at runtime — today the API relies on the operator-console and network-boundary posture described in `docs/security.md`. Declared here so later issues can attach `security: [%{\"operator_bearer\" => []}]` to specific operations without a second components-level change when the auth layer ships.",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "External control-plane API for the CryptoBank non-custodial\ntreasury runtime. Scoped to the public `/v1/...` surface; the\nprivate `/internal/adapter/callback` contract is intentionally\nout of scope. The authoritative prose contract for this API\nlives at `docs/bank-v0.1-runtime-flow-and-api.md`.\n",
+    "title": "CryptoBank /v1 API",
+    "version": "0.1.0"
+  },
+  "openapi": "3.0.0",
+  "paths": {
+    "/v1/address_labels/{id}": {
+      "patch": {
+        "callbacks": {},
+        "description": "Patch the label's alias / role / verified flag, or retire it.\nThe address value itself is immutable — wrong addresses require\nretiring the label and attaching a new one.\n",
+        "operationId": "BankWeb.API.V1.AddressLabelController.update",
+        "parameters": [
+          {
+            "description": "Opaque runtime-assigned address label id (UUID).",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Id"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": "Elixir.BankWeb.OpenApi.Schemas.UpdateAddressLabelRequest"
+            }
+          },
+          "description": "Update address label body",
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.AddressLabelResponse"
+              }
+            },
+            "description": "Updated address label"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        },
+        "summary": "Update an address label",
+        "tags": [
+          "AddressLabels"
+        ]
+      }
+    },
+    "/v1/approvals": {
+      "get": {
+        "callbacks": {},
+        "description": "Returns every decision envelope currently in `approval_required`.\nThe `decisions` array is unpaged today; a future issue may\nintroduce cursor-based pagination.\n",
+        "operationId": "BankWeb.API.V1.ApprovalController.index",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.ApprovalQueueResponse"
+              }
+            },
+            "description": "Pending approval queue"
+          }
+        },
+        "summary": "List pending approvals",
+        "tags": [
+          "Approvals"
+        ]
+      }
+    },
+    "/v1/approvals/{decision_id}/approve": {
+      "post": {
+        "callbacks": {},
+        "description": "Writes a successor envelope with outcome `auto_exec`. Returns\n`200` with `dispatch: \"recorded\"` and a `next_step` hint\npointing at the execute endpoint; v0.1 does not auto-dispatch\nafter approval. Requires `actor_id` in the body.\n",
+        "operationId": "BankWeb.API.V1.ApprovalController.approve",
+        "parameters": [
+          {
+            "description": "Opaque runtime-assigned decision envelope id (UUID).",
+            "in": "path",
+            "name": "decision_id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Id"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": "Elixir.BankWeb.OpenApi.Schemas.ApprovalActionRequest"
+            }
+          },
+          "description": "Approval action body",
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.ApprovalActionResponse"
+              }
+            },
+            "description": "Successor envelope + dispatch"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        },
+        "summary": "Approve a decision in the queue",
+        "tags": [
+          "Approvals"
+        ]
+      }
+    },
+    "/v1/approvals/{decision_id}/reject": {
+      "post": {
+        "callbacks": {},
+        "description": "Writes a successor envelope with outcome `block`. Returns `200`\nwith `dispatch: \"no_dispatch\"`. Requires `actor_id` in the body;\n`reason` is optional and is persisted to audit.\n",
+        "operationId": "BankWeb.API.V1.ApprovalController.reject",
+        "parameters": [
+          {
+            "description": "Opaque runtime-assigned decision envelope id (UUID).",
+            "in": "path",
+            "name": "decision_id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Id"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": "Elixir.BankWeb.OpenApi.Schemas.ApprovalActionRequest"
+            }
+          },
+          "description": "Approval action body",
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.ApprovalActionResponse"
+              }
+            },
+            "description": "Successor envelope + dispatch"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        },
+        "summary": "Reject a decision in the queue",
+        "tags": [
+          "Approvals"
+        ]
+      }
+    },
+    "/v1/audit": {
+      "get": {
+        "callbacks": {},
+        "description": "Paged, filterable audit stream. Audit events cannot be edited via\nany endpoint — this list is append-only.\n",
+        "operationId": "BankWeb.API.V1.AuditController.index",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          },
+          {
+            "description": "Filter by intent / correlation id (UUID).",
+            "in": "query",
+            "name": "intent_id",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Id"
+            }
+          },
+          {
+            "description": "Filter by audit subject type (e.g. `agent_intent`, `decision_envelope`).",
+            "in": "query",
+            "name": "subject_type",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by audit subject id. Typically a UUID; may be a smart-account id or on-chain address for non-intent subjects.",
+            "in": "query",
+            "name": "subject_id",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by event type (e.g. `intent.submitted`).",
+            "in": "query",
+            "name": "event_type",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Inclusive lower bound on `ts`; ISO 8601.",
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Inclusive upper bound on `ts`; ISO 8601.",
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "format": "date-time",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Opaque cursor from a prior page.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Page size. Default 50.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Time order. `asc` (default) or `desc`.",
+            "in": "query",
+            "name": "order",
+            "required": false,
+            "schema": {
+              "default": "asc",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.AuditListResponse"
+              }
+            },
+            "description": "Audit events page"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        },
+        "summary": "List audit events",
+        "tags": [
+          "Audit"
+        ]
+      }
+    },
+    "/v1/connect/smart_account": {
+      "post": {
+        "callbacks": {},
+        "description": "v1.1 scaffolding for the browser-native connect flow (see\n`docs/wallet-connect.md`). The synchronous response is\n`202 accepted` with a `note` stating that adapter dispatch is\nstubbed: the runtime persists the connect intent and emits an\naudit event, but `Bank.Delegations.request_connect/1` does NOT\nyet grant a delegation on-chain. Chain ids other than `8453`\n(Base) and `84532` (Base Sepolia) return `422\nunsupported_chain`.\n",
+        "operationId": "BankWeb.API.V1.ConnectController.request",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": "Elixir.BankWeb.OpenApi.Schemas.ConnectSmartAccountRequest"
+            }
+          },
+          "description": "Connect smart-account body",
+          "required": false
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.ConnectSmartAccountResponse"
+              }
+            },
+            "description": "Connect accepted (adapter dispatch stubbed)"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        },
+        "summary": "Request a browser-initiated smart-account connect",
+        "tags": [
+          "Connect"
+        ]
+      }
+    },
+    "/v1/counterparties": {
+      "get": {
+        "callbacks": {},
+        "description": "Paged / filterable list of counterparties.",
+        "operationId": "BankWeb.API.V1.CounterpartyController.index",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          },
+          {
+            "description": "Case-insensitive substring match on counterparty `name`.",
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter to active (`true`) or archived (`false`) counterparties.",
+            "in": "query",
+            "name": "active",
+            "required": false,
+            "schema": {
+              "enum": [
+                "true",
+                "false"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Page size. Default 50; max 500.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 500,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a prior page.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.CounterpartyListResponse"
+              }
+            },
+            "description": "Counterparty list"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        },
+        "summary": "List counterparties",
+        "tags": [
+          "Counterparties"
+        ]
+      },
+      "post": {
+        "callbacks": {},
+        "description": "Creates a new counterparty. `name` is required; other fields are optional.",
+        "operationId": "BankWeb.API.V1.CounterpartyController.create",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": "Elixir.BankWeb.OpenApi.Schemas.CreateCounterpartyRequest"
+            }
+          },
+          "description": "Create counterparty body",
+          "required": false
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.CounterpartyResponse"
+              }
+            },
+            "description": "Counterparty detail"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        },
+        "summary": "Create a counterparty",
+        "tags": [
+          "Counterparties"
+        ]
+      }
+    },
+    "/v1/counterparties/{id}": {
+      "patch": {
+        "callbacks": {},
+        "description": "Patch a counterparty's name / notes / active flag. `active: false` soft-archives.",
+        "operationId": "BankWeb.API.V1.CounterpartyController.update",
+        "parameters": [
+          {
+            "description": "Opaque runtime-assigned counterparty id (UUID).",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Id"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": "Elixir.BankWeb.OpenApi.Schemas.UpdateCounterpartyRequest"
+            }
+          },
+          "description": "Update counterparty body",
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.CounterpartyResponse"
+              }
+            },
+            "description": "Counterparty detail"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        },
+        "summary": "Update a counterparty",
+        "tags": [
+          "Counterparties"
+        ]
+      }
+    },
+    "/v1/counterparties/{id}/addresses": {
+      "post": {
+        "callbacks": {},
+        "description": "Attach a chain address to an existing counterparty. Duplicates\n(same `(chain, address)` on an active label) return `409\naddress_already_labelled`. Attaching to an archived counterparty\nreturns `409 counterparty_archived`.\n",
+        "operationId": "BankWeb.API.V1.CounterpartyController.add_address",
+        "parameters": [
+          {
+            "description": "Opaque runtime-assigned counterparty id (UUID).",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Id"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": "Elixir.BankWeb.OpenApi.Schemas.AttachAddressRequest"
+            }
+          },
+          "description": "Attach address body",
+          "required": false
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.AddressLabelResponse"
+              }
+            },
+            "description": "New address label"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        },
+        "summary": "Attach an address label to a counterparty",
+        "tags": [
+          "Counterparties"
+        ]
+      }
+    },
+    "/v1/counterparties/{id}/evidence": {
+      "post": {
+        "callbacks": {},
+        "description": "Append a new evidence artifact to the counterparty. Evidence is\nappend-only: this endpoint never edits prior artifacts. Archived\ncounterparties reject new evidence with `409\ncounterparty_archived`.\n",
+        "operationId": "BankWeb.API.V1.CounterpartyController.add_evidence",
+        "parameters": [
+          {
+            "description": "Opaque runtime-assigned counterparty id (UUID).",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Id"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": "Elixir.BankWeb.OpenApi.Schemas.AddEvidenceRequest"
+            }
+          },
+          "description": "Evidence body",
+          "required": false
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.EvidenceResponse"
+              }
+            },
+            "description": "New evidence artifact"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        },
+        "summary": "Pin an evidence artifact to a counterparty",
+        "tags": [
+          "Counterparties"
+        ]
+      }
+    },
+    "/v1/decisions/{id}": {
+      "get": {
+        "callbacks": {},
+        "description": "Returns a decision envelope's detail plus the execution plans\ncurrently linked to it. This endpoint is live.\n",
+        "operationId": "BankWeb.API.V1.DecisionController.show",
+        "parameters": [
+          {
+            "description": "Opaque runtime-assigned decision envelope id (UUID).",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Id"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.DecisionShowResponse"
+              }
+            },
+            "description": "Decision envelope detail"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        },
+        "summary": "Get a decision envelope",
+        "tags": [
+          "Decisions"
+        ]
+      }
+    },
+    "/v1/decisions/{id}/execute": {
+      "post": {
+        "callbacks": {},
+        "description": "Triggers execution on an `auto_exec` envelope. Used for hold\nrelease, retry after an aborted plan, and tiered-autonomy\nmanual confirm. Requires `smart_account_id` in the body; the\nadapter will sign with the delegation bound to that account.\nReturns `202` with the new execution plan on success.\n",
+        "operationId": "BankWeb.API.V1.DecisionController.execute",
+        "parameters": [
+          {
+            "description": "Opaque runtime-assigned decision envelope id (UUID).",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Id"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": "Elixir.BankWeb.OpenApi.Schemas.ExecuteDecisionRequest"
+            }
+          },
+          "description": "Execute decision body",
+          "required": false
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.ExecuteDecisionResponse"
+              }
+            },
+            "description": "Execution plan enqueued"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        },
+        "summary": "Manually execute an auto_exec decision",
+        "tags": [
+          "Decisions"
+        ]
+      }
+    },
+    "/v1/health": {
+      "get": {
+        "callbacks": {},
+        "description": "Confirms the Postgres connection is reachable so an orchestrator\ncan distinguish a running web process from one that cannot serve\ntraffic. Returns `200` with `status: \"ok\"` when every check\nreports `\"ok\"`; otherwise returns `503` with `status: \"degraded\"`\nand the same body shape.\n",
+        "operationId": "BankWeb.HealthController.readiness",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.HealthReadinessResponse"
+              }
+            },
+            "description": "Readiness snapshot"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.HealthReadinessResponse"
+              }
+            },
+            "description": "At least one check is degraded; body mirrors the 200 shape."
+          }
+        },
+        "summary": "Readiness probe",
+        "tags": [
+          "Health"
+        ]
+      }
+    },
+    "/v1/health/deep": {
+      "get": {
+        "callbacks": {},
+        "description": "Runs every operational check in `Bank.Ops.Health.snapshot/0`:\nPostgres, adapter reachability, stuck-plan count, … Returns\n`200` when every check is `ok`; otherwise `503` with a non-`ok`\noverall `status`. Safe to alert on.\n",
+        "operationId": "BankWeb.HealthController.deep",
+        "parameters": [],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.HealthDeepResponse"
+              }
+            },
+            "description": "Deep health snapshot"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.HealthDeepResponse"
+              }
+            },
+            "description": "At least one check is degraded; body mirrors the 200 shape."
+          }
+        },
+        "summary": "Deep operational-health probe",
+        "tags": [
+          "Health"
+        ]
+      }
+    },
+    "/v1/intents": {
+      "post": {
+        "callbacks": {},
+        "description": "Agent-facing entry point for submitting a structured\n`AgentIntent` for evaluation. Request body fields match the\npinned contract in `docs/bank-v0.1-runtime-flow-and-api.md`.\n\n**Current runtime behavior: returns `501 Not Implemented` —\nintent engine work is still pending.** The operation spec\ndocuments the target contract so SDK tooling can be generated\nahead of the engine landing.\n",
+        "operationId": "BankWeb.API.V1.IntentController.create",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": "Elixir.BankWeb.OpenApi.Schemas.IntentSubmissionRequest"
+            }
+          },
+          "description": "Intent submission body",
+          "required": false
+        },
+        "responses": {
+          "501": {
+            "$ref": "#/components/responses/NotImplemented"
+          }
+        },
+        "summary": "Submit an intent for evaluation",
+        "tags": [
+          "Intents"
+        ]
+      }
+    },
+    "/v1/intents/{id}": {
+      "get": {
+        "callbacks": {},
+        "description": "Returns the current state of an intent together with linked\ndecision / simulation / plan summaries.\n\n**Current runtime behavior: returns `501 Not Implemented`.**\n",
+        "operationId": "BankWeb.API.V1.IntentController.show",
+        "parameters": [
+          {
+            "description": "Opaque runtime-assigned intent id (UUID).",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Id"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "responses": {
+          "501": {
+            "$ref": "#/components/responses/NotImplemented"
+          }
+        },
+        "summary": "Get an intent by id",
+        "tags": [
+          "Intents"
+        ]
+      }
+    },
+    "/v1/intents/{id}/cancel": {
+      "post": {
+        "callbacks": {},
+        "description": "Operator cancellation prior to execution. Allowed while the\nintent is `submitted`, `evaluating`, or `decided`; once\n`executing`, operators must use security controls instead.\n\n**Current runtime behavior: returns `501 Not Implemented`.**\n",
+        "operationId": "BankWeb.API.V1.IntentController.cancel",
+        "parameters": [
+          {
+            "description": "Opaque runtime-assigned intent id (UUID).",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Id"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": "Elixir.BankWeb.OpenApi.Schemas.CancelRequest"
+            }
+          },
+          "description": "Cancel request body",
+          "required": false
+        },
+        "responses": {
+          "501": {
+            "$ref": "#/components/responses/NotImplemented"
+          }
+        },
+        "summary": "Cancel an intent before execution",
+        "tags": [
+          "Intents"
+        ]
+      }
+    },
+    "/v1/intents/{id}/replay": {
+      "get": {
+        "callbacks": {},
+        "description": "Returns a deterministic replay bundle: the original intent, the\npolicy snapshot each decision referenced, the trust assessment\nchain, simulation chain, decision chain, execution plan chain,\nand audit events. Rendered by\n`BankWeb.API.V1.AuditJSON.replay/1`.\n\nThis endpoint is live today — unlike the other `/v1/intents`\nactions, it is not routed through the `not_implemented`\nfallback.\n",
+        "operationId": "BankWeb.API.V1.IntentController.replay",
+        "parameters": [
+          {
+            "description": "Opaque runtime-assigned intent id (UUID).",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Id"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.IntentReplayResponse"
+              }
+            },
+            "description": "Replay bundle"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "summary": "Get the full replay bundle for an intent",
+        "tags": [
+          "Intents"
+        ]
+      }
+    },
+    "/v1/intents/{id}/simulate": {
+      "post": {
+        "callbacks": {},
+        "description": "Produces a fresh `SimulationReport` on demand (pre-submit dry\nrun, refresh, or operator inspection). `reason=\"refresh\"`\nresets the active report used by decisioning.\n\n**Current runtime behavior: returns `501 Not Implemented`.**\n",
+        "operationId": "BankWeb.API.V1.IntentController.simulate",
+        "parameters": [
+          {
+            "description": "Opaque runtime-assigned intent id (UUID).",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Id"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": "Elixir.BankWeb.OpenApi.Schemas.SimulationRequest"
+            }
+          },
+          "description": "Simulation request body",
+          "required": false
+        },
+        "responses": {
+          "501": {
+            "$ref": "#/components/responses/NotImplemented"
+          }
+        },
+        "summary": "Request an on-demand simulation",
+        "tags": [
+          "Intents"
+        ]
+      }
+    },
+    "/v1/policies": {
+      "get": {
+        "callbacks": {},
+        "description": "Paged list of policy rules, filterable by state and rule type. Returns the full supersession chain when `state=superseded` is included.",
+        "operationId": "BankWeb.API.V1.PolicyController.index",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          },
+          {
+            "description": "Filter by policy-rule state.",
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "enum": [
+                "draft",
+                "active",
+                "superseded",
+                "archived"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Filter by rule type.",
+            "in": "query",
+            "name": "rule_type",
+            "required": false,
+            "schema": {
+              "enum": [
+                "amount_limit",
+                "rolling_spend_cap",
+                "slippage_ceiling",
+                "allowed_router",
+                "allowed_asset",
+                "allowed_chain",
+                "autonomy_tier",
+                "time_window"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "Page size. Default 50; max 500.",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 500,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Opaque cursor from a prior page.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.PolicyListResponse"
+              }
+            },
+            "description": "Policy rule list"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        },
+        "summary": "List policy rules",
+        "tags": [
+          "Policies"
+        ]
+      },
+      "post": {
+        "callbacks": {},
+        "description": "Creates a new policy rule. `rule_type` is required; `params` / `scope` shape depends on the rule type and is validated at the context boundary.",
+        "operationId": "BankWeb.API.V1.PolicyController.create",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": "Elixir.BankWeb.OpenApi.Schemas.CreatePolicyRequest"
+            }
+          },
+          "description": "Create policy body",
+          "required": false
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.PolicyResponse"
+              }
+            },
+            "description": "New policy rule"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        },
+        "summary": "Create a policy rule",
+        "tags": [
+          "Policies"
+        ]
+      }
+    },
+    "/v1/policies/{id}/archive": {
+      "post": {
+        "callbacks": {},
+        "description": "Soft-deactivate a policy rule. Only active rules can be archived; already-superseded / already-archived rules return `409 not_active`.",
+        "operationId": "BankWeb.API.V1.PolicyController.archive",
+        "parameters": [
+          {
+            "description": "Opaque runtime-assigned policy rule id (UUID).",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Id"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.PolicyResponse"
+              }
+            },
+            "description": "Archived policy rule"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        },
+        "summary": "Archive a policy rule",
+        "tags": [
+          "Policies"
+        ]
+      }
+    },
+    "/v1/policies/{id}/revise": {
+      "post": {
+        "callbacks": {},
+        "description": "Writes a new version of an active rule. The prior version is\nmarked `superseded`; in-flight evaluations continue using their\ncaptured policy snapshot. `rule_type` cannot change across a\nrevision. Archived or already-superseded rules return `409\nnot_active`.\n",
+        "operationId": "BankWeb.API.V1.PolicyController.revise",
+        "parameters": [
+          {
+            "description": "Opaque runtime-assigned policy rule id (UUID).",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Id"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": "Elixir.BankWeb.OpenApi.Schemas.RevisePolicyRequest"
+            }
+          },
+          "description": "Revise policy body",
+          "required": false
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.PolicyResponse"
+              }
+            },
+            "description": "Successor policy rule"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        },
+        "summary": "Revise a policy rule",
+        "tags": [
+          "Policies"
+        ]
+      }
+    },
+    "/v1/security/pause": {
+      "post": {
+        "callbacks": {},
+        "description": "Soft pause — blocks new `executing` transitions while letting\npending confirmations keep polling, agents keep submitting, and\ndecisions keep being written.\n\nScope parse: `\"counterparty:{id}\"` yields a counterparty-scoped\npause; any other value (omitted, `null`, `\"global\"`, or an\nunrecognised string) is currently treated as a global pause —\nthe runtime does NOT reject unknown scope values today. See\n`SecurityPauseRequest.scope` for the truthful wording.\n\nThe already-paused case returns `200` with\n`status: \"already_paused\"` — it is idempotent, not an error.\n",
+        "operationId": "BankWeb.API.V1.SecurityController.pause",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": "Elixir.BankWeb.OpenApi.Schemas.SecurityPauseRequest"
+            }
+          },
+          "description": "Pause body",
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.SecurityStateResponse"
+              }
+            },
+            "description": "Pause state"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        },
+        "summary": "Pause automation",
+        "tags": [
+          "Security"
+        ]
+      }
+    },
+    "/v1/security/resume": {
+      "post": {
+        "callbacks": {},
+        "description": "Lifts the pause. Intents that accumulated while paused are NOT\nauto-flushed into execution — each still needs a decision event\nor a manual `POST /v1/decisions/{id}/execute`.\n\nScope parse: same semantics as pause — `\"counterparty:{id}\"`\nresumes that scope, any other value resumes globally. The\nruntime does NOT reject unknown `scope` values today. Returns\n`200` with `status: \"already_running\"` when the scope was not\npaused.\n",
+        "operationId": "BankWeb.API.V1.SecurityController.resume",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": "Elixir.BankWeb.OpenApi.Schemas.SecurityResumeRequest"
+            }
+          },
+          "description": "Resume body",
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.SecurityStateResponse"
+              }
+            },
+            "description": "Resume state"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        },
+        "summary": "Resume automation",
+        "tags": [
+          "Security"
+        ]
+      }
+    },
+    "/v1/security/revoke_delegation": {
+      "post": {
+        "callbacks": {},
+        "description": "Enqueues a delegation revoke for the given smart account. The\nsynchronous response is a **receipt**: `202 revoke_enqueued`\nwith the `smart_account_id` as the handle. The chain-side state\nchange has NOT yet landed — final state is delivered\nasynchronously via the `security:events` realtime channel and\nthe audit stream.\n\nRevoke is one-way at the API: re-delegation is intentionally\nnot a v1 `/v1/security` operation. Re-delegation is an operator\nflow in the web console's security surface, outside the\nexternal API.\n",
+        "operationId": "BankWeb.API.V1.SecurityController.revoke_delegation",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": "Elixir.BankWeb.OpenApi.Schemas.RevokeDelegationRequest"
+            }
+          },
+          "description": "Revoke body",
+          "required": false
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.RevokeDelegationResponse"
+              }
+            },
+            "description": "Revoke enqueued"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        },
+        "summary": "Submit a delegation revoke",
+        "tags": [
+          "Security"
+        ]
+      }
+    },
+    "/v1/trust_assertions": {
+      "post": {
+        "callbacks": {},
+        "description": "Operator-issued manual trust override. Any prior active\nassertion with overlapping scope is marked `superseded`.\nTrust-engine-derived assertions take the same internal shape\nbut never come through this endpoint; the response's\n`issued_by` disambiguates.\n",
+        "operationId": "BankWeb.API.V1.TrustAssertionController.create",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": "Elixir.BankWeb.OpenApi.Schemas.IssueTrustAssertionRequest"
+            }
+          },
+          "description": "Trust assertion body",
+          "required": false
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.IssueTrustAssertionResponse"
+              }
+            },
+            "description": "New trust assertion"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        },
+        "summary": "Issue a trust assertion",
+        "tags": [
+          "TrustAssertions"
+        ]
+      }
+    }
+  },
+  "security": [],
+  "servers": [
+    {
+      "description": "Phoenix endpoint; external API lives under `/v1/`.",
+      "url": "{scheme}://{host}",
+      "variables": {
+        "host": {
+          "default": "localhost:4000",
+          "description": "Host:port of the Phoenix endpoint."
+        },
+        "scheme": {
+          "default": "http",
+          "description": "Transport scheme (https in prod).",
+          "enum": [
+            "http",
+            "https"
+          ]
+        }
+      }
+    }
+  ],
+  "tags": [
+    {
+      "description": "Agent intent lifecycle (submit, inspect, simulate, cancel, replay).",
+      "name": "Intents"
+    },
+    {
+      "description": "Decision envelopes and operator-initiated execution.",
+      "name": "Decisions"
+    },
+    {
+      "description": "Human approval queue for decisions flagged by policy.",
+      "name": "Approvals"
+    },
+    {
+      "description": "Known counterparties, their evidence, and address book entries.",
+      "name": "Counterparties"
+    },
+    {
+      "description": "Chain addresses attributed to counterparties.",
+      "name": "AddressLabels"
+    },
+    {
+      "description": "Operator-issued trust statements that feed the trust engine.",
+      "name": "TrustAssertions"
+    },
+    {
+      "description": "Policy catalog, revisions, and archival.",
+      "name": "Policies"
+    },
+    {
+      "description": "Append-only runtime audit event stream.",
+      "name": "Audit"
+    },
+    {
+      "description": "Runtime pause, resume, and delegation revoke.",
+      "name": "Security"
+    },
+    {
+      "description": "Browser-wallet / smart-account connection scaffolding.",
+      "name": "Connect"
+    },
+    {
+      "description": "Readiness and deep operational-health probes under `/v1/health`.",
+      "name": "Health"
+    }
+  ]
+}
