@@ -211,6 +211,32 @@ defmodule BankWeb.OpenApiRemainingEndpointsTest do
       assert Enum.sort(status_enum) ==
                Enum.sort(["paused", "already_paused", "resumed", "already_running"])
     end
+
+    test "pause / resume scope is documented truthfully as a loose string (runtime does not reject unknown values)" do
+      for mod <- [
+            BankWeb.OpenApi.Schemas.SecurityPauseRequest,
+            BankWeb.OpenApi.Schemas.SecurityResumeRequest
+          ] do
+        schema = mod.schema()
+
+        # `scope` must not be an enum — the runtime silently falls
+        # back to `:global` on unrecognised values, so an OpenAPI
+        # enum would reject requests the server currently accepts.
+        assert schema.properties.scope.type == :string
+
+        refute schema.properties.scope.enum,
+               "#{inspect(mod)}.scope must not be an enum — runtime accepts any string"
+
+        # Description must state the truthful parse behavior rather
+        # than overclaiming validation.
+        description = schema.properties.scope.description
+        assert description =~ "counterparty:"
+
+        assert description =~ "NOT",
+               "#{inspect(mod)}.scope description must explicitly state the runtime " <>
+                 "parse is NOT strict (unknown values fall back to global)"
+      end
+    end
   end
 
   describe "connect — truthful adapter-stub note" do
@@ -218,6 +244,34 @@ defmodule BankWeb.OpenApiRemainingEndpointsTest do
       response_schema = BankWeb.OpenApi.Schemas.ConnectSmartAccountResponse.schema()
       assert :note in response_schema.required
       assert response_schema.properties.note.example =~ "stubbed"
+    end
+
+    test "account is documented as a loose non-empty string, NOT as EvmAddress" do
+      # The controller only checks `account` is a non-empty string. The
+      # browser hook forwards `accounts[0]` directly from the wallet,
+      # which is typically an EIP-55 mixed-case EVM address — the
+      # shared `EvmAddress` schema's lowercase-only pattern would
+      # reject those requests.
+      account = BankWeb.OpenApi.Schemas.ConnectSmartAccountRequest.schema().properties.account
+
+      # Regression guard for the prior `$ref: EvmAddress` form: must
+      # be a concrete Schema, not a Reference.
+      assert match?(%OpenApiSpex.Schema{}, account),
+             "account must be a concrete Schema, not a $ref to EvmAddress"
+
+      assert account.type == :string
+      assert account.minLength == 1
+
+      # No pattern constraint — runtime accepts any non-empty string.
+      assert is_nil(account.pattern),
+             "account must not carry a format pattern — runtime accepts any non-empty string"
+
+      # An EIP-55 mixed-case example is honest about what the wallet
+      # sends today; a lowercase-only pattern would reject it.
+      assert account.example =~ ~r/^0x[0-9A-Fa-f]+$/
+
+      assert account.example != String.downcase(account.example),
+             "account example should be mixed-case to match what the wallet hook forwards"
     end
   end
 

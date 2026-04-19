@@ -15,7 +15,7 @@ defmodule BankWeb.OpenApi.Schemas.ConnectSmartAccountRequest do
   @moduledoc "Body for `POST /v1/connect/smart_account`."
 
   require OpenApiSpex
-  alias OpenApiSpex.{Reference, Schema}
+  alias OpenApiSpex.Schema
 
   OpenApiSpex.schema(%{
     title: "ConnectSmartAccountRequest",
@@ -29,8 +29,24 @@ defmodule BankWeb.OpenApi.Schemas.ConnectSmartAccountRequest do
     type: :object,
     required: [:smart_account_id, :account, :chain_id],
     properties: %{
-      smart_account_id: %Schema{type: :string, example: "sa_primary"},
-      account: %Reference{"$ref": "#/components/schemas/EvmAddress"},
+      smart_account_id: %Schema{type: :string, minLength: 1, example: "sa_primary"},
+      account: %Schema{
+        type: :string,
+        minLength: 1,
+        description: """
+        Signer account address. The controller currently accepts any
+        non-empty string — format validation is intentionally loose
+        because `assets/js/hooks/wallet_connect.js` forwards
+        `accounts[0]` directly from the wallet, which is typically
+        an EIP-55 mixed-case EVM address (`0x` followed by 40 hex
+        chars with case-encoded checksum). The shared `EvmAddress`
+        schema's lowercase-only pattern would reject those payloads,
+        so this field intentionally does NOT `$ref` it. A future
+        issue may tighten this to a checksum-aware pattern once the
+        browser flow is fully signed.
+        """,
+        example: "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01"
+      },
       chain_id: %Schema{
         type: :integer,
         description:

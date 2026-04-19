@@ -30,10 +30,16 @@ defmodule BankWeb.API.V1.SecurityController do
     description: """
     Soft pause — blocks new `executing` transitions while letting
     pending confirmations keep polling, agents keep submitting, and
-    decisions keep being written. Default scope is `"global"`; a
-    counterparty-scoped pause is expressed as
-    `"counterparty:{id}"`. The already-paused case returns `200`
-    with `status: "already_paused"` — it is idempotent, not an error.
+    decisions keep being written.
+
+    Scope parse: `"counterparty:{id}"` yields a counterparty-scoped
+    pause; any other value (omitted, `null`, `"global"`, or an
+    unrecognised string) is currently treated as a global pause —
+    the runtime does NOT reject unknown scope values today. See
+    `SecurityPauseRequest.scope` for the truthful wording.
+
+    The already-paused case returns `200` with
+    `status: "already_paused"` — it is idempotent, not an error.
     """,
     tags: ["Security"],
     parameters: [@idempotency_key_ref, @request_id_in_ref],
@@ -70,8 +76,13 @@ defmodule BankWeb.API.V1.SecurityController do
     description: """
     Lifts the pause. Intents that accumulated while paused are NOT
     auto-flushed into execution — each still needs a decision event
-    or a manual `POST /v1/decisions/{id}/execute`. Returns `200`
-    with `status: "already_running"` when the scope was not paused.
+    or a manual `POST /v1/decisions/{id}/execute`.
+
+    Scope parse: same semantics as pause — `"counterparty:{id}"`
+    resumes that scope, any other value resumes globally. The
+    runtime does NOT reject unknown `scope` values today. Returns
+    `200` with `status: "already_running"` when the scope was not
+    paused.
     """,
     tags: ["Security"],
     parameters: [@idempotency_key_ref, @request_id_in_ref],

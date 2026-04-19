@@ -31,16 +31,29 @@ defmodule BankWeb.OpenApi.Schemas.SecurityPauseRequest do
   OpenApiSpex.schema(%{
     title: "SecurityPauseRequest",
     description: """
-    Request body for `pause`. `scope` defaults to `"global"` when
-    absent; a counterparty-scoped pause is expressed as
-    `"counterparty:{id}"`. `reason` defaults to
-    `"operator_requested"`; the value is persisted to audit.
+    Request body for `pause`. `reason` defaults to
+    `"operator_requested"`; the value is persisted to audit. See
+    the `scope` property for the truthful parse semantics — the
+    runtime does NOT reject unrecognised scope values today.
     """,
     type: :object,
     properties: %{
       scope: %Schema{
         type: :string,
-        description: ~s|`"global"` or `"counterparty:{id}"`. Default: `"global"`.|,
+        description: """
+        Pause scope. The controller parses two shapes:
+
+          * `"counterparty:{id}"` → counterparty-scoped pause.
+          * anything else (omitted, `null`, `"global"`, or any
+            unrecognised value) → global pause.
+
+        The runtime does NOT currently reject unknown `scope`
+        values — a string that does not match
+        `"counterparty:{id}"` is silently treated as global. This
+        field is documented as a plain string rather than an enum
+        to stay truthful to that parse behavior. A future issue
+        may tighten the runtime to reject unknown values.
+        """,
         example: "global"
       },
       reason: %Schema{type: :string, example: "operator_requested"}
@@ -56,10 +69,21 @@ defmodule BankWeb.OpenApi.Schemas.SecurityResumeRequest do
 
   OpenApiSpex.schema(%{
     title: "SecurityResumeRequest",
-    description: "Same `scope` semantics as pause. Default: `\"global\"`.",
+    description: """
+    Request body for `resume`. Same `scope` parse semantics as
+    pause — the runtime does not reject unrecognised values.
+    """,
     type: :object,
     properties: %{
-      scope: %Schema{type: :string, example: "global"}
+      scope: %Schema{
+        type: :string,
+        description:
+          "Resume scope. Controller recognises `\"counterparty:{id}\"` and " <>
+            "treats every other value (including omitted, `\"global\"`, or " <>
+            "any unrecognised string) as a global resume. Unknown values " <>
+            "are NOT rejected at the runtime today.",
+        example: "global"
+      }
     }
   })
 end
@@ -92,7 +116,11 @@ defmodule BankWeb.OpenApi.Schemas.SecurityStateResponse do
       },
       scope: %Schema{
         type: :string,
-        description: ~s|`"global"` or `"counterparty:{id}"`.|,
+        description:
+          "Echoed scope. Always either `\"global\"` or " <>
+            "`\"counterparty:{id}\"` — the response renders the parsed " <>
+            "scope, so unrecognised request-side values appear here as " <>
+            "`\"global\"` (see the request schemas' `scope` notes).",
         example: "global"
       }
     }
