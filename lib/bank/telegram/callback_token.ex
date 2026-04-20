@@ -8,9 +8,9 @@ defmodule Bank.Telegram.CallbackToken do
   Telegram's `InlineKeyboardButton.callback_data` field has a hard
   **64-byte** limit. A `Phoenix.Token` signed blob of the payload we
   need to bind (action, target id, actor, expiry) exceeds that. This
-  module uses a fixed-layout 48-byte binary plus a 12-byte truncated
-  HMAC, encoded as 64 URL-safe Base64 characters — the Telegram
-  maximum.
+  module uses a fixed 48-byte binary (38-byte body + 10-byte
+  truncated HMAC), encoded as 64 URL-safe Base64 characters — the
+  Telegram maximum.
 
   ## Binary layout
 
