@@ -5,8 +5,9 @@ defmodule Bank.Telegram.CommandsTest do
 
   Pins:
 
-    * `parse/1` handles DM commands, group-chat `@BotName`-suffixed
-      commands, trailing args, whitespace, unknown command names,
+    * `parse/1` handles DM commands, safely ignores group-chat
+      `@BotName`-suffixed commands until the bot has an authoritative
+      username to compare against, plus trailing args, whitespace, unknown command names,
       and non-command text;
     * `handle/2` renders each command deterministically from
       existing source-of-truth helpers (`Bank.Security.snapshot/0`,
@@ -51,10 +52,10 @@ defmodule Bank.Telegram.CommandsTest do
       assert {:command, :queue, ""} = Commands.parse("/queue")
     end
 
-    test "strips Telegram's @BotName suffix (group-chat form)" do
-      assert {:command, :status, ""} = Commands.parse("/status@MyBot")
-      assert {:command, :queue, ""} = Commands.parse("/queue@MyBot")
-      assert {:command, :help, "extra"} = Commands.parse("/help@MyBot extra")
+    test "ignores @BotName-suffixed group commands to avoid answering commands for other bots" do
+      assert :not_a_command = Commands.parse("/status@MyBot")
+      assert :not_a_command = Commands.parse("/queue@OtherBot")
+      assert :not_a_command = Commands.parse("/help@SomeBot extra")
     end
 
     test "captures trimmed args after the command name" do
@@ -123,6 +124,17 @@ defmodule Bank.Telegram.CommandsTest do
 
       assert {:ok, text} = Commands.handle({:command, :status, ""}, @approver)
       assert text =~ "Counterparty pauses: acme-inc"
+    end
+
+    test "sorts small counterparty-scope pauses so /status output stays deterministic" do
+      {:ok, :paused} =
+        Bank.Security.pause({:counterparty, "zeta-co"}, reason: "risk_spike", actor: :user)
+
+      {:ok, :paused} =
+        Bank.Security.pause({:counterparty, "acme-inc"}, reason: "risk_spike", actor: :user)
+
+      assert {:ok, text} = Commands.handle({:command, :status, ""}, @approver)
+      assert text =~ "Counterparty pauses: acme-inc, zeta-co"
     end
   end
 

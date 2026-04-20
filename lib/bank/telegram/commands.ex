@@ -30,10 +30,12 @@ defmodule Bank.Telegram.Commands do
 
   ## Telegram group-chat suffix
 
-  When a bot is added to a group chat Telegram prepends the bot
-  handle to commands (`/status@MyBot`). `parse/1` strips the
-  `@handle` suffix before command lookup so the same code path
-  works in DMs and group chats.
+  Telegram group chats often address commands to a specific bot as
+  `/status@BotName`. `#71` does not yet have a configured bot
+  username to compare against, so the safe choice is to ignore any
+  slash command carrying an `@suffix` rather than risk responding to
+  a command meant for a different bot in a shared group chat. DM
+  commands and unsuffixed group commands still parse normally.
 
   ## Scope
 
@@ -74,8 +76,8 @@ defmodule Bank.Telegram.Commands do
       caller leaves the message alone so Telegram does not mistake
       it for a reply.
 
-  Strips Telegram's `@BotName` suffix from the command name so the
-  same code path handles DMs and group chats.
+  Slash commands carrying an `@suffix` are treated as `:not_a_command`
+  until the bot has an authoritative username to compare against.
   """
   @spec parse(term()) :: parsed()
   def parse(text) when is_binary(text) do
@@ -94,17 +96,17 @@ defmodule Bank.Telegram.Commands do
         [head] -> {head, ""}
       end
 
-    name_without_bot =
-      case String.split(raw_name, "@", parts: 2) do
-        [n, _bot] -> n
-        [n] -> n
-      end
+    case String.split(raw_name, "@", parts: 2) do
+      [_name, _bot] ->
+        :not_a_command
 
-    lowered = String.downcase(name_without_bot)
+      [name] ->
+        lowered = String.downcase(name)
 
-    case Map.fetch(@known, lowered) do
-      {:ok, cmd} -> {:command, cmd, args}
-      :error -> {:unknown, lowered}
+        case Map.fetch(@known, lowered) do
+          {:ok, cmd} -> {:command, cmd, args}
+          :error -> {:unknown, lowered}
+        end
     end
   end
 
@@ -170,7 +172,7 @@ defmodule Bank.Telegram.Commands do
     cp_line =
       case map_size(cps) do
         0 -> "Counterparty pauses: none"
-        n when n <= 5 -> "Counterparty pauses: " <> Enum.join(Map.keys(cps), ", ")
+        n when n <= 5 -> "Counterparty pauses: " <> Enum.join(Enum.sort(Map.keys(cps)), ", ")
         n -> "Counterparty pauses: #{n}"
       end
 
