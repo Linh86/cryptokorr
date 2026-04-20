@@ -128,9 +128,23 @@ defmodule BankWeb.ApiSpecTest do
     end
   end
 
-  describe "components.schemas" do
-    test "is an empty map pending #87 (shared components)" do
-      assert ApiSpec.spec().components.schemas == %{}
+  describe "components.schemas — populated by #87" do
+    test "includes the full shared primitive / enum / envelope set" do
+      # These are the shapes #88/#89 will $ref by name; a rename or
+      # drop must surface as a test failure here. `ErrorEnvelope`
+      # is the outer `{error: ErrorDetail}` wrapper that matches
+      # what `/v1` controllers actually emit; `ErrorDetail` is the
+      # inner object, registered so later issues can $ref either
+      # layer.
+      expected_schema_keys = ~w(
+        Id Timestamp AmountString EvmAddress
+        Chain Asset IntentState DecisionOutcome
+        TrustLevel TrustConfidence
+        Links ErrorDetail ErrorEnvelope
+      )
+
+      actual_keys = ApiSpec.spec().components.schemas |> Map.keys() |> Enum.sort()
+      assert actual_keys == Enum.sort(expected_schema_keys)
     end
   end
 end

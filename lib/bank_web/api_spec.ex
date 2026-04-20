@@ -30,19 +30,41 @@ defmodule BankWeb.ApiSpec do
 
   ## Layout convention for later issues
 
-    * Per-domain schema modules live under
-      `lib/bank_web/open_api/schemas/<domain>.ex`
-      (e.g. `BankWeb.OpenApi.Schemas.Intents`).
-    * Shared error / envelope / header schemas live under
-      `lib/bank_web/open_api/` and land with issue #87.
-    * Tag name constants go in `BankWeb.OpenApi.Tags` when #87
-      needs them. For #86 the ten domain tags are inline in
-      `tags/0` below — the authoritative list matching the
-      `/v1/...` router surface.
+    * Shared primitive / enum / envelope schemas live under
+      `lib/bank_web/open_api/schemas/` and are registered in
+      `components.schemas` by title. Added in #87:
+
+          BankWeb.OpenApi.Schemas.{Id, Timestamp, AmountString,
+            EvmAddress, Chain, Asset, IntentState, DecisionOutcome,
+            TrustLevel, TrustConfidence, Links, ErrorDetail,
+            ErrorEnvelope}
+
+      `ErrorEnvelope` is the outer `{error: ErrorDetail}` wrapper
+      that every non-2xx `/v1` response actually emits today;
+      `ErrorDetail` carries the inner object. Later issues
+      `$ref` either layer depending on whether they describe the
+      full response body or just the inner error.
+
+    * Shared reusable components live under
+      `lib/bank_web/open_api/`:
+
+          BankWeb.OpenApi.Parameters       — request parameters
+          BankWeb.OpenApi.Headers          — response headers
+          BankWeb.OpenApi.Responses        — error responses
+          BankWeb.OpenApi.SecuritySchemes  — auth placeholders
+
+    * Per-domain request / response body schemas land in later
+      issues at `lib/bank_web/open_api/schemas/<domain>.ex` (e.g.
+      `BankWeb.OpenApi.Schemas.Intents`) and $ref the shared
+      primitives above rather than redefining them.
+    * The ten domain tags are inline in `tags/0` below — the
+      authoritative list matching the `/v1/...` router surface.
     * Controllers stay at `lib/bank_web/controllers/api/v1/*.ex`;
       they adopt `use OpenApiSpex.ControllerSpecs` and declare
-      `operation :action, ...` alongside their actions. The
-      controller tree does not move.
+      `operation :action, ...` alongside their actions, citing
+      shared components by name (e.g.
+      `%Reference{"$ref": "#/components/responses/Conflict"}`).
+      The controller tree does not move.
 
   ## Non-goals for #86
 
@@ -64,10 +86,27 @@ defmodule BankWeb.ApiSpec do
     Info,
     OpenApi,
     Paths,
-    SecurityScheme,
     Server,
     ServerVariable,
     Tag
+  }
+
+  alias BankWeb.OpenApi.{Headers, Parameters, Responses, SecuritySchemes}
+
+  alias BankWeb.OpenApi.Schemas.{
+    AmountString,
+    Asset,
+    Chain,
+    DecisionOutcome,
+    ErrorDetail,
+    ErrorEnvelope,
+    EvmAddress,
+    Id,
+    IntentState,
+    Links,
+    Timestamp,
+    TrustConfidence,
+    TrustLevel
   }
 
   @behaviour OpenApi
@@ -160,21 +199,72 @@ defmodule BankWeb.ApiSpec do
 
   defp components do
     %Components{
-      schemas: %{},
-      securitySchemes: %{
-        "operator_bearer" => %SecurityScheme{
-          type: "http",
-          scheme: "bearer",
-          description:
-            "Placeholder for future operator bearer auth. Not currently " <>
-              "enforced on `/v1/` at runtime — today the API relies on the " <>
-              "operator-console and network-boundary posture described in " <>
-              "`docs/security.md`. Declared here so later issues can attach " <>
-              "`security: [%{\"operator_bearer\" => []}]` to specific " <>
-              "operations without a second components-level change when " <>
-              "the auth layer ships."
-        }
-      }
+      schemas: schemas(),
+      parameters: parameters(),
+      headers: headers(),
+      responses: responses(),
+      securitySchemes: security_schemes()
+    }
+  end
+
+  # Registered by title so later issues can `$ref` them as
+  # `#/components/schemas/<title>`. Titles come from each schema
+  # module's `OpenApiSpex.schema/1` declaration and are asserted
+  # by the component regression tests.
+  defp schemas do
+    %{
+      "Id" => Id.schema(),
+      "Timestamp" => Timestamp.schema(),
+      "AmountString" => AmountString.schema(),
+      "EvmAddress" => EvmAddress.schema(),
+      "Chain" => Chain.schema(),
+      "Asset" => Asset.schema(),
+      "IntentState" => IntentState.schema(),
+      "DecisionOutcome" => DecisionOutcome.schema(),
+      "TrustLevel" => TrustLevel.schema(),
+      "TrustConfidence" => TrustConfidence.schema(),
+      "Links" => Links.schema(),
+      "ErrorDetail" => ErrorDetail.schema(),
+      "ErrorEnvelope" => ErrorEnvelope.schema()
+    }
+  end
+
+  defp parameters do
+    %{
+      "IdempotencyKey" => Parameters.idempotency_key(),
+      "RequestIdIn" => Parameters.request_id_in()
+    }
+  end
+
+  defp headers do
+    %{
+      "RequestIdOut" => Headers.request_id_out()
+    }
+  end
+
+  defp responses do
+    %{
+      "BadRequest" => Responses.bad_request(),
+      "Forbidden" => Responses.forbidden(),
+      "NotFound" => Responses.not_found(),
+      "Conflict" => Responses.conflict(),
+      "UnprocessableEntity" => Responses.unprocessable_entity(),
+      "ServiceUnavailable" => Responses.service_unavailable(),
+      "BadGateway" => Responses.bad_gateway(),
+      "GatewayTimeout" => Responses.gateway_timeout()
+    }
+  end
+
+  # Truthfulness note: both schemes carry the "Not currently
+  # enforced" caveat in their descriptions (see
+  # `BankWeb.OpenApi.SecuritySchemes`). The top-level
+  # `security: []` in `spec/0` keeps the contract honest — no
+  # operation is marked as requiring either scheme until the
+  # runtime actually enforces one.
+  defp security_schemes do
+    %{
+      "operator_bearer" => SecuritySchemes.operator_bearer(),
+      "agent_api_key" => SecuritySchemes.agent_api_key()
     }
   end
 
