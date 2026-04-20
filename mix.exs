@@ -99,7 +99,13 @@ defmodule Bank.MixProject do
         "esbuild bank --minify",
         "phx.digest"
       ],
-      precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"]
+      precommit: [
+        "compile --warnings-as-errors",
+        "deps.unlock --unused",
+        "format",
+        "test",
+        "openapi.check"
+      ]
     ]
   end
 end
