@@ -178,9 +178,10 @@ defmodule BankWeb.OpenApiComponentsTest do
 
   describe "shared responses" do
     test "declares the full error-response family under stable names" do
+      # `NotImplemented` was added in #88 for the intent stubs.
       expected =
         ~w(BadRequest Forbidden NotFound Conflict UnprocessableEntity
-           ServiceUnavailable BadGateway GatewayTimeout)
+           NotImplemented ServiceUnavailable BadGateway GatewayTimeout)
 
       actual = components().responses |> Map.keys() |> Enum.sort()
       assert actual == Enum.sort(expected)

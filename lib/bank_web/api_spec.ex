@@ -54,9 +54,20 @@ defmodule BankWeb.ApiSpec do
           BankWeb.OpenApi.SecuritySchemes  — auth placeholders
 
     * Per-domain request / response body schemas land in later
-      issues at `lib/bank_web/open_api/schemas/<domain>.ex` (e.g.
-      `BankWeb.OpenApi.Schemas.Intents`) and $ref the shared
-      primitives above rather than redefining them.
+      issues at `lib/bank_web/open_api/schemas/<domain>.ex` and
+      `$ref` the shared primitives above rather than redefining
+      them. Added in #88 for the intents / decisions / approvals /
+      health endpoints:
+
+          BankWeb.OpenApi.Schemas.{HealthReadinessResponse,
+            HealthDeepResponse, IntentTarget,
+            IntentSubmissionRequest, SimulationRequest,
+            CancelRequest, IntentReplayResponse,
+            ExecutionPlanSummary, DecisionEnvelopeDetail,
+            DecisionShowResponse, ExecuteDecisionRequest,
+            ExecuteDecisionResponse, ApprovalDecisionSummary,
+            ApprovalQueueResponse, ApprovalActionRequest,
+            ApprovalNextStep, ApprovalActionResponse}
     * The ten domain tags are inline in `tags/0` below — the
       authoritative list matching the `/v1/...` router surface.
     * Controllers stay at `lib/bank_web/controllers/api/v1/*.ex`;
@@ -95,15 +106,32 @@ defmodule BankWeb.ApiSpec do
 
   alias BankWeb.OpenApi.Schemas.{
     AmountString,
+    ApprovalActionRequest,
+    ApprovalActionResponse,
+    ApprovalDecisionSummary,
+    ApprovalNextStep,
+    ApprovalQueueResponse,
     Asset,
+    CancelRequest,
     Chain,
+    DecisionEnvelopeDetail,
     DecisionOutcome,
+    DecisionShowResponse,
     ErrorDetail,
     ErrorEnvelope,
     EvmAddress,
+    ExecuteDecisionRequest,
+    ExecuteDecisionResponse,
+    ExecutionPlanSummary,
+    HealthDeepResponse,
+    HealthReadinessResponse,
     Id,
+    IntentReplayResponse,
     IntentState,
+    IntentSubmissionRequest,
+    IntentTarget,
     Links,
+    SimulationRequest,
     Timestamp,
     TrustConfidence,
     TrustLevel
@@ -123,7 +151,8 @@ defmodule BankWeb.ApiSpec do
     {"Policies", "Policy catalog, revisions, and archival."},
     {"Audit", "Append-only runtime audit event stream."},
     {"Security", "Runtime pause, resume, and delegation revoke."},
-    {"Connect", "Browser-wallet / smart-account connection scaffolding."}
+    {"Connect", "Browser-wallet / smart-account connection scaffolding."},
+    {"Health", "Readiness and deep operational-health probes under `/v1/health`."}
   ]
 
   @impl OpenApi
@@ -138,7 +167,7 @@ defmodule BankWeb.ApiSpec do
     }
   end
 
-  @doc "The ten external-domain tag names. Canonical, used by tests and later issues."
+  @doc "Canonical top-level tag names (ten business domains + `Health`)."
   @spec domain_tag_names() :: [String.t()]
   def domain_tag_names, do: Enum.map(@domain_tags, fn {name, _} -> name end)
 
@@ -225,7 +254,26 @@ defmodule BankWeb.ApiSpec do
       "TrustConfidence" => TrustConfidence.schema(),
       "Links" => Links.schema(),
       "ErrorDetail" => ErrorDetail.schema(),
-      "ErrorEnvelope" => ErrorEnvelope.schema()
+      "ErrorEnvelope" => ErrorEnvelope.schema(),
+
+      # Per-domain shapes added in #88.
+      "HealthReadinessResponse" => HealthReadinessResponse.schema(),
+      "HealthDeepResponse" => HealthDeepResponse.schema(),
+      "IntentTarget" => IntentTarget.schema(),
+      "IntentSubmissionRequest" => IntentSubmissionRequest.schema(),
+      "SimulationRequest" => SimulationRequest.schema(),
+      "CancelRequest" => CancelRequest.schema(),
+      "IntentReplayResponse" => IntentReplayResponse.schema(),
+      "ExecutionPlanSummary" => ExecutionPlanSummary.schema(),
+      "DecisionEnvelopeDetail" => DecisionEnvelopeDetail.schema(),
+      "DecisionShowResponse" => DecisionShowResponse.schema(),
+      "ExecuteDecisionRequest" => ExecuteDecisionRequest.schema(),
+      "ExecuteDecisionResponse" => ExecuteDecisionResponse.schema(),
+      "ApprovalDecisionSummary" => ApprovalDecisionSummary.schema(),
+      "ApprovalQueueResponse" => ApprovalQueueResponse.schema(),
+      "ApprovalActionRequest" => ApprovalActionRequest.schema(),
+      "ApprovalNextStep" => ApprovalNextStep.schema(),
+      "ApprovalActionResponse" => ApprovalActionResponse.schema()
     }
   end
 
@@ -249,6 +297,7 @@ defmodule BankWeb.ApiSpec do
       "NotFound" => Responses.not_found(),
       "Conflict" => Responses.conflict(),
       "UnprocessableEntity" => Responses.unprocessable_entity(),
+      "NotImplemented" => Responses.not_implemented(),
       "ServiceUnavailable" => Responses.service_unavailable(),
       "BadGateway" => Responses.bad_gateway(),
       "GatewayTimeout" => Responses.gateway_timeout()
