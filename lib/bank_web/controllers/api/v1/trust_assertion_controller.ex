@@ -27,12 +27,42 @@ defmodule BankWeb.API.V1.TrustAssertionController do
   """
 
   use BankWeb, :controller
+  use OpenApiSpex.ControllerSpecs
 
   alias Bank.Counterparties
   alias BankWeb.API.V1.CounterpartyJSON
+  alias OpenApiSpex.Reference
+
+  @idempotency_key_ref %Reference{"$ref": "#/components/parameters/IdempotencyKey"}
+  @request_id_in_ref %Reference{"$ref": "#/components/parameters/RequestIdIn"}
+  @not_found_ref %Reference{"$ref": "#/components/responses/NotFound"}
+  @unprocessable_ref %Reference{"$ref": "#/components/responses/UnprocessableEntity"}
 
   @subject_types ~w(counterparty address_label)
   @levels ~w(trusted sensitive unknown conflicted)
+
+  operation(:create,
+    summary: "Issue a trust assertion",
+    description: """
+    Operator-issued manual trust override. Any prior active
+    assertion with overlapping scope is marked `superseded`.
+    Trust-engine-derived assertions take the same internal shape
+    but never come through this endpoint; the response's
+    `issued_by` disambiguates.
+    """,
+    tags: ["TrustAssertions"],
+    parameters: [@idempotency_key_ref, @request_id_in_ref],
+    request_body:
+      {"Trust assertion body", "application/json",
+       BankWeb.OpenApi.Schemas.IssueTrustAssertionRequest},
+    responses: %{
+      201 =>
+        {"New trust assertion", "application/json",
+         BankWeb.OpenApi.Schemas.IssueTrustAssertionResponse},
+      404 => @not_found_ref,
+      422 => @unprocessable_ref
+    }
+  )
 
   def create(conn, params) do
     with {:ok, {subject_type, subject_id}} <- parse_subject(params),

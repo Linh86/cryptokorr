@@ -22,14 +22,75 @@ defmodule BankWeb.API.V1.CounterpartyController do
   """
 
   use BankWeb, :controller
+  use OpenApiSpex.ControllerSpecs
 
   alias Bank.Counterparties
   alias BankWeb.API.V1.CounterpartyJSON
+  alias OpenApiSpex.{Parameter, Reference, Schema}
 
   @list_limit_default 50
   @list_limit_max 500
 
+  @id_ref %Reference{"$ref": "#/components/schemas/Id"}
+  @request_id_in_ref %Reference{"$ref": "#/components/parameters/RequestIdIn"}
+  @idempotency_key_ref %Reference{"$ref": "#/components/parameters/IdempotencyKey"}
+  @not_found_ref %Reference{"$ref": "#/components/responses/NotFound"}
+  @conflict_ref %Reference{"$ref": "#/components/responses/Conflict"}
+  @unprocessable_ref %Reference{"$ref": "#/components/responses/UnprocessableEntity"}
+
+  @counterparty_id_param %Parameter{
+    name: :id,
+    in: :path,
+    required: true,
+    description: "Opaque runtime-assigned counterparty id (UUID).",
+    schema: @id_ref
+  }
+
+  @list_query_params [
+    %Parameter{
+      name: :q,
+      in: :query,
+      required: false,
+      description: "Case-insensitive substring match on counterparty `name`.",
+      schema: %Schema{type: :string}
+    },
+    %Parameter{
+      name: :active,
+      in: :query,
+      required: false,
+      description: "Filter to active (`true`) or archived (`false`) counterparties.",
+      schema: %Schema{type: :string, enum: ["true", "false"]}
+    },
+    %Parameter{
+      name: :limit,
+      in: :query,
+      required: false,
+      description: "Page size. Default 50; max 500.",
+      schema: %Schema{type: :integer, minimum: 1, maximum: 500, default: 50}
+    },
+    %Parameter{
+      name: :cursor,
+      in: :query,
+      required: false,
+      description: "Opaque cursor from a prior page.",
+      schema: %Schema{type: :string}
+    }
+  ]
+
   # --- GET /v1/counterparties -------------------------------------------
+
+  operation(:index,
+    summary: "List counterparties",
+    description: "Paged / filterable list of counterparties.",
+    tags: ["Counterparties"],
+    parameters: [@request_id_in_ref | @list_query_params],
+    responses: %{
+      200 =>
+        {"Counterparty list", "application/json",
+         BankWeb.OpenApi.Schemas.CounterpartyListResponse},
+      422 => @unprocessable_ref
+    }
+  )
 
   def index(conn, params) do
     with {:ok, filters} <- parse_filters(params),
@@ -45,6 +106,21 @@ defmodule BankWeb.API.V1.CounterpartyController do
   end
 
   # --- POST /v1/counterparties ------------------------------------------
+
+  operation(:create,
+    summary: "Create a counterparty",
+    description: "Creates a new counterparty. `name` is required; other fields are optional.",
+    tags: ["Counterparties"],
+    parameters: [@idempotency_key_ref, @request_id_in_ref],
+    request_body:
+      {"Create counterparty body", "application/json",
+       BankWeb.OpenApi.Schemas.CreateCounterpartyRequest},
+    responses: %{
+      201 =>
+        {"Counterparty detail", "application/json", BankWeb.OpenApi.Schemas.CounterpartyResponse},
+      422 => @unprocessable_ref
+    }
+  )
 
   def create(conn, params) do
     attrs =
@@ -66,6 +142,23 @@ defmodule BankWeb.API.V1.CounterpartyController do
   end
 
   # --- PATCH /v1/counterparties/:id -------------------------------------
+
+  operation(:update,
+    summary: "Update a counterparty",
+    description:
+      "Patch a counterparty's name / notes / active flag. `active: false` soft-archives.",
+    tags: ["Counterparties"],
+    parameters: [@counterparty_id_param, @idempotency_key_ref, @request_id_in_ref],
+    request_body:
+      {"Update counterparty body", "application/json",
+       BankWeb.OpenApi.Schemas.UpdateCounterpartyRequest},
+    responses: %{
+      200 =>
+        {"Counterparty detail", "application/json", BankWeb.OpenApi.Schemas.CounterpartyResponse},
+      404 => @not_found_ref,
+      422 => @unprocessable_ref
+    }
+  )
 
   def update(conn, %{"id" => id} = params) do
     with {:ok, uuid} <- cast_uuid(id, "id"),
@@ -89,6 +182,27 @@ defmodule BankWeb.API.V1.CounterpartyController do
   end
 
   # --- POST /v1/counterparties/:id/addresses ----------------------------
+
+  operation(:add_address,
+    summary: "Attach an address label to a counterparty",
+    description: """
+    Attach a chain address to an existing counterparty. Duplicates
+    (same `(chain, address)` on an active label) return `409
+    address_already_labelled`. Attaching to an archived counterparty
+    returns `409 counterparty_archived`.
+    """,
+    tags: ["Counterparties"],
+    parameters: [@counterparty_id_param, @idempotency_key_ref, @request_id_in_ref],
+    request_body:
+      {"Attach address body", "application/json", BankWeb.OpenApi.Schemas.AttachAddressRequest},
+    responses: %{
+      201 =>
+        {"New address label", "application/json", BankWeb.OpenApi.Schemas.AddressLabelResponse},
+      404 => @not_found_ref,
+      409 => @conflict_ref,
+      422 => @unprocessable_ref
+    }
+  )
 
   def add_address(conn, %{"id" => id} = params) do
     with {:ok, uuid} <- cast_uuid(id, "id"),
@@ -132,6 +246,27 @@ defmodule BankWeb.API.V1.CounterpartyController do
   end
 
   # --- POST /v1/counterparties/:id/evidence -----------------------------
+
+  operation(:add_evidence,
+    summary: "Pin an evidence artifact to a counterparty",
+    description: """
+    Append a new evidence artifact to the counterparty. Evidence is
+    append-only: this endpoint never edits prior artifacts. Archived
+    counterparties reject new evidence with `409
+    counterparty_archived`.
+    """,
+    tags: ["Counterparties"],
+    parameters: [@counterparty_id_param, @idempotency_key_ref, @request_id_in_ref],
+    request_body:
+      {"Evidence body", "application/json", BankWeb.OpenApi.Schemas.AddEvidenceRequest},
+    responses: %{
+      201 =>
+        {"New evidence artifact", "application/json", BankWeb.OpenApi.Schemas.EvidenceResponse},
+      404 => @not_found_ref,
+      409 => @conflict_ref,
+      422 => @unprocessable_ref
+    }
+  )
 
   def add_evidence(conn, %{"id" => id} = params) do
     with {:ok, uuid} <- cast_uuid(id, "id"),

@@ -17,10 +17,41 @@ defmodule BankWeb.API.V1.ConnectController do
   """
 
   use BankWeb, :controller
+  use OpenApiSpex.ControllerSpecs
 
   alias Bank.Delegations
+  alias OpenApiSpex.Reference
+
+  @idempotency_key_ref %Reference{"$ref": "#/components/parameters/IdempotencyKey"}
+  @request_id_in_ref %Reference{"$ref": "#/components/parameters/RequestIdIn"}
+  @unprocessable_ref %Reference{"$ref": "#/components/responses/UnprocessableEntity"}
 
   # --- POST /v1/connect/smart_account -------------------------------------
+
+  operation(:request,
+    summary: "Request a browser-initiated smart-account connect",
+    description: """
+    v1.1 scaffolding for the browser-native connect flow (see
+    `docs/wallet-connect.md`). The synchronous response is
+    `202 accepted` with a `note` stating that adapter dispatch is
+    stubbed: the runtime persists the connect intent and emits an
+    audit event, but `Bank.Delegations.request_connect/1` does NOT
+    yet grant a delegation on-chain. Chain ids other than `8453`
+    (Base) and `84532` (Base Sepolia) return `422
+    unsupported_chain`.
+    """,
+    tags: ["Connect"],
+    parameters: [@idempotency_key_ref, @request_id_in_ref],
+    request_body:
+      {"Connect smart-account body", "application/json",
+       BankWeb.OpenApi.Schemas.ConnectSmartAccountRequest},
+    responses: %{
+      202 =>
+        {"Connect accepted (adapter dispatch stubbed)", "application/json",
+         BankWeb.OpenApi.Schemas.ConnectSmartAccountResponse},
+      422 => @unprocessable_ref
+    }
+  )
 
   def request(conn, params) do
     with {:ok, payload} <- validate_payload(params),

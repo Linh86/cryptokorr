@@ -23,16 +23,81 @@ defmodule BankWeb.API.V1.PolicyController do
   """
 
   use BankWeb, :controller
+  use OpenApiSpex.ControllerSpecs
 
   alias Bank.Policies
   alias BankWeb.API.V1.PolicyJSON
+  alias OpenApiSpex.{Parameter, Reference, Schema}
 
   @list_limit_default 50
   @list_limit_max 500
   @states ~w(draft active superseded archived)
   @rule_types ~w(amount_limit rolling_spend_cap slippage_ceiling allowed_router allowed_asset allowed_chain autonomy_tier time_window)
 
+  @id_ref %Reference{"$ref": "#/components/schemas/Id"}
+  @request_id_in_ref %Reference{"$ref": "#/components/parameters/RequestIdIn"}
+  @idempotency_key_ref %Reference{"$ref": "#/components/parameters/IdempotencyKey"}
+  @not_found_ref %Reference{"$ref": "#/components/responses/NotFound"}
+  @conflict_ref %Reference{"$ref": "#/components/responses/Conflict"}
+  @unprocessable_ref %Reference{"$ref": "#/components/responses/UnprocessableEntity"}
+
+  @policy_id_param %Parameter{
+    name: :id,
+    in: :path,
+    required: true,
+    description: "Opaque runtime-assigned policy rule id (UUID).",
+    schema: @id_ref
+  }
+
+  @list_query_params [
+    %Parameter{
+      name: :state,
+      in: :query,
+      required: false,
+      description: "Filter by policy-rule state.",
+      schema: %Schema{type: :string, enum: ~w(draft active superseded archived)}
+    },
+    %Parameter{
+      name: :rule_type,
+      in: :query,
+      required: false,
+      description: "Filter by rule type.",
+      schema: %Schema{
+        type: :string,
+        enum:
+          ~w(amount_limit rolling_spend_cap slippage_ceiling allowed_router allowed_asset allowed_chain autonomy_tier time_window)
+      }
+    },
+    %Parameter{
+      name: :limit,
+      in: :query,
+      required: false,
+      description: "Page size. Default 50; max 500.",
+      schema: %Schema{type: :integer, minimum: 1, maximum: 500, default: 50}
+    },
+    %Parameter{
+      name: :cursor,
+      in: :query,
+      required: false,
+      description: "Opaque cursor from a prior page.",
+      schema: %Schema{type: :string}
+    }
+  ]
+
   # --- GET /v1/policies -------------------------------------------------
+
+  operation(:index,
+    summary: "List policy rules",
+    description:
+      "Paged list of policy rules, filterable by state and rule type. " <>
+        "Returns the full supersession chain when `state=superseded` is included.",
+    tags: ["Policies"],
+    parameters: [@request_id_in_ref | @list_query_params],
+    responses: %{
+      200 => {"Policy rule list", "application/json", BankWeb.OpenApi.Schemas.PolicyListResponse},
+      422 => @unprocessable_ref
+    }
+  )
 
   def index(conn, params) do
     with {:ok, filters} <- parse_filters(params),
@@ -48,6 +113,21 @@ defmodule BankWeb.API.V1.PolicyController do
   end
 
   # --- POST /v1/policies ------------------------------------------------
+
+  operation(:create,
+    summary: "Create a policy rule",
+    description:
+      "Creates a new policy rule. `rule_type` is required; `params` / `scope` shape " <>
+        "depends on the rule type and is validated at the context boundary.",
+    tags: ["Policies"],
+    parameters: [@idempotency_key_ref, @request_id_in_ref],
+    request_body:
+      {"Create policy body", "application/json", BankWeb.OpenApi.Schemas.CreatePolicyRequest},
+    responses: %{
+      201 => {"New policy rule", "application/json", BankWeb.OpenApi.Schemas.PolicyResponse},
+      422 => @unprocessable_ref
+    }
+  )
 
   def create(conn, params) do
     with {:ok, attrs} <- parse_create_attrs(params) do
@@ -66,6 +146,28 @@ defmodule BankWeb.API.V1.PolicyController do
   end
 
   # --- POST /v1/policies/:id/revise ------------------------------------
+
+  operation(:revise,
+    summary: "Revise a policy rule",
+    description: """
+    Writes a new version of an active rule. The prior version is
+    marked `superseded`; in-flight evaluations continue using their
+    captured policy snapshot. `rule_type` cannot change across a
+    revision. Archived or already-superseded rules return `409
+    not_active`.
+    """,
+    tags: ["Policies"],
+    parameters: [@policy_id_param, @idempotency_key_ref, @request_id_in_ref],
+    request_body:
+      {"Revise policy body", "application/json", BankWeb.OpenApi.Schemas.RevisePolicyRequest},
+    responses: %{
+      201 =>
+        {"Successor policy rule", "application/json", BankWeb.OpenApi.Schemas.PolicyResponse},
+      404 => @not_found_ref,
+      409 => @conflict_ref,
+      422 => @unprocessable_ref
+    }
+  )
 
   def revise(conn, %{"id" => id} = params) do
     with {:ok, uuid} <- cast_uuid(id, "id"),
@@ -95,6 +197,20 @@ defmodule BankWeb.API.V1.PolicyController do
   end
 
   # --- POST /v1/policies/:id/archive -----------------------------------
+
+  operation(:archive,
+    summary: "Archive a policy rule",
+    description:
+      "Soft-deactivate a policy rule. Only active rules can be archived; " <>
+        "already-superseded / already-archived rules return `409 not_active`.",
+    tags: ["Policies"],
+    parameters: [@policy_id_param, @idempotency_key_ref, @request_id_in_ref],
+    responses: %{
+      200 => {"Archived policy rule", "application/json", BankWeb.OpenApi.Schemas.PolicyResponse},
+      404 => @not_found_ref,
+      409 => @conflict_ref
+    }
+  )
 
   def archive(conn, %{"id" => id}) do
     with {:ok, uuid} <- cast_uuid(id, "id"),

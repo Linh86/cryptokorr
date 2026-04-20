@@ -28,11 +28,99 @@ defmodule BankWeb.API.V1.AuditController do
   """
 
   use BankWeb, :controller
+  use OpenApiSpex.ControllerSpecs
 
   alias Bank.Audit
   alias BankWeb.API.V1.AuditJSON
+  alias OpenApiSpex.{Parameter, Reference, Schema}
 
   action_fallback BankWeb.API.V1.FallbackController
+
+  @id_ref %Reference{"$ref": "#/components/schemas/Id"}
+  @request_id_in_ref %Reference{"$ref": "#/components/parameters/RequestIdIn"}
+  @unprocessable_ref %Reference{"$ref": "#/components/responses/UnprocessableEntity"}
+
+  @audit_query_params [
+    %Parameter{
+      name: :intent_id,
+      in: :query,
+      required: false,
+      description: "Filter by intent / correlation id (UUID).",
+      schema: @id_ref
+    },
+    %Parameter{
+      name: :subject_type,
+      in: :query,
+      required: false,
+      description: "Filter by audit subject type (e.g. `agent_intent`, `decision_envelope`).",
+      schema: %Schema{type: :string}
+    },
+    %Parameter{
+      name: :subject_id,
+      in: :query,
+      required: false,
+      description:
+        "Filter by audit subject id. Typically a UUID; may be a smart-account id " <>
+          "or on-chain address for non-intent subjects.",
+      schema: %Schema{type: :string}
+    },
+    %Parameter{
+      name: :event_type,
+      in: :query,
+      required: false,
+      description: "Filter by event type (e.g. `intent.submitted`).",
+      schema: %Schema{type: :string}
+    },
+    %Parameter{
+      name: :from,
+      in: :query,
+      required: false,
+      description: "Inclusive lower bound on `ts`; ISO 8601.",
+      schema: %Schema{type: :string, format: :"date-time"}
+    },
+    %Parameter{
+      name: :to,
+      in: :query,
+      required: false,
+      description: "Inclusive upper bound on `ts`; ISO 8601.",
+      schema: %Schema{type: :string, format: :"date-time"}
+    },
+    %Parameter{
+      name: :cursor,
+      in: :query,
+      required: false,
+      description: "Opaque cursor from a prior page.",
+      schema: %Schema{type: :string}
+    },
+    %Parameter{
+      name: :limit,
+      in: :query,
+      required: false,
+      description: "Page size. Default 50.",
+      schema: %Schema{type: :integer, minimum: 1, default: 50}
+    },
+    %Parameter{
+      name: :order,
+      in: :query,
+      required: false,
+      description: "Time order. `asc` (default) or `desc`.",
+      schema: %Schema{type: :string, enum: ["asc", "desc"], default: "asc"}
+    }
+  ]
+
+  operation(:index,
+    summary: "List audit events",
+    description: """
+    Paged, filterable audit stream. Audit events cannot be edited via
+    any endpoint — this list is append-only.
+    """,
+    tags: ["Audit"],
+    parameters: [@request_id_in_ref | @audit_query_params],
+    responses: %{
+      200 => {"Audit events page", "application/json", BankWeb.OpenApi.Schemas.AuditListResponse},
+      422 => @unprocessable_ref
+    }
+  )
 
   def index(conn, params) do
     with {:ok, filters} <- parse_filters(params),
