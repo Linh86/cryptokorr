@@ -1,0 +1,200 @@
+defmodule Bank.Telegram.Callbacks do
+  @moduledoc """
+  Consume Telegram inline-button callbacks and apply them to the
+  decision approval state machine (issue #72, epic #54).
+
+  This is the only place that translates a Telegram button press
+  into a real decision mutation. The webhook controller authenticates
+  the sender and then hands an authorized `Bank.Telegram.Operator`
+  plus the normalized callback payload to `handle/3`. The function
+  returns a short operator-facing string the controller surfaces via
+  `Bank.Telegram.Transport.answer_callback_query/2`.
+
+  ## Dependencies
+
+    * `Bank.Telegram.CallbackToken.verify/4` — signed short-lived
+      token check; actor-bound so a captured button cannot be replayed
+      from a different chat / user.
+    * `Bank.Telegram.Config.can?/2` — role-based capability check.
+      `Bank.Telegram.Alerts.buttons_for/2` already gates mutating
+      buttons at emit time on `:approve_reject`; the re-check here is
+      defense-in-depth against a bug that would let a viewer receive
+      a button they should not have.
+    * `Bank.Decisions.approve/2` / `reject/2` — the real state
+      mutation. This module does not invent a parallel audit path;
+      the decisions context already emits `Bank.Audit.Events`
+      approval_granted / approval_rejected and broadcasts via
+      `Bank.Runtime.Notifier`.
+
+  ## Supported actions
+
+  Only `:approve` and `:reject` are wired today. The callback-token
+  layer (#69) also accepts `:pause`, `:resume`, and `:open_replay`
+  codes; a token carrying any of those is refused with
+  `:unsupported_action` here and will be wired in later issues
+  (#73 pause/resume, ...).
+
+  ## Audit attribution
+
+  Decision mutations record `actor_id: "telegram:" <> audit_actor`.
+  Both the action surface (Telegram) and the operator identity
+  survive in the audit row. The `Bank.Audit.AuditEvent` schema does
+  not have a separate `surface` field; encoding it into `actor_id`
+  keeps the attribution a single string that is greppable and
+  dashboard-friendly without broadening the schema. The actor type
+  stays `:user` — the default in `Bank.Audit.Events.approval_granted/3`
+  and `approval_rejected/3`.
+
+  ## Fail-closed
+
+  Every error path returns `{:error, reason, text}` where `text` is
+  short, truthful, and safe to show to an operator. No branch
+  collapses a non-outcome into a fake success; the response either
+  reports a real state transition or reports *why* the button did
+  not do anything.
+
+  The HTTP-side `answer_callback_query` call is the controller's
+  responsibility — this module never touches the Telegram API
+  directly.
+  """
+
+  require Logger
+
+  alias Bank.Decisions
+  alias Bank.Telegram.CallbackToken
+  alias Bank.Telegram.Config
+  alias Bank.Telegram.Operator
+
+  @type callback_query :: %{
+          required(:user_id) => integer(),
+          required(:chat_id) => integer(),
+          required(:data) => String.t(),
+          optional(:query_id) => String.t(),
+          optional(:message_id) => integer() | nil,
+          optional(:update_id) => integer()
+        }
+
+  @type reason ::
+          :malformed
+          | :invalid
+          | :expired
+          | :actor_mismatch
+          | :forbidden
+          | :unsupported_action
+          | :not_found
+          | :already_resolved
+          | :wrong_state
+          | :backend_error
+
+  @type result :: {:ok, String.t()} | {:error, reason(), String.t()}
+
+  @doc """
+  Apply a callback from an already-authorized operator.
+
+  `operator` must come from `Bank.Telegram.Config.authorize/2` — the
+  controller is responsible for that. `callback` is the map produced
+  by `Bank.Telegram.Update.from_telegram_json/1` for a
+  `{:callback_query, ...}` variant.
+
+  Options:
+
+    * `:now` — override the clock used by `CallbackToken.verify/4`
+      (seconds since epoch). Tests exercise the expiry branch without
+      `Process.sleep/1`.
+  """
+  @spec handle(Operator.t(), callback_query(), keyword()) :: result()
+  def handle(%Operator{} = operator, %{user_id: _, chat_id: _, data: _} = callback, opts \\ []) do
+    with {:ok, payload} <- verify_token(callback, opts),
+         :ok <- check_role(operator),
+         :ok <- check_supported_action(payload.action) do
+      apply_action(operator, payload)
+    end
+  end
+
+  defp verify_token(callback, opts) do
+    case CallbackToken.verify(callback.data, callback.user_id, callback.chat_id, opts) do
+      {:ok, payload} ->
+        {:ok, payload}
+
+      {:error, :malformed} ->
+        {:error, :malformed, "Invalid button."}
+
+      {:error, :invalid} ->
+        {:error, :invalid, "Invalid button."}
+
+      {:error, :expired} ->
+        {:error, :expired, "This button has expired. Open /queue for a fresh one."}
+
+      {:error, :actor_mismatch} ->
+        {:error, :actor_mismatch, "This button is not yours."}
+    end
+  end
+
+  defp check_role(operator) do
+    if Config.can?(operator, :approve_reject) do
+      :ok
+    else
+      {:error, :forbidden, "Not authorized."}
+    end
+  end
+
+  defp check_supported_action(action) when action in [:approve, :reject], do: :ok
+  defp check_supported_action(_), do: {:error, :unsupported_action, "Unsupported button."}
+
+  defp apply_action(operator, %{action: :approve, target_id: decision_id}) do
+    run_decision(operator, :approve, decision_id, "Approved via Telegram", "Approved.")
+  end
+
+  defp apply_action(operator, %{action: :reject, target_id: decision_id}) do
+    run_decision(operator, :reject, decision_id, "Rejected via Telegram", "Rejected.")
+  end
+
+  defp run_decision(operator, action, decision_id, reason, success_text) do
+    opts = [actor_id: audit_actor_id(operator), reason: reason]
+
+    result =
+      case action do
+        :approve -> Decisions.approve(decision_id, opts)
+        :reject -> Decisions.reject(decision_id, opts)
+      end
+
+    case result do
+      {:ok, _successor, _dispatch} ->
+        {:ok, success_text}
+
+      {:error, :not_found} ->
+        {:error, :not_found, "Decision not found."}
+
+      {:error, :already_superseded} ->
+        {:error, :already_resolved, "Decision already resolved."}
+
+      {:error, {:wrong_outcome, _}} ->
+        {:error, :already_resolved, "Decision already resolved."}
+
+      {:error, {:wrong_state, state}} ->
+        Logger.error(
+          "Bank.Telegram.Callbacks: #{action} on #{decision_id} hit wrong_state=#{inspect(state)} " <>
+            "for operator=#{operator.audit_actor}"
+        )
+
+        {:error, :wrong_state, "Could not apply."}
+
+      {:error, :intent_not_found} ->
+        Logger.error("Bank.Telegram.Callbacks: #{action} on #{decision_id} hit intent_not_found")
+
+        {:error, :backend_error, "Could not apply."}
+
+      {:error, other} ->
+        Logger.error(
+          "Bank.Telegram.Callbacks: #{action} on #{decision_id} failed: #{inspect(other)}"
+        )
+
+        {:error, :backend_error, "Could not apply."}
+    end
+  end
+
+  defp audit_actor_id(%Operator{audit_actor: audit_actor})
+       when is_binary(audit_actor) and audit_actor != "" do
+    "telegram:" <> audit_actor
+  end
+end
