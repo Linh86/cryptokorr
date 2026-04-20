@@ -96,10 +96,12 @@ config :bank, Bank.AdapterClient,
   req_options: []
 
 # Telegram operator bot (epic #54): disabled by default in dev.
-# Flip `enabled: true` and populate `operators` locally to exercise the
-# bot against a development chat. Production wiring is env-driven in
-# config/runtime.exs; see `Bank.Telegram.Config`.
+# Flip `enabled: true` and populate `operators` / `webhook_secret`
+# locally to exercise the bot against a development chat and a tunnel
+# (e.g. ngrok). Production wiring is env-driven in config/runtime.exs;
+# see `Bank.Telegram.Config`.
 config :bank, Bank.Telegram.Config,
   enabled: false,
   bot_token: nil,
+  webhook_secret: nil,
   operators: []

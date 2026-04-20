@@ -90,13 +90,18 @@ case config_env() do
 end
 
 # Bank.Telegram.Config: identity / allowlist / role / secrets boundary
-# for the operator Telegram bot (epic #54, issue #70).
+# for the operator Telegram bot (epic #54, issues #70, #69).
 #
 #   * TELEGRAM_BOT_ENABLED must be the literal string "true" to enable
 #     the bot in :prod. Anything else is treated as disabled so a boot
 #     with a missing value fails closed.
 #   * TELEGRAM_BOT_TOKEN is the bot token issued by BotFather. Required
 #     when enabled; rotated on staff change or milestone end.
+#   * TELEGRAM_WEBHOOK_SECRET is the value we pass to setWebhook's
+#     `secret_token` parameter; Telegram echoes it back in the
+#     `X-Telegram-Bot-Api-Secret-Token` header on every inbound update.
+#     `BankWeb.Plugs.VerifyTelegramWebhook` verifies it. Required when
+#     enabled; generate with `openssl rand -hex 32`.
 #   * TELEGRAM_OPERATORS is a pipe-separated allowlist of
 #     USER_ID:CHAT_ID:ROLE:AUDIT_ACTOR records. Roles: viewer,
 #     approver, security_operator, admin. See
@@ -122,6 +127,20 @@ case config_env() do
           BotFather. Rotate on staff change or milestone end.
           """
 
+      webhook_secret =
+        System.get_env("TELEGRAM_WEBHOOK_SECRET") ||
+          raise """
+          environment variable TELEGRAM_WEBHOOK_SECRET is missing.
+          TELEGRAM_BOT_ENABLED=true requires a webhook secret so the
+          webhook ingress plug can verify Telegram's echoed
+          X-Telegram-Bot-Api-Secret-Token header. Generate with:
+            openssl rand -hex 32
+          Then register the webhook with:
+            curl -X POST https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook \\
+                 -d url=https://<host>/internal/telegram/webhook \\
+                 -d secret_token=$TELEGRAM_WEBHOOK_SECRET
+          """
+
       operators_raw =
         System.get_env("TELEGRAM_OPERATORS") ||
           raise """
@@ -143,11 +162,13 @@ case config_env() do
       config :bank, Bank.Telegram.Config,
         enabled: true,
         bot_token: bot_token,
+        webhook_secret: webhook_secret,
         operators: operators
     else
       config :bank, Bank.Telegram.Config,
         enabled: false,
         bot_token: nil,
+        webhook_secret: nil,
         operators: []
     end
 

@@ -33,6 +33,15 @@ defmodule BankWeb.Router do
     plug OpenApiSpex.Plug.PutApiSpec, module: BankWeb.ApiSpec
   end
 
+  # Telegram webhook ingress pipeline. Verifies the
+  # `X-Telegram-Bot-Api-Secret-Token` header echoed back by Telegram
+  # (registered alongside the webhook URL via setWebhook). See
+  # `BankWeb.Plugs.VerifyTelegramWebhook` (issue #69).
+  pipeline :internal_telegram do
+    plug :accepts, ["json"]
+    plug BankWeb.Plugs.VerifyTelegramWebhook
+  end
+
   # Liveness probe — no DB touch, safe for a load balancer.
   scope "/", BankWeb do
     pipe_through :api
@@ -107,6 +116,16 @@ defmodule BankWeb.Router do
     pipe_through :internal_adapter
 
     post "/callback", AdapterCallbackController, :callback
+  end
+
+  # Telegram bot webhook — ingress for bot updates. Authenticated via
+  # the webhook secret Telegram echoes on every call. Controller only
+  # authenticates and normalizes; command / approval dispatch lands in
+  # later sub-issues of epic #54. See issue #69.
+  scope "/internal/telegram", BankWeb.Internal do
+    pipe_through :internal_telegram
+
+    post "/webhook", TelegramWebhookController, :webhook
   end
 
   # Web control tower — LiveView-based operator console.

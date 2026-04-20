@@ -47,7 +47,13 @@ defmodule Bank.Telegram.ConfigTest do
   end
 
   defp configure(opts) do
-    defaults = [enabled: true, bot_token: "test-bot-token", operators: []]
+    defaults = [
+      enabled: true,
+      bot_token: "test-bot-token",
+      webhook_secret: "test-webhook-secret",
+      operators: []
+    ]
+
     Application.put_env(:bank, TelegramConfig, Keyword.merge(defaults, opts))
   end
 
@@ -64,8 +70,9 @@ defmodule Bank.Telegram.ConfigTest do
 
       refute Keyword.has_key?(bank_cfg, Bank.Telegram.Config),
              "config/config.exs must not set :bank, Bank.Telegram.Config — production " <>
-               "must supply TELEGRAM_BOT_ENABLED / TELEGRAM_BOT_TOKEN / TELEGRAM_OPERATORS " <>
-               "via env in config/runtime.exs. See issue #70."
+               "must supply TELEGRAM_BOT_ENABLED / TELEGRAM_BOT_TOKEN / " <>
+               "TELEGRAM_WEBHOOK_SECRET / TELEGRAM_OPERATORS via env in " <>
+               "config/runtime.exs. See issues #70 and #69."
     end
   end
 
@@ -206,6 +213,7 @@ defmodule Bank.Telegram.ConfigTest do
       assert {:ok, cfg} = TelegramConfig.load()
       assert cfg.enabled
       assert cfg.bot_token == "test-bot-token"
+      assert cfg.webhook_secret == "test-webhook-secret"
       assert [%Operator{audit_actor: "ops-alice"}] = cfg.operators
     end
 
@@ -260,6 +268,39 @@ defmodule Bank.Telegram.ConfigTest do
     test "returns {:error, :bot_not_configured} on a nil token" do
       configure(bot_token: nil)
       assert {:error, :bot_not_configured} = TelegramConfig.bot_token()
+    end
+  end
+
+  describe "webhook_secret/0 — safe accessor (#69)" do
+    test "returns {:ok, secret} when enabled and configured" do
+      configure(webhook_secret: "whsec-123")
+      assert {:ok, "whsec-123"} = TelegramConfig.webhook_secret()
+    end
+
+    test "returns {:error, :bot_disabled} when the bot is off" do
+      configure(enabled: false, webhook_secret: "whsec-123")
+      assert {:error, :bot_disabled} = TelegramConfig.webhook_secret()
+    end
+
+    test "returns {:error, :webhook_secret_not_configured} on a nil secret" do
+      configure(webhook_secret: nil)
+      assert {:error, :webhook_secret_not_configured} = TelegramConfig.webhook_secret()
+    end
+
+    test "returns {:error, :webhook_secret_not_configured} on a blank secret" do
+      configure(webhook_secret: "")
+      assert {:error, :webhook_secret_not_configured} = TelegramConfig.webhook_secret()
+    end
+
+    test "returns {:error, :invalid_config} when the config shape is broken" do
+      Application.put_env(:bank, TelegramConfig,
+        enabled: true,
+        bot_token: "t",
+        webhook_secret: "w",
+        operators: [%{user_id: 1, chat_id: 1, role: :god_mode, audit_actor: "x"}]
+      )
+
+      assert {:error, :invalid_config} = TelegramConfig.webhook_secret()
     end
   end
 
