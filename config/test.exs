@@ -48,13 +48,23 @@ config :bank, Bank.AdapterClient,
   req_options: [plug: {Req.Test, Bank.AdapterClient}]
 
 # Telegram operator bot (epic #54): disabled by default under the test
-# env. Tests that exercise the config boundary opt in explicitly via
-# `Application.put_env/3` under `async: false` — see
-# test/bank/telegram/config_test.exs.
+# env. Tests that exercise the config / webhook / transport boundaries
+# opt in explicitly via `Application.put_env/3` under `async: false`
+# — see test/bank/telegram/config_test.exs and
+# test/bank_web/plugs/verify_telegram_webhook_test.exs.
 config :bank, Bank.Telegram.Config,
   enabled: false,
   bot_token: nil,
+  webhook_secret: nil,
   operators: []
+
+# Transport HTTP requests are routed to Req.Test under the test env so
+# individual tests can stub per-test responses without a real server.
+# The base_url is a synthetic host — requests never hit the real
+# Telegram Bot API during tests.
+config :bank, Bank.Telegram.Transport,
+  base_url: "http://telegram.test",
+  req_options: [plug: {Req.Test, Bank.Telegram.Transport}]
 
 # Disable the operational health telemetry poller in tests.
 # `Bank.Ops.Health.emit_telemetry/0` issues an HTTP call to the

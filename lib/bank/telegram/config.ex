@@ -18,6 +18,7 @@ defmodule Bank.Telegram.Config do
       config :bank, Bank.Telegram.Config,
         enabled: boolean(),
         bot_token: String.t() | nil,
+        webhook_secret: String.t() | nil,
         operators: [
           %{
             user_id: integer(),
@@ -28,9 +29,15 @@ defmodule Bank.Telegram.Config do
         ]
 
   Production supplies these via `TELEGRAM_BOT_ENABLED`,
-  `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_OPERATORS` in `config/runtime.exs`.
-  The bot is disabled by default in dev and test; tests opt in by
-  calling `Application.put_env/3` under `async: false`.
+  `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, and
+  `TELEGRAM_OPERATORS` in `config/runtime.exs`. The bot is disabled by
+  default in dev and test; tests opt in by calling
+  `Application.put_env/3` under `async: false`.
+
+  `webhook_secret` is the value Telegram echoes back in the
+  `X-Telegram-Bot-Api-Secret-Token` header when we register the
+  webhook URL with that secret. `BankWeb.Plugs.VerifyTelegramWebhook`
+  consumes it. Added in issue #69.
 
   ## Roles
 
@@ -58,6 +65,7 @@ defmodule Bank.Telegram.Config do
   @type config :: %{
           enabled: boolean(),
           bot_token: String.t() | nil,
+          webhook_secret: String.t() | nil,
           operators: [Operator.t()]
         }
 
@@ -69,6 +77,11 @@ defmodule Bank.Telegram.Config do
           | :invalid_config
 
   @type token_error :: :bot_disabled | :bot_not_configured | :invalid_config
+
+  @type webhook_secret_error ::
+          :bot_disabled
+          | :webhook_secret_not_configured
+          | :invalid_config
 
   @doc """
   Load and validate the Telegram bot configuration from application
@@ -84,10 +97,17 @@ defmodule Bank.Telegram.Config do
     raw = Application.get_env(:bank, __MODULE__, [])
     enabled = Keyword.get(raw, :enabled, false) == true
     bot_token = Keyword.get(raw, :bot_token)
+    webhook_secret = Keyword.get(raw, :webhook_secret)
 
     case parse_operators(Keyword.get(raw, :operators, [])) do
       {:ok, operators} ->
-        {:ok, %{enabled: enabled, bot_token: bot_token, operators: operators}}
+        {:ok,
+         %{
+           enabled: enabled,
+           bot_token: bot_token,
+           webhook_secret: webhook_secret,
+           operators: operators
+         }}
 
       {:error, _} = err ->
         err
@@ -122,6 +142,37 @@ defmodule Bank.Telegram.Config do
       {:ok, %{bot_token: token}} when is_binary(token) and byte_size(token) > 0 -> {:ok, token}
       {:ok, _} -> {:error, :bot_not_configured}
       {:error, _} -> {:error, :invalid_config}
+    end
+  end
+
+  @doc """
+  Return the configured webhook secret, or a fail-closed error.
+
+  This is the value Telegram sends back in the
+  `X-Telegram-Bot-Api-Secret-Token` header on every inbound update
+  after we register the webhook URL with that secret. The
+  `BankWeb.Plugs.VerifyTelegramWebhook` plug compares the incoming
+  header to this value with `Plug.Crypto.secure_compare/2`.
+
+  The error distinguishes between "disabled" (no secret needed
+  because we are not accepting webhooks) and "not configured" (bot
+  is enabled but the secret was never set — a misconfiguration that
+  must fail closed rather than silently accept all callers).
+  """
+  @spec webhook_secret() :: {:ok, String.t()} | {:error, webhook_secret_error()}
+  def webhook_secret do
+    case load() do
+      {:ok, %{enabled: false}} ->
+        {:error, :bot_disabled}
+
+      {:ok, %{webhook_secret: s}} when is_binary(s) and byte_size(s) > 0 ->
+        {:ok, s}
+
+      {:ok, _} ->
+        {:error, :webhook_secret_not_configured}
+
+      {:error, _} ->
+        {:error, :invalid_config}
     end
   end
 
