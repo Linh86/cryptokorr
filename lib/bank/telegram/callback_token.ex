@@ -14,15 +14,31 @@ defmodule Bank.Telegram.CallbackToken do
 
   ## Binary layout
 
-      |  1 byte  |  1 byte  | 4 bytes    | 6 bytes   | 8 bytes         | 16 bytes    | 12 bytes |
+      |  1 byte  |  1 byte  | 4 bytes    | 8 bytes   | 8 bytes         | 16 bytes    | 10 bytes |
       | version  | action   | expires_at | user_id   | chat_id         | target_id   | hmac     |
-      | 0x01     | code     | uint32 s   | uint48    | int64 signed    | uuid raw    | sha256   |
+      | 0x02     | code     | uint32 s   | uint64    | int64 signed    | uuid raw    | sha256   |
                                                                                     (truncated)
 
   The HMAC key is derived from the endpoint's `:secret_key_base` via
   SHA-256 with a module-specific domain separator, so tokens rotate
   automatically when the key rotates and tokens for this module do
   not collide with other signed payloads elsewhere in the app.
+
+  ### Why `user_id` is uint64 (not uint48)
+
+  Telegram documents user and chat ids as requiring **up to 52
+  significant bits**, so the `uint48` layout used before the #69
+  fix could overflow on legitimate operator IDs and break
+  button-based flows. Widening `user_id` to `uint64` adds 2 bytes;
+  the `hmac` field was narrowed from 12 to 10 bytes (SHA-256
+  truncated to 80 bits) to keep the total body at 48 bytes so the
+  Base64-URL-encoded output still fits Telegram's 64-character
+  `callback_data` limit. 80-bit HMAC is comfortably secure for
+  5-minute-expiry tokens — online forgery against the bot endpoint
+  requires ~2⁸⁰ guesses, and each guess requires a Telegram →
+  Phoenix round-trip. The `version` byte bumps from `0x01` to
+  `0x02` so the new parser cleanly rejects any legacy-layout
+  tokens as malformed.
 
   ## Bindings
 
@@ -69,10 +85,10 @@ defmodule Bank.Telegram.CallbackToken do
 
   alias Bank.Telegram.Operator
 
-  @version 0x01
+  @version 0x02
   @default_max_age_s 5 * 60
   @token_bytes 48
-  @hmac_bytes 12
+  @hmac_bytes 10
   @body_bytes @token_bytes - @hmac_bytes
 
   @actions %{
@@ -123,7 +139,7 @@ defmodule Bank.Telegram.CallbackToken do
     target_bin = decode_uuid!(target_id)
 
     body =
-      <<@version::8, action_code::8, expires_at::32, user_id::48, chat_id::signed-64,
+      <<@version::8, action_code::8, expires_at::32, user_id::64, chat_id::signed-64,
         target_bin::binary-size(16)>>
 
     mac = mac(body)
@@ -184,7 +200,7 @@ defmodule Bank.Telegram.CallbackToken do
   end
 
   defp parse_body(
-         <<@version::8, action_code::8, expires_at::32, user_id::48, chat_id::signed-64,
+         <<@version::8, action_code::8, expires_at::32, user_id::64, chat_id::signed-64,
            target_id::binary-size(16)>>
        ) do
     case Map.fetch(@codes_to_actions, action_code) do

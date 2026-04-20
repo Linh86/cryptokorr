@@ -69,6 +69,78 @@ defmodule Bank.Telegram.CallbackTokenTest do
     end
   end
 
+  describe "Telegram user_id range (>48-bit regression)" do
+    # Telegram documents user/chat ids as requiring up to 52
+    # significant bits. The pre-fix layout packed `user_id` into
+    # uint48 and would silently truncate any id ≥ 2^48, breaking
+    # button-based flows for legitimate operator ids. The fixed
+    # layout packs `user_id` into uint64.
+
+    test "round-trips a 49-bit user_id (first id that the old uint48 layout could not hold)" do
+      # 2^48 — the smallest integer that does not fit in 48 bits.
+      big_id = 281_474_976_710_656
+      op = %Operator{operator() | user_id: big_id}
+      now = 1_000_000
+      token = CallbackToken.sign(op, :approve, target_id(), now: now)
+
+      assert {:ok, %{user_id: ^big_id}} =
+               CallbackToken.verify(token, big_id, op.chat_id, now: now)
+    end
+
+    test "round-trips a 52-bit user_id (Telegram-documented upper range)" do
+      # (2^52) - 1 — the largest integer within Telegram's documented
+      # 52-bit significant-bits range.
+      telegram_max = 4_503_599_627_370_495
+      op = %Operator{operator() | user_id: telegram_max}
+      now = 1_000_000
+      token = CallbackToken.sign(op, :approve, target_id(), now: now)
+
+      assert {:ok, %{user_id: ^telegram_max}} =
+               CallbackToken.verify(token, telegram_max, op.chat_id, now: now)
+    end
+
+    test "round-trips the largest value the uint64 layout allows" do
+      # (2^64) - 1 — upper bound of the fixed-width encoding itself.
+      # Way above any plausible Telegram id, but pins the layout's
+      # stated maximum so narrowing uint64 would surface here.
+      max_uint64 = 18_446_744_073_709_551_615
+      op = %Operator{operator() | user_id: max_uint64}
+      now = 1_000_000
+      token = CallbackToken.sign(op, :approve, target_id(), now: now)
+
+      assert {:ok, %{user_id: ^max_uint64}} =
+               CallbackToken.verify(token, max_uint64, op.chat_id, now: now)
+    end
+
+    test "a >48-bit user_id and a different incoming id are still caught by the actor check" do
+      big_id = 281_474_976_710_656
+      op = %Operator{operator() | user_id: big_id}
+      now = 1_000_000
+      token = CallbackToken.sign(op, :approve, target_id(), now: now)
+
+      # Presenting the low 48 bits (what the old layout would have
+      # silently truncated to) must not match the bound user id.
+      truncated_to_48 = Bitwise.band(big_id, 0xFFFF_FFFF_FFFF)
+
+      assert {:error, :actor_mismatch} =
+               CallbackToken.verify(token, truncated_to_48, op.chat_id, now: now)
+    end
+  end
+
+  describe "fixed-layout byte budget" do
+    test "encoded token decodes back to exactly 48 bytes for every action" do
+      # Pins the fixed-width layout: if the body ever grows past
+      # 48 bytes, Base64 output will exceed Telegram's 64-char
+      # callback_data limit.
+      for action <- CallbackToken.actions() do
+        token = CallbackToken.sign(operator(), action, target_id())
+        assert String.length(token) == 64
+        assert {:ok, decoded} = Base.url_decode64(token, padding: false)
+        assert byte_size(decoded) == 48, "token body for #{inspect(action)} is not 48 bytes"
+      end
+    end
+  end
+
   describe "Telegram 64-byte callback_data budget" do
     test "encoded token is exactly 64 URL-safe-Base64 characters" do
       token = CallbackToken.sign(operator(), :approve, target_id())
