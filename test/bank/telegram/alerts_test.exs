@@ -321,6 +321,93 @@ defmodule Bank.Telegram.AlertsTest do
     end
   end
 
+  describe "buttons_for/2 — #70 role boundary (#68 viewer-leak fix)" do
+    # The #70 identity boundary defines `:viewer` as read-only;
+    # `Bank.Telegram.Config.can?/2` forbids `:approve_reject` for
+    # viewers. #68 must not emit mutating approve/reject inline
+    # buttons to viewers — they still receive the informational
+    # text, but without tappable controls.
+
+    test ":viewer receives zero buttons on :pending_approval" do
+      viewer =
+        op(%{
+          user_id: 77_001,
+          chat_id: 99,
+          role: :viewer,
+          audit_actor: "ops-observer"
+        })
+
+      assert [] =
+               Alerts.buttons_for({:pending_approval, %{decision_id: @target_id}}, viewer)
+    end
+
+    test ":approver still receives signed approve + reject buttons" do
+      approver = op(@approver_a)
+
+      assert [
+               %{label: "Approve", callback_data: approve},
+               %{label: "Reject", callback_data: reject}
+             ] =
+               Alerts.buttons_for({:pending_approval, %{decision_id: @target_id}}, approver)
+
+      assert {:ok, %{action: :approve}} =
+               CallbackToken.verify(approve, approver.user_id, approver.chat_id)
+
+      assert {:ok, %{action: :reject}} =
+               CallbackToken.verify(reject, approver.user_id, approver.chat_id)
+    end
+
+    test "alerts buttons still sign a >48-bit user_id cleanly (cross-check #69 uint64 fix)" do
+      # Safety check that the stacked base branch's uint64 user_id
+      # widening (commit a622f93 on #69) is present — a regression
+      # here would silently truncate large Telegram user ids.
+      big_user = 281_474_976_710_656
+
+      approver =
+        op(%{
+          user_id: big_user,
+          chat_id: 88,
+          role: :approver,
+          audit_actor: "ops-bigid"
+        })
+
+      [%{callback_data: approve}, %{callback_data: reject}] =
+        Alerts.buttons_for({:pending_approval, %{decision_id: @target_id}}, approver)
+
+      assert {:ok, %{user_id: ^big_user, action: :approve}} =
+               CallbackToken.verify(approve, big_user, 88)
+
+      assert {:ok, %{user_id: ^big_user, action: :reject}} =
+               CallbackToken.verify(reject, big_user, 88)
+    end
+
+    test ":security_operator and :admin also receive buttons" do
+      sec_op =
+        op(%{
+          user_id: 77_002,
+          chat_id: 99,
+          role: :security_operator,
+          audit_actor: "ops-sec"
+        })
+
+      admin =
+        op(%{
+          user_id: 77_003,
+          chat_id: 99,
+          role: :admin,
+          audit_actor: "ops-admin"
+        })
+
+      for role_op <- [sec_op, admin] do
+        assert [%{label: "Approve"}, %{label: "Reject"}] =
+                 Alerts.buttons_for(
+                   {:pending_approval, %{decision_id: @target_id}},
+                   role_op
+                 )
+      end
+    end
+  end
+
   describe "dispatch/1 — happy path" do
     test "fans out one send_message per operator with per-recipient buttons on pending_approval" do
       configure([])
@@ -361,6 +448,52 @@ defmodule Bank.Telegram.AlertsTest do
                    matching_op.chat_id
                  )
       end
+    end
+
+    test "mixed allowlist: viewer receives text-only, approver receives buttons, on pending_approval" do
+      viewer = %{
+        user_id: 77_001,
+        chat_id: 70,
+        role: :viewer,
+        audit_actor: "ops-observer"
+      }
+
+      configure(operators: [viewer, @approver_a])
+      stub_transport_ok(self())
+
+      alert =
+        {:pending_approval,
+         %{intent_id: @intent_id, decision_id: @target_id, amount: "250.00", asset: "USDC"}}
+
+      assert :ok = Alerts.dispatch(alert)
+
+      payloads = collect_payloads(2)
+
+      by_chat = Map.new(payloads, fn p -> {p["chat_id"], p} end)
+
+      # Viewer got the informational text but no mutating controls.
+      viewer_payload = Map.fetch!(by_chat, viewer.chat_id)
+      assert viewer_payload["text"] =~ "Pending approval"
+
+      refute Map.has_key?(viewer_payload, "reply_markup"),
+             "viewer must not receive approve/reject buttons — role boundary leak"
+
+      # Approver got the same text *plus* actor-bound buttons.
+      approver_payload = Map.fetch!(by_chat, @approver_a.chat_id)
+      assert approver_payload["text"] =~ "Pending approval"
+
+      [[approve, reject]] =
+        get_in(approver_payload, ["reply_markup", "inline_keyboard"])
+
+      assert approve["text"] == "Approve"
+      assert reject["text"] == "Reject"
+
+      assert {:ok, %{action: :approve}} =
+               CallbackToken.verify(
+                 approve["callback_data"],
+                 @approver_a.user_id,
+                 @approver_a.chat_id
+               )
     end
 
     test "non-approval alerts send text without reply_markup" do

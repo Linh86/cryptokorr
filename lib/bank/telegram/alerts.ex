@@ -144,7 +144,22 @@ defmodule Bank.Telegram.Alerts do
   Return the inline buttons this alert should carry **for this
   operator**. Empty list for every alert type except
   `:pending_approval`, which emits per-recipient signed approve /
-  reject callback tokens.
+  reject callback tokens — and then only when the operator's role
+  has the `:approve_reject` capability per
+  `Bank.Telegram.Config.can?/2`.
+
+  ## Role boundary
+
+  The #70 identity boundary pins `:viewer` as read-only (it may
+  `:read` but not `:approve_reject`). Delivering mutating
+  Approve / Reject buttons to a viewer would give them a UI path
+  that their role is specifically forbidden from using; that
+  leak is prevented here so the boundary is enforced at emit
+  time, not only at callback verify time. Viewers still receive
+  the informational alert text with its deep links — they just
+  do not receive tappable mutating controls. Approvers,
+  security-operators, and admins receive the buttons because
+  their role grants `:approve_reject`.
 
   Kept as a separate step from `render/1` because callback tokens
   are actor-bound (signed with the recipient's user_id and
@@ -154,16 +169,20 @@ defmodule Bank.Telegram.Alerts do
   @spec buttons_for(alert(), Operator.t()) :: [Transport.inline_button()]
   def buttons_for({:pending_approval, %{decision_id: decision_id}}, %Operator{} = op)
       when is_binary(decision_id) do
-    [
-      %{
-        label: "Approve",
-        callback_data: CallbackToken.sign(op, :approve, decision_id)
-      },
-      %{
-        label: "Reject",
-        callback_data: CallbackToken.sign(op, :reject, decision_id)
-      }
-    ]
+    if Config.can?(op, :approve_reject) do
+      [
+        %{
+          label: "Approve",
+          callback_data: CallbackToken.sign(op, :approve, decision_id)
+        },
+        %{
+          label: "Reject",
+          callback_data: CallbackToken.sign(op, :reject, decision_id)
+        }
+      ]
+    else
+      []
+    end
   end
 
   def buttons_for(_alert, _operator), do: []
