@@ -34,6 +34,7 @@ defmodule BankWeb.Plugs.VerifyTelegramWebhook do
   require Logger
 
   alias Bank.Telegram.Config
+  alias Bank.Telegram.Telemetry, as: TelegramTelemetry
 
   @header_name "x-telegram-bot-api-secret-token"
 
@@ -43,15 +44,17 @@ defmodule BankWeb.Plugs.VerifyTelegramWebhook do
     with {:ok, presented} <- extract_secret(conn),
          {:ok, expected} <- Config.webhook_secret(),
          true <- Plug.Crypto.secure_compare(presented, expected) do
+      TelegramTelemetry.webhook_auth(:ok)
       conn
     else
       :missing ->
         log_reject(conn, "missing_secret_token")
+        TelegramTelemetry.webhook_auth(:missing_secret_token)
         halt_with(conn, "missing_secret_token")
 
       {:error, :bot_disabled} ->
         Logger.warning("BankWeb.Plugs.VerifyTelegramWebhook: refusing webhook — bot disabled")
-
+        TelegramTelemetry.webhook_auth(:bot_disabled)
         halt_with(conn, "bot_disabled")
 
       {:error, :webhook_secret_not_configured} ->
@@ -59,6 +62,7 @@ defmodule BankWeb.Plugs.VerifyTelegramWebhook do
           "BankWeb.Plugs.VerifyTelegramWebhook: no :webhook_secret configured; refusing webhook"
         )
 
+        TelegramTelemetry.webhook_auth(:server_misconfigured)
         halt_with(conn, "server_misconfigured")
 
       {:error, :invalid_config} ->
@@ -66,10 +70,12 @@ defmodule BankWeb.Plugs.VerifyTelegramWebhook do
           "BankWeb.Plugs.VerifyTelegramWebhook: Telegram config shape is invalid; refusing webhook"
         )
 
+        TelegramTelemetry.webhook_auth(:server_misconfigured)
         halt_with(conn, "server_misconfigured")
 
       false ->
         log_reject(conn, "invalid_secret_token")
+        TelegramTelemetry.webhook_auth(:invalid_secret_token)
         halt_with(conn, "invalid_secret_token")
     end
   end

@@ -60,6 +60,7 @@ defmodule Bank.Telegram.Transport do
   require Logger
 
   alias Bank.Telegram.Config
+  alias Bank.Telegram.Telemetry, as: TelegramTelemetry
 
   @default_base_url "https://api.telegram.org"
   @default_timeout_ms 5_000
@@ -114,14 +115,69 @@ defmodule Bank.Telegram.Transport do
     call("answerCallbackQuery", payload)
   end
 
+  @doc """
+  Classify an error reason as retriable, not-retriable, or unknown.
+
+  Used by telemetry and higher-level callers (`Bank.Telegram.Alerts`,
+  the webhook controller) to decide whether a failed call is worth
+  another attempt later or whether the caller should give up and
+  surface a hard signal to the operator.
+
+    * `:telegram_unavailable` — network / DNS / timeout; retriable
+      with backoff.
+    * `{:telegram_rejected, status, _}` — 5xx is retriable, 4xx is
+      not (the request itself is wrong: bad chat id, blocked user,
+      malformed payload).
+    * `:invalid_response` — 200 with an unexpected body shape;
+      treat as a contract bug, not retriable.
+    * Config-side errors (`:bot_disabled` / `:bot_not_configured` /
+      `:invalid_config`) are not retriable by the caller — an
+      operator has to change configuration first.
+
+  This is a classification function only; it does not perform any
+  retry, and `Bank.Telegram.Transport` itself never retries on its
+  own. Higher layers choose their retry policy.
+  """
+  @spec retriable?(any()) :: boolean() | :unknown
+  def retriable?(:telegram_unavailable), do: true
+
+  def retriable?({:telegram_rejected, status, _body}) when is_integer(status) and status >= 500,
+    do: true
+
+  def retriable?({:telegram_rejected, status, _body}) when is_integer(status), do: false
+  def retriable?(:invalid_response), do: false
+  def retriable?(:bot_disabled), do: false
+  def retriable?(:bot_not_configured), do: false
+  def retriable?(:invalid_config), do: false
+  def retriable?(_), do: :unknown
+
   # --- internals ---
 
   defp call(method, payload) do
-    with {:ok, token} <- Config.bot_token(),
-         {:ok, url} <- url_for(token, method) do
-      do_post(url, payload, method)
+    case Config.bot_token() do
+      {:ok, token} ->
+        {:ok, url} = url_for(token, method)
+        emit_transport(method, do_post(url, payload, method))
+
+      {:error, reason} ->
+        emit_transport(method, {:error, reason})
     end
   end
+
+  defp emit_transport(method, {:ok, _} = ok) do
+    TelegramTelemetry.transport(method, :ok, false)
+    ok
+  end
+
+  defp emit_transport(method, {:error, reason} = err) do
+    tag = error_tag(reason)
+    TelegramTelemetry.transport(method, tag, retriable?(reason))
+    err
+  end
+
+  defp error_tag({:telegram_rejected, _, _}), do: :telegram_rejected
+  defp error_tag(atom) when is_atom(atom), do: atom
+  defp error_tag(_), do: :unknown
 
   defp url_for(token, method) do
     base = base_url()
