@@ -29,7 +29,9 @@ defmodule BankWeb.Internal.TelegramWebhookController do
   use BankWeb, :controller
   require Logger
 
+  alias Bank.Telegram.Commands
   alias Bank.Telegram.Config, as: TelegramConfig
+  alias Bank.Telegram.Transport
   alias Bank.Telegram.Update
 
   def webhook(conn, params) do
@@ -40,8 +42,8 @@ defmodule BankWeb.Internal.TelegramWebhookController do
 
   defp dispatch({:text_message, msg}, conn) do
     case TelegramConfig.authorize(msg.user_id, msg.chat_id) do
-      {:ok, _operator} ->
-        ack(conn, "text_message_accepted")
+      {:ok, operator} ->
+        handle_text(msg, operator, conn)
 
       {:error, reason} ->
         Logger.info(
@@ -71,6 +73,34 @@ defmodule BankWeb.Internal.TelegramWebhookController do
   defp dispatch({:ignored, reason}, conn) do
     Logger.debug("BankWeb.Internal.TelegramWebhookController: ignoring update (#{reason})")
     ack(conn, "ignored_update")
+  end
+
+  defp handle_text(msg, operator, conn) do
+    case Commands.parse(msg.text) do
+      :not_a_command ->
+        # Non-command text is accepted but produces no reply. Free-
+        # form chat interaction is an explicit non-goal in #71.
+        ack(conn, "text_message_accepted")
+
+      parsed ->
+        {:ok, reply} = Commands.handle(parsed, operator)
+
+        case Transport.send_message(msg.chat_id, reply) do
+          {:ok, _} ->
+            :ok
+
+          {:error, reason} ->
+            # Best-effort reply — we still 200-ACK to Telegram so
+            # its retry loop does not hammer us with the same
+            # inbound update.
+            Logger.warning(
+              "BankWeb.Internal.TelegramWebhookController: command reply to " <>
+                "chat_id=#{msg.chat_id} failed: #{inspect(reason)}"
+            )
+        end
+
+        ack(conn, "command_handled")
+    end
   end
 
   defp ack(conn, status_str) do

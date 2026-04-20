@@ -53,14 +53,15 @@ defmodule BankWeb.Internal.TelegramWebhookControllerTest do
   end
 
   describe "text messages" do
-    test "ACKs text_message_accepted when the sender is allowlisted", %{conn: conn} do
+    test "ACKs text_message_accepted on non-command text when the sender is allowlisted",
+         %{conn: conn} do
       payload = %{
         "update_id" => 1,
         "message" => %{
           "message_id" => 10,
           "from" => %{"id" => @approver.user_id},
           "chat" => %{"id" => @approver.chat_id},
-          "text" => "/status"
+          "text" => "hello bot"
         }
       }
 
@@ -71,6 +72,51 @@ defmodule BankWeb.Internal.TelegramWebhookControllerTest do
 
       body = json_response(conn, 200)
       assert body["status"] == "text_message_accepted"
+    end
+
+    test "dispatches /help as a command, sends the help reply, and ACKs command_handled",
+         %{conn: conn} do
+      # #71 round-trip: an allowlisted operator sends a known
+      # command → controller parses it via Bank.Telegram.Commands,
+      # sends the reply via Bank.Telegram.Transport (stubbed
+      # here), and ACKs with the "command_handled" status so the
+      # ingress path has an operational signal distinct from
+      # non-command text.
+      test_pid = self()
+
+      Req.Test.stub(Bank.Telegram.Transport, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:telegram_sent, Jason.decode!(body)})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(%{"ok" => true, "result" => %{"message_id" => 1}}))
+      end)
+
+      payload = %{
+        "update_id" => 1,
+        "message" => %{
+          "message_id" => 10,
+          "from" => %{"id" => @approver.user_id},
+          "chat" => %{"id" => @approver.chat_id},
+          "text" => "/help"
+        }
+      }
+
+      conn =
+        conn
+        |> authenticated()
+        |> post(@webhook_path, payload)
+
+      body = json_response(conn, 200)
+      assert body["status"] == "command_handled"
+
+      assert_receive {:telegram_sent, sent}, 500
+      assert sent["chat_id"] == @approver.chat_id
+      assert sent["text"] =~ "Commands:"
+      assert sent["text"] =~ "/help"
+      assert sent["text"] =~ "/status"
+      assert sent["text"] =~ "/queue"
     end
 
     test "ACKs ignored_sender when the user is unknown", %{conn: conn} do
