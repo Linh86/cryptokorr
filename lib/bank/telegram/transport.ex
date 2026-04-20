@@ -125,9 +125,10 @@ defmodule Bank.Telegram.Transport do
 
     * `:telegram_unavailable` — network / DNS / timeout; retriable
       with backoff.
-    * `{:telegram_rejected, status, _}` — 5xx is retriable, 4xx is
-      not (the request itself is wrong: bad chat id, blocked user,
-      malformed payload).
+    * `{:telegram_rejected, status, _}` — 5xx is retriable, and 429
+      is retriable flood control (`retry_after` in Telegram's Bot
+      API). Other 4xx are not retriable because the request itself is
+      wrong (bad chat id, blocked user, malformed payload).
     * `:invalid_response` — 200 with an unexpected body shape;
       treat as a contract bug, not retriable.
     * Config-side errors (`:bot_disabled` / `:bot_not_configured` /
@@ -143,6 +144,8 @@ defmodule Bank.Telegram.Transport do
 
   def retriable?({:telegram_rejected, status, _body}) when is_integer(status) and status >= 500,
     do: true
+
+  def retriable?({:telegram_rejected, 429, _body}), do: true
 
   def retriable?({:telegram_rejected, status, _body}) when is_integer(status), do: false
   def retriable?(:invalid_response), do: false

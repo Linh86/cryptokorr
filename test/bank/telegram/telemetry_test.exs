@@ -80,12 +80,17 @@ defmodule Bank.Telegram.TelemetryTest do
       assert Transport.retriable?(:telegram_unavailable) == true
     end
 
-    test "Telegram 5xx is retriable, 4xx is not" do
+    test "Telegram 5xx and 429 are retriable; other 4xx are not" do
       assert Transport.retriable?({:telegram_rejected, 503, %{}}) == true
       assert Transport.retriable?({:telegram_rejected, 502, ""}) == true
+
+      assert Transport.retriable?(
+               {:telegram_rejected, 429, %{"parameters" => %{"retry_after" => 3}}}
+             ) ==
+               true
+
       assert Transport.retriable?({:telegram_rejected, 400, %{}}) == false
       assert Transport.retriable?({:telegram_rejected, 404, %{}}) == false
-      assert Transport.retriable?({:telegram_rejected, 429, %{}}) == false
     end
 
     test "invalid 2xx body is treated as a contract bug, not retriable" do

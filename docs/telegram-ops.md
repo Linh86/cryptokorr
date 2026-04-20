@@ -186,8 +186,9 @@ Summary:
 | Error reason                             | Retriable? | Why                                                 |
 | ---------------------------------------- | ---------- | --------------------------------------------------- |
 | `:telegram_unavailable`                  | `true`     | Network / DNS / timeout. Retry with backoff.        |
+| `{:telegram_rejected, 429, _}`           | `true`     | Flood control. Back off for Telegram's `retry_after`. |
 | `{:telegram_rejected, status, _}` (5xx)  | `true`     | Telegram-side transient fault.                      |
-| `{:telegram_rejected, status, _}` (4xx)  | `false`    | Request itself is wrong (bad chat id, malformed).   |
+| `{:telegram_rejected, status, _}` (other 4xx) | `false` | Request itself is wrong (bad chat id, malformed).   |
 | `:invalid_response`                      | `false`    | 2xx with an unexpected body shape. Contract bug.    |
 | `:bot_disabled`                          | `false`    | Config says the bot is off. Operator must toggle.   |
 | `:bot_not_configured`                    | `false`    | Enabled but no token. Operator must fix env.        |
