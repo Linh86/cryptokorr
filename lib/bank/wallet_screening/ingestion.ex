@@ -35,6 +35,7 @@ defmodule Bank.WalletScreening.Ingestion do
   require Logger
 
   alias Bank.WalletScreening
+  alias Bank.WalletScreening.FeedHealth
 
   alias Bank.WalletScreening.Sources.{
     BTCAbuse,
@@ -78,6 +79,7 @@ defmodule Bank.WalletScreening.Ingestion do
       %{records: records, skipped: skipped} = OFAC.parse(entries)
       do_upsert("ofac", records, skipped)
     end
+    |> track_health("ofac")
   end
 
   @doc """
@@ -96,6 +98,7 @@ defmodule Bank.WalletScreening.Ingestion do
       %{records: records, skipped: skipped} = OpenSanctions.parse(entities)
       do_upsert("opensanctions", records, skipped)
     end
+    |> track_health("opensanctions")
   end
 
   @doc """
@@ -114,6 +117,7 @@ defmodule Bank.WalletScreening.Ingestion do
       %{records: records, skipped: skipped} = ScamSniffer.parse(entries)
       do_upsert("scamsniffer", records, skipped)
     end
+    |> track_health("scamsniffer")
   end
 
   @doc """
@@ -132,6 +136,7 @@ defmodule Bank.WalletScreening.Ingestion do
       %{records: records, skipped: skipped} = EtherScamDB.parse(entries)
       do_upsert("etherscamdb", records, skipped)
     end
+    |> track_health("etherscamdb")
   end
 
   @doc """
@@ -152,6 +157,7 @@ defmodule Bank.WalletScreening.Ingestion do
       %{records: records, skipped: skipped} = BTCAbuse.parse_csv(body)
       do_upsert("btc_abuse", records, skipped)
     end
+    |> track_health("btc_abuse")
   end
 
   @doc """
@@ -172,6 +178,7 @@ defmodule Bank.WalletScreening.Ingestion do
       %{records: records, skipped: skipped} = GraphSense.parse(tags)
       do_upsert("graphsense", records, skipped)
     end
+    |> track_health("graphsense")
   end
 
   @doc """
@@ -185,7 +192,8 @@ defmodule Bank.WalletScreening.Ingestion do
   @spec ingest_scoring(list(), keyword()) :: {:ok, ingest_result()} | {:error, term()}
   def ingest_scoring(entries, _opts \\ []) when is_list(entries) do
     %{records: records, skipped: skipped} = InternalScoring.parse(entries)
-    do_upsert("internal_scoring", records, skipped)
+    result = do_upsert("internal_scoring", records, skipped)
+    track_health(result, "internal_scoring")
   end
 
   # --- Fetch helpers ----------------------------------------------------
@@ -324,33 +332,46 @@ defmodule Bank.WalletScreening.Ingestion do
 
     case records do
       [] ->
-        {:ok,
-         %{
-           source: source,
-           ingested: 0,
-           skipped: length(skipped),
-           errors: []
-         }}
+        result = %{
+          source: source,
+          ingested: 0,
+          skipped: length(skipped),
+          errors: []
+        }
+
+        FeedHealth.record_success(source, result)
+        {:ok, result}
 
       _ ->
         case WalletScreening.upsert_records(records) do
           {:ok, count} ->
             Logger.info("WalletScreening.Ingestion: #{source} upserted #{count} records")
 
-            {:ok,
-             %{
-               source: source,
-               ingested: count,
-               skipped: length(skipped),
-               errors: []
-             }}
+            result = %{
+              source: source,
+              ingested: count,
+              skipped: length(skipped),
+              errors: []
+            }
+
+            FeedHealth.record_success(source, result)
+            {:ok, result}
 
           {:error, reason} ->
             Logger.error("WalletScreening.Ingestion: #{source} upsert failed: #{inspect(reason)}")
-
+            FeedHealth.record_failure(source, reason)
             {:error, reason}
         end
     end
+  end
+
+  # --- Health tracking ---------------------------------------------------
+
+  defp track_health({:ok, _result} = ok, _source), do: ok
+
+  defp track_health({:error, reason} = error, source) do
+    FeedHealth.record_failure(source, reason)
+    error
   end
 
   # --- Config -----------------------------------------------------------

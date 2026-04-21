@@ -14,6 +14,8 @@ defmodule Bank.Application do
       {Phoenix.PubSub, name: Bank.PubSub},
       # In-memory registry for pause/resume (see Bank.Security.PauseState).
       Bank.Security.PauseState,
+      # Feed freshness tracking for wallet screening sources.
+      Bank.WalletScreening.FeedHealth,
       # Delegation state is now durable in Postgres (see Bank.Delegations).
       # Background workers for runtime orchestration (see Bank.Runtime).
       {Oban, Application.fetch_env!(:bank, Oban)},
