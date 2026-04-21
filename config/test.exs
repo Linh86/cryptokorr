@@ -84,4 +84,5 @@ config :bank, Bank.WalletScreening.Ingestion,
   scamsniffer_url: "http://scamsniffer-feed.test/blacklist.json",
   etherscamdb_url: "http://etherscamdb-feed.test/scams.yaml",
   btc_abuse_url: "http://btcabuse-feed.test/reports.csv",
+  graphsense_url: "http://graphsense-feed.test/tagpack.json",
   req_options: [plug: {Req.Test, Bank.WalletScreening.Ingestion}]

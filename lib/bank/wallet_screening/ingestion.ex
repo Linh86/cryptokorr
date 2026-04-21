@@ -34,7 +34,7 @@ defmodule Bank.WalletScreening.Ingestion do
   require Logger
 
   alias Bank.WalletScreening
-  alias Bank.WalletScreening.Sources.{BTCAbuse, EtherScamDB, OFAC, OpenSanctions, ScamSniffer}
+  alias Bank.WalletScreening.Sources.{BTCAbuse, EtherScamDB, GraphSense, OFAC, OpenSanctions, ScamSniffer}
 
   @type ingest_result :: %{
           source: String.t(),
@@ -47,6 +47,7 @@ defmodule Bank.WalletScreening.Ingestion do
   @default_opensanctions_url "https://data.opensanctions.org/datasets/latest/sanctions/entities.ftm.json"
   @default_scamsniffer_url "https://raw.githubusercontent.com/scamsniffer/scam-database/main/blacklist/combined.json"
   @default_etherscamdb_url "https://raw.githubusercontent.com/MrLuit/EtherScamDB/master/_data/scams.yaml"
+  @default_graphsense_url "https://raw.githubusercontent.com/graphsense/graphsense-tagpacks/main/packs/exchange.json"
 
   # --- Public API -------------------------------------------------------
 
@@ -140,6 +141,25 @@ defmodule Bank.WalletScreening.Ingestion do
          {:ok, body} <- fetch_body(url) do
       %{records: records, skipped: skipped} = BTCAbuse.parse_csv(body)
       do_upsert("btc_abuse", records, skipped)
+    end
+  end
+
+  @doc """
+  Ingest GraphSense tagpack attribution data.
+
+  Fetches the GraphSense tagpack JSON feed, extracts tags, normalizes
+  them, and upserts into the screening store as `context` records.
+  Supports tagpack envelope objects, bare tag arrays, and NDJSON.
+  """
+  @spec ingest_graphsense(keyword()) :: {:ok, ingest_result()} | {:error, term()}
+  def ingest_graphsense(opts \\ []) do
+    url = Keyword.get(opts, :url, graphsense_url())
+
+    with {:ok, body} <- fetch_body(url),
+         {:ok, decoded} <- decode_json_flexible(body) do
+      tags = GraphSense.extract_tags(decoded)
+      %{records: records, skipped: skipped} = GraphSense.parse(tags)
+      do_upsert("graphsense", records, skipped)
     end
   end
 
@@ -310,6 +330,9 @@ defmodule Bank.WalletScreening.Ingestion do
 
   defp btc_abuse_url,
     do: Keyword.get(config(), :btc_abuse_url)
+
+  defp graphsense_url,
+    do: Keyword.get(config(), :graphsense_url, @default_graphsense_url)
 
   defp req_options, do: Keyword.get(config(), :req_options, [])
 end
