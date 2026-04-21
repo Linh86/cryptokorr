@@ -2,6 +2,7 @@ defmodule Bank.WalletScreening.FeedHealthTest do
   use ExUnit.Case, async: false
 
   alias Bank.WalletScreening.FeedHealth
+  alias Bank.WalletScreening.Ingestion
 
   setup do
     FeedHealth.reset()
@@ -30,6 +31,27 @@ defmodule Bank.WalletScreening.FeedHealthTest do
       assert state.status == :fresh
       assert state.last_failure_at != nil
       assert state.last_failure_reason =~ "http_error"
+    end
+  end
+
+  describe "ingestion integration" do
+    test "successful ingestion records feed freshness" do
+      assert {:ok, %{ingested: 0}} = Ingestion.ingest_scoring([])
+
+      state = FeedHealth.get("internal_scoring")
+      assert state.status == :fresh
+      assert state.last_ingested == 0
+      assert state.last_skipped == 0
+      assert state.last_success_at != nil
+    end
+
+    test "failed ingestion records feed failure" do
+      assert {:error, :btc_abuse_feed_url_not_configured} = Ingestion.ingest_btc_abuse(url: nil)
+
+      state = FeedHealth.get("btc_abuse")
+      assert state.status == :failed
+      assert state.last_failure_reason =~ "btc_abuse_feed_url_not_configured"
+      assert state.last_failure_at != nil
     end
   end
 

@@ -339,7 +339,6 @@ defmodule Bank.WalletScreening.Ingestion do
           errors: []
         }
 
-        FeedHealth.record_success(source, result)
         {:ok, result}
 
       _ ->
@@ -354,12 +353,10 @@ defmodule Bank.WalletScreening.Ingestion do
               errors: []
             }
 
-            FeedHealth.record_success(source, result)
             {:ok, result}
 
           {:error, reason} ->
             Logger.error("WalletScreening.Ingestion: #{source} upsert failed: #{inspect(reason)}")
-            FeedHealth.record_failure(source, reason)
             {:error, reason}
         end
     end
@@ -367,7 +364,10 @@ defmodule Bank.WalletScreening.Ingestion do
 
   # --- Health tracking ---------------------------------------------------
 
-  defp track_health({:ok, _result} = ok, _source), do: ok
+  defp track_health({:ok, result} = ok, source) do
+    FeedHealth.record_success(source, result)
+    ok
+  end
 
   defp track_health({:error, reason} = error, source) do
     FeedHealth.record_failure(source, reason)

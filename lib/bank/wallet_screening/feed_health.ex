@@ -4,9 +4,9 @@ defmodule Bank.WalletScreening.FeedHealth do
 
   Every successful or failed ingestion run updates the source's health
   state so operators can inspect which feeds are fresh, stale, or
-  failing. The state is held in a named ETS table that survives
-  process restarts within the same node (the table is owned by the
-  application supervisor via a dedicated GenServer).
+  failing. The state is node-local and volatile: it is held in a named
+  ETS table owned by this supervised GenServer, so a process or node
+  restart resets the snapshot to `:unknown` until ingestion runs again.
 
   ## Stale policy
 

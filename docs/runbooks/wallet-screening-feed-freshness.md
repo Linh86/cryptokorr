@@ -44,6 +44,11 @@ Each source health state includes:
 - `last_failure_at` / `last_failure_reason` — when and why the last failure occurred
 - `last_ingested` / `last_skipped` — record counts from the last run
 
+The freshness snapshot is node-local and volatile. After an
+application restart, sources report `:unknown` until their ingestion
+job runs again. The screening records themselves remain durable in
+Postgres; only the operational freshness snapshot is reset.
+
 ## How to refresh feeds
 
 ### Manual refresh from IEx
