@@ -58,6 +58,7 @@ defmodule Bank.Stablecoins.QuoteRequest do
           | :unsupported_dest_chain
           | :unsupported_dest_asset
           | :invalid_amount
+          | :invalid_slippage
           | :same_token
           | :source_token_blocked
           | :dest_token_blocked
@@ -76,13 +77,13 @@ defmodule Bank.Stablecoins.QuoteRequest do
          {:ok, dest_chain} <- require_string(params, :dest_chain),
          {:ok, dest_asset} <- require_string(params, :dest_asset),
          {:ok, amount} <- parse_amount(params),
+         {:ok, slippage} <- parse_slippage(params),
          {:ok, source_token} <- resolve_source(source_chain, source_asset),
          {:ok, dest_token} <- resolve_dest(dest_chain, dest_asset),
          :ok <- validate_not_same(source_chain, source_asset, dest_chain, dest_asset),
          :ok <- validate_status(source_token, :source_token_blocked),
          :ok <- validate_status(dest_token, :dest_token_blocked) do
       route_kind = derive_route_kind(source_chain, source_asset, dest_chain, dest_asset)
-      slippage = Map.get(params, :slippage_bps) || Map.get(params, "slippage_bps")
 
       {:ok,
        %__MODULE__{
@@ -114,12 +115,16 @@ defmodule Bank.Stablecoins.QuoteRequest do
 
     case raw do
       %Decimal{} = d ->
-        if Decimal.compare(d, Decimal.new(0)) == :gt, do: {:ok, d}, else: {:error, :invalid_amount}
+        if Decimal.compare(d, Decimal.new(0)) == :gt,
+          do: {:ok, d},
+          else: {:error, :invalid_amount}
 
       s when is_binary(s) ->
         case Decimal.parse(s) do
           {d, ""} ->
-            if Decimal.compare(d, Decimal.new(0)) == :gt, do: {:ok, d}, else: {:error, :invalid_amount}
+            if Decimal.compare(d, Decimal.new(0)) == :gt,
+              do: {:ok, d},
+              else: {:error, :invalid_amount}
 
           _ ->
             {:error, :invalid_amount}
@@ -133,6 +138,29 @@ defmodule Bank.Stablecoins.QuoteRequest do
 
       _ ->
         {:error, :invalid_amount}
+    end
+  end
+
+  defp parse_slippage(params) do
+    raw = Map.get(params, :slippage_bps) || Map.get(params, "slippage_bps")
+
+    case raw do
+      nil ->
+        {:ok, nil}
+
+      n when is_integer(n) and n >= 0 and n <= 10_000 ->
+        {:ok, n}
+
+      s when is_binary(s) ->
+        with {n, ""} <- Integer.parse(s),
+             true <- n >= 0 and n <= 10_000 do
+          {:ok, n}
+        else
+          _ -> {:error, :invalid_slippage}
+        end
+
+      _ ->
+        {:error, :invalid_slippage}
     end
   end
 

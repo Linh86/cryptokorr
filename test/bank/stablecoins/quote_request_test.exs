@@ -207,5 +207,33 @@ defmodule Bank.Stablecoins.QuoteRequestTest do
 
       assert req.slippage_bps == 50
     end
+
+    test "accepts string slippage_bps" do
+      assert {:ok, req} =
+               QuoteRequest.build(%{
+                 source_chain: "ethereum",
+                 source_asset: "USDC",
+                 dest_chain: "ethereum",
+                 dest_asset: "USDT",
+                 amount: Decimal.new("100"),
+                 slippage_bps: "75"
+               })
+
+      assert req.slippage_bps == 75
+    end
+
+    test "rejects invalid slippage_bps" do
+      for slippage <- [-1, 10_001, "1.5", "abc", :fifty] do
+        assert {:error, :invalid_slippage} =
+                 QuoteRequest.build(%{
+                   source_chain: "ethereum",
+                   source_asset: "USDC",
+                   dest_chain: "ethereum",
+                   dest_asset: "USDT",
+                   amount: Decimal.new("100"),
+                   slippage_bps: slippage
+                 })
+      end
+    end
   end
 end
