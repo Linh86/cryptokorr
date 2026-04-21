@@ -71,6 +71,7 @@ defmodule Bank.Autonomy do
   alias Bank.Intents.AgentIntent
   alias Bank.Policies.Evaluation
   alias Bank.Quotes.Preview
+  alias Bank.WalletScreening.IntentScreening
 
   @type outcome :: :auto_exec | :hold | :approval_required | :block
   @type risk_tier :: :low | :moderate | :elevated | :severe
@@ -105,6 +106,9 @@ defmodule Bank.Autonomy do
       `Bank.Quotes.preview/2`. `nil` means "no preview attempted yet"
       and is treated as `{:error, :preview_missing}`.
     * `:paused?` — boolean, from `Bank.Security`.
+    * `:screening` — (optional) pre-computed screening result from
+      `Bank.WalletScreening.IntentScreening.screen/1`. If not supplied,
+      screening is resolved from the intent automatically.
 
   Options:
 
@@ -126,6 +130,8 @@ defmodule Bank.Autonomy do
   end
 
   def route(inputs, opts) do
+    inputs = resolve_screening(inputs)
+
     cond do
       policy_violations?(inputs) ->
         build_policy_block(inputs)
@@ -144,6 +150,12 @@ defmodule Bank.Autonomy do
 
       simulation_failed?(inputs) ->
         build_simulation_failed(inputs)
+
+      screening_hard_block?(inputs) ->
+        build_screening_block(inputs)
+
+      screening_challenge?(inputs) ->
+        build_screening_challenge(inputs)
 
       conflicted_trust?(inputs) ->
         build(
@@ -200,8 +212,28 @@ defmodule Bank.Autonomy do
           %{}
         )
     end
+    |> annotate_screening(inputs)
     |> emit()
   end
+
+  defp annotate_screening(decision, %{screening: %{status: :not_applicable}}) do
+    put_in(decision, [:rationale, :screening], %{status: :not_applicable})
+  end
+
+  defp annotate_screening(decision, %{screening: screening}) do
+    annotation = %{
+      status: screening[:status],
+      chain: screening[:chain],
+      address: screening[:address],
+      winning_source: screening[:winning_source],
+      winning_reason: screening[:winning_reason],
+      total_records: screening[:outcome] && length(screening.outcome.all_records)
+    }
+
+    put_in(decision, [:rationale, :screening], annotation)
+  end
+
+  defp annotate_screening(decision, _inputs), do: decision
 
   defp emit(%{} = decision) do
     Bank.Runtime.Telemetry.decision(decision)
@@ -256,6 +288,54 @@ defmodule Bank.Autonomy do
 
   defp simulation_failed?(%{preview: {:error, {:simulation_failed, _}}}), do: true
   defp simulation_failed?(_), do: false
+
+  # --- Wallet screening guards ------------------------------------------
+
+  defp resolve_screening(%{screening: _} = inputs), do: inputs
+
+  defp resolve_screening(%{intent: %AgentIntent{} = intent} = inputs) do
+    Map.put(inputs, :screening, IntentScreening.screen(intent))
+  end
+
+  defp resolve_screening(inputs), do: Map.put(inputs, :screening, %{status: :not_applicable})
+
+  defp screening_hard_block?(%{screening: %{status: :block}}), do: true
+  defp screening_hard_block?(_), do: false
+
+  defp screening_challenge?(%{screening: %{status: :challenge}}), do: true
+  defp screening_challenge?(_), do: false
+
+  defp build_screening_block(%{screening: screening}) do
+    build(
+      :block,
+      :severe,
+      :wallet_screening_hard_block,
+      "destination address is sanctioned: #{screening[:winning_reason] || "sanctions hit"}",
+      %{
+        screening_source: screening[:winning_source],
+        screening_reason: screening[:winning_reason],
+        screening_chain: screening[:chain],
+        screening_address: screening[:address]
+      }
+    )
+  end
+
+  defp build_screening_challenge(%{screening: screening}) do
+    build(
+      :approval_required,
+      :elevated,
+      :wallet_screening_challenge,
+      "destination address flagged by scam/phishing feed: #{screening[:winning_reason] || "scam feed hit"}",
+      %{
+        screening_source: screening[:winning_source],
+        screening_reason: screening[:winning_reason],
+        screening_chain: screening[:chain],
+        screening_address: screening[:address]
+      }
+    )
+  end
+
+  # --- Trust guards -------------------------------------------------------
 
   defp conflicted_trust?(%{trust: %{derived_trust: :conflicted}}), do: true
   defp conflicted_trust?(_), do: false
