@@ -36,6 +36,9 @@ defmodule BankWeb.API.V1.ApprovalController do
 
   alias Bank.Decisions
   alias Bank.Decisions.DecisionEnvelope
+  alias Bank.Intents.AgentIntent
+  alias Bank.Repo
+  alias Bank.WalletScreening.Evidence
   alias OpenApiSpex.{Parameter, Reference}
 
   @id_ref %Reference{"$ref": "#/components/schemas/Id"}
@@ -211,7 +214,21 @@ defmodule BankWeb.API.V1.ApprovalController do
       decided_at: e.decided_at,
       decided_by: e.decided_by,
       approval_expires_at: e.approval_expires_at,
-      reasons: e.reasons
+      reasons: e.reasons,
+      screening_evidence: screening_evidence(e)
     }
   end
+
+  defp screening_evidence(%DecisionEnvelope{intent: %AgentIntent{} = intent}) do
+    Evidence.for_intent(intent)
+  end
+
+  defp screening_evidence(%DecisionEnvelope{intent_id: intent_id}) when is_binary(intent_id) do
+    case Repo.get(AgentIntent, intent_id) do
+      nil -> nil
+      %AgentIntent{} = intent -> Evidence.for_intent(intent)
+    end
+  end
+
+  defp screening_evidence(_envelope), do: nil
 end

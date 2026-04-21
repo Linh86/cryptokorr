@@ -163,7 +163,9 @@ defmodule Bank.WalletScreening.EvidenceTest do
 
     test "screens intent target address label" do
       cp = Fixtures.counterparty()
-      label = Fixtures.address_label(counterparty: cp, chain: "ethereum", address: "0xLabelAddr001")
+
+      label =
+        Fixtures.address_label(counterparty: cp, chain: "ethereum", address: "0xLabelAddr001")
 
       insert_record!(%{
         chain: "ethereum",
@@ -213,7 +215,7 @@ defmodule Bank.WalletScreening.EvidenceTest do
       evidence = Evidence.for_address("ethereum", @sanctions_addr)
 
       assert is_list(evidence.feed_health)
-      assert Enum.any?(evidence.feed_health, &(&1.source == "ofac"))
+      assert Enum.any?(evidence.feed_health, &(&1["source"] == "ofac"))
     end
   end
 end

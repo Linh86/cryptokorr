@@ -112,16 +112,16 @@ defmodule Bank.WalletScreening.Evidence do
 
   defp render_record(%ScreeningRecord{} = r) do
     %{
-      id: r.id,
-      control_tier: Atom.to_string(r.control_tier),
-      source: r.source,
-      source_record_id: r.source_record_id,
-      category: r.category,
-      reason: r.reason,
-      evidence_uri: r.evidence_uri,
-      score: render_decimal(r.score),
-      score_version: r.score_version,
-      metadata: r.metadata
+      "id" => r.id,
+      "control_tier" => Atom.to_string(r.control_tier),
+      "source" => r.source,
+      "source_record_id" => r.source_record_id,
+      "category" => r.category,
+      "reason" => r.reason,
+      "evidence_uri" => r.evidence_uri,
+      "score" => render_decimal(r.score),
+      "score_version" => r.score_version,
+      "metadata" => r.metadata
     }
   end
 
@@ -149,11 +149,11 @@ defmodule Bank.WalletScreening.Evidence do
 
   defp render_health(state) do
     %{
-      source: state.source,
-      status: Atom.to_string(state.status),
-      severity: Atom.to_string(state.severity),
-      last_success_at: state.last_success_at,
-      stale_after_hours: state.stale_after_hours
+      "source" => state.source,
+      "status" => Atom.to_string(state.status),
+      "severity" => Atom.to_string(state.severity),
+      "last_success_at" => state.last_success_at,
+      "stale_after_hours" => state.stale_after_hours
     }
   end
 
