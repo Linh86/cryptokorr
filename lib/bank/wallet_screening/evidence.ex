@@ -24,10 +24,8 @@ defmodule Bank.WalletScreening.Evidence do
   """
 
   alias Bank.WalletScreening
-  alias Bank.WalletScreening.{FeedHealth, ScreeningOutcome, ScreeningRecord}
-  alias Bank.Counterparties.AddressLabel
+  alias Bank.WalletScreening.{FeedHealth, IntentScreening, ScreeningOutcome, ScreeningRecord}
   alias Bank.Intents.AgentIntent
-  alias Bank.Repo
 
   @type evidence :: %{
           outcome: String.t(),
@@ -54,17 +52,14 @@ defmodule Bank.WalletScreening.Evidence do
   @doc """
   Screen the target address of an intent and return evidence.
 
-  Resolves the destination address from the intent's
-  `target_raw_address` or `target_address_label_id`.
+  Resolves the destination address using the same target-resolution
+  helper as runtime wallet-screening routing.
   """
   @spec for_intent(AgentIntent.t(), keyword()) :: evidence()
   def for_intent(%AgentIntent{} = intent, opts \\ []) do
-    {chain, address} = resolve_target(intent)
-
-    case {chain, address} do
-      {nil, _} -> empty_evidence()
-      {_, nil} -> empty_evidence()
-      {c, a} -> for_address(c, a, opts)
+    case IntentScreening.resolve_target(intent) do
+      {:ok, chain, address} -> for_address(chain, address, opts)
+      _ -> empty_evidence()
     end
   end
 
@@ -156,19 +151,4 @@ defmodule Bank.WalletScreening.Evidence do
       "stale_after_hours" => state.stale_after_hours
     }
   end
-
-  defp resolve_target(%AgentIntent{target_raw_address: addr, chain: chain})
-       when is_binary(addr) and addr != "" do
-    {chain, addr}
-  end
-
-  defp resolve_target(%AgentIntent{target_address_label_id: label_id, chain: chain})
-       when is_binary(label_id) do
-    case Repo.get(AddressLabel, label_id) do
-      nil -> {chain, nil}
-      %AddressLabel{address: addr} -> {chain, addr}
-    end
-  end
-
-  defp resolve_target(_), do: {nil, nil}
 end

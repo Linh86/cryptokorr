@@ -181,12 +181,36 @@ defmodule Bank.WalletScreening.EvidenceTest do
         Fixtures.agent_intent(
           counterparty: cp,
           target_address_label_id: label.id,
-          chain: "ethereum"
+          chain: "base"
         )
 
       evidence = Evidence.for_intent(intent)
 
       assert evidence.outcome == "clean"
+      assert evidence.screened_chain == "ethereum"
+      assert evidence.total_records == 1
+    end
+
+    test "screens counterparty-only intent using its single active label on the intent chain" do
+      cp = Fixtures.counterparty()
+      _label = Fixtures.address_label(counterparty: cp, chain: "base", address: "0xEvidenceCp001")
+
+      insert_record!(%{
+        chain: "base",
+        address: "0xEvidenceCp001",
+        control_tier: :challenge,
+        source: "scamsniffer",
+        source_record_id: "ss-evidence-cp-001",
+        category: "phishing",
+        reason: "ScamSniffer evidence counterparty-only target"
+      })
+
+      intent = Fixtures.agent_intent(counterparty: cp, chain: "base")
+
+      evidence = Evidence.for_intent(intent)
+
+      assert evidence.outcome == "challenge"
+      assert evidence.screened_address == "0xEvidenceCp001"
       assert evidence.total_records == 1
     end
 

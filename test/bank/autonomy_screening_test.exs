@@ -62,6 +62,30 @@ defmodule Bank.AutonomyScreeningTest do
       assert decision.rationale.screening_reason =~ "LAZARUS"
     end
 
+    test "sanctions hit still blocks when preview is unavailable" do
+      insert_screening!(%{
+        chain: "base",
+        address: "0xSanctionedPreviewDown001",
+        control_tier: :hard_block,
+        source: "ofac",
+        source_record_id: "sdn-preview-down-001",
+        category: "sanctions",
+        reason: "OFAC SDN: preview outage must not hide sanctions"
+      })
+
+      intent =
+        Fixtures.agent_intent(
+          target_counterparty_id: nil,
+          target_raw_address: "0xSanctionedPreviewDown001",
+          chain: "base"
+        )
+
+      decision = Autonomy.route(base_inputs(intent, %{preview: {:error, :provider_unavailable}}))
+
+      assert decision.outcome == :block
+      assert decision.reason_code == :wallet_screening_hard_block
+    end
+
     test "hard_block beats challenge through screening precedence" do
       insert_screening!(%{
         chain: "base",
@@ -201,7 +225,9 @@ defmodule Bank.AutonomyScreeningTest do
   describe "screening: address resolution" do
     test "screens address label target" do
       cp = Fixtures.counterparty()
-      label = Fixtures.address_label(counterparty: cp, chain: "ethereum", address: "0xLabelTarget007")
+
+      label =
+        Fixtures.address_label(counterparty: cp, chain: "ethereum", address: "0xLabelTarget007")
 
       insert_screening!(%{
         chain: "ethereum",
@@ -217,21 +243,50 @@ defmodule Bank.AutonomyScreeningTest do
         Fixtures.agent_intent(
           counterparty: cp,
           target_address_label_id: label.id,
-          chain: "ethereum"
+          chain: "base"
         )
 
       decision = Autonomy.route(base_inputs(intent))
 
       assert decision.outcome == :block
       assert decision.reason_code == :wallet_screening_hard_block
+      assert decision.rationale.screening.chain == "ethereum"
     end
 
-    test "counterparty-only intent (no raw address or label) gets not_applicable screening" do
+    test "screens counterparty-only target when exactly one active label matches the intent chain" do
+      cp = Fixtures.counterparty()
+
+      _label =
+        Fixtures.address_label(counterparty: cp, chain: "base", address: "0xCounterpartyOnly008")
+
+      insert_screening!(%{
+        chain: "base",
+        address: "0xCounterpartyOnly008",
+        control_tier: :challenge,
+        source: "scamsniffer",
+        source_record_id: "ss-auto-008",
+        category: "phishing",
+        reason: "ScamSniffer counterparty-only target"
+      })
+
+      intent = Fixtures.agent_intent(counterparty: cp, chain: "base")
+
+      decision = Autonomy.route(base_inputs(intent))
+
+      assert decision.outcome == :approval_required
+      assert decision.reason_code == :wallet_screening_challenge
+      assert decision.rationale.screening.address == "0xCounterpartyOnly008"
+    end
+
+    test "counterparty-only intent with no active label gets explicit unresolved screening" do
       intent = Fixtures.agent_intent()
 
       decision = Autonomy.route(base_inputs(intent))
 
-      assert decision.rationale.screening.status == :not_applicable
+      assert decision.outcome == :hold
+      assert decision.reason_code == :wallet_screening_unresolved
+      assert decision.rationale.screening.status == :unresolved
+      assert decision.rationale.screening.reason == :no_active_label
     end
   end
 

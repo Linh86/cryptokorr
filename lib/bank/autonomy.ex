@@ -19,23 +19,28 @@ defmodule Bank.Autonomy do
     2. **Policy violations** — any violation from the policy evaluation
        emits `:block`; the `policy.autonomy_tier` constraint is
        surfaced explicitly so the UI can say "rule X blocked this".
-    3. **Provider degradation** — `{:error, :provider_unavailable}` or
+    3. **Wallet screening** — sanctions (`:hard_block`) emit `:block`;
+       scam/phishing (`:challenge`) emits `:approval_required`; context
+       and score-only hits annotate the rationale but do not block. If
+       the target references an address shape that cannot be safely
+       resolved, emit `:hold`.
+    4. **Provider degradation** — `{:error, :provider_unavailable}` or
        `{:error, :stale}` emits `:hold` with reason
        `:preview_unavailable` / `:preview_stale`. The caller
        resimulates before proceeding.
-    4. **Simulation failure** — `{:error, {:simulation_failed, _}}`
+    5. **Simulation failure** — `{:error, {:simulation_failed, _}}`
        emits `:block` with `:simulation_failed`.
-    5. **Conflicted trust** — `derived_trust == :conflicted` emits
+    6. **Conflicted trust** — `derived_trust == :conflicted` emits
        `:approval_required`. Confidence is always `:low` for conflicted,
        so auto-executing is never appropriate.
-    6. **Sensitive trust** — `:sensitive` emits `:approval_required`
+    7. **Sensitive trust** — `:sensitive` emits `:approval_required`
        regardless of amount.
-    7. **Unknown trust** — emits `:approval_required` when amount is
+    8. **Unknown trust** — emits `:approval_required` when amount is
        under the `unknown_approval_ceiling` knob, else `:block`.
-    8. **Trusted + auto-capable policy tier + low-risk amount** —
+    9. **Trusted + auto-capable policy tier + low-risk amount** —
        emits `:auto_exec`.
-    9. **Trusted + policy tier :manual** — emits `:approval_required`.
-    10. **Fallback** — `:approval_required` (conservative default).
+    10. **Trusted + policy tier :manual** — emits `:approval_required`.
+    11. **Fallback** — `:approval_required` (conservative default).
 
   ## Amount thresholds
 
@@ -145,17 +150,20 @@ defmodule Bank.Autonomy do
           %{tier: :block}
         )
 
-      preview_degraded?(inputs) ->
-        build_preview_degraded(inputs)
-
-      simulation_failed?(inputs) ->
-        build_simulation_failed(inputs)
-
       screening_hard_block?(inputs) ->
         build_screening_block(inputs)
 
       screening_challenge?(inputs) ->
         build_screening_challenge(inputs)
+
+      screening_unresolved?(inputs) ->
+        build_screening_unresolved(inputs)
+
+      preview_degraded?(inputs) ->
+        build_preview_degraded(inputs)
+
+      simulation_failed?(inputs) ->
+        build_simulation_failed(inputs)
 
       conflicted_trust?(inputs) ->
         build(
@@ -216,8 +224,14 @@ defmodule Bank.Autonomy do
     |> emit()
   end
 
-  defp annotate_screening(decision, %{screening: %{status: :not_applicable}}) do
-    put_in(decision, [:rationale, :screening], %{status: :not_applicable})
+  defp annotate_screening(decision, %{screening: %{status: status} = screening})
+       when status in [:not_applicable, :unresolved] do
+    annotation =
+      screening
+      |> Map.take([:status, :reason, :chain, :address])
+      |> reject_nil_values()
+
+    put_in(decision, [:rationale, :screening], annotation)
   end
 
   defp annotate_screening(decision, %{screening: screening}) do
@@ -305,6 +319,9 @@ defmodule Bank.Autonomy do
   defp screening_challenge?(%{screening: %{status: :challenge}}), do: true
   defp screening_challenge?(_), do: false
 
+  defp screening_unresolved?(%{screening: %{status: :unresolved}}), do: true
+  defp screening_unresolved?(_), do: false
+
   defp build_screening_block(%{screening: screening}) do
     build(
       :block,
@@ -331,6 +348,19 @@ defmodule Bank.Autonomy do
         screening_reason: screening[:winning_reason],
         screening_chain: screening[:chain],
         screening_address: screening[:address]
+      }
+    )
+  end
+
+  defp build_screening_unresolved(%{screening: screening}) do
+    build(
+      :hold,
+      :moderate,
+      :wallet_screening_unresolved,
+      "destination address could not be resolved for wallet screening",
+      %{
+        screening_reason: screening[:reason],
+        screening_chain: screening[:chain]
       }
     )
   end
@@ -471,6 +501,10 @@ defmodule Bank.Autonomy do
       reason: message,
       rationale: rationale
     }
+  end
+
+  defp reject_nil_values(map) do
+    Map.reject(map, fn {_key, value} -> is_nil(value) end)
   end
 
   defp trust_confidence(%{trust: %{confidence: c}}), do: c
