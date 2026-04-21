@@ -77,8 +77,11 @@ config :bank, Bank.Telegram.Transport,
 config :bank, BankWeb.Telemetry, periodic_measurements: []
 
 # Wallet screening feed ingestion uses Req.Test so tests can stub
-# feed responses without hitting real OFAC / OpenSanctions servers.
+# feed responses without hitting real sanctions / scam feed servers.
 config :bank, Bank.WalletScreening.Ingestion,
   ofac_url: "http://ofac-feed.test/sanctions.json",
   opensanctions_url: "http://opensanctions-feed.test/entities.ftm.json",
+  scamsniffer_url: "http://scamsniffer-feed.test/blacklist.json",
+  etherscamdb_url: "http://etherscamdb-feed.test/scams.yaml",
+  btc_abuse_url: "http://btcabuse-feed.test/reports.csv",
   req_options: [plug: {Req.Test, Bank.WalletScreening.Ingestion}]
