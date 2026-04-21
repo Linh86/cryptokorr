@@ -134,12 +134,14 @@ The MVP should include:
 
 - wallet or smart-account connection
 - safe address labeling
+- sanctioned and risky-wallet screening on destination addresses
 - user-curated counterparties with evidence and notes
 - stablecoin transfers
 - recurring or triggered payment operations
 - limited whitelist-only swaps
 - tiered autonomy
 - approval queue
+- operator alerts and approvals via Telegram bot
 - full decision audit
 - emergency pause and delegation revoke
 
@@ -152,6 +154,7 @@ The MVP should not include:
 - bridging
 - full multi-chain launch
 - retail neobank experience
+- free-form chat-driven transaction authoring without policy-bound intents
 
 The product should be architected as chain-agnostic, but only one production EVM L2 should go live in v1. The default first live chain should be Base. The default first-class asset should be USDC.
 
@@ -174,6 +177,55 @@ The Audit and Replay view should explain why an action executed, why it was bloc
 The Security Console should provide pause, revoke, delegation visibility, and operational safety controls.
 
 This web app is not a custody experience. It is a trust, control, and observability interface for an execution runtime.
+
+## Operator Messaging Surface
+
+Implemented by epic #54.
+
+The MVP includes a Telegram bot as a thin operator surface on top of the
+control plane.
+
+The bot should not replace the web console. It should shorten response
+time when a human decision is needed.
+
+The Telegram bot supports:
+
+- alert delivery for pending approvals, runtime pause / resume, revoke
+  failures, execution outcomes, and sanctions / scam hits
+- approve or reject of queued actions
+- runtime status and queue summary commands
+- deep links back to replay or audit in the web control tower
+
+The Telegram bot does not support:
+
+- free-form transaction authoring
+- policy editing
+- direct bypass of the approval queue
+- unaudited operator actions
+
+## Address And Wallet Risk Intelligence
+
+See epic #55.
+
+Safe address labeling in MVP should not rely on user curation alone. The
+runtime should combine curated counterparties with external wallet-risk
+intelligence.
+
+The decision boundary should be layered:
+
+- **Hard block** for exact sanctions hits from OFAC and OpenSanctions
+- **Warning / challenge** for scam or phishing signals from community
+  feeds like ScamSniffer, EtherScamDB, and BTC-specific abuse feeds
+- **Context / labeling** from GraphSense tagpacks and other public
+  attribution sources
+- **Internal scoring only** from research datasets such as Elliptic++
+  and similar modeling inputs; model output alone should not create a
+  hard block
+
+This layering matters because the product should be able to say not only
+"this transfer is denied," but also whether it was denied for legal
+sanctions reasons, challenged for scam risk, or merely elevated for
+human review due to suspicious context.
 
 ## Design Principles
 
@@ -198,11 +250,20 @@ A trusted high-value transfer is routed to approval or cooldown instead of silen
 
 An unknown address is held or blocked rather than treated as safe by default.
 
+A sanctioned address is blocked before execution and the operator can
+see which list triggered the block.
+
+A scam- or phishing-labelled address is challenged and routed to manual
+review instead of silent execution.
+
 Conflicted evidence prevents auto-execution until the trust state is resolved.
 
 A swap outside allowed slippage or policy bounds is blocked.
 
 Revoked delegation stops execution immediately.
+
+An operator can approve or reject a queued action from Telegram and the
+audit trail records that the action came from the bot surface.
 
 Any completed or blocked action can be replayed from audit data and explained to an operator.
 

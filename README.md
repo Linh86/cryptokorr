@@ -79,8 +79,8 @@ runtime-flow doc.
 | `intents.evaluate`    | `:intents_evaluate`    | Policy + trust + simulation pipeline on intent submission. |
 | `intents.reevaluate`  | `:intents_reevaluate`  | Hold-TTL and trust/policy-change-driven re-evaluation. |
 | `approvals.expire`    | `:approvals_expire`    | Approval TTL → successor envelope with outcome `block`. |
-| `executions.run`      | `:executions_run`      | Prepare plan skeleton, hand off to the adapter. |
-| `executions.confirm`  | `:executions_confirm`  | Poll chain-side confirmation state reported by the adapter. |
+| `executions.run`      | `:executions_run`      | Re-validate the decision, plan, pause state, and delegation, then dispatch the transfer through the adapter. |
+| `executions.confirm`  | `:executions_confirm`  | Safety-net reconciliation if adapter callbacks miss a terminal plan finalisation. |
 | `security.revoke`     | `:security_revoke`     | Dispatch delegation revoke transaction through the adapter. |
 
 Workers live under `Bank.Runtime.Workers`; see "Workers and realtime
@@ -158,14 +158,35 @@ Subscribes to four PubSub topics: `security:events`, `approval:queue`,
 `dashboard:runtime_status`, and `audit:stream`. Re-renders on any
 broadcast without polling.
 
+**`BankWeb.IntentsLive` (`/intents`)**
+
+Dedicated operator view of the intent stream, separate from dashboard
+summaries, queue rows, and replay drilldowns:
+
+* **State breakdown** — count chips for each `AgentIntent.state`.
+  Counts respect the active `kind` and search filters, but
+  intentionally ignore the active `state` filter so each chip answers
+  "what would this slice show if I switched to this state?"
+* **Filterable table** — shareable query-param filters for state,
+  kind, and free-text search by agent ID or intent ID.
+* **Intent rows** — latest intents with agent, kind, amount, target,
+  state badge, submitted timestamp, and a direct "Replay" link to
+  `/audit/replay/:intent_id`.
+* **Empty state** — explains when the current filter slice has no
+  matching intents.
+
+Subscribes to `audit:stream`; any audit append triggers a reload of the
+current slice without polling.
+
 **`BankWeb.QueueLive` (`/queue`)**
 
 The action queue surfaces decisions and executions that need attention:
 
 * **Pending approvals** — decisions with outcome `:approval_required`.
-  Approve/reject buttons are rendered but disabled because the approval
-  backend endpoints are stubs (501) — wiring lands with the approval
-  engine. Shows risk tier and expiry time.
+  Approve/reject actions are live in both the UI and `/v1/approvals`.
+  Approval records the successor decision envelope; actual execution
+  still requires an explicit `POST /v1/decisions/:id/execute` with the
+  chosen `smart_account_id`. Shows risk tier and expiry time.
 * **Active executions** — in-flight execution plans (non-terminal
   status). Shows execution status badge and intent summary.
 * **Held actions** — decisions with outcome `:hold` from the trust
@@ -286,11 +307,10 @@ reflected immediately. Reuses the real `Bank.Security` and
 `Bank.Delegations` contexts directly — no second interpretation layer.
 
 **Route-aware navigation.** The sidebar navigation is route-aware: every
-landed page (Dashboard, Connection, Action Queue, Policies,
+landed page (Dashboard, Connection, Intents, Action Queue, Policies,
 Counterparties, Audit, Security) highlights based on the current page.
 Each LiveView passes an `active_page` assign to the shared
-`Layouts.app/1` shell. The Intents page is the only remaining
-placeholder for a future issue.
+`Layouts.app/1` shell.
 
 **What is not yet included:**
 
@@ -299,17 +319,14 @@ placeholder for a future issue.
   established through the adapter callback flow; the UI reflects
   the state the backend already tracks. This limitation is made
   explicit in the UI.
-* **Approve/reject actions.** The approval controller endpoints are
-  stubs (501 Not Implemented). The queue renders disabled buttons
-  with a tooltip explaining this. Wiring lands with the approval
-  engine.
-* **Audit pagination UI.** `Bank.Audit.list_events/2` returns a cursor
-  for pages beyond the first 50; the UI surfaces a "more events
-  available" footer but does not yet expose pagination controls.
-  Operators who need to page can hit `GET /v1/audit` directly.
-* **Intents page.** Sidebar placeholder; a dedicated intent listing
-  page is left for a future issue. The replay surface already covers
-  per-intent inspection from the audit drilldown.
+* **Public intent intake.** `POST /v1/intents`, `GET /v1/intents/:id`,
+  `POST /v1/intents/:id/simulate`, and `POST /v1/intents/:id/cancel`
+  remain stubbed while the trust + simulation pipeline is still being
+  wired into end-to-end submission.
+* **Wallet risk intelligence.** Counterparty management exists today,
+  but runtime address screening against sanctions, scam feeds, public
+  attribution tags, and internal suspicious-wallet scoring has not yet
+  been integrated into intent routing (epic #55).
 
 The sidebar layout, theme toggle, and navigation shell are shared
 infrastructure that future pages can reuse.
@@ -319,6 +336,13 @@ infrastructure that future pages can reuse.
 Every endpoint from the runtime-flow doc has a routed home and a typed
 controller. Surfaces are filled in progressively as owning engines land:
 
+* **Decisions** (`GET /v1/decisions/:id`,
+  `POST /v1/decisions/:id/execute`) are wired through
+  `Bank.Decisions`.
+* **Approvals** (`GET /v1/approvals`,
+  `POST /v1/approvals/:decision_id/approve`,
+  `POST /v1/approvals/:decision_id/reject`) are wired through
+  `Bank.Decisions`' approval state machine.
 * **Counterparty + address book + trust assertion routes** are wired
   through `Bank.Counterparties` (`/v1/counterparties*`,
   `/v1/address_labels/:id`, `/v1/trust_assertions`). See
@@ -326,10 +350,16 @@ controller. Surfaces are filled in progressively as owning engines land:
 * **Policy catalog routes** are wired through `Bank.Policies`
   (`GET /v1/policies`, `POST /v1/policies`, `POST /v1/policies/:id/revise`,
   `POST /v1/policies/:id/archive`). See "Policy engine" below.
-* **Audit** (`GET /v1/audit`, `GET /v1/intents/:id/replay`) is wired
-  through `Bank.Audit`.
-* Everything else still returns a `501 Not Implemented` envelope and
-  lands with the owning engine issue.
+* **Security** (`POST /v1/security/pause`, `/resume`,
+  `/revoke_delegation`) is wired through `Bank.Security`.
+* **Audit** (`GET /v1/audit`) and **Replay**
+  (`GET /v1/intents/:id/replay`) are wired through `Bank.Audit`.
+* **Browser connect scaffolding** (`POST /v1/connect/smart_account`) is
+  wired through `Bank.Delegations.request_connect/1`, but the actual
+  adapter-side grant dispatch is still stubbed.
+* **Intent replay** is live, but the agent-facing intent intake and
+  submission endpoints still return a `501 Not Implemented` envelope
+  until the full evaluation pipeline lands.
 
 See `lib/bank_web/router.ex` for the complete route table, or run
 `mix phx.routes`.
@@ -798,24 +828,25 @@ Bank.Runtime.enqueue_delegation_revoke(smart_account_id, reason) # security.revo
 Bank.Runtime.emit_audit(attrs)                                  # Audit.append_event + Notifier.audit_stream
 ```
 
-**What each worker does today.** Workers split into two groups — those
-that already perform real state transitions, and those that stop at a
-safe boundary because the engine or adapter they need isn't wired yet.
+**What each worker does today.** Workers split into two groups — the
+intent-evaluation safe boundaries that still wait on the policy / trust
+/ simulation pipeline, and the workers that already perform real state
+transitions or real adapter dispatch.
 
 | Worker              | Queue                  | Posture today |
 |---------------------|------------------------|---------------|
 | `EvaluateIntent`    | `:intents_evaluate`    | **Safe boundary.** Cancels as `:engines_pending` — the policy / trust / simulation engines land with the engine issues (#8+). |
 | `ReevaluateIntent`  | `:intents_reevaluate`  | **Safe boundary.** Same as above, plus validates the intent is in `:decided` or `:blocked`. |
 | `ExpireApproval`    | `:approvals_expire`    | **Real transition.** Supersedes the `:approval_required` envelope with a `:block` successor, flips the intent to `:blocked`, emits `decision.decided` + `intent.state_changed` audit, broadcasts on `approval:queue` + `intent:{id}`. Whole transition runs inside an `Ecto.Multi` so the partial unique index stays valid at every commit boundary. |
-| `RunExecution`      | `:executions_run`      | **Safe boundary.** Validates the envelope is current + `:auto_exec` + `:decided`, then cancels as `:adapter_pending`. Actual plan preparation lands with the TypeScript adapter. |
-| `ConfirmExecution`  | `:executions_confirm`  | **Real transition when terminal.** Polls the plan; on `final_outcome: :confirmed/:reverted/:aborted` finalises the intent (`:executing → :executed/:blocked`), audits, and broadcasts. Snoozes on mid-flight status, cancels on `:prepared` (adapter not wired yet). Idempotent: a second confirm for the same finalised intent cancels as `:already_finalised`. |
-| `RevokeDelegation`  | `:security_revoke`     | **Observable boundary.** Broadcasts `:delegation_revoke_requested` on `security:events`, writes a `security.revoke_requested` audit event, cancels as `:adapter_pending`. Operators see the revoke-initiation moment even before the adapter lands. |
+| `RunExecution`      | `:executions_run`      | **Real adapter dispatch.** Re-validates the decision, plan, pause state, and delegation, then calls the adapter's `/dispatch/transfer` route. Advances the plan to `:signing` on adapter acceptance, aborts deterministically on rejected / unresolvable plans, and relies on callbacks for the rest of the lifecycle. |
+| `ConfirmExecution`  | `:executions_confirm`  | **Safety-net reconciliation.** Normally a no-op because adapter callbacks already progress plan + intent atomically. If a callback is lost after the terminal plan write, this worker finalises the intent to `:executed` or `:blocked`. Snoozes while the plan is mid-flight; idempotent on already-finalised intents. |
+| `RevokeDelegation`  | `:security_revoke`     | **Real adapter dispatch.** Broadcasts `:delegation_revoke_requested`, writes `security.revoke_requested` audit, then calls the adapter's revoke dispatch route. Final state changes still land via `delegation.state_changed` callbacks. |
 
 **Retry posture.** Oban return tuples encode intent:
 
 * `:ok` — transition succeeded (or there was nothing to do); do not retry.
 * `{:cancel, reason}` — deterministic, non-retriable stop (`:not_found`,
-  `:already_superseded`, `:engines_pending`, `:adapter_pending`,
+  `:already_superseded`, `:engines_pending`,
   `:already_finalised`, `:malformed_args`, wrong-state, wrong-outcome).
   The job completes without retrying — retrying wouldn't help.
 * `{:snooze, seconds}` — non-terminal; try again later. Used by
@@ -824,10 +855,11 @@ safe boundary because the engine or adapter they need isn't wired yet.
 * `{:error, reason}` — transient (DB down, changeset error); standard
   Oban backoff + retry.
 
-Failures widen caution, never autonomy. Every worker that could in
-principle authorise an action stops short and cancels with a
-`*_pending` reason until the engine or adapter it depends on is wired
-in — there are no mock results, no "would have auto-executed" paths.
+Failures widen caution, never autonomy. The still-deferred
+action-authorising workers (`EvaluateIntent` and `ReevaluateIntent`)
+stop short and cancel with `:engines_pending` until the policy / trust /
+simulation pipeline is fully wired in — there are no mock results, no
+"would have auto-executed" paths.
 
 **Deterministic args.** Jobs always reference stable ids (`intent_id`,
 `decision_id`, `execution_plan_id`, `smart_account_id`, `reason`) — no
@@ -853,19 +885,18 @@ deferred:
   boundary and cancel as `:engines_pending` because the trust and
   simulation engines that sit alongside policy in the pipeline land with
   later engine issues. Decisioning wires all three together.
-* **TypeScript adapter dispatch.** The adapter service exists (separate
-  repo) and the internal callback endpoint is wired, but `RunExecution`
-  and `RevokeDelegation` still stop at `:adapter_pending` on the
-  enqueue side. The remaining work is HTTP dispatch from those workers to
-  the adapter's `/dispatch/*` routes and wiring `ConfirmExecution` to
-  poll real terminal outcomes.
-* **Remaining control tower pages.** The connection page (issue #13),
-  dashboard, and action queue (issue #14) are live. Intents, Policies,
-  Counterparties, and Audit/Replay screens land with issues #15-#16.
+* **Public intent submission.** The trust + simulation + decision
+  engines are present as building blocks, but the public
+  `/v1/intents*` submission and inspection surface remains stubbed until
+  the full end-to-end intake flow is wired.
 * **Browser wallet integration.** The connection page shows delegation
   state from the backend but does not yet include a client-side
   wallet SDK. A browser-native "connect wallet" flow (WalletConnect
   / wagmi) is a follow-up once the adapter supports it.
+* **Wallet risk intelligence.** Runtime routing does not yet hard-block
+  sanctioned addresses, challenge scam/phishing-labelled addresses, or
+  enrich counterparties from public crypto attribution tagpacks and
+  internal scoring (epic #55).
 * **Integrity anchoring.** `payload_hash` is the substrate, but signing
   or external-service anchoring (Merkle chain, witness service) lands
   with issue #12 alongside the final security hardening pass.
