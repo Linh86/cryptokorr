@@ -155,12 +155,71 @@ regression-tested by `Bank.AdapterConfigTest` and
   key issuance is tracked separately.
 - Rate limiting and quota enforcement are out of scope for alpha.
 
+## Telegram bot operator surface (#54)
+
+The operator-facing Telegram bot is used for alerting, queue approvals,
+runtime-status checks, and high-risk pause / resume step-up
+confirmation. It is a **convenience surface**, not a second source of
+truth.
+
+Controls:
+
+- Bot token kept as an env var secret (`TELEGRAM_BOT_TOKEN`), never
+  committed to the repo.
+- Webhook secret kept as an env var secret (`TELEGRAM_WEBHOOK_SECRET`)
+  and verified before the controller normalizes any update.
+- Operator allowlist kept in `TELEGRAM_OPERATORS` as user id + chat id
+  + role + audit actor tuples.
+- Allowlist of Telegram user ids and chat ids. Unknown senders are
+  ignored.
+- Every mutating bot action maps onto an existing control-plane action
+  (`approve`, `reject`, `pause`, `resume`) rather than introducing a new
+  path.
+- Bot callbacks carry short-lived, signed action tokens so Telegram
+  button presses cannot be replayed outside their intended decision or
+  time window.
+- High-risk pause / resume actions require a second confirmation step in
+  Telegram and include a deep link back to the web console.
+- All bot-delivered alerts and approvals must emit audit events that
+  identify Telegram as the surface of origin.
+- The bot does **not** support free-form transaction authoring.
+
+## Planned next alpha control: address and wallet risk screening (#55)
+
+Counterparty curation is necessary but not sufficient. The next alpha
+extension should add layered wallet-intelligence controls:
+
+- **Hard block:** exact match against OFAC digital currency entries and
+  OpenSanctions `CryptoWallet` sanctions data.
+- **Warning / challenge:** exact or high-confidence matches from
+  community scam feeds such as ScamSniffer, EtherScamDB, and BTC-
+  specific abuse lists.
+- **Context / labeling:** public attribution and cluster context from
+  GraphSense tagpacks and similar public tag sources.
+- **Internal scoring only:** graph- or feature-based suspicious-wallet
+  scores using research datasets such as Elliptic++. Model output alone
+  must never create a hard block.
+
+The operator and audit surfaces should preserve:
+
+- source feed
+- confidence / control tier
+- last-seen timestamp
+- evidence link or source URI
+
+This keeps the system explainable: sanctions produce a legal block,
+community scam feeds produce a challenge, and internal models only widen
+human review.
+
 ## Secrets inventory
 
 | Secret                       | Where it lives             | Rotated on                    |
 | ---------------------------- | -------------------------- | ----------------------------- |
 | `ADAPTER_DISPATCH_SECRET`    | env var (both services)    | milestone end, staff change   |
 | `ADAPTER_CALLBACK_SECRET`    | env var (both services)    | milestone end, staff change   |
+| `TELEGRAM_BOT_TOKEN`         | env var (Phoenix)          | milestone end, staff change   |
+| `TELEGRAM_WEBHOOK_SECRET`    | env var (Phoenix)          | milestone end, staff change   |
+| `TELEGRAM_OPERATORS`         | env var (Phoenix)          | staff change, role change     |
 | `SECRET_KEY_BASE`            | env var (Phoenix)          | milestone end                 |
 | Adapter TLS server key       | mounted file (adapter)     | certificate expiry (optional) |
 | Bundler RPC key (Base)       | adapter env var            | vendor-driven                 |
