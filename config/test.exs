@@ -75,3 +75,10 @@ config :bank, Bank.Telegram.Transport,
 # endpoint and `emit_telemetry/0` itself are still exercised
 # directly by tests that own the calling process.
 config :bank, BankWeb.Telemetry, periodic_measurements: []
+
+# Wallet screening feed ingestion uses Req.Test so tests can stub
+# feed responses without hitting real OFAC / OpenSanctions servers.
+config :bank, Bank.WalletScreening.Ingestion,
+  ofac_url: "http://ofac-feed.test/sanctions.json",
+  opensanctions_url: "http://opensanctions-feed.test/entities.ftm.json",
+  req_options: [plug: {Req.Test, Bank.WalletScreening.Ingestion}]
