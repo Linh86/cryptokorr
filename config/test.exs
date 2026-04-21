@@ -92,3 +92,9 @@ config :bank, Bank.Stablecoins.Providers.ZeroX,
   base_url: "http://zerox.test",
   api_key: "test-0x-api-key",
   req_options: [plug: {Req.Test, Bank.Stablecoins.Providers.ZeroX}]
+
+# 1inch swap adapter: route HTTP to Req.Test so tests can stub per-process.
+config :bank, Bank.Stablecoins.Providers.OneInch,
+  base_url: "http://oneinch.test",
+  api_key: "test-1inch-api-key",
+  req_options: [plug: {Req.Test, Bank.Stablecoins.Providers.OneInch}]
