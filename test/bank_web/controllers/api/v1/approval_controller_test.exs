@@ -9,6 +9,7 @@ defmodule BankWeb.API.V1.ApprovalControllerTest do
   alias Bank.Runtime.Workers.RunExecution
   alias Bank.Security
   alias Bank.Security.PauseState
+  alias Bank.WalletScreening
 
   setup do
     PauseState.reset()
@@ -32,6 +33,45 @@ defmodule BankWeb.API.V1.ApprovalControllerTest do
 
       assert [%{"id" => id}] = body["decisions"]
       assert id == envelope.id
+    end
+
+    test "includes screening evidence for pending approvals", %{conn: conn} do
+      target = "0xQueueScreeningEvidence001"
+
+      intent =
+        agent_intent(
+          target_counterparty_id: nil,
+          target_raw_address: target,
+          chain: "ethereum"
+        )
+
+      {:ok, _record} =
+        WalletScreening.upsert_record(%{
+          chain: "ethereum",
+          address: target,
+          control_tier: :challenge,
+          source: "scamsniffer",
+          source_record_id: "queue-ss-001",
+          category: "phishing",
+          reason: "ScamSniffer: queue evidence"
+        })
+
+      _envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      conn = get(conn, ~p"/v1/approvals")
+      body = json_response(conn, 200)
+
+      assert [%{"screening_evidence" => evidence}] = body["decisions"]
+      assert evidence["outcome"] == "challenge"
+      assert evidence["winning_tier"] == "challenge"
+      assert evidence["screened_address"] == target
+      assert [%{"control_tier" => "challenge", "source" => "scamsniffer"}] = evidence["records"]
     end
   end
 

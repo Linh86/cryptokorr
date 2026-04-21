@@ -7,6 +7,7 @@ defmodule BankWeb.API.V1.CounterpartyControllerTest do
   alias Bank.Counterparties.{AddressLabel, EvidenceArtifact}
   alias Bank.Fixtures
   alias Bank.Repo
+  alias Bank.WalletScreening
 
   describe "GET /v1/counterparties" do
     test "lists counterparties with paging metadata", %{conn: conn} do
@@ -128,6 +129,36 @@ defmodule BankWeb.API.V1.CounterpartyControllerTest do
 
       label_id = body["data"]["id"]
       assert %AddressLabel{} = Repo.get(AddressLabel, label_id)
+    end
+
+    test "returns screening evidence on attached address labels", %{conn: conn} do
+      cp = Fixtures.counterparty()
+      address = "0xCounterpartyScreening001"
+
+      {:ok, _record} =
+        WalletScreening.upsert_record(%{
+          chain: "base",
+          address: address,
+          control_tier: :context,
+          source: "graphsense",
+          source_record_id: "cp-gs-001",
+          category: "exchange",
+          reason: "GraphSense: counterparty evidence"
+        })
+
+      conn =
+        post(conn, ~p"/v1/counterparties/#{cp.id}/addresses", %{
+          "chain" => "base",
+          "address" => address,
+          "role" => "payout"
+        })
+
+      body = json_response(conn, 201)
+      evidence = body["data"]["screening_evidence"]
+
+      assert evidence["outcome"] == "clean"
+      assert evidence["winning_tier"] == "context"
+      assert [%{"control_tier" => "context", "source" => "graphsense"}] = evidence["records"]
     end
 
     test "409 on duplicate active (chain, address)", %{conn: conn} do

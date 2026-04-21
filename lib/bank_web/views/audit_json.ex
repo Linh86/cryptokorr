@@ -29,7 +29,8 @@ defmodule BankWeb.API.V1.AuditJSON do
       simulations: Enum.map(bundle.simulations, &render_simulation/1),
       decisions: Enum.map(bundle.decisions, &render_decision/1),
       plans: Enum.map(bundle.plans, &render_plan/1),
-      audit: Enum.map(bundle.audit, &render_event/1)
+      audit: Enum.map(bundle.audit, &render_event/1),
+      screening_evidence: bundle[:screening_evidence]
     }
   end
 

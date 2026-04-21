@@ -20,6 +20,7 @@ defmodule BankWeb.API.V1.CounterpartyJSON do
   """
 
   alias Bank.Counterparties.{AddressLabel, Counterparty, EvidenceArtifact, TrustAssertion}
+  alias Bank.WalletScreening.Evidence
 
   @doc "Paged `GET /v1/counterparties` envelope."
   def index(%{entries: entries, next_cursor: cursor}) do
@@ -117,10 +118,18 @@ defmodule BankWeb.API.V1.CounterpartyJSON do
       role: label.role,
       verified: label.verified,
       retired_at: label.retired_at,
+      screening_evidence: screening_evidence(label),
       inserted_at: label.inserted_at,
       updated_at: label.updated_at
     }
   end
+
+  defp screening_evidence(%AddressLabel{chain: chain, address: address})
+       when is_binary(chain) and is_binary(address) do
+    Evidence.for_address(chain, address)
+  end
+
+  defp screening_evidence(_label), do: nil
 
   @doc false
   def evidence_artifact(%EvidenceArtifact{} = artifact) do
