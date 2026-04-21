@@ -61,6 +61,13 @@ defmodule Bank.WalletScreening.Sources.InternalScoringTest do
     "model_version" => "v1"
   }
 
+  @out_of_range_decimal_score %{
+    "address" => "0xAddr",
+    "chain" => "ethereum",
+    "score" => Decimal.new("1.01"),
+    "model_version" => "v1"
+  }
+
   describe "parse/1" do
     test "parses high-score entry with correct control_tier and provenance" do
       %{records: [record], skipped: []} = InternalScoring.parse([@high_score_entry])
@@ -90,7 +97,12 @@ defmodule Bank.WalletScreening.Sources.InternalScoringTest do
     test "preserves features in metadata" do
       %{records: [record], skipped: []} = InternalScoring.parse([@high_score_entry])
 
-      assert record.metadata["features"] == ["high_fan_in", "mixer_exposure", "rapid_consolidation"]
+      assert record.metadata["features"] == [
+               "high_fan_in",
+               "mixer_exposure",
+               "rapid_consolidation"
+             ]
+
       assert record.metadata["model_version"] == "elliptic-v2.1"
       assert record.metadata["scored_at"] == "2025-06-01T12:00:00Z"
       assert record.metadata["raw_score"] == 0.92
@@ -145,6 +157,11 @@ defmodule Bank.WalletScreening.Sources.InternalScoringTest do
       assert skipped.reason =~ "missing or invalid score"
     end
 
+    test "skips entries with out-of-range Decimal score" do
+      %{records: [], skipped: [skipped]} = InternalScoring.parse([@out_of_range_decimal_score])
+      assert skipped.reason =~ "missing or invalid score"
+    end
+
     test "all records have score_only tier" do
       entries = [@high_score_entry, @low_score_entry, @btc_score_entry]
       %{records: records, skipped: []} = InternalScoring.parse(entries)
@@ -154,7 +171,9 @@ defmodule Bank.WalletScreening.Sources.InternalScoringTest do
     end
 
     test "all records have internal_scoring source" do
-      %{records: records, skipped: []} = InternalScoring.parse([@high_score_entry, @btc_score_entry])
+      %{records: records, skipped: []} =
+        InternalScoring.parse([@high_score_entry, @btc_score_entry])
+
       assert Enum.all?(records, &(&1.source == "internal_scoring"))
     end
 
@@ -174,6 +193,22 @@ defmodule Bank.WalletScreening.Sources.InternalScoringTest do
       entry = Map.put(@high_score_entry, "score", "0.75")
       %{records: [record], skipped: []} = InternalScoring.parse([entry])
       assert Decimal.compare(record.score, Decimal.from_float(0.7)) == :gt
+    end
+
+    test "rejects string score with trailing junk" do
+      entry = Map.put(@high_score_entry, "score", "0.75abc")
+      %{records: [], skipped: [skipped]} = InternalScoring.parse([entry])
+      assert skipped.reason =~ "missing or invalid score"
+    end
+
+    test "source_record_id is stable across EVM checksum-case variants" do
+      upper = Map.put(@high_score_entry, "address", "0xABCDEF0000000000000000000000000000000001")
+      lower = Map.put(@high_score_entry, "address", "0xabcdef0000000000000000000000000000000001")
+
+      %{records: [upper_record], skipped: []} = InternalScoring.parse([upper])
+      %{records: [lower_record], skipped: []} = InternalScoring.parse([lower])
+
+      assert upper_record.source_record_id == lower_record.source_record_id
     end
   end
 end

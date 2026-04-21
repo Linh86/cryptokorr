@@ -132,8 +132,11 @@ defmodule Bank.WalletScreening.Sources.InternalScoring do
   end
 
   defp build_source_record_id(chain, address, model_version) do
+    canonical_chain = chain |> String.trim() |> String.downcase()
+    normalised_address = normalise_address(canonical_chain, address)
+
     hash =
-      :crypto.hash(:sha256, "#{chain}:#{address}:#{model_version}")
+      :crypto.hash(:sha256, "#{canonical_chain}:#{normalised_address}:#{model_version}")
       |> binary_part(0, 6)
       |> Base.encode16(case: :lower)
 
@@ -149,7 +152,7 @@ defmodule Bank.WalletScreening.Sources.InternalScoring do
     case Map.get(entry, "score") do
       s when is_float(s) and s >= 0.0 and s <= 1.0 -> s
       s when is_integer(s) and s >= 0 and s <= 1 -> s / 1
-      %Decimal{} = d -> Decimal.to_float(d)
+      %Decimal{} = d -> decimal_score(d)
       s when is_binary(s) -> parse_float_score(s)
       _ -> nil
     end
@@ -157,8 +160,17 @@ defmodule Bank.WalletScreening.Sources.InternalScoring do
 
   defp parse_float_score(s) do
     case Float.parse(s) do
-      {f, _} when f >= 0.0 and f <= 1.0 -> f
+      {f, ""} when f >= 0.0 and f <= 1.0 -> f
       _ -> nil
+    end
+  end
+
+  defp decimal_score(%Decimal{} = score) do
+    zero = Decimal.new("0")
+    one = Decimal.new("1")
+
+    if Decimal.compare(score, zero) in [:eq, :gt] and Decimal.compare(score, one) in [:eq, :lt] do
+      Decimal.to_float(score)
     end
   end
 
@@ -185,4 +197,14 @@ defmodule Bank.WalletScreening.Sources.InternalScoring do
 
   defp non_empty(""), do: nil
   defp non_empty(s), do: s
+
+  @evm_chains ~w(ethereum base arbitrum optimism polygon avalanche bsc)
+
+  defp normalise_address(chain, address) when chain in @evm_chains do
+    address
+    |> String.trim()
+    |> String.downcase()
+  end
+
+  defp normalise_address(_chain, address), do: String.trim(address)
 end

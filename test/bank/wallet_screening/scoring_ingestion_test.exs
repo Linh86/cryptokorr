@@ -50,8 +50,8 @@ defmodule Bank.WalletScreening.ScoringIngestionTest do
       records = WalletScreening.list_records(%{source: "internal_scoring"})
 
       assert Enum.all?(records, fn r ->
-        r.score != nil and r.score_version != nil
-      end)
+               r.score != nil and r.score_version != nil
+             end)
     end
 
     test "score_only records produce :clean screening outcome (never block/challenge alone)" do
@@ -69,6 +69,31 @@ defmodule Bank.WalletScreening.ScoringIngestionTest do
 
       records = WalletScreening.list_records(%{source: "internal_scoring"})
       assert length(records) == 2
+    end
+
+    test "upsert is idempotent across EVM checksum-case variants" do
+      upper = %{
+        "address" => "0xABCDEF0000000000000000000000000000000001",
+        "chain" => "ethereum",
+        "score" => 0.91,
+        "model_version" => "elliptic-v2.1",
+        "category" => "suspicious"
+      }
+
+      lower = Map.put(upper, "address", "0xabcdef0000000000000000000000000000000001")
+
+      {:ok, _} = Ingestion.ingest_scoring([upper])
+      {:ok, _} = Ingestion.ingest_scoring([lower])
+
+      records =
+        WalletScreening.list_records(%{
+          source: "internal_scoring",
+          chain: "ethereum",
+          address: "0xabcdef0000000000000000000000000000000001"
+        })
+
+      assert length(records) == 1
+      assert hd(records).address == "0xabcdef0000000000000000000000000000000001"
     end
 
     test "reports invalid entries in skipped" do
