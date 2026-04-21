@@ -95,6 +95,8 @@ defmodule Bank.Telegram.CommandsTest do
       assert text =~ "/help"
       assert text =~ "/status"
       assert text =~ "/queue"
+      assert text =~ "/pause"
+      assert text =~ "/resume"
       # Commands section header so downstream text parsing stays
       # stable across small wording tweaks.
       assert text =~ "Commands:"

@@ -232,9 +232,9 @@ defmodule Bank.Telegram.CallbacksTest do
   end
 
   describe "handle/3 — unsupported action" do
-    test "refuses an otherwise-valid :pause token as :unsupported_action" do
+    test "refuses an otherwise-valid :open_replay token as :unsupported_action" do
       envelope = pending_approval_envelope()
-      token = CallbackToken.sign(@approver, :pause, envelope.id)
+      token = CallbackToken.sign(@approver, :open_replay, envelope.id)
 
       assert {:error, :unsupported_action, _} =
                Callbacks.handle(@approver, callback_for(@approver, token))
