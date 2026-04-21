@@ -58,7 +58,8 @@ defmodule Bank.Repo.Migrations.CreateScreeningRecords do
                "(control_tier != 'score_only') OR (control_tier = 'score_only' AND score IS NOT NULL)"
            )
 
-    create unique_index(:screening_records,
+    create unique_index(
+             :screening_records,
              [:chain, :normalised_address, :source, :source_record_id],
              name: :screening_records_chain_addr_source_idx
            )

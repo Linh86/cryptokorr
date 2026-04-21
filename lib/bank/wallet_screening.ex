@@ -60,6 +60,24 @@ defmodule Bank.WalletScreening do
 
   @type uuid :: String.t()
 
+  @record_attr_keys [
+    :chain,
+    :address,
+    :normalised_address,
+    :control_tier,
+    :source,
+    :source_record_id,
+    :category,
+    :reason,
+    :evidence_uri,
+    :metadata,
+    :first_seen_at,
+    :last_seen_at,
+    :expires_at,
+    :score,
+    :score_version
+  ]
+
   # --- Screening lookup -------------------------------------------------
 
   @doc """
@@ -79,8 +97,9 @@ defmodule Bank.WalletScreening do
   def screen(chain, address, opts \\ []) when is_binary(chain) and is_binary(address) do
     normalised = normalise_address(chain, address)
     include_expired = Keyword.get(opts, :include_expired, false)
+    now = Keyword.get(opts, :now, DateTime.utc_now())
 
-    records = load_matching_records(chain, normalised, include_expired)
+    records = load_matching_records(chain, normalised, include_expired, now)
 
     ScreeningOutcome.from_records(records)
   end
@@ -102,7 +121,8 @@ defmodule Bank.WalletScreening do
     |> ScreeningRecord.changeset(attrs)
     |> Repo.insert(
       on_conflict: {:replace_all_except, [:id, :inserted_at]},
-      conflict_target: [:chain, :normalised_address, :source, :source_record_id]
+      conflict_target: [:chain, :normalised_address, :source, :source_record_id],
+      returning: true
     )
   end
 
@@ -187,22 +207,39 @@ defmodule Bank.WalletScreening do
   @evm_chains ~w(ethereum base arbitrum optimism polygon avalanche bsc)
 
   defp evm_chain?(chain) do
-    String.downcase(chain) in @evm_chains
+    canonical_chain(chain) in @evm_chains
   end
 
   defp normalise_record_attrs(attrs) do
+    attrs = atomise_known_keys(attrs)
     chain = Map.get(attrs, :chain) || Map.get(attrs, "chain", "")
     address = Map.get(attrs, :address) || Map.get(attrs, "address", "")
 
     attrs
     |> Map.put(:normalised_address, normalise_address(chain, address))
-    |> Map.put(:chain, String.downcase(String.trim(chain)))
+    |> Map.put(:chain, canonical_chain(chain))
   end
 
-  defp load_matching_records(chain, normalised_address, include_expired) do
+  defp atomise_known_keys(attrs) do
+    Enum.reduce(@record_attr_keys, attrs, fn key, acc ->
+      string_key = Atom.to_string(key)
+
+      case Map.fetch(acc, string_key) do
+        {:ok, value} ->
+          acc
+          |> Map.delete(string_key)
+          |> Map.put_new(key, value)
+
+        :error ->
+          acc
+      end
+    end)
+  end
+
+  defp load_matching_records(chain, normalised_address, include_expired, now) do
     query =
       from(r in ScreeningRecord,
-        where: r.chain == ^String.downcase(chain),
+        where: r.chain == ^canonical_chain(chain),
         where: r.normalised_address == ^normalised_address,
         order_by: [desc: r.updated_at, desc: r.id]
       )
@@ -211,7 +248,6 @@ defmodule Bank.WalletScreening do
       if include_expired do
         query
       else
-        now = DateTime.utc_now()
         where(query, [r], is_nil(r.expires_at) or r.expires_at > ^now)
       end
 
@@ -221,7 +257,7 @@ defmodule Bank.WalletScreening do
   defp apply_filters(query, filters) do
     Enum.reduce(filters, query, fn
       {:chain, chain}, q when is_binary(chain) ->
-        where(q, [r], r.chain == ^String.downcase(chain))
+        where(q, [r], r.chain == ^canonical_chain(chain))
 
       {:address, addr}, q when is_binary(addr) ->
         chain = Map.get(filters, :chain, "")
@@ -237,5 +273,11 @@ defmodule Bank.WalletScreening do
       _, q ->
         q
     end)
+  end
+
+  defp canonical_chain(chain) do
+    chain
+    |> String.trim()
+    |> String.downcase()
   end
 end

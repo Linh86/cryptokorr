@@ -3,7 +3,9 @@ defmodule Bank.WalletScreening.ScreeningOutcomeTest do
 
   alias Bank.WalletScreening.{ScreeningOutcome, ScreeningRecord}
 
-  defp record(tier, source \\ "test", opts \\ []) do
+  defp record(tier, source), do: record(tier, source, [])
+
+  defp record(tier, source, opts) do
     %ScreeningRecord{
       id: Ecto.UUID.generate(),
       chain: Keyword.get(opts, :chain, "base"),

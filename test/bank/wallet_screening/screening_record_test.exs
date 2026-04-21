@@ -54,7 +54,9 @@ defmodule Bank.WalletScreening.ScreeningRecordTest do
           end)
 
         changeset = ScreeningRecord.changeset(%ScreeningRecord{}, attrs)
-        assert changeset.valid?, "expected #{tier} to be valid, got: #{inspect(errors_on(changeset))}"
+
+        assert changeset.valid?,
+               "expected #{tier} to be valid, got: #{inspect(errors_on(changeset))}"
       end
     end
 

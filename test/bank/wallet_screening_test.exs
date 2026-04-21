@@ -76,6 +76,19 @@ defmodule Bank.WalletScreeningTest do
       assert second.id == first.id
       assert second.reason == "Updated SDN entry"
     end
+
+    test "accepts string-key attributes from feed parsers" do
+      string_attrs =
+        @ofac_attrs
+        |> Map.put(:chain, " Base ")
+        |> Map.new(fn {key, value} -> {to_string(key), value} end)
+
+      assert {:ok, record} = WalletScreening.upsert_record(string_attrs)
+
+      assert record.chain == "base"
+      assert record.normalised_address == "0xdeadbeef00000000000000000000000000000001"
+      assert record.source == "ofac"
+    end
   end
 
   describe "upsert_records/1" do
@@ -189,6 +202,30 @@ defmodule Bank.WalletScreeningTest do
         )
 
       assert result.outcome == :clean
+    end
+
+    test "uses the supplied clock for expiry filtering" do
+      now = ~U[2026-04-21 12:00:00Z]
+      expires_at = DateTime.add(now, 60, :second)
+
+      insert_record!(Map.put(@ofac_attrs, :expires_at, expires_at))
+
+      active =
+        WalletScreening.screen(
+          "base",
+          "0xDeAdBeEf00000000000000000000000000000001",
+          now: now
+        )
+
+      expired =
+        WalletScreening.screen(
+          "base",
+          "0xDeAdBeEf00000000000000000000000000000001",
+          now: DateTime.add(now, 120, :second)
+        )
+
+      assert active.outcome == :block
+      assert expired.outcome == :clean
     end
 
     test "includes expired records when requested" do
