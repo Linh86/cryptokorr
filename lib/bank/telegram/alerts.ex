@@ -81,6 +81,7 @@ defmodule Bank.Telegram.Alerts do
   alias Bank.Telegram.CallbackToken
   alias Bank.Telegram.Config
   alias Bank.Telegram.Operator
+  alias Bank.Telegram.Telemetry, as: TelegramTelemetry
   alias Bank.Telegram.Transport
 
   @alert_types ~w(
@@ -195,12 +196,63 @@ defmodule Bank.Telegram.Alerts do
   """
   @spec dispatch(alert()) :: :ok | {:error, dispatch_error()}
   def dispatch(alert) do
+    type = alert_type(alert)
+
     with {:ok, cfg} <- Config.load() |> map_config_load(),
-         :ok <- check_enabled(cfg),
-         :ok <- check_bot_token(cfg),
-         :ok <- check_operators(cfg),
-         {:ok, text} <- render(alert) do
-      fan_out(alert, text, cfg.operators)
+         :ok <- check_enabled_typed(cfg, type),
+         :ok <- check_bot_token_typed(cfg, type),
+         :ok <- check_operators_typed(cfg, type),
+         {:ok, text} <- render_typed(alert, type) do
+      fan_out(alert, type, text, cfg.operators)
+    end
+  end
+
+  defp alert_type({type, _ctx}) when is_atom(type), do: type
+  defp alert_type(_), do: :__unknown__
+
+  # Wrappers that emit telemetry on the short-circuit error paths
+  # without touching the bare :ok return contract of the guards.
+  defp check_enabled_typed(cfg, type) do
+    case check_enabled(cfg) do
+      :ok ->
+        :ok
+
+      {:error, reason} = err ->
+        TelegramTelemetry.alert(type, reason, 0, 0)
+        err
+    end
+  end
+
+  defp check_bot_token_typed(cfg, type) do
+    case check_bot_token(cfg) do
+      :ok ->
+        :ok
+
+      {:error, reason} = err ->
+        TelegramTelemetry.alert(type, reason, 0, 0)
+        err
+    end
+  end
+
+  defp check_operators_typed(cfg, type) do
+    case check_operators(cfg) do
+      :ok ->
+        :ok
+
+      {:error, reason} = err ->
+        TelegramTelemetry.alert(type, reason, 0, 0)
+        err
+    end
+  end
+
+  defp render_typed(alert, type) do
+    case render(alert) do
+      {:ok, _} = ok ->
+        ok
+
+      {:error, _} = err ->
+        TelegramTelemetry.alert(type, :render_error, 0, 0)
+        err
     end
   end
 
@@ -427,7 +479,7 @@ defmodule Bank.Telegram.Alerts do
   defp check_operators(%{operators: ops}) when is_list(ops) and ops != [], do: :ok
   defp check_operators(_), do: {:error, :no_operators}
 
-  defp fan_out(alert, text, operators) do
+  defp fan_out(alert, type, text, operators) do
     results =
       Enum.map(operators, fn %Operator{chat_id: chat_id} = op ->
         buttons = buttons_for(alert, op)
@@ -447,12 +499,25 @@ defmodule Bank.Telegram.Alerts do
         end
       end)
 
+    targeted = length(results)
     failures = Enum.filter(results, &match?({_chat_id, _}, &1))
+    failed = length(failures)
 
     cond do
-      failures == [] -> :ok
-      length(failures) == length(results) -> {:error, {:all_failed, failures}}
-      true -> :ok
+      failures == [] ->
+        TelegramTelemetry.alert(type, :ok, targeted, 0)
+        :ok
+
+      failed == targeted ->
+        TelegramTelemetry.alert(type, :all_failed, targeted, failed)
+        {:error, {:all_failed, failures}}
+
+      true ->
+        # Partial success: dispatch still returns :ok, but telemetry
+        # reflects that some recipients did not land so dashboards
+        # can alert on persistent partial failures.
+        TelegramTelemetry.alert(type, :ok, targeted, failed)
+        :ok
     end
   end
 end
