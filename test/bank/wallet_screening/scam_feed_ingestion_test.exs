@@ -22,6 +22,13 @@ defmodule Bank.WalletScreening.ScamFeedIngestionTest do
     }
   ]
 
+  @scamsniffer_combined %{
+    "degenalgo.art" => [
+      "0x3da02e1f29bcbed185eca0d3299efd46e6e7e155",
+      "0x398e98b7c19db2f5df086eb4f83624146aa1ab53"
+    ]
+  }
+
   # --- EtherScamDB fixture data ------------------------------------------
 
   @etherscamdb_entries [
@@ -42,6 +49,28 @@ defmodule Bank.WalletScreening.ScamFeedIngestionTest do
       "status" => "Verified"
     }
   ]
+
+  @etherscamdb_yaml """
+  -
+      id: 55001
+      name: Fake DEX
+      url: 'https://fake-dex.com'
+      coin: ETH
+      category: Phishing
+      subcategory: DEX Scam
+      addresses:
+          - '0xEthScamAddr001'
+          - '0xEthScamAddr002'
+      status: Active
+  -
+      id: 55002
+      name: Ponzi Token
+      coin: ETH
+      category: Scamming
+      addresses:
+          - '0xEthScamAddr003'
+      status: Verified
+  """
 
   # --- BTC Abuse fixture data --------------------------------------------
 
@@ -104,6 +133,20 @@ defmodule Bank.WalletScreening.ScamFeedIngestionTest do
       assert eth_result.outcome == :clean
     end
 
+    test "ScamSniffer ingests current combined.json domain map shape" do
+      Req.Test.stub(Bank.WalletScreening.Ingestion, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(@scamsniffer_combined))
+      end)
+
+      assert {:ok, %{ingested: 2}} = Ingestion.ingest_scamsniffer()
+
+      result = WalletScreening.screen("ethereum", "0x3da02e1f29bcbed185eca0d3299efd46e6e7e155")
+      assert result.outcome == :challenge
+      assert result.winning_record.reason =~ "degenalgo.art"
+    end
+
     test "ScamSniffer handles HTTP error" do
       Req.Test.stub(Bank.WalletScreening.Ingestion, fn conn ->
         Plug.Conn.resp(conn, 503, "Service Unavailable")
@@ -119,8 +162,8 @@ defmodule Bank.WalletScreening.ScamFeedIngestionTest do
     test "ingests EtherScamDB entries as challenge records" do
       Req.Test.stub(Bank.WalletScreening.Ingestion, fn conn ->
         conn
-        |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.resp(200, Jason.encode!(@etherscamdb_entries))
+        |> Plug.Conn.put_resp_content_type("text/yaml")
+        |> Plug.Conn.resp(200, @etherscamdb_yaml)
       end)
 
       assert {:ok, result} = Ingestion.ingest_etherscamdb()
@@ -137,8 +180,8 @@ defmodule Bank.WalletScreening.ScamFeedIngestionTest do
     test "EtherScamDB records produce :challenge screening outcome" do
       Req.Test.stub(Bank.WalletScreening.Ingestion, fn conn ->
         conn
-        |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.resp(200, Jason.encode!(@etherscamdb_entries))
+        |> Plug.Conn.put_resp_content_type("text/yaml")
+        |> Plug.Conn.resp(200, @etherscamdb_yaml)
       end)
 
       {:ok, _} = Ingestion.ingest_etherscamdb()
@@ -205,6 +248,10 @@ defmodule Bank.WalletScreening.ScamFeedIngestionTest do
 
       assert {:error, {:http_error, 500}} = Ingestion.ingest_btc_abuse()
     end
+
+    test "BTC Abuse requires an explicit feed URL because the public bulk API is not currently live" do
+      assert {:error, :btc_abuse_feed_url_not_configured} = Ingestion.ingest_btc_abuse(url: nil)
+    end
   end
 
   # --- Cross-source and precedence tests ---------------------------------
@@ -212,30 +259,28 @@ defmodule Bank.WalletScreening.ScamFeedIngestionTest do
   describe "scam feeds vs sanctions precedence" do
     test "sanctions hard_block takes precedence over scam challenge" do
       Req.Test.stub(Bank.WalletScreening.Ingestion, fn conn ->
-        case conn.request_path do
-          path when path =~ "scamsniffer" ->
-            entry = %{
-              "address" => "0xSharedScamAddr",
-              "chain" => "ethereum",
-              "type" => "phishing"
-            }
+        if String.contains?(conn.host, "scamsniffer") do
+          entry = %{
+            "address" => "0xSharedScamAddr",
+            "chain" => "ethereum",
+            "type" => "phishing"
+          }
 
-            conn
-            |> Plug.Conn.put_resp_content_type("application/json")
-            |> Plug.Conn.resp(200, Jason.encode!([entry]))
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.resp(200, Jason.encode!([entry]))
+        else
+          ofac_entry = %{
+            "id" => 77001,
+            "id_type" => "Digital Currency Address - ETH",
+            "id_number" => "0xSharedScamAddr",
+            "name" => "SANCTIONED ENTITY",
+            "programs" => ["SDGT"]
+          }
 
-          _ ->
-            ofac_entry = %{
-              "id" => 77001,
-              "id_type" => "Digital Currency Address - ETH",
-              "id_number" => "0xSharedScamAddr",
-              "name" => "SANCTIONED ENTITY",
-              "programs" => ["SDGT"]
-            }
-
-            conn
-            |> Plug.Conn.put_resp_content_type("application/json")
-            |> Plug.Conn.resp(200, Jason.encode!([ofac_entry]))
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.resp(200, Jason.encode!([ofac_entry]))
         end
       end)
 

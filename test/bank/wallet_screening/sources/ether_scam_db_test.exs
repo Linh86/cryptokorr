@@ -44,6 +44,30 @@ defmodule Bank.WalletScreening.Sources.EtherScamDBTest do
     "addresses" => ["  ", ""]
   }
 
+  @scams_yaml """
+  -
+      id: 2
+      name: myelherwallel.com
+      url: 'http://myelherwallel.com'
+      coin: ETH
+      category: Phishing
+      subcategory: MyEtherWallet
+      addresses:
+          - '0xD0cC2B24980CBCCA47EF755Da88B220a82291407'
+          - '0x4cdc1cba0aeb5539f2e0ba158281e67e0e54a9b1'
+      reporter: MyCrypto
+  -
+      id: 7
+      name: xn--mytherwallet-fvb.com
+      url: 'http://xn--mytherwallet-fvb.com'
+      coin: ETH
+      category: Phishing
+      subcategory: MyEtherWallet
+      description: |-
+          Multiline descriptions exist in the public feed and should not break decoding.
+      reporter: MyCrypto
+  """
+
   describe "parse/1" do
     test "parses entry with addresses array producing one record per address" do
       %{records: records, skipped: []} = EtherScamDB.parse([@phishing_entry])
@@ -122,6 +146,38 @@ defmodule Bank.WalletScreening.Sources.EtherScamDBTest do
 
     test "handles empty list" do
       assert %{records: [], skipped: []} = EtherScamDB.parse([])
+    end
+  end
+
+  describe "decode_yaml/1" do
+    test "decodes canonical EtherScamDB _data/scams.yaml shape" do
+      entries = EtherScamDB.decode_yaml(@scams_yaml)
+
+      assert [
+               %{
+                 "id" => "2",
+                 "name" => "myelherwallel.com",
+                 "url" => "http://myelherwallel.com",
+                 "coin" => "ETH",
+                 "category" => "Phishing",
+                 "addresses" => [
+                   "0xD0cC2B24980CBCCA47EF755Da88B220a82291407",
+                   "0x4cdc1cba0aeb5539f2e0ba158281e67e0e54a9b1"
+                 ]
+               },
+               %{"id" => "7", "name" => "xn--mytherwallet-fvb.com"}
+             ] = entries
+    end
+
+    test "decoded YAML entries feed into the normal parser" do
+      %{records: records, skipped: skipped} =
+        @scams_yaml
+        |> EtherScamDB.decode_yaml()
+        |> EtherScamDB.parse()
+
+      assert length(records) == 2
+      assert length(skipped) == 1
+      assert Enum.all?(records, &(&1.source == "etherscamdb"))
     end
   end
 end

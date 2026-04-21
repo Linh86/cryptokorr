@@ -2,9 +2,12 @@ defmodule Bank.WalletScreening.Sources.BTCAbuse do
   @moduledoc """
   Parser and normalizer for Bitcoin abuse/scam feed data.
 
-  The Bitcoin Abuse Database (bitcoinabuse.com) and similar BTC-
-  specific abuse feeds publish CSV exports of reported Bitcoin
-  addresses with abuse categories and reporter metadata.
+  BTCAbuse / Bitcoin Abuse-style datasets publish reported Bitcoin
+  addresses with abuse categories and reporter metadata. The current
+  public BTCAbuse site exposes browsable address evidence but does
+  not expose a live unauthenticated bulk API, so ingestion expects an
+  operator-configured CSV export with the historical Bitcoin Abuse
+  field shape.
 
   ## Feed format
 
@@ -34,7 +37,7 @@ defmodule Bank.WalletScreening.Sources.BTCAbuse do
   """
 
   @source_name "btc_abuse"
-  @evidence_base "https://www.bitcoinabuse.com/reports/"
+  @evidence_base "https://btcabuse.com/browse/"
 
   @abuse_types %{
     "1" => "ransomware",

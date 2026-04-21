@@ -83,7 +83,7 @@ defmodule Bank.WalletScreening.Sources.BTCAbuseTest do
       body = csv_body([@csv_other_addr])
       %{records: [record], skipped: []} = BTCAbuse.parse_csv(body)
 
-      assert record.evidence_uri =~ "bitcoinabuse.com/reports/"
+      assert record.evidence_uri =~ "btcabuse.com/browse/"
       assert record.evidence_uri =~ "3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"
     end
 

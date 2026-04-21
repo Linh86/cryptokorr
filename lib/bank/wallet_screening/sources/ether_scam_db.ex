@@ -3,8 +3,10 @@ defmodule Bank.WalletScreening.Sources.EtherScamDB do
   Parser and normalizer for EtherScamDB scam address data.
 
   EtherScamDB maintains a community-contributed database of Ethereum
-  scam addresses. The public export is a JSON array of scam entries
-  with address, category, and reporter metadata.
+  scam addresses. The canonical public export is the GitHub
+  `_data/scams.yaml` file; this module parses that shape into entry
+  maps and then normalizes address-bearing entries into screening
+  records.
 
   ## Feed format
 
@@ -60,6 +62,27 @@ defmodule Bank.WalletScreening.Sources.EtherScamDB do
     %{records: Enum.reverse(records), skipped: Enum.reverse(skipped)}
   end
 
+  @doc """
+  Decode the canonical EtherScamDB `_data/scams.yaml` file.
+
+  This is intentionally a tiny, source-specific YAML reader rather
+  than a general YAML parser: we only need top-level scam entries,
+  scalar fields, and the `addresses` string array used by the public
+  feed. Unknown or multiline fields are ignored rather than treated
+  as successful address data.
+  """
+  @spec decode_yaml(String.t()) :: [map()]
+  def decode_yaml(body) when is_binary(body) do
+    body
+    |> String.split("\n")
+    |> Enum.reduce({[], nil, nil}, &decode_yaml_line/2)
+    |> then(fn {entries, current, _array_key} ->
+      entries
+      |> maybe_prepend(current)
+      |> Enum.reverse()
+    end)
+  end
+
   defp normalise_entry(entry) do
     addresses = extract_addresses(entry)
     entry_id = Map.get(entry, "id")
@@ -113,7 +136,7 @@ defmodule Bank.WalletScreening.Sources.EtherScamDB do
   defp extract_addresses(entry) do
     case Map.get(entry, "addresses") do
       list when is_list(list) ->
-        list |> Enum.filter(&is_binary/1) |> Enum.reject(&(String.trim(&1) == ""))
+        Enum.filter(list, &is_binary/1)
 
       _ ->
         case get_string(entry, "address") do
@@ -163,4 +186,50 @@ defmodule Bank.WalletScreening.Sources.EtherScamDB do
 
   defp non_empty(""), do: nil
   defp non_empty(s), do: s
+
+  defp decode_yaml_line(line, {entries, current, array_key}) do
+    trimmed = String.trim(line)
+
+    cond do
+      trimmed == "" ->
+        {entries, current, array_key}
+
+      trimmed == "-" ->
+        {maybe_prepend(entries, current), %{}, nil}
+
+      String.starts_with?(trimmed, "- ") and is_binary(array_key) ->
+        value = trimmed |> String.trim_leading("- ") |> yaml_scalar()
+        {entries, Map.update(current || %{}, array_key, [value], &(&1 ++ [value])), array_key}
+
+      String.contains?(trimmed, ":") ->
+        [key, value] = String.split(trimmed, ":", parts: 2)
+        key = String.trim(key)
+        value = String.trim(value)
+
+        cond do
+          value == "" ->
+            {entries, current || %{}, key}
+
+          value in ["|-", "|", ">-", ">"] ->
+            {entries, current || %{}, nil}
+
+          true ->
+            {entries, Map.put(current || %{}, key, yaml_scalar(value)), nil}
+        end
+
+      true ->
+        {entries, current, array_key}
+    end
+  end
+
+  defp maybe_prepend(entries, nil), do: entries
+  defp maybe_prepend(entries, current) when current == %{}, do: entries
+  defp maybe_prepend(entries, current), do: [current | entries]
+
+  defp yaml_scalar(value) do
+    value
+    |> String.trim()
+    |> String.trim("'")
+    |> String.trim("\"")
+  end
 end

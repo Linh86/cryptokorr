@@ -21,6 +21,9 @@ defmodule Bank.WalletScreening.Ingestion do
       config :bank, Bank.WalletScreening.Ingestion,
         ofac_url: "https://...",
         opensanctions_url: "https://...",
+        scamsniffer_url: "https://...",
+        etherscamdb_url: "https://...",
+        btc_abuse_url: "https://...", # optional operator-provided CSV export
         req_options: []
 
   In the test environment, `req_options` should include
@@ -43,8 +46,7 @@ defmodule Bank.WalletScreening.Ingestion do
   @default_ofac_url "https://www.treasury.gov/ofac/downloads/sanctions/1.0/sdn_advanced.xml"
   @default_opensanctions_url "https://data.opensanctions.org/datasets/latest/sanctions/entities.ftm.json"
   @default_scamsniffer_url "https://raw.githubusercontent.com/scamsniffer/scam-database/main/blacklist/combined.json"
-  @default_etherscamdb_url "https://raw.githubusercontent.com/MrLuit/EtherScamDB/master/data/scams.json"
-  @default_btc_abuse_url "https://www.bitcoinabuse.com/api/reports/download"
+  @default_etherscamdb_url "https://raw.githubusercontent.com/MrLuit/EtherScamDB/master/_data/scams.yaml"
 
   # --- Public API -------------------------------------------------------
 
@@ -124,15 +126,18 @@ defmodule Bank.WalletScreening.Ingestion do
   @doc """
   Ingest Bitcoin abuse/scam feed data.
 
-  Fetches the BTC abuse CSV export, parses and deduplicates by
-  address, and upserts into the screening store as `challenge`
-  records.
+  Fetches an operator-configured BTC abuse CSV export, parses and
+  deduplicates by address, and upserts into the screening store as
+  `challenge` records. The public BTCAbuse site does not currently
+  expose an unauthenticated bulk endpoint, so this function fails
+  closed when no URL is configured.
   """
   @spec ingest_btc_abuse(keyword()) :: {:ok, ingest_result()} | {:error, term()}
   def ingest_btc_abuse(opts \\ []) do
     url = Keyword.get(opts, :url, btc_abuse_url())
 
-    with {:ok, body} <- fetch_body(url) do
+    with {:ok, url} <- require_url(url, :btc_abuse_feed_url_not_configured),
+         {:ok, body} <- fetch_body(url) do
       %{records: records, skipped: skipped} = BTCAbuse.parse_csv(body)
       do_upsert("btc_abuse", records, skipped)
     end
@@ -154,6 +159,10 @@ defmodule Bank.WalletScreening.Ingestion do
         {:error, {:fetch_failed, reason}}
     end
   end
+
+  defp require_url(nil, reason), do: {:error, reason}
+  defp require_url("", reason), do: {:error, reason}
+  defp require_url(url, _reason) when is_binary(url), do: {:ok, url}
 
   defp request(url) do
     [
@@ -193,14 +202,26 @@ defmodule Bank.WalletScreening.Ingestion do
   defp decode_json(body) when is_binary(body) do
     case Jason.decode(body) do
       {:ok, list} when is_list(list) -> {:ok, list}
+      {:ok, map} when is_map(map) -> {:ok, map}
       {:ok, _other} -> {:ok, []}
       {:error, _} -> {:error, :invalid_json}
     end
   end
 
   # EtherScamDB wraps the array in a top-level object with a "result"
-  # or "data" key in some exports, or returns a bare array in others.
+  # or "data" key in some exports, returns a bare array in others, and
+  # publishes its canonical GitHub data source as `_data/scams.yaml`.
   defp decode_json_flexible(body) when is_binary(body) do
+    case body |> String.trim_leading() |> String.starts_with?("-") do
+      true ->
+        {:ok, EtherScamDB.decode_yaml(body)}
+
+      false ->
+        decode_json_flexible_body(body)
+    end
+  end
+
+  defp decode_json_flexible_body(body) do
     case Jason.decode(body) do
       {:ok, list} when is_list(list) ->
         {:ok, list}
@@ -288,7 +309,7 @@ defmodule Bank.WalletScreening.Ingestion do
     do: Keyword.get(config(), :etherscamdb_url, @default_etherscamdb_url)
 
   defp btc_abuse_url,
-    do: Keyword.get(config(), :btc_abuse_url, @default_btc_abuse_url)
+    do: Keyword.get(config(), :btc_abuse_url)
 
   defp req_options, do: Keyword.get(config(), :req_options, [])
 end

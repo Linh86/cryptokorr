@@ -10,7 +10,18 @@ defmodule Bank.WalletScreening.Sources.ScamSniffer do
 
   ## Feed format
 
-  ScamSniffer's blocklist API returns a JSON array of objects:
+  ScamSniffer's public GitHub blocklist includes several JSON shapes.
+  The default `combined.json` file is a map of phishing domains to
+  the EVM addresses associated with each domain:
+
+      {
+        "degenalgo.art": [
+          "0x3da02e1f29bcbed185eca0d3299efd46e6e7e155"
+        ]
+      }
+
+  The parser also accepts a bare address array (`address.json`) and a
+  list of object entries for compatibility with older mirrors:
 
       [
         {
@@ -54,6 +65,13 @@ defmodule Bank.WalletScreening.Sources.ScamSniffer do
   def parse(entries) when is_list(entries) do
     {records, skipped} =
       Enum.reduce(entries, {[], []}, fn entry, {recs, skips} ->
+        entry =
+          if is_binary(entry) do
+            %{"address" => entry, "chain" => "ethereum", "type" => "phishing"}
+          else
+            entry
+          end
+
         case normalise_entry(entry) do
           {:ok, record} -> {[record | recs], skips}
           {:skip, reason} -> {recs, [%{entry: entry, reason: reason} | skips]}
@@ -63,8 +81,42 @@ defmodule Bank.WalletScreening.Sources.ScamSniffer do
     %{records: Enum.reverse(records), skipped: Enum.reverse(skipped)}
   end
 
+  def parse(domain_map) when is_map(domain_map) do
+    {records, skipped} =
+      Enum.reduce(domain_map, {[], []}, fn {domain, addresses}, {recs, skips} ->
+        case addresses do
+          list when is_list(list) ->
+            Enum.reduce(list, {recs, skips}, fn address, {inner_recs, inner_skips} ->
+              entry = %{
+                "address" => address,
+                "chain" => "ethereum",
+                "type" => "phishing",
+                "name" => domain,
+                "url" => "https://#{domain}",
+                "domain" => domain
+              }
+
+              case normalise_entry(entry) do
+                {:ok, record} -> {[record | inner_recs], inner_skips}
+                {:skip, reason} -> {inner_recs, [%{entry: entry, reason: reason} | inner_skips]}
+              end
+            end)
+
+          _ ->
+            skipped = %{
+              entry: %{domain => addresses},
+              reason: "domain entry is not an address list"
+            }
+
+            {recs, [skipped | skips]}
+        end
+      end)
+
+    %{records: Enum.reverse(records), skipped: Enum.reverse(skipped)}
+  end
+
   defp normalise_entry(entry) do
-    address = get_string(entry, "address")
+    address = get_address(entry)
 
     cond do
       is_nil(address) or address == "" ->
@@ -107,9 +159,12 @@ defmodule Bank.WalletScreening.Sources.ScamSniffer do
 
   defp build_metadata(entry) do
     entry
-    |> Map.take(["address", "chain", "type", "name", "url", "id", "tags", "created_at"])
+    |> Map.take(["address", "chain", "type", "name", "url", "domain", "id", "tags", "created_at"])
     |> Map.reject(fn {_k, v} -> is_nil(v) end)
   end
+
+  defp get_address(address) when is_binary(address), do: String.trim(address) |> non_empty()
+  defp get_address(entry) when is_map(entry), do: get_string(entry, "address")
 
   defp get_string(map, key) do
     case Map.get(map, key) do

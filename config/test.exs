@@ -82,6 +82,6 @@ config :bank, Bank.WalletScreening.Ingestion,
   ofac_url: "http://ofac-feed.test/sanctions.json",
   opensanctions_url: "http://opensanctions-feed.test/entities.ftm.json",
   scamsniffer_url: "http://scamsniffer-feed.test/blacklist.json",
-  etherscamdb_url: "http://etherscamdb-feed.test/scams.json",
+  etherscamdb_url: "http://etherscamdb-feed.test/scams.yaml",
   btc_abuse_url: "http://btcabuse-feed.test/reports.csv",
   req_options: [plug: {Req.Test, Bank.WalletScreening.Ingestion}]
