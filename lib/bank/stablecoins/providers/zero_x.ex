@@ -14,6 +14,7 @@ defmodule Bank.Stablecoins.Providers.ZeroX do
       config :bank, Bank.Stablecoins.Providers.ZeroX,
         base_url: "https://api.0x.org",
         api_key: "...",
+        taker_address: "0x...", # optional fallback; request metadata wins
         req_options: []
 
   Tests override `:req_options` with
@@ -58,43 +59,75 @@ defmodule Bank.Stablecoins.Providers.ZeroX do
   # -- HTTP -----------------------------------------------------------------
 
   defp fetch_quote(req) do
-    sell_amount = to_base_units(req.amount, req.source_token.decimals)
-
-    params = [
-      chainId: Map.fetch!(@chain_ids, req.source_chain),
-      sellToken: req.source_token.address,
-      buyToken: req.dest_token.address,
-      sellAmount: sell_amount
-    ]
-
     config = Application.get_env(:bank, __MODULE__, [])
-    base_url = Keyword.get(config, :base_url, "https://api.0x.org")
-    api_key = Keyword.get(config, :api_key)
-    extra = Keyword.get(config, :req_options, [])
 
-    headers =
-      [{"accept", "application/json"}]
-      |> maybe_append_api_key(api_key)
+    with {:ok, taker} <- taker_address(req, config) do
+      sell_amount = to_base_units(req.amount, req.source_token.decimals)
 
-    req_opts =
-      [
-        base_url: base_url,
-        url: "/swap/permit2/quote",
-        method: :get,
-        headers: headers,
-        params: params,
-        receive_timeout: 10_000,
-        retry: false
-      ]
-      |> Keyword.merge(extra)
+      params =
+        [
+          chainId: Map.fetch!(@chain_ids, req.source_chain),
+          sellToken: req.source_token.address,
+          buyToken: req.dest_token.address,
+          sellAmount: sell_amount,
+          taker: taker
+        ]
+        |> maybe_append_slippage(req.slippage_bps)
 
-    req_opts
-    |> Req.request()
-    |> classify_response()
+      request_quote(params, config)
+    end
   end
 
-  defp maybe_append_api_key(headers, nil), do: headers
-  defp maybe_append_api_key(headers, key), do: [{"0x-api-key", key} | headers]
+  defp request_quote(params, config) do
+    base_url = Keyword.get(config, :base_url, "https://api.0x.org")
+    extra = Keyword.get(config, :req_options, [])
+
+    with {:ok, api_key} <- api_key(config) do
+      headers = [{"accept", "application/json"}, {"0x-version", "v2"}, {"0x-api-key", api_key}]
+
+      req_opts =
+        [
+          base_url: base_url,
+          url: "/swap/permit2/quote",
+          method: :get,
+          headers: headers,
+          params: params,
+          receive_timeout: 10_000,
+          retry: false
+        ]
+        |> Keyword.merge(extra)
+
+      req_opts
+      |> Req.request()
+      |> classify_response()
+    end
+  end
+
+  defp api_key(config) do
+    case Keyword.get(config, :api_key) do
+      key when is_binary(key) and key != "" -> {:ok, key}
+      _ -> {:error, {:provider_error, %{reason: "missing_api_key"}}}
+    end
+  end
+
+  defp maybe_append_slippage(params, nil), do: params
+  defp maybe_append_slippage(params, bps), do: Keyword.put(params, :slippageBps, bps)
+
+  defp taker_address(%QuoteRequest{metadata: metadata}, config) do
+    case metadata_taker_address(metadata) || Keyword.get(config, :taker_address) do
+      address when is_binary(address) and address != "" ->
+        {:ok, address}
+
+      _ ->
+        {:error, {:provider_error, %{reason: "missing_taker"}}}
+    end
+  end
+
+  defp metadata_taker_address(metadata) when is_map(metadata) do
+    Map.get(metadata, :taker_address) || Map.get(metadata, "taker_address")
+  end
+
+  defp metadata_taker_address(_), do: nil
 
   # -- Response classification ----------------------------------------------
 
@@ -135,6 +168,10 @@ defmodule Bank.Stablecoins.Providers.ZeroX do
   defp no_liquidity?(_), do: false
 
   # -- Normalization --------------------------------------------------------
+
+  defp normalize(_req, %{"liquidityAvailable" => false}) do
+    {:error, :no_route_found}
+  end
 
   defp normalize(req, body) do
     with {:ok, buy_amount} <- parse_base_units(body, "buyAmount", req.dest_token.decimals),

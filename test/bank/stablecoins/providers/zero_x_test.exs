@@ -1,8 +1,10 @@
 defmodule Bank.Stablecoins.Providers.ZeroXTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Bank.Stablecoins.{QuoteRequest, RouteQuote, RouteLeg}
   alias Bank.Stablecoins.Providers.ZeroX
+
+  @taker_address "0x0000000000000000000000000000000000000abc"
 
   # -- Fixtures -------------------------------------------------------------
 
@@ -12,7 +14,8 @@ defmodule Bank.Stablecoins.Providers.ZeroXTest do
       source_asset: "USDC",
       dest_chain: "ethereum",
       dest_asset: "USDT",
-      amount: Decimal.new("100")
+      amount: Decimal.new("100"),
+      metadata: %{taker_address: @taker_address}
     }
 
     QuoteRequest.build(Map.merge(defaults, overrides))
@@ -205,7 +208,7 @@ defmodule Bank.Stablecoins.Providers.ZeroXTest do
     end
 
     test "sends correct query params to 0x API" do
-      {:ok, req} = build_swap_request(%{amount: Decimal.new("250.50")})
+      {:ok, req} = build_swap_request(%{amount: Decimal.new("250.50"), slippage_bps: 75})
 
       Req.Test.stub(ZeroX, fn conn ->
         conn = Plug.Conn.fetch_query_params(conn)
@@ -215,6 +218,8 @@ defmodule Bank.Stablecoins.Providers.ZeroXTest do
         assert params["sellToken"] == "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
         assert params["buyToken"] == "0xdAC17F958D2ee523a2206206994597C13D831ec7"
         assert params["sellAmount"] == "250500000"
+        assert params["taker"] == @taker_address
+        assert params["slippageBps"] == "75"
 
         Req.Test.json(conn, success_body(sell_amount: "250500000", buy_amount: "249500000"))
       end)
@@ -226,11 +231,12 @@ defmodule Bank.Stablecoins.Providers.ZeroXTest do
       {:ok, req} = build_swap_request()
 
       Req.Test.stub(ZeroX, fn conn ->
-        api_key =
-          conn.req_headers
-          |> Enum.find_value(fn {k, v} -> if k == "0x-api-key", do: v end)
+        headers = Map.new(conn.req_headers)
+        api_key = Map.fetch!(headers, "0x-api-key")
+        version = Map.fetch!(headers, "0x-version")
 
         assert api_key == "test-0x-api-key"
+        assert version == "v2"
 
         Req.Test.json(conn, success_body())
       end)
@@ -304,6 +310,33 @@ defmodule Bank.Stablecoins.Providers.ZeroXTest do
   # -- Error classification -------------------------------------------------
 
   describe "quote/1 — error classification" do
+    test "missing taker address returns provider_error before HTTP" do
+      {:ok, req} =
+        QuoteRequest.build(%{
+          source_chain: "ethereum",
+          source_asset: "USDC",
+          dest_chain: "ethereum",
+          dest_asset: "USDT",
+          amount: Decimal.new("100")
+        })
+
+      assert {:error, {:provider_error, %{reason: "missing_taker"}}} = ZeroX.quote(req)
+    end
+
+    test "missing API key returns provider_error before HTTP" do
+      previous = Application.get_env(:bank, ZeroX, [])
+
+      on_exit(fn ->
+        Application.put_env(:bank, ZeroX, previous)
+      end)
+
+      Application.put_env(:bank, ZeroX, Keyword.delete(previous, :api_key))
+
+      {:ok, req} = build_swap_request()
+
+      assert {:error, {:provider_error, %{reason: "missing_api_key"}}} = ZeroX.quote(req)
+    end
+
     test "429 maps to :rate_limited" do
       {:ok, req} = build_swap_request()
 
@@ -342,6 +375,16 @@ defmodule Bank.Stablecoins.Providers.ZeroXTest do
           conn |> Plug.Conn.put_status(400),
           %{"reason" => "INSUFFICIENT_ASSET_LIQUIDITY", "code" => 100}
         )
+      end)
+
+      assert {:error, :no_route_found} = ZeroX.quote(req)
+    end
+
+    test "200 with liquidityAvailable=false maps to :no_route_found" do
+      {:ok, req} = build_swap_request()
+
+      Req.Test.stub(ZeroX, fn conn ->
+        Req.Test.json(conn, %{"liquidityAvailable" => false})
       end)
 
       assert {:error, :no_route_found} = ZeroX.quote(req)
