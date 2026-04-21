@@ -17,6 +17,10 @@ defmodule BankWeb.Internal.TelegramWebhookController do
       classify and produce a reply, which is sent via
       `Bank.Telegram.Transport.send_message/3`. Free-form
       non-command text is accepted but produces no reply.
+    * `/pause` and `/resume` text commands (#73) do not mutate
+      runtime state directly. They render an explicit confirmation
+      prompt with a signed inline button; the callback-query path below
+      performs the actual state change after token verification.
     * For a `{:callback_query, ...}` update from an authorized
       operator, delegate to `Bank.Telegram.Callbacks.handle/2` to
       verify the signed callback token and apply the decision
@@ -44,6 +48,7 @@ defmodule BankWeb.Internal.TelegramWebhookController do
   alias Bank.Telegram.Callbacks
   alias Bank.Telegram.Commands
   alias Bank.Telegram.Config, as: TelegramConfig
+  alias Bank.Telegram.SecurityControls
   alias Bank.Telegram.Transport
   alias Bank.Telegram.Update
 
@@ -92,6 +97,19 @@ defmodule BankWeb.Internal.TelegramWebhookController do
   end
 
   defp handle_text(msg, operator, conn) do
+    case SecurityControls.parse_command(msg.text) do
+      {:ok, action} ->
+        handle_security_command(msg, operator, action, conn)
+
+      :not_security_command ->
+        handle_read_command(msg, operator, conn)
+
+      :not_a_command ->
+        handle_read_command(msg, operator, conn)
+    end
+  end
+
+  defp handle_read_command(msg, operator, conn) do
     case Commands.parse(msg.text) do
       :not_a_command ->
         # Non-command text is accepted but produces no reply. Free-
@@ -117,6 +135,27 @@ defmodule BankWeb.Internal.TelegramWebhookController do
 
         ack(conn, "command_handled")
     end
+  end
+
+  defp handle_security_command(msg, operator, action, conn) do
+    {text, opts} =
+      case SecurityControls.confirmation(operator, action) do
+        {:ok, reply, buttons} -> {reply, [inline_buttons: buttons]}
+        {:error, :forbidden, reply, []} -> {reply, []}
+      end
+
+    case Transport.send_message(msg.chat_id, text, opts) do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "BankWeb.Internal.TelegramWebhookController: security command reply to " <>
+            "chat_id=#{msg.chat_id} failed: #{inspect(reason)}"
+        )
+    end
+
+    ack(conn, "command_handled")
   end
 
   defp handle_callback(operator, cb) do

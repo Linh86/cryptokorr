@@ -23,10 +23,12 @@ defmodule Bank.Telegram.Commands do
       #70 identity truth table currently grants `:read`, but the
       check keeps the authorization model centralised so a future
       role restriction flows through automatically.
-    * No mutating command is supported. Unknown commands resolve
-      to the `/help` text — matching the #71 "return a safe and
-      clear help response" rule — so no command text accidentally
-      falls through into business code.
+    * No mutating command is handled here. `/pause` and `/resume`
+      are intercepted by `Bank.Telegram.SecurityControls` in #73 so
+      they can render explicit step-up confirmation buttons before any
+      state change. Unknown commands resolve to the `/help` text —
+      matching the #71 "return a safe and clear help response" rule —
+      so no command text accidentally falls through into business code.
 
   ## Telegram group-chat suffix
 
@@ -40,8 +42,9 @@ defmodule Bank.Telegram.Commands do
   ## Scope
 
   `#71` wires this module to the webhook controller and nothing
-  else. Approve / reject (#72), pause / resume (#73), and
-  observability / runbook (#74) remain out of scope.
+      else. Approve / reject (#72), pause / resume (#73), and
+      observability / runbook (#74) are implemented in sibling modules
+      rather than inside this read-only renderer.
   """
 
   alias Bank.Decisions
@@ -152,6 +155,8 @@ defmodule Bank.Telegram.Commands do
     /help — list supported commands
     /status — current runtime pause state
     /queue — pending approval queue
+    /pause — request step-up confirmation for global pause
+    /resume — request step-up confirmation for global resume
     """
     |> String.trim_trailing()
   end
