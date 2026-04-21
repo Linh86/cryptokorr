@@ -40,7 +40,7 @@ defmodule Bank.WalletScreening.Ingestion do
           errors: [term()]
         }
 
-  @default_ofac_url "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/ADVANCED_JSON"
+  @default_ofac_url "https://www.treasury.gov/ofac/downloads/sanctions/1.0/sdn_advanced.xml"
   @default_opensanctions_url "https://data.opensanctions.org/datasets/latest/sanctions/entities.ftm.json"
 
   # --- Public API -------------------------------------------------------
@@ -48,16 +48,17 @@ defmodule Bank.WalletScreening.Ingestion do
   @doc """
   Ingest OFAC digital currency sanctions data.
 
-  Fetches the consolidated OFAC JSON feed, extracts digital currency
+  Fetches the OFAC advanced SDN feed, extracts digital currency
   address entries, normalizes them, and upserts into the screening
-  store.
+  store. The current public OFAC download is XML; JSON-shaped test
+  fixtures remain supported for parser compatibility.
   """
   @spec ingest_ofac(keyword()) :: {:ok, ingest_result()} | {:error, term()}
   def ingest_ofac(opts \\ []) do
     url = Keyword.get(opts, :url, ofac_url())
 
-    with {:ok, body} <- fetch_json(url),
-         entries <- extract_ofac_entries(body) do
+    with {:ok, body} <- fetch_body(url),
+         {:ok, entries} <- decode_ofac_payload(body) do
       %{records: records, skipped: skipped} = OFAC.parse(entries)
       do_upsert("ofac", records, skipped)
     end
@@ -74,60 +75,54 @@ defmodule Bank.WalletScreening.Ingestion do
   def ingest_opensanctions(opts \\ []) do
     url = Keyword.get(opts, :url, opensanctions_url())
 
-    with {:ok, body} <- fetch_ndjson(url) do
-      %{records: records, skipped: skipped} = OpenSanctions.parse(body)
+    with {:ok, body} <- fetch_body(url) do
+      entities = decode_ndjson(body)
+      %{records: records, skipped: skipped} = OpenSanctions.parse(entities)
       do_upsert("opensanctions", records, skipped)
     end
   end
 
   # --- Fetch helpers ----------------------------------------------------
 
-  defp fetch_json(url) do
-    case Req.get(url, req_options()) do
-      {:ok, %Req.Response{status: 200, body: body}} when is_list(body) ->
-        {:ok, body}
-
-      {:ok, %Req.Response{status: 200, body: body}} when is_map(body) ->
+  defp fetch_body(url) do
+    case request(url) do
+      {:ok, %Req.Response{status: 200, body: body}} ->
         {:ok, body}
 
       {:ok, %Req.Response{status: status}} ->
-        Logger.warning("WalletScreening.Ingestion: OFAC feed returned HTTP #{status}")
+        Logger.warning("WalletScreening.Ingestion: feed returned HTTP #{status}")
         {:error, {:http_error, status}}
 
       {:error, reason} ->
-        Logger.warning("WalletScreening.Ingestion: OFAC fetch failed: #{inspect(reason)}")
+        Logger.warning("WalletScreening.Ingestion: fetch failed: #{inspect(reason)}")
         {:error, {:fetch_failed, reason}}
     end
   end
 
-  defp fetch_ndjson(url) do
-    case Req.get(url, Keyword.merge(req_options(), decode_body: false)) do
-      {:ok, %Req.Response{status: 200, body: body}} when is_binary(body) ->
-        entities =
-          body
-          |> String.split("\n", trim: true)
-          |> Enum.reduce([], fn line, acc ->
-            case Jason.decode(line) do
-              {:ok, entity} -> [entity | acc]
-              {:error, _} -> acc
-            end
-          end)
-          |> Enum.reverse()
+  defp request(url) do
+    [
+      url: url,
+      method: :get,
+      retry: false,
+      decode_body: false
+    ]
+    |> Keyword.merge(req_options())
+    |> Req.request()
+  end
 
-        {:ok, entities}
-
-      {:ok, %Req.Response{status: status}} ->
-        Logger.warning("WalletScreening.Ingestion: OpenSanctions feed returned HTTP #{status}")
-        {:error, {:http_error, status}}
-
-      {:error, reason} ->
-        Logger.warning("WalletScreening.Ingestion: OpenSanctions fetch failed: #{inspect(reason)}")
-        {:error, {:fetch_failed, reason}}
+  # The current OFAC advanced SDN download is XML. Some tests and
+  # historical mirrors expose equivalent JSON, so support both a
+  # top-level list and a map with a nested list.
+  defp decode_ofac_payload(body) when is_binary(body) do
+    if body |> String.trim_leading() |> String.starts_with?("<") do
+      {:ok, OFAC.extract_digital_currency_entries_from_xml(body)}
+    else
+      with {:ok, decoded} <- Jason.decode(body) do
+        {:ok, extract_ofac_entries(decoded)}
+      end
     end
   end
 
-  # The OFAC consolidated JSON payload structure varies. Support both
-  # a top-level list and a map with a nested list.
   defp extract_ofac_entries(body) when is_list(body) do
     OFAC.extract_digital_currency_entries(body)
   end
@@ -137,6 +132,18 @@ defmodule Bank.WalletScreening.Ingestion do
       Map.get(body, "results", Map.get(body, "entries", Map.get(body, "data", [])))
 
     OFAC.extract_digital_currency_entries(entries)
+  end
+
+  defp decode_ndjson(body) when is_binary(body) do
+    body
+    |> String.split("\n", trim: true)
+    |> Enum.reduce([], fn line, acc ->
+      case Jason.decode(line) do
+        {:ok, entity} -> [entity | acc]
+        {:error, _} -> acc
+      end
+    end)
+    |> Enum.reverse()
   end
 
   # --- Upsert plumbing --------------------------------------------------
@@ -173,9 +180,7 @@ defmodule Bank.WalletScreening.Ingestion do
              }}
 
           {:error, reason} ->
-            Logger.error(
-              "WalletScreening.Ingestion: #{source} upsert failed: #{inspect(reason)}"
-            )
+            Logger.error("WalletScreening.Ingestion: #{source} upsert failed: #{inspect(reason)}")
 
             {:error, reason}
         end
@@ -187,6 +192,9 @@ defmodule Bank.WalletScreening.Ingestion do
   defp config, do: Application.get_env(:bank, __MODULE__, [])
 
   defp ofac_url, do: Keyword.get(config(), :ofac_url, @default_ofac_url)
-  defp opensanctions_url, do: Keyword.get(config(), :opensanctions_url, @default_opensanctions_url)
+
+  defp opensanctions_url,
+    do: Keyword.get(config(), :opensanctions_url, @default_opensanctions_url)
+
   defp req_options, do: Keyword.get(config(), :req_options, [])
 end

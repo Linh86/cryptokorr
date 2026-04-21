@@ -66,6 +66,26 @@ defmodule Bank.WalletScreening.Sources.OpenSanctionsTest do
     }
   }
 
+  @mixed_currency_wallet %{
+    "id" => "os-wallet-098",
+    "schema" => "CryptoWallet",
+    "properties" => %{
+      "publicKey" => ["0xMixedCurrencyWallet"],
+      "currency" => ["ETH", "DOGE"],
+      "topics" => ["sanction"]
+    }
+  }
+
+  @empty_address_wallet %{
+    "id" => "os-wallet-097",
+    "schema" => "CryptoWallet",
+    "properties" => %{
+      "publicKey" => ["", "  "],
+      "currency" => ["ETH"],
+      "topics" => ["sanction"]
+    }
+  }
+
   @no_address_wallet %{
     "id" => "os-wallet-100",
     "schema" => "CryptoWallet",
@@ -135,7 +155,22 @@ defmodule Bank.WalletScreening.Sources.OpenSanctionsTest do
     test "skips wallets with unsupported currency" do
       %{records: [], skipped: [skipped]} = OpenSanctions.parse([@unsupported_currency_wallet])
 
-      assert skipped.reason =~ "unsupported currencies"
+      assert skipped.reason =~ "unsupported currency"
+    end
+
+    test "records supported currencies while reporting unsupported siblings" do
+      %{records: [record], skipped: [skipped]} = OpenSanctions.parse([@mixed_currency_wallet])
+
+      assert record.chain == "ethereum"
+      assert record.address == "0xMixedCurrencyWallet"
+      assert skipped.reason =~ "unsupported currency: DOGE"
+    end
+
+    test "skips empty publicKey values instead of producing malformed records" do
+      %{records: [], skipped: skipped} = OpenSanctions.parse([@empty_address_wallet])
+
+      assert length(skipped) == 2
+      assert Enum.all?(skipped, &(&1.reason =~ "empty publicKey"))
     end
 
     test "skips wallets with no address" do

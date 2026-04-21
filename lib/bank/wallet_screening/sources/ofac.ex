@@ -65,6 +65,13 @@ defmodule Bank.WalletScreening.Sources.OFAC do
     "ARB" => "arbitrum"
   }
 
+  @distinct_party_re ~r/<DistinctParty\b(?<attrs>[^>]*)>(?<body>.*?)<\/DistinctParty>/s
+  @feature_type_re ~r/<FeatureType\b(?<attrs>[^>]*)>(?<label>.*?)<\/FeatureType>/s
+  @feature_re ~r/<Feature\b(?<attrs>[^>]*)>.*?<VersionDetail\b[^>]*>(?<value>.*?)<\/VersionDetail>/s
+
+  @primary_alias_re ~r/<Alias\b[^>]*Primary="true"[^>]*>(?<body>.*?)<\/Alias>/s
+  @name_part_re ~r/<NamePartValue\b[^>]*>(?<value>.*?)<\/NamePartValue>/s
+
   @type parse_result :: %{
           records: [map()],
           skipped: [map()]
@@ -102,6 +109,47 @@ defmodule Bank.WalletScreening.Sources.OFAC do
     Enum.filter(entries, fn entry ->
       id_type = Map.get(entry, "id_type", "")
       String.contains?(id_type, "Digital Currency Address")
+    end)
+  end
+
+  @doc """
+  Extract digital currency address entries from OFAC's advanced SDN XML.
+
+  OFAC's current public advanced SDN download is XML. This helper
+  converts the relevant `DistinctParty`/`Feature` records into the
+  same lightweight entry shape accepted by `parse/1`, keeping the
+  source-specific XML parsing out of the ingestion orchestrator.
+  """
+  @spec extract_digital_currency_entries_from_xml(String.t()) :: list()
+  def extract_digital_currency_entries_from_xml(xml) when is_binary(xml) do
+    feature_types = digital_currency_feature_types(xml)
+
+    Regex.scan(@distinct_party_re, xml, capture: :all_names)
+    |> Enum.flat_map(fn [attrs, body] ->
+      fixed_ref = fixed_ref(attrs)
+      entity_name = primary_name(body)
+
+      Regex.scan(@feature_re, body, capture: :all_names)
+      |> Enum.flat_map(fn [feature_attrs, value] ->
+        feature_id = attr(feature_attrs, "ID")
+        type_id = attr(feature_attrs, "FeatureTypeID")
+
+        case Map.fetch(feature_types, type_id) do
+          {:ok, label} ->
+            [
+              %{
+                "id" => fixed_ref || feature_id,
+                "id_type" => label,
+                "id_number" => xml_text(value),
+                "name" => entity_name,
+                "programs" => []
+              }
+            ]
+
+          :error ->
+            []
+        end
+      end)
     end)
   end
 
@@ -173,4 +221,60 @@ defmodule Bank.WalletScreening.Sources.OFAC do
 
   defp build_evidence_uri(nil), do: @evidence_base
   defp build_evidence_uri(sdn_id), do: "#{@evidence_base}/Details.aspx?id=#{sdn_id}"
+
+  defp digital_currency_feature_types(xml) do
+    @feature_type_re
+    |> Regex.scan(xml, capture: :all_names)
+    |> Enum.reduce(%{}, fn [attrs, label], acc ->
+      id = attr(attrs, "ID")
+      label = xml_text(label)
+
+      if is_binary(id) and String.contains?(label, "Digital Currency Address") do
+        Map.put(acc, id, label)
+      else
+        acc
+      end
+    end)
+  end
+
+  defp fixed_ref(attrs) do
+    attr(attrs, "FixedRef")
+  end
+
+  defp attr(attrs, name) do
+    case Regex.run(~r/\b#{Regex.escape(name)}="([^"]*)"/, attrs, capture: :all_but_first) do
+      [value] -> value
+      nil -> nil
+    end
+  end
+
+  defp primary_name(body) do
+    alias_body =
+      case Regex.named_captures(@primary_alias_re, body) do
+        %{"body" => alias_body} -> alias_body
+        nil -> body
+      end
+
+    names =
+      @name_part_re
+      |> Regex.scan(alias_body, capture: :all_names)
+      |> Enum.map(fn [value] -> xml_text(value) end)
+      |> Enum.reject(&(&1 == ""))
+
+    case names do
+      [] -> nil
+      _ -> Enum.join(names, " ")
+    end
+  end
+
+  defp xml_text(text) do
+    text
+    |> String.replace(~r/<[^>]+>/, "")
+    |> String.replace("&amp;", "&")
+    |> String.replace("&lt;", "<")
+    |> String.replace("&gt;", ">")
+    |> String.replace("&quot;", "\"")
+    |> String.replace("&apos;", "'")
+    |> String.trim()
+  end
 end

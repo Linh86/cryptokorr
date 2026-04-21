@@ -48,6 +48,44 @@ defmodule Bank.WalletScreening.Sources.OFACTest do
     "name" => "BAD ENTRY"
   }
 
+  @advanced_xml """
+  <?xml version="1.0" encoding="utf-8"?>
+  <Sanctions>
+    <ReferenceValueSets>
+      <FeatureTypeValues>
+        <FeatureType ID="344" FeatureTypeGroupID="1">Digital Currency Address - XBT</FeatureType>
+        <FeatureType ID="345" FeatureTypeGroupID="1">Digital Currency Address - ETH</FeatureType>
+        <FeatureType ID="25" FeatureTypeGroupID="1">Location</FeatureType>
+      </FeatureTypeValues>
+    </ReferenceValueSets>
+    <DistinctParty FixedRef="12345">
+      <Profile ID="12345" PartySubTypeID="3">
+        <Identity ID="67890" FixedRef="12345" Primary="true" False="false">
+          <Alias FixedRef="12345" AliasTypeID="1403" Primary="true" LowQuality="false">
+            <DocumentedName ID="67890" FixedRef="12345" DocNameStatusID="1">
+              <DocumentedNamePart>
+                <NamePartValue NamePartGroupID="1" ScriptID="215" ScriptStatusID="1" Acronym="false">TEST &amp; ENTITY</NamePartValue>
+              </DocumentedNamePart>
+            </DocumentedName>
+          </Alias>
+        </Identity>
+        <Feature ID="31723" FeatureTypeID="344">
+          <FeatureVersion ID="29462" ReliabilityID="1">
+            <VersionDetail DetailTypeID="1432">12QtD5BFwRsdNsAZY76UVE1xyCGNTojH9h</VersionDetail>
+          </FeatureVersion>
+          <IdentityReference IdentityID="67890" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+        <Feature ID="31724" FeatureTypeID="345">
+          <FeatureVersion ID="29463" ReliabilityID="1">
+            <VersionDetail DetailTypeID="1432">0xDeAdBeEf00000000000000000000000000000001</VersionDetail>
+          </FeatureVersion>
+          <IdentityReference IdentityID="67890" IdentityFeatureLinkTypeID="1" />
+        </Feature>
+      </Profile>
+    </DistinctParty>
+  </Sanctions>
+  """
+
   describe "extract_digital_currency_entries/1" do
     test "filters to digital currency entries only" do
       entries = [@eth_entry, @non_crypto_entry, @btc_entry]
@@ -60,6 +98,25 @@ defmodule Bank.WalletScreening.Sources.OFACTest do
 
     test "returns empty for non-crypto entries" do
       assert OFAC.extract_digital_currency_entries([@non_crypto_entry]) == []
+    end
+
+    test "extracts digital currency entries from OFAC advanced XML" do
+      entries = OFAC.extract_digital_currency_entries_from_xml(@advanced_xml)
+
+      assert [
+               %{
+                 "id" => "12345",
+                 "id_type" => "Digital Currency Address - XBT",
+                 "id_number" => "12QtD5BFwRsdNsAZY76UVE1xyCGNTojH9h",
+                 "name" => "TEST & ENTITY"
+               },
+               %{
+                 "id" => "12345",
+                 "id_type" => "Digital Currency Address - ETH",
+                 "id_number" => "0xDeAdBeEf00000000000000000000000000000001",
+                 "name" => "TEST & ENTITY"
+               }
+             ] = entries
     end
   end
 

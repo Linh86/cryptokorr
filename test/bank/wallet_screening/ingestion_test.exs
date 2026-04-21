@@ -2,7 +2,7 @@ defmodule Bank.WalletScreening.IngestionTest do
   use Bank.DataCase, async: true
 
   alias Bank.WalletScreening
-  alias Bank.WalletScreening.{Ingestion, ScreeningRecord}
+  alias Bank.WalletScreening.Ingestion
 
   # --- OFAC fixture data ------------------------------------------------
 
@@ -37,6 +37,39 @@ defmodule Bank.WalletScreening.IngestionTest do
 
   defp ofac_feed_body do
     [@ofac_eth_entry, @ofac_btc_entry, @ofac_bad_entry, @ofac_non_crypto]
+  end
+
+  defp ofac_advanced_xml_body do
+    """
+    <?xml version="1.0" encoding="utf-8"?>
+    <Sanctions>
+      <ReferenceValueSets>
+        <FeatureTypeValues>
+          <FeatureType ID="344" FeatureTypeGroupID="1">Digital Currency Address - XBT</FeatureType>
+          <FeatureType ID="345" FeatureTypeGroupID="1">Digital Currency Address - ETH</FeatureType>
+        </FeatureTypeValues>
+      </ReferenceValueSets>
+      <DistinctParty FixedRef="88001">
+        <Profile ID="88001" PartySubTypeID="3">
+          <Identity ID="17012" FixedRef="88001" Primary="true" False="false">
+            <Alias FixedRef="88001" AliasTypeID="1403" Primary="true" LowQuality="false">
+              <DocumentedName ID="17012" FixedRef="88001" DocNameStatusID="1">
+                <DocumentedNamePart>
+                  <NamePartValue NamePartGroupID="1" ScriptID="215" ScriptStatusID="1" Acronym="false">XML ENTITY</NamePartValue>
+                </DocumentedNamePart>
+              </DocumentedName>
+            </Alias>
+          </Identity>
+          <Feature ID="31723" FeatureTypeID="345">
+            <FeatureVersion ID="29462" ReliabilityID="1">
+              <VersionDetail DetailTypeID="1432">0xXmlSanctionedAddr</VersionDetail>
+            </FeatureVersion>
+            <IdentityReference IdentityID="17012" IdentityFeatureLinkTypeID="1" />
+          </Feature>
+        </Profile>
+      </DistinctParty>
+    </Sanctions>
+    """
   end
 
   # --- OpenSanctions fixture data ---------------------------------------
@@ -112,6 +145,23 @@ defmodule Bank.WalletScreening.IngestionTest do
       assert result.outcome == :block
       assert result.winning_record.source == "ofac"
       assert result.winning_record.reason =~ "TEST ENTITY A"
+    end
+
+    test "OFAC ingests current advanced XML feed shape" do
+      Req.Test.stub(Bank.WalletScreening.Ingestion, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("text/xml")
+        |> Plug.Conn.resp(200, ofac_advanced_xml_body())
+      end)
+
+      {:ok, result} = Ingestion.ingest_ofac()
+
+      assert result.ingested == 1
+
+      screening = WalletScreening.screen("ethereum", "0xXmlSanctionedAddr")
+      assert screening.outcome == :block
+      assert screening.winning_record.source == "ofac"
+      assert screening.winning_record.reason =~ "XML ENTITY"
     end
 
     test "OFAC upsert is idempotent — second ingestion updates, not duplicates" do
@@ -224,34 +274,32 @@ defmodule Bank.WalletScreening.IngestionTest do
   describe "provenance across sources" do
     test "OFAC and OpenSanctions records for the same address coexist" do
       Req.Test.stub(Bank.WalletScreening.Ingestion, fn conn ->
-        case conn.request_path do
-          path when path =~ "sanctions" ->
-            entry = %{
-              "id" => 88001,
-              "id_type" => "Digital Currency Address - ETH",
-              "id_number" => "0xSharedAddress",
-              "name" => "SHARED ENTITY",
-              "programs" => ["SDGT"]
+        if String.contains?(conn.request_path, "sanctions") do
+          entry = %{
+            "id" => 88001,
+            "id_type" => "Digital Currency Address - ETH",
+            "id_number" => "0xSharedAddress",
+            "name" => "SHARED ENTITY",
+            "programs" => ["SDGT"]
+          }
+
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.resp(200, Jason.encode!([entry]))
+        else
+          entity = %{
+            "id" => "os-shared-001",
+            "schema" => "CryptoWallet",
+            "properties" => %{
+              "publicKey" => ["0xSharedAddress"],
+              "currency" => ["ETH"],
+              "topics" => ["sanction"]
             }
+          }
 
-            conn
-            |> Plug.Conn.put_resp_content_type("application/json")
-            |> Plug.Conn.resp(200, Jason.encode!([entry]))
-
-          _ ->
-            entity = %{
-              "id" => "os-shared-001",
-              "schema" => "CryptoWallet",
-              "properties" => %{
-                "publicKey" => ["0xSharedAddress"],
-                "currency" => ["ETH"],
-                "topics" => ["sanction"]
-              }
-            }
-
-            conn
-            |> Plug.Conn.put_resp_content_type("application/x-ndjson")
-            |> Plug.Conn.resp(200, Jason.encode!(entity))
+          conn
+          |> Plug.Conn.put_resp_content_type("application/x-ndjson")
+          |> Plug.Conn.resp(200, Jason.encode!(entity))
         end
       end)
 

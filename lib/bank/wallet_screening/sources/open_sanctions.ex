@@ -73,8 +73,7 @@ defmodule Bank.WalletScreening.Sources.OpenSanctions do
       |> filter_sanctioned_wallets()
       |> Enum.reduce({[], []}, fn entity, {recs, skips} ->
         case normalise_entity(entity) do
-          {:ok, record_list} -> {record_list ++ recs, skips}
-          {:skip, reason} -> {recs, [%{entity: entity, reason: reason} | skips]}
+          {:ok, record_list, skipped} -> {record_list ++ recs, skipped ++ skips}
         end
       end)
 
@@ -93,55 +92,75 @@ defmodule Bank.WalletScreening.Sources.OpenSanctions do
   end
 
   defp normalise_entity(entity) do
-    entity_id = Map.get(entity, "id")
     addresses = prop_list(entity, "publicKey")
     currencies = prop_list(entity, "currency")
     source_urls = prop_list(entity, "sourceUrl")
     holders = prop_list(entity, "holder")
 
-    case {addresses, currencies} do
-      {[], _} ->
-        {:skip, "no publicKey property"}
+    cond do
+      addresses == [] ->
+        {:ok, [], [skipped(entity, "no publicKey property")]}
 
-      {_, []} ->
-        {:skip, "no currency property"}
+      currencies == [] ->
+        {:ok, [], [skipped(entity, "no currency property")]}
 
-      {addrs, currs} ->
-        records =
-          for address <- addrs,
-              currency <- currs,
-              chain = Map.get(@chain_map, String.upcase(currency)) do
-            %{
-              chain: chain,
-              address: String.trim(address),
-              control_tier: :hard_block,
-              source: @source_name,
-              source_record_id: "#{entity_id}-#{currency}-#{short_hash(address)}",
-              category: "sanctions",
-              reason: build_reason(entity_id, holders, currency),
-              evidence_uri: build_evidence_uri(entity_id, source_urls),
-              metadata: %{
-                "entity_id" => entity_id,
-                "currency" => currency,
-                "holders" => holders,
-                "source_urls" => source_urls
-              },
-              first_seen_at: DateTime.utc_now(),
-              last_seen_at: DateTime.utc_now()
-            }
-          end
+      true ->
+        {records, skipped} =
+          Enum.reduce(currencies, {[], []}, fn currency, {records, skipped} ->
+            currency = String.upcase(currency)
 
-        skipped_currencies =
-          currs
-          |> Enum.reject(&Map.has_key?(@chain_map, String.upcase(&1)))
+            case Map.get(@chain_map, currency) do
+              nil ->
+                {records, [skipped(entity, "unsupported currency: #{currency}") | skipped]}
 
-        if records == [] and skipped_currencies != [] do
-          {:skip, "unsupported currencies: #{Enum.join(skipped_currencies, ", ")}"}
-        else
-          {:ok, records}
-        end
+              chain ->
+                records_for_currency(entity, addresses, currency, chain, holders, source_urls)
+                |> merge_records(records, skipped)
+            end
+          end)
+
+        {:ok, Enum.reverse(records), Enum.reverse(skipped)}
     end
   end
+
+  defp records_for_currency(entity, addresses, currency, chain, holders, source_urls) do
+    entity_id = Map.get(entity, "id")
+
+    Enum.reduce(addresses, {[], []}, fn address, {records, skipped} ->
+      address = String.trim(address)
+
+      if address == "" do
+        {records, [skipped(entity, "empty publicKey value") | skipped]}
+      else
+        record = %{
+          chain: chain,
+          address: address,
+          control_tier: :hard_block,
+          source: @source_name,
+          source_record_id: "#{entity_id}-#{currency}-#{short_hash(address)}",
+          category: "sanctions",
+          reason: build_reason(entity_id, holders, currency),
+          evidence_uri: build_evidence_uri(entity_id, source_urls),
+          metadata: %{
+            "entity_id" => entity_id,
+            "currency" => currency,
+            "holders" => holders,
+            "source_urls" => source_urls
+          },
+          first_seen_at: DateTime.utc_now(),
+          last_seen_at: DateTime.utc_now()
+        }
+
+        {[record | records], skipped}
+      end
+    end)
+  end
+
+  defp merge_records({new_records, new_skipped}, records, skipped) do
+    {new_records ++ records, new_skipped ++ skipped}
+  end
+
+  defp skipped(entity, reason), do: %{entity: entity, reason: reason}
 
   defp prop_list(entity, key) do
     entity
