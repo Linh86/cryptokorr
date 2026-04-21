@@ -1,7 +1,7 @@
 defmodule BankWeb.Internal.TelegramWebhookController do
   @moduledoc """
   Ingress endpoint for Telegram updates
-  (`POST /internal/telegram/webhook`, issue #69).
+  (`POST /internal/telegram/webhook`, issues #69 + #71 + #72).
 
   Responsibilities at this boundary:
 
@@ -12,13 +12,25 @@ defmodule BankWeb.Internal.TelegramWebhookController do
       Unknown users, wrong chats, disabled bot → ACK as
       `ignored_sender` at `:info`. We do NOT surface 401/403 here
       because Telegram would retry the update.
+    * For a `{:text_message, ...}` update from an authorized
+      operator, hand off to `Bank.Telegram.Commands` (#71) to
+      classify and produce a reply, which is sent via
+      `Bank.Telegram.Transport.send_message/3`. Free-form
+      non-command text is accepted but produces no reply.
+    * For a `{:callback_query, ...}` update from an authorized
+      operator, delegate to `Bank.Telegram.Callbacks.handle/2` to
+      verify the signed callback token and apply the decision
+      mutation (#72), then acknowledge the button press through
+      `Bank.Telegram.Transport.answer_callback_query/2` so the
+      Telegram UI stops spinning. Failures from the ack call are
+      swallowed — we still 200 this request so Telegram's retry
+      loop stops at the first delivery.
+    * Even when a callback_query comes from an *unauthorized*
+      caller, we silently close the Telegram spinner (no text) so
+      the button in that user's UI does not spin forever. No
+      action is taken, only the spinner is cleared.
     * Respond 200 on everything we accept or deliberately ignore so
       Telegram's retry loop stops at the first delivery.
-
-  This controller does not dispatch commands, approvals, or any
-  state-changing action. Those land in later issues of epic #54 and
-  consume the normalized shape from `Bank.Telegram.Update` plus the
-  authenticated operator.
 
   The plug `BankWeb.Plugs.VerifyTelegramWebhook` sits in front of
   this endpoint and enforces the
@@ -29,6 +41,7 @@ defmodule BankWeb.Internal.TelegramWebhookController do
   use BankWeb, :controller
   require Logger
 
+  alias Bank.Telegram.Callbacks
   alias Bank.Telegram.Commands
   alias Bank.Telegram.Config, as: TelegramConfig
   alias Bank.Telegram.Transport
@@ -57,7 +70,9 @@ defmodule BankWeb.Internal.TelegramWebhookController do
 
   defp dispatch({:callback_query, cb}, conn) do
     case TelegramConfig.authorize(cb.user_id, cb.chat_id) do
-      {:ok, _operator} ->
+      {:ok, operator} ->
+        text = handle_callback(operator, cb)
+        answer_callback_query(cb.query_id, text)
         ack(conn, "callback_query_accepted")
 
       {:error, reason} ->
@@ -66,6 +81,7 @@ defmodule BankWeb.Internal.TelegramWebhookController do
             "(user_id=#{cb.user_id} chat_id=#{cb.chat_id} reason=#{reason})"
         )
 
+        answer_callback_query(cb.query_id, nil)
         ack(conn, "ignored_sender")
     end
   end
@@ -100,6 +116,30 @@ defmodule BankWeb.Internal.TelegramWebhookController do
         end
 
         ack(conn, "command_handled")
+    end
+  end
+
+  defp handle_callback(operator, cb) do
+    case Callbacks.handle(operator, cb) do
+      {:ok, text} -> text
+      {:error, _reason, text} -> text
+    end
+  end
+
+  defp answer_callback_query(query_id, text) do
+    opts = if is_binary(text), do: [text: text], else: []
+
+    case Transport.answer_callback_query(query_id, opts) do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "BankWeb.Internal.TelegramWebhookController: answer_callback_query failed " <>
+            "(query_id=#{query_id} reason=#{inspect(reason)})"
+        )
+
+        :ok
     end
   end
 
