@@ -39,16 +39,20 @@ defmodule Bank.Stablecoins.Providers.OneInchTest do
         "decimals" => 6
       },
       "protocols" => [
-        [
-          [
+        %{
+          "token" => "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+          "hops" => [
             %{
-              "name" => "UNISWAP_V3",
               "part" => 100,
-              "fromTokenAddress" => "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-              "toTokenAddress" => "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+              "dst" => "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+              "fromTokenId" => 0,
+              "toTokenId" => 1,
+              "protocols" => [
+                %{"name" => "UNISWAP_V3", "part" => 100}
+              ]
             }
           ]
-        ]
+        }
       ],
       "tx" => %{
         "from" => @taker_address,
@@ -216,7 +220,7 @@ defmodule Bank.Stablecoins.Providers.OneInchTest do
       {:ok, req} = build_swap_request(%{amount: Decimal.new("250.50"), slippage_bps: 50})
 
       Req.Test.stub(OneInch, fn conn ->
-        assert conn.request_path == "/swap/v6.0/1/swap"
+        assert conn.request_path == "/swap/v6.1/1/swap"
 
         conn = Plug.Conn.fetch_query_params(conn)
         params = conn.query_params
@@ -238,7 +242,7 @@ defmodule Bank.Stablecoins.Providers.OneInchTest do
       {:ok, req} = build_swap_request(%{source_chain: "base", dest_chain: "base"})
 
       Req.Test.stub(OneInch, fn conn ->
-        assert conn.request_path == "/swap/v6.0/8453/swap"
+        assert conn.request_path == "/swap/v6.1/8453/swap"
         Req.Test.json(conn, success_body())
       end)
 
@@ -386,7 +390,7 @@ defmodule Bank.Stablecoins.Providers.OneInchTest do
       assert {:error, :no_route_found} = OneInch.quote(req)
     end
 
-    test "400 with not enough error maps to :no_route_found" do
+    test "400 with not enough allowance maps to provider_error" do
       {:ok, req} = build_swap_request()
 
       Req.Test.stub(OneInch, fn conn ->
@@ -400,7 +404,7 @@ defmodule Bank.Stablecoins.Providers.OneInchTest do
         )
       end)
 
-      assert {:error, :no_route_found} = OneInch.quote(req)
+      assert {:error, {:provider_error, %{status: 400, body: _}}} = OneInch.quote(req)
     end
 
     test "400 with unrecognized error maps to provider_error" do

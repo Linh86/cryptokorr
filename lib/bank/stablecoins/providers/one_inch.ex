@@ -3,7 +3,7 @@ defmodule Bank.Stablecoins.Providers.OneInch do
   1inch adapter for same-chain EVM USDC/USDT swaps.
 
   Implements `Bank.Stablecoins.Provider`, calling the 1inch Swap API
-  v6.0 for same-chain quotes on supported EVM chains and normalizing
+  v6.1 for same-chain quotes on supported EVM chains and normalizing
   responses into `%RouteQuote{}`.
 
   Supported chains: ethereum, base, arbitrum, optimism, polygon.
@@ -12,8 +12,9 @@ defmodule Bank.Stablecoins.Providers.OneInch do
   ## Configuration
 
       config :bank, Bank.Stablecoins.Providers.OneInch,
-        base_url: "https://api.1inch.dev",
+        base_url: "https://api.1inch.com",
         api_key: "...",
+        from_address: "0x...", # optional fallback; request metadata wins
         req_options: []
 
   Tests override `:req_options` with
@@ -80,7 +81,7 @@ defmodule Bank.Stablecoins.Providers.OneInch do
   end
 
   defp request_swap(chain_id, params, api_key, config) do
-    base_url = Keyword.get(config, :base_url, "https://api.1inch.dev")
+    base_url = Keyword.get(config, :base_url, "https://api.1inch.com")
     extra = Keyword.get(config, :req_options, [])
 
     headers = [
@@ -91,7 +92,7 @@ defmodule Bank.Stablecoins.Providers.OneInch do
     req_opts =
       [
         base_url: base_url,
-        url: "/swap/v6.0/#{chain_id}/swap",
+        url: "/swap/v6.1/#{chain_id}/swap",
         method: :get,
         headers: headers,
         params: params,
@@ -180,8 +181,7 @@ defmodule Bank.Stablecoins.Providers.OneInch do
   defp no_liquidity?(%{"error" => err}) when is_binary(err) do
     downcased = String.downcase(err)
 
-    String.contains?(downcased, "insufficient liquidity") or
-      String.contains?(downcased, "not enough")
+    String.contains?(downcased, "insufficient liquidity")
   end
 
   defp no_liquidity?(_), do: false
@@ -270,8 +270,14 @@ defmodule Bank.Stablecoins.Providers.OneInch do
 
   defp primary_protocol(body) do
     case get_in(body, ["protocols"]) do
-      [[[%{"name" => name} | _] | _] | _] -> name
-      _ -> "1inch"
+      [%{"hops" => [%{"protocols" => [%{"name" => name} | _]} | _]} | _] ->
+        name
+
+      [[[%{"name" => name} | _] | _] | _] ->
+        name
+
+      _ ->
+        "1inch"
     end
   end
 
