@@ -40,6 +40,7 @@ defmodule Bank.WalletScreening.Ingestion do
     BTCAbuse,
     EtherScamDB,
     GraphSense,
+    InternalScoring,
     OFAC,
     OpenSanctions,
     ScamSniffer
@@ -171,6 +172,20 @@ defmodule Bank.WalletScreening.Ingestion do
       %{records: records, skipped: skipped} = GraphSense.parse(tags)
       do_upsert("graphsense", records, skipped)
     end
+  end
+
+  @doc """
+  Ingest internal suspicious-wallet scoring results.
+
+  Accepts a list of scoring result maps directly (no HTTP fetch — the
+  scoring pipeline is internal). Parses and upserts into the screening
+  store as `score_only` records. Score-only records never produce a
+  `:block` or `:challenge` outcome on their own.
+  """
+  @spec ingest_scoring(list(), keyword()) :: {:ok, ingest_result()} | {:error, term()}
+  def ingest_scoring(entries, _opts \\ []) when is_list(entries) do
+    %{records: records, skipped: skipped} = InternalScoring.parse(entries)
+    do_upsert("internal_scoring", records, skipped)
   end
 
   # --- Fetch helpers ----------------------------------------------------
