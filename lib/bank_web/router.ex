@@ -98,6 +98,9 @@ defmodule BankWeb.Router do
     post "/policies/:id/revise", PolicyController, :revise
     post "/policies/:id/archive", PolicyController, :archive
 
+    # Wallet screening
+    get "/screening/:chain/:address", ScreeningController, :show
+
     # Audit
     get "/audit", AuditController, :index
 

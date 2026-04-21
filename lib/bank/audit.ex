@@ -316,7 +316,8 @@ defmodule Bank.Audit do
       simulations: simulations,
       decisions: decisions,
       plans: plans,
-      audit: audit
+      audit: audit,
+      screening_evidence: Bank.WalletScreening.Evidence.for_intent(intent)
     }
   end
 
