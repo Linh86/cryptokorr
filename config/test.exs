@@ -86,3 +86,9 @@ config :bank, Bank.WalletScreening.Ingestion,
   btc_abuse_url: "http://btcabuse-feed.test/reports.csv",
   graphsense_url: "http://graphsense-feed.test/tagpack.yaml",
   req_options: [plug: {Req.Test, Bank.WalletScreening.Ingestion}]
+
+# 0x swap adapter: route HTTP to Req.Test so tests can stub per-process.
+config :bank, Bank.Stablecoins.Providers.ZeroX,
+  base_url: "http://zerox.test",
+  api_key: "test-0x-api-key",
+  req_options: [plug: {Req.Test, Bank.Stablecoins.Providers.ZeroX}]
