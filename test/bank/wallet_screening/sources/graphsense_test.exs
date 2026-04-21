@@ -51,10 +51,55 @@ defmodule Bank.WalletScreening.Sources.GraphSenseTest do
     "tags" => [@eth_tag, @btc_tag]
   }
 
+  @address_only_tagpack %{
+    "title" => "GraphSense Binance",
+    "creator" => "GraphSense Core Team",
+    "confidence" => "service_data",
+    "category" => "exchange",
+    "currency" => "BTC",
+    "label" => "binance.com",
+    "lastmod" => "2019-07-03",
+    "source" => "https://www.coindesk.com/binance-hack",
+    "tags" => [
+      %{"address" => "1NDyJtNTjmwk5xPNhjgAMu4HDHigtobu1s"},
+      %{"address" => "3CTPRyUbCKkByGmAVvDV6ReZXT1WfV3UPd"}
+    ]
+  }
+
+  @tagpack_yaml """
+  title: GraphSense Binance
+  creator: GraphSense Core Team
+  is_cluster_definer: true
+  confidence: service_data
+  description: Addresses related to Binance
+  category: exchange
+  currency: BTC
+  label: binance.com
+  lastmod: 2019-07-03
+  source: https://www.coindesk.com/hackers-steal-40-7-million-in-bitcoin-from-crypto-exchange-binance
+  actor: binance
+  tags:
+  - address: 1NDyJtNTjmwk5xPNhjgAMu4HDHigtobu1s
+  - address: 3CTPRyUbCKkByGmAVvDV6ReZXT1WfV3UPd
+  """
+
   describe "extract_tags/1" do
     test "extracts tags from tagpack envelope" do
       tags = GraphSense.extract_tags(@tagpack_envelope)
       assert length(tags) == 2
+    end
+
+    test "applies root tagpack metadata to address-only tags" do
+      [first, second] = GraphSense.extract_tags(@address_only_tagpack)
+
+      assert first["address"] == "1NDyJtNTjmwk5xPNhjgAMu4HDHigtobu1s"
+      assert first["currency"] == "BTC"
+      assert first["label"] == "binance.com"
+      assert first["category"] == "exchange"
+      assert first["source"] == "https://www.coindesk.com/binance-hack"
+
+      assert second["currency"] == "BTC"
+      assert second["creator"] == "GraphSense Core Team"
     end
 
     test "passes through bare array" do
@@ -65,6 +110,31 @@ defmodule Bank.WalletScreening.Sources.GraphSenseTest do
     test "returns empty for unexpected input" do
       assert GraphSense.extract_tags("not json") == []
       assert GraphSense.extract_tags(%{}) == []
+    end
+  end
+
+  describe "decode_yaml/1" do
+    test "decodes canonical public GraphSense tagpack YAML" do
+      tagpack = GraphSense.decode_yaml(@tagpack_yaml)
+      tags = GraphSense.extract_tags(tagpack)
+
+      assert tagpack["title"] == "GraphSense Binance"
+      assert tagpack["currency"] == "BTC"
+      assert length(tags) == 2
+      assert Enum.all?(tags, &(&1["currency"] == "BTC"))
+      assert Enum.all?(tags, &(&1["label"] == "binance.com"))
+    end
+
+    test "decoded YAML feeds into the normal parser" do
+      %{records: records, skipped: []} =
+        @tagpack_yaml
+        |> GraphSense.decode_yaml()
+        |> GraphSense.extract_tags()
+        |> GraphSense.parse()
+
+      assert length(records) == 2
+      assert Enum.all?(records, &(&1.chain == "bitcoin"))
+      assert Enum.all?(records, &(&1.control_tier == :context))
     end
   end
 
@@ -98,7 +168,8 @@ defmodule Bank.WalletScreening.Sources.GraphSenseTest do
     test "uses source URI as evidence_uri when available" do
       %{records: [record], skipped: []} = GraphSense.parse([@eth_tag])
 
-      assert record.evidence_uri == "https://etherscan.io/address/0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
+      assert record.evidence_uri ==
+               "https://etherscan.io/address/0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D"
     end
 
     test "falls back to graphsense URL when source is missing" do

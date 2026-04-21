@@ -24,6 +24,7 @@ defmodule Bank.WalletScreening.Ingestion do
         scamsniffer_url: "https://...",
         etherscamdb_url: "https://...",
         btc_abuse_url: "https://...", # optional operator-provided CSV export
+        graphsense_url: "https://...",
         req_options: []
 
   In the test environment, `req_options` should include
@@ -34,7 +35,15 @@ defmodule Bank.WalletScreening.Ingestion do
   require Logger
 
   alias Bank.WalletScreening
-  alias Bank.WalletScreening.Sources.{BTCAbuse, EtherScamDB, GraphSense, OFAC, OpenSanctions, ScamSniffer}
+
+  alias Bank.WalletScreening.Sources.{
+    BTCAbuse,
+    EtherScamDB,
+    GraphSense,
+    OFAC,
+    OpenSanctions,
+    ScamSniffer
+  }
 
   @type ingest_result :: %{
           source: String.t(),
@@ -47,7 +56,7 @@ defmodule Bank.WalletScreening.Ingestion do
   @default_opensanctions_url "https://data.opensanctions.org/datasets/latest/sanctions/entities.ftm.json"
   @default_scamsniffer_url "https://raw.githubusercontent.com/scamsniffer/scam-database/main/blacklist/combined.json"
   @default_etherscamdb_url "https://raw.githubusercontent.com/MrLuit/EtherScamDB/master/_data/scams.yaml"
-  @default_graphsense_url "https://raw.githubusercontent.com/graphsense/graphsense-tagpacks/main/packs/exchange.json"
+  @default_graphsense_url "https://raw.githubusercontent.com/graphsense/graphsense-tagpacks/master/packs/binance.yaml"
 
   # --- Public API -------------------------------------------------------
 
@@ -147,16 +156,17 @@ defmodule Bank.WalletScreening.Ingestion do
   @doc """
   Ingest GraphSense tagpack attribution data.
 
-  Fetches the GraphSense tagpack JSON feed, extracts tags, normalizes
-  them, and upserts into the screening store as `context` records.
-  Supports tagpack envelope objects, bare tag arrays, and NDJSON.
+  Fetches the GraphSense tagpack feed, extracts tags, normalizes them,
+  and upserts into the screening store as `context` records. The public
+  GraphSense tagpacks are YAML files; JSON tagpack objects and bare
+  arrays remain supported for mirrors and tests.
   """
   @spec ingest_graphsense(keyword()) :: {:ok, ingest_result()} | {:error, term()}
   def ingest_graphsense(opts \\ []) do
     url = Keyword.get(opts, :url, graphsense_url())
 
     with {:ok, body} <- fetch_body(url),
-         {:ok, decoded} <- decode_json_flexible(body) do
+         {:ok, decoded} <- decode_graphsense_payload(body) do
       tags = GraphSense.extract_tags(decoded)
       %{records: records, skipped: skipped} = GraphSense.parse(tags)
       do_upsert("graphsense", records, skipped)
@@ -257,6 +267,21 @@ defmodule Bank.WalletScreening.Ingestion do
 
       {:error, _} ->
         {:error, :invalid_json}
+    end
+  end
+
+  defp decode_graphsense_payload(body) when is_binary(body) do
+    trimmed = String.trim_leading(body)
+
+    cond do
+      String.starts_with?(trimmed, "{") or String.starts_with?(trimmed, "[") ->
+        decode_json(trimmed)
+
+      String.contains?(body, "\ntags:") or String.starts_with?(trimmed, "tags:") ->
+        {:ok, GraphSense.decode_yaml(body)}
+
+      true ->
+        {:error, :invalid_graphsense_payload}
     end
   end
 

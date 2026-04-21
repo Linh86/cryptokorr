@@ -10,27 +10,21 @@ defmodule Bank.WalletScreening.Sources.GraphSense do
 
   ## Feed format
 
-  GraphSense tagpacks follow the TagPack schema. A tagpack is a JSON
-  object containing a `tags` array:
+  GraphSense tagpacks follow the TagPack schema. The public repository
+  currently publishes YAML files where common attribution metadata lives
+  at the tagpack root and `tags` often contain only addresses:
 
-      {
-        "title": "DeFi Protocol Tags",
-        "creator": "graphsense",
-        "tags": [
-          {
-            "address": "0x1234...",
-            "currency": "ETH",
-            "label": "Uniswap V3 Router",
-            "source": "https://etherscan.io/address/0x1234...",
-            "category": "defi",
-            "lastmod": "2025-06-01"
-          },
-          ...
-        ]
-      }
+      title: GraphSense Binance
+      creator: GraphSense Core Team
+      category: exchange
+      currency: BTC
+      label: binance.com
+      source: https://www.coindesk.com/...
+      tags:
+      - address: 1NDyJtNTjmwk5xPNhjgAMu4HDHigtobu1s
 
-  Some tagpacks are distributed as NDJSON (one tag per line) or as a
-  bare JSON array of tags. This parser handles all three shapes.
+  JSON tagpack objects with the same `tags` envelope and bare JSON tag
+  arrays are also supported for mirrors and tests.
 
   ## Chain mapping
 
@@ -89,15 +83,45 @@ defmodule Bank.WalletScreening.Sources.GraphSense do
   end
 
   @doc """
+  Decode the public GraphSense YAML tagpack shape.
+
+  This is intentionally a small source-specific reader, not a general
+  YAML parser. It supports the root scalar metadata and `tags` list
+  used by the public `graphsense-tagpacks` repository.
+  """
+  @spec decode_yaml(String.t()) :: map()
+  def decode_yaml(body) when is_binary(body) do
+    body
+    |> String.split("\n")
+    |> Enum.reduce({%{}, [], nil, :root}, &decode_yaml_line/2)
+    |> then(fn {metadata, tags, current_tag, _mode} ->
+      tags =
+        tags
+        |> maybe_prepend(current_tag)
+        |> Enum.reverse()
+
+      Map.put(metadata, "tags", tags)
+    end)
+  end
+
+  @doc """
   Extract the tags array from a tagpack envelope.
 
   Handles three shapes:
-  - Tagpack object with `"tags"` key → extracts the array
-  - Bare JSON array → returns as-is
-  - NDJSON lines (pre-split into a list) → returns as-is
+  - Tagpack object with `"tags"` key -> extracts tags and applies root metadata defaults
+  - Bare JSON array -> returns as-is
+  - NDJSON lines (pre-split into a list) -> returns as-is
   """
   @spec extract_tags(map() | list()) :: list()
-  def extract_tags(%{"tags" => tags}) when is_list(tags), do: tags
+  def extract_tags(%{"tags" => tags} = tagpack) when is_list(tags) do
+    defaults = Map.drop(tagpack, ["tags"])
+
+    Enum.map(tags, fn
+      tag when is_map(tag) -> Map.merge(defaults, tag)
+      other -> other
+    end)
+  end
+
   def extract_tags(tags) when is_list(tags), do: tags
   def extract_tags(_), do: []
 
@@ -186,11 +210,14 @@ defmodule Bank.WalletScreening.Sources.GraphSense do
 
   defp parse_date(str) when is_binary(str) do
     case DateTime.from_iso8601(str <> "T00:00:00Z") do
-      {:ok, dt, _} -> dt
-      _ -> case DateTime.from_iso8601(str) do
-        {:ok, dt, _} -> dt
-        _ -> nil
-      end
+      {:ok, dt, _} ->
+        dt
+
+      _ ->
+        case DateTime.from_iso8601(str) do
+          {:ok, dt, _} -> dt
+          _ -> nil
+        end
     end
   end
 
@@ -198,10 +225,68 @@ defmodule Bank.WalletScreening.Sources.GraphSense do
     case Map.get(map, key) do
       s when is_binary(s) -> String.trim(s) |> non_empty()
       n when is_number(n) -> to_string(n)
+      true -> "true"
+      false -> "false"
       _ -> nil
     end
   end
 
   defp non_empty(""), do: nil
   defp non_empty(s), do: s
+
+  defp decode_yaml_line(line, {metadata, tags, current_tag, mode}) do
+    trimmed = String.trim(line)
+
+    cond do
+      trimmed == "" or String.starts_with?(trimmed, "#") ->
+        {metadata, tags, current_tag, mode}
+
+      trimmed == "tags:" ->
+        {metadata, tags, current_tag, :tags}
+
+      mode == :tags and String.starts_with?(trimmed, "- ") ->
+        tag = trimmed |> String.trim_leading("- ") |> decode_yaml_kv()
+        {metadata, maybe_prepend(tags, current_tag), tag, :tags}
+
+      mode == :tags and String.contains?(trimmed, ":") and is_map(current_tag) ->
+        {key, value} = split_yaml_kv(trimmed)
+        {metadata, tags, Map.put(current_tag, key, yaml_scalar(value)), :tags}
+
+      mode == :root and String.contains?(trimmed, ":") ->
+        {key, value} = split_yaml_kv(trimmed)
+        {Map.put(metadata, key, yaml_scalar(value)), tags, current_tag, :root}
+
+      true ->
+        {metadata, tags, current_tag, mode}
+    end
+  end
+
+  defp decode_yaml_kv(""), do: %{}
+
+  defp decode_yaml_kv(fragment) do
+    if String.contains?(fragment, ":") do
+      {key, value} = split_yaml_kv(fragment)
+      %{key => yaml_scalar(value)}
+    else
+      %{"address" => yaml_scalar(fragment)}
+    end
+  end
+
+  defp split_yaml_kv(line) do
+    [key, value] = String.split(line, ":", parts: 2)
+    {String.trim(key), String.trim(value)}
+  end
+
+  defp yaml_scalar(value) do
+    value
+    |> String.trim()
+    |> String.trim_leading("'")
+    |> String.trim_trailing("'")
+    |> String.trim_leading("\"")
+    |> String.trim_trailing("\"")
+  end
+
+  defp maybe_prepend(list, nil), do: list
+  defp maybe_prepend(list, map) when map == %{}, do: list
+  defp maybe_prepend(list, map), do: [map | list]
 end

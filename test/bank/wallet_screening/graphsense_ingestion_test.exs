@@ -7,6 +7,7 @@ defmodule Bank.WalletScreening.GraphSenseIngestionTest do
   @tagpack %{
     "title" => "Exchange Tags",
     "creator" => "graphsense-test",
+    "source" => "https://example.test/tagpack",
     "tags" => [
       %{
         "address" => "0xBE0eB53F46cd790Cd13851d5EFf43D12404d33E8",
@@ -31,6 +32,23 @@ defmodule Bank.WalletScreening.GraphSenseIngestionTest do
     ]
   }
 
+  @tagpack_yaml """
+  title: GraphSense Binance
+  creator: GraphSense Core Team
+  confidence: service_data
+  category: exchange
+  currency: ETH
+  label: Binance Hot Wallet
+  lastmod: 2025-06-01
+  source: https://etherscan.io/address/0xBE0eB53F46cd790Cd13851d5EFf43D12404d33E8
+  tags:
+  - address: 0xBE0eB53F46cd790Cd13851d5EFf43D12404d33E8
+  - address: 0xContextOnly0000000000000000000000000000001
+  - address: DogeUnsupported
+    currency: DOGE
+    label: Unsupported Chain
+  """
+
   @bare_tags [
     %{
       "address" => "0xBareTags001",
@@ -44,8 +62,8 @@ defmodule Bank.WalletScreening.GraphSenseIngestionTest do
     test "ingests GraphSense tagpack as context records" do
       Req.Test.stub(Bank.WalletScreening.Ingestion, fn conn ->
         conn
-        |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.resp(200, Jason.encode!(@tagpack))
+        |> Plug.Conn.put_resp_content_type("text/yaml")
+        |> Plug.Conn.resp(200, @tagpack_yaml)
       end)
 
       assert {:ok, result} = Ingestion.ingest_graphsense()
@@ -62,8 +80,8 @@ defmodule Bank.WalletScreening.GraphSenseIngestionTest do
     test "GraphSense records produce :clean screening outcome (context only)" do
       Req.Test.stub(Bank.WalletScreening.Ingestion, fn conn ->
         conn
-        |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.resp(200, Jason.encode!(@tagpack))
+        |> Plug.Conn.put_resp_content_type("text/yaml")
+        |> Plug.Conn.resp(200, @tagpack_yaml)
       end)
 
       {:ok, _} = Ingestion.ingest_graphsense()
@@ -90,8 +108,8 @@ defmodule Bank.WalletScreening.GraphSenseIngestionTest do
 
       Req.Test.stub(Bank.WalletScreening.Ingestion, fn conn ->
         conn
-        |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.resp(200, Jason.encode!(@tagpack))
+        |> Plug.Conn.put_resp_content_type("text/yaml")
+        |> Plug.Conn.resp(200, @tagpack_yaml)
       end)
 
       {:ok, _} = Ingestion.ingest_graphsense()
@@ -118,8 +136,8 @@ defmodule Bank.WalletScreening.GraphSenseIngestionTest do
 
       Req.Test.stub(Bank.WalletScreening.Ingestion, fn conn ->
         conn
-        |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.resp(200, Jason.encode!(@tagpack))
+        |> Plug.Conn.put_resp_content_type("text/yaml")
+        |> Plug.Conn.resp(200, @tagpack_yaml)
       end)
 
       {:ok, _} = Ingestion.ingest_graphsense()
@@ -143,8 +161,8 @@ defmodule Bank.WalletScreening.GraphSenseIngestionTest do
     test "upsert is idempotent" do
       stub = fn conn ->
         conn
-        |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.resp(200, Jason.encode!(@tagpack))
+        |> Plug.Conn.put_resp_content_type("text/yaml")
+        |> Plug.Conn.resp(200, @tagpack_yaml)
       end
 
       Req.Test.stub(Bank.WalletScreening.Ingestion, stub)
