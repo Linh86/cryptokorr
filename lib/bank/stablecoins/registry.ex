@@ -36,7 +36,10 @@ defmodule Bank.Stablecoins.Registry do
         name: "USD Coin",
         standard: :erc20,            # or :spl_token for Solana
         status: :active,             # :active | :approval_only | :blocked
-        issuer: "Circle"
+        issuer: "Circle",
+        canonical: true,
+        variant: :native,
+        notes: "Circle native USDC"
       }
 
   ## Address normalisation
@@ -44,6 +47,15 @@ defmodule Bank.Stablecoins.Registry do
   EVM address lookups are case-insensitive (lowercased before
   comparison). Solana mint lookups are exact string matches (base58
   is case-sensitive).
+
+  ## Canonicality
+
+  Circle-native USDC entries are marked `canonical: true`. Tether's
+  currently published supported-protocol guidance does not list the
+  Base, Arbitrum, OP Mainnet, or Polygon PoS USDT representations used
+  by routing providers, so those entries are deliberately
+  `canonical: false` and `status: :approval_only` until provider- and
+  policy-specific routing support pins them more tightly.
   """
 
   @type token :: %{
@@ -54,7 +66,10 @@ defmodule Bank.Stablecoins.Registry do
           name: String.t(),
           standard: :erc20 | :spl_token,
           status: :active | :approval_only | :blocked,
-          issuer: String.t()
+          issuer: String.t(),
+          canonical: boolean(),
+          variant: :native | :bridged,
+          notes: String.t()
         }
 
   @type error :: {:error, :unsupported_chain | :unsupported_asset | :unknown_token}
@@ -63,29 +78,179 @@ defmodule Bank.Stablecoins.Registry do
 
   @tokens [
     # Ethereum
-    %{chain: "ethereum", asset: "USDC", address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", decimals: 6, name: "USD Coin", standard: :erc20, status: :active, issuer: "Circle"},
-    %{chain: "ethereum", asset: "USDT", address: "0xdAC17F958D2ee523a2206206994597C13D831ec7", decimals: 6, name: "Tether USD", standard: :erc20, status: :active, issuer: "Tether"},
+    %{
+      chain: "ethereum",
+      asset: "USDC",
+      address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      decimals: 6,
+      name: "USD Coin",
+      standard: :erc20,
+      status: :active,
+      issuer: "Circle",
+      canonical: true,
+      variant: :native,
+      notes: "Circle native USDC"
+    },
+    %{
+      chain: "ethereum",
+      asset: "USDT",
+      address: "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+      decimals: 6,
+      name: "Tether USD",
+      standard: :erc20,
+      status: :active,
+      issuer: "Tether",
+      canonical: true,
+      variant: :native,
+      notes: "Tether USDt on Ethereum"
+    },
 
     # Base
-    %{chain: "base", asset: "USDC", address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", decimals: 6, name: "USD Coin", standard: :erc20, status: :active, issuer: "Circle"},
-    %{chain: "base", asset: "USDT", address: "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2", decimals: 6, name: "Tether USD", standard: :erc20, status: :active, issuer: "Tether"},
+    %{
+      chain: "base",
+      asset: "USDC",
+      address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      decimals: 6,
+      name: "USD Coin",
+      standard: :erc20,
+      status: :active,
+      issuer: "Circle",
+      canonical: true,
+      variant: :native,
+      notes: "Circle native USDC"
+    },
+    %{
+      chain: "base",
+      asset: "USDT",
+      address: "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2",
+      decimals: 6,
+      name: "Tether USD",
+      standard: :erc20,
+      status: :approval_only,
+      issuer: "Tether",
+      canonical: false,
+      variant: :bridged,
+      notes:
+        "Bridged USDT representation on Base; require policy approval until provider-specific route support is pinned"
+    },
 
     # Arbitrum
-    %{chain: "arbitrum", asset: "USDC", address: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", decimals: 6, name: "USD Coin", standard: :erc20, status: :active, issuer: "Circle"},
-    %{chain: "arbitrum", asset: "USDT", address: "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9", decimals: 6, name: "Tether USD", standard: :erc20, status: :active, issuer: "Tether"},
+    %{
+      chain: "arbitrum",
+      asset: "USDC",
+      address: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+      decimals: 6,
+      name: "USD Coin",
+      standard: :erc20,
+      status: :active,
+      issuer: "Circle",
+      canonical: true,
+      variant: :native,
+      notes: "Circle native USDC"
+    },
+    %{
+      chain: "arbitrum",
+      asset: "USDT",
+      address: "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
+      decimals: 6,
+      name: "Tether USD",
+      standard: :erc20,
+      status: :approval_only,
+      issuer: "Tether",
+      canonical: false,
+      variant: :bridged,
+      notes:
+        "Bridged USDT representation on Arbitrum; require policy approval until provider-specific route support is pinned"
+    },
 
     # Optimism
-    %{chain: "optimism", asset: "USDC", address: "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85", decimals: 6, name: "USD Coin", standard: :erc20, status: :active, issuer: "Circle"},
-    %{chain: "optimism", asset: "USDT", address: "0x94b008aA00579c1307B0EF2c499aD98a8ce58e58", decimals: 6, name: "Tether USD", standard: :erc20, status: :active, issuer: "Tether"},
+    %{
+      chain: "optimism",
+      asset: "USDC",
+      address: "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85",
+      decimals: 6,
+      name: "USD Coin",
+      standard: :erc20,
+      status: :active,
+      issuer: "Circle",
+      canonical: true,
+      variant: :native,
+      notes: "Circle native USDC"
+    },
+    %{
+      chain: "optimism",
+      asset: "USDT",
+      address: "0x94b008aA00579c1307B0EF2c499aD98a8ce58e58",
+      decimals: 6,
+      name: "Tether USD",
+      standard: :erc20,
+      status: :approval_only,
+      issuer: "Tether",
+      canonical: false,
+      variant: :bridged,
+      notes:
+        "Bridged USDT representation on OP Mainnet; require policy approval until provider-specific route support is pinned"
+    },
 
     # Polygon PoS
-    %{chain: "polygon", asset: "USDC", address: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359", decimals: 6, name: "USD Coin", standard: :erc20, status: :active, issuer: "Circle"},
-    %{chain: "polygon", asset: "USDT", address: "0xc2132D05D31c914a87C6611C10748AEb04B58e8F", decimals: 6, name: "Tether USD", standard: :erc20, status: :active, issuer: "Tether"},
+    %{
+      chain: "polygon",
+      asset: "USDC",
+      address: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+      decimals: 6,
+      name: "USD Coin",
+      standard: :erc20,
+      status: :active,
+      issuer: "Circle",
+      canonical: true,
+      variant: :native,
+      notes: "Circle native USDC"
+    },
+    %{
+      chain: "polygon",
+      asset: "USDT",
+      address: "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
+      decimals: 6,
+      name: "Tether USD",
+      standard: :erc20,
+      status: :approval_only,
+      issuer: "Tether",
+      canonical: false,
+      variant: :bridged,
+      notes:
+        "Bridged USDT representation on Polygon PoS; require policy approval until provider-specific route support is pinned"
+    },
 
     # Solana
-    %{chain: "solana", asset: "USDC", address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", decimals: 6, name: "USD Coin", standard: :spl_token, status: :active, issuer: "Circle"},
-    %{chain: "solana", asset: "USDT", address: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", decimals: 6, name: "Tether USD", standard: :spl_token, status: :active, issuer: "Tether"}
+    %{
+      chain: "solana",
+      asset: "USDC",
+      address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      decimals: 6,
+      name: "USD Coin",
+      standard: :spl_token,
+      status: :active,
+      issuer: "Circle",
+      canonical: true,
+      variant: :native,
+      notes: "Circle native USDC"
+    },
+    %{
+      chain: "solana",
+      asset: "USDT",
+      address: "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
+      decimals: 6,
+      name: "Tether USD",
+      standard: :spl_token,
+      status: :active,
+      issuer: "Tether",
+      canonical: true,
+      variant: :native,
+      notes: "Tether USDt on Solana"
+    }
   ]
+
+  @evm_chains ~w(ethereum base arbitrum optimism polygon)
 
   @supported_chains @tokens |> Enum.map(& &1.chain) |> Enum.uniq() |> Enum.sort()
   @supported_assets @tokens |> Enum.map(& &1.asset) |> Enum.uniq() |> Enum.sort()
@@ -93,11 +258,13 @@ defmodule Bank.Stablecoins.Registry do
   @by_chain_asset Map.new(@tokens, fn t -> {{t.chain, t.asset}, t} end)
 
   @by_chain_address Map.new(@tokens, fn t ->
-    key = if evm_chain?(t.chain), do: {t.chain, String.downcase(t.address)}, else: {t.chain, t.address}
-    {key, t}
-  end)
+                      key =
+                        if t.chain in @evm_chains,
+                          do: {t.chain, String.downcase(t.address)},
+                          else: {t.chain, t.address}
 
-  @evm_chains ~w(ethereum base arbitrum optimism polygon)
+                      {key, t}
+                    end)
 
   # --- Public API ---------------------------------------------------------
 
@@ -125,8 +292,12 @@ defmodule Bank.Stablecoins.Registry do
   @spec resolve(String.t(), String.t()) :: {:ok, token()} | error()
   def resolve(chain, asset) do
     cond do
-      not supported_chain?(chain) -> {:error, :unsupported_chain}
-      not supported_asset?(asset) -> {:error, :unsupported_asset}
+      not supported_chain?(chain) ->
+        {:error, :unsupported_chain}
+
+      not supported_asset?(asset) ->
+        {:error, :unsupported_asset}
+
       true ->
         case Map.get(@by_chain_asset, {chain, asset}) do
           nil -> {:error, :unknown_token}

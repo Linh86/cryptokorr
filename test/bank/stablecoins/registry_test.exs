@@ -58,14 +58,20 @@ defmodule Bank.Stablecoins.RegistryTest do
       assert token.standard == :erc20
       assert token.status == :active
       assert token.issuer == "Circle"
+      assert token.canonical
+      assert token.variant == :native
     end
 
-    test "resolves USDT on base" do
+    test "resolves approval-only bridged USDT on base" do
       assert {:ok, token} = Registry.resolve("base", "USDT")
       assert token.chain == "base"
       assert token.asset == "USDT"
       assert token.standard == :erc20
       assert token.issuer == "Tether"
+      assert token.status == :approval_only
+      refute token.canonical
+      assert token.variant == :bridged
+      assert token.notes =~ "Bridged USDT"
     end
 
     test "resolves USDC on solana" do
@@ -86,10 +92,11 @@ defmodule Bank.Stablecoins.RegistryTest do
       for chain <- Registry.chains(), asset <- Registry.assets() do
         assert {:ok, token} = Registry.resolve(chain, asset),
                "expected #{chain}/#{asset} to resolve"
+
         assert token.chain == chain
         assert token.asset == asset
         assert token.decimals == 6
-        assert token.status == :active
+        assert token.status in [:active, :approval_only]
       end
     end
 
@@ -201,7 +208,29 @@ defmodule Bank.Stablecoins.RegistryTest do
         assert token.standard in [:erc20, :spl_token]
         assert token.status in [:active, :approval_only, :blocked]
         assert is_binary(token.issuer)
+        assert is_boolean(token.canonical)
+        assert token.variant in [:native, :bridged]
+        assert is_binary(token.notes) and token.notes != ""
       end
+    end
+
+    test "canonical-vs-bridged distinction is explicit" do
+      native = Enum.filter(Registry.all(), & &1.canonical)
+      bridged = Enum.reject(Registry.all(), & &1.canonical)
+
+      assert length(native) == 8
+      assert length(bridged) == 4
+      assert Enum.all?(native, &(&1.variant == :native))
+      assert Enum.all?(bridged, &(&1.variant == :bridged))
+      assert Enum.all?(bridged, &(&1.status == :approval_only))
+    end
+
+    test "USDC entries are canonical active tokens on every supported chain" do
+      assert Registry.for_asset("USDC") |> length() == 6
+
+      assert Enum.all?(Registry.for_asset("USDC"), fn token ->
+               token.canonical and token.status == :active and token.issuer == "Circle"
+             end)
     end
 
     test "EVM tokens use :erc20 standard" do
