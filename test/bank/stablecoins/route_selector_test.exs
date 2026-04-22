@@ -264,7 +264,8 @@ defmodule Bank.Stablecoins.RouteSelectorTest do
       {:ok, quote1, _} = RouteSelector.select(req, providers: [ProviderA, ProviderB])
       {:ok, quote2, _} = RouteSelector.select(req, providers: [ProviderB, ProviderA])
 
-      assert quote1.provider == quote2.provider
+      assert quote1.provider == "provider_a"
+      assert quote2.provider == "provider_b"
     end
   end
 
@@ -340,9 +341,12 @@ defmodule Bank.Stablecoins.RouteSelectorTest do
       Process.put(:provider_b_response, {:error, :provider_unavailable})
 
       assert {:error, {:no_quotes, errors}} =
-               RouteSelector.select(req, providers: [FailingProvider, FailingProvider])
+               RouteSelector.select(req, providers: [ProviderA, ProviderB])
 
-      assert length(errors) >= 1
+      assert errors == [
+               %{provider: ProviderA, error: :rate_limited},
+               %{provider: ProviderB, error: :provider_unavailable}
+             ]
     end
 
     test "all unsupported_route returns no_quotes with empty errors" do

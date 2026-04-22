@@ -58,6 +58,11 @@ defmodule Bank.Stablecoins.RouteSelector do
           error: term()
         }
 
+  @type collected_quote :: %{
+          provider_index: non_neg_integer(),
+          quote: RouteQuote.t()
+        }
+
   @evm_chains ~w(ethereum base arbitrum optimism polygon)
 
   @default_priority ~w(zerox oneinch jupiter circle_cctp)
@@ -88,7 +93,7 @@ defmodule Bank.Stablecoins.RouteSelector do
              %{
                considered: length(quotes),
                errors: errors,
-               all_quotes: quotes
+               all_quotes: Enum.map(quotes, & &1.quote)
              }}
         end
     end
@@ -97,8 +102,8 @@ defmodule Bank.Stablecoins.RouteSelector do
   # -- Provider resolution --------------------------------------------------
 
   defp providers_for(req, opts) do
-    case Keyword.get(opts, :providers) do
-      list when is_list(list) and list != [] ->
+    case Keyword.fetch(opts, :providers) do
+      {:ok, list} when is_list(list) ->
         list
 
       _ ->
@@ -141,19 +146,24 @@ defmodule Bank.Stablecoins.RouteSelector do
   # -- Quote collection -----------------------------------------------------
 
   defp collect_quotes(modules, req) do
-    results = Enum.map(modules, fn mod -> {mod, mod.quote(req)} end)
+    results =
+      modules
+      |> Enum.with_index()
+      |> Enum.map(fn {mod, index} -> {mod, index, mod.quote(req)} end)
 
     quotes =
       results
-      |> Enum.filter(fn {_mod, result} -> match?({:ok, _}, result) end)
-      |> Enum.map(fn {_mod, {:ok, quote}} -> quote end)
+      |> Enum.filter(fn {_mod, _index, result} -> match?({:ok, _}, result) end)
+      |> Enum.map(fn {_mod, index, {:ok, quote}} ->
+        %{provider_index: index, quote: quote}
+      end)
 
     errors =
       results
-      |> Enum.reject(fn {_mod, result} ->
+      |> Enum.reject(fn {_mod, _index, result} ->
         match?({:ok, _}, result) or match?({:error, :unsupported_route}, result)
       end)
-      |> Enum.map(fn {mod, {:error, reason}} ->
+      |> Enum.map(fn {mod, _index, {:error, reason}} ->
         %{provider: mod, error: reason}
       end)
 
@@ -163,16 +173,17 @@ defmodule Bank.Stablecoins.RouteSelector do
   # -- Selection ------------------------------------------------------------
 
   defp pick_best([]), do: nil
-  defp pick_best([single]), do: single
+  defp pick_best([single]), do: single.quote
 
   defp pick_best(quotes) do
     quotes
     |> Enum.sort(&compare_quotes/2)
     |> List.first()
+    |> Map.fetch!(:quote)
   end
 
   defp compare_quotes(a, b) do
-    case Decimal.compare(a.output_amount, b.output_amount) do
+    case Decimal.compare(a.quote.output_amount, b.quote.output_amount) do
       :gt -> true
       :lt -> false
       :eq -> break_tie(a, b)
@@ -188,26 +199,33 @@ defmodule Bank.Stablecoins.RouteSelector do
   end
 
   defp compare_fees(a, b) do
-    fee_a = a.fees[:total_fee] || Decimal.new(0)
-    fee_b = b.fees[:total_fee] || Decimal.new(0)
+    fee_a = a.quote.fees[:total_fee] || Decimal.new(0)
+    fee_b = b.quote.fees[:total_fee] || Decimal.new(0)
     Decimal.compare(fee_a, fee_b)
   end
 
   defp break_tie_eta(a, b) do
-    eta_a = a.eta_seconds || 999_999
-    eta_b = b.eta_seconds || 999_999
+    eta_a = a.quote.eta_seconds || 999_999
+    eta_b = b.quote.eta_seconds || 999_999
 
     cond do
       eta_a < eta_b -> true
       eta_a > eta_b -> false
-      true -> priority_index(a.provider) <= priority_index(b.provider)
+      true -> break_tie_provider(a, b)
     end
   end
 
-  defp priority_index(provider_id) do
-    case Enum.find_index(@default_priority, &(&1 == provider_id)) do
-      nil -> 999
-      idx -> idx
+  defp break_tie_provider(a, b) do
+    a_priority = priority_index(a.quote.provider)
+    b_priority = priority_index(b.quote.provider)
+
+    case a_priority - b_priority do
+      diff when diff < 0 -> true
+      diff when diff > 0 -> false
+      _ -> a.provider_index <= b.provider_index
     end
   end
+
+  defp priority_index(provider_id),
+    do: Enum.find_index(@default_priority, &(&1 == provider_id)) || 999
 end
