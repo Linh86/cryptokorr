@@ -21,7 +21,7 @@ defmodule Bank.Stablecoins.IntentRouting do
   ## Execution state
 
   This module produces a route plan but does NOT submit on-chain
-  transactions. The execution plan state is set to `:planned` to
+  transactions. The execution plan state is set to `:requires_adapter` to
   indicate that the route has been evaluated and a provider quote
   selected, but the adapter dispatch step has not yet been wired
   for stablecoin swap/bridge routes.
@@ -55,7 +55,10 @@ defmodule Bank.Stablecoins.IntentRouting do
       emit_telemetry(evaluation)
 
       result = build_result(evaluation)
-      {:ok, result}
+
+      with :ok <- maybe_emit_audit(params, result) do
+        {:ok, result}
+      end
     else
       {:error, reason} ->
         emit_telemetry_error(reason)
@@ -73,39 +76,29 @@ defmodule Bank.Stablecoins.IntentRouting do
   def build_evidence(%{evaluation: nil}), do: %{stablecoin_route: nil}
 
   def build_evidence(%{evaluation: eval} = result) do
+    request = eval.request || eval.quote.request
+
     %{
       stablecoin_route: %{
-        decision: result.outcome,
-        execution_state: result.execution_state,
-        reason_code: result.reason_code,
-        policy_decision: eval.decision,
-        policy_reasons: Enum.map(eval.reasons, &Map.take(&1, [:rule, :detail, :severity])),
+        decision: atom_string(result.outcome),
+        execution_state: atom_string(result.execution_state),
+        reason_code: atom_string(result.reason_code),
+        reason: result.reason,
+        policy_decision: atom_string(eval.decision),
+        policy_reasons: Enum.map(eval.reasons, &reason_json/1),
         score: eval.score,
-        fee_summary: eval.fee_summary,
-        route_kind: eval.quote.route_kind,
+        fee_summary: fee_summary_json(eval.fee_summary),
+        route_kind: atom_string(eval.quote.route_kind),
         provider: eval.quote.provider,
-        input_amount: eval.quote.input_amount,
-        output_amount: eval.quote.output_amount,
-        legs:
-          Enum.map(eval.quote.legs, fn leg ->
-            %{
-              step: leg.step,
-              kind: leg.kind,
-              source_chain: leg.source_chain,
-              source_asset: leg.source_asset,
-              dest_chain: leg.dest_chain,
-              dest_asset: leg.dest_asset,
-              protocol: leg.protocol
-            }
-          end),
-        selector_metadata: %{
-          considered: eval.selector_metadata[:considered],
-          errors:
-            Enum.map(eval.selector_metadata[:errors] || [], fn e ->
-              %{provider: inspect(e.provider), error: inspect(e.error)}
-            end)
-        },
-        evaluated_at: eval.quote.quoted_at
+        input_amount: decimal_string(eval.quote.input_amount),
+        output_amount: decimal_string(eval.quote.output_amount),
+        eta_seconds: eval.quote.eta_seconds,
+        expires_at: datetime_string(eval.quote.expires_at),
+        quoted_at: datetime_string(eval.quote.quoted_at),
+        quote_request: quote_request_json(request),
+        legs: Enum.map(eval.quote.legs, &leg_json/1),
+        selector_metadata: selector_metadata_json(eval.selector_metadata),
+        evaluated_at: datetime_string(eval.quote.quoted_at)
       }
     }
   end
@@ -142,7 +135,7 @@ defmodule Bank.Stablecoins.IntentRouting do
       :stablecoin_route_allowed,
       "Stablecoin #{eval.quote.route_kind} route via #{eval.quote.provider} — " <>
         "score #{eval.score}, fee #{eval.fee_summary.total_fee}",
-      :planned
+      :requires_adapter
     }
   end
 
@@ -153,7 +146,7 @@ defmodule Bank.Stablecoins.IntentRouting do
       :approval_required,
       :stablecoin_route_needs_approval,
       "Stablecoin route requires approval: #{rules}",
-      :planned
+      :requires_adapter
     }
   end
 
@@ -177,10 +170,49 @@ defmodule Bank.Stablecoins.IntentRouting do
         ProviderHealth.record_failure(provider_id, reason)
       end)
 
-      ProviderHealth.record_success(evaluation.quote.provider)
+      record_successes(evaluation)
     end
 
     :ok
+  end
+
+  defp record_successes(%{quote: %{provider: "composite"}, selector_metadata: meta}) do
+    meta
+    |> Map.take([:swap_meta, :bridge_meta])
+    |> Map.values()
+    |> Enum.flat_map(fn
+      %{all_quotes: quotes} -> quotes
+      _ -> []
+    end)
+    |> Enum.each(&ProviderHealth.record_success(&1.provider))
+  end
+
+  defp record_successes(evaluation) do
+    ProviderHealth.record_success(evaluation.quote.provider)
+  end
+
+  defp maybe_emit_audit(params, result) do
+    case intent_id(params) do
+      nil ->
+        :ok
+
+      id ->
+        case Bank.Runtime.emit_audit(%{
+               actor: :runtime,
+               event_type: "stablecoin.route_evaluated",
+               subject_type: "agent_intent",
+               subject_id: id,
+               correlation_id: id,
+               after_ref: build_evidence(result)
+             }) do
+          {:ok, _event} -> :ok
+          {:error, reason} -> {:error, {:audit_failed, reason}}
+        end
+    end
+  end
+
+  defp intent_id(params) do
+    params[:intent_id] || params["intent_id"]
   end
 
   defp emit_telemetry(evaluation) do
@@ -205,4 +237,82 @@ defmodule Bank.Stablecoins.IntentRouting do
   defp provider_id_for(mod) when is_atom(mod) do
     if function_exported?(mod, :provider_id, 0), do: mod.provider_id(), else: inspect(mod)
   end
+
+  defp provider_id_for(provider_id) when is_binary(provider_id), do: provider_id
+
+  defp quote_request_json(nil), do: nil
+
+  defp quote_request_json(request) do
+    %{
+      source_chain: request.source_chain,
+      source_asset: request.source_asset,
+      dest_chain: request.dest_chain,
+      dest_asset: request.dest_asset,
+      amount: decimal_string(request.amount),
+      slippage_bps: request.slippage_bps,
+      route_kind: atom_string(request.route_kind)
+    }
+  end
+
+  defp reason_json(reason) do
+    %{
+      rule: atom_string(reason.rule),
+      detail: reason.detail,
+      severity: atom_string(reason.severity)
+    }
+  end
+
+  defp fee_summary_json(nil), do: nil
+
+  defp fee_summary_json(fees) do
+    %{
+      gas_fee: decimal_string(fees.gas_fee),
+      protocol_fee: decimal_string(fees.protocol_fee),
+      bridge_fee: decimal_string(fees.bridge_fee),
+      cryptobank_fee: decimal_string(fees.cryptobank_fee),
+      total_fee: decimal_string(fees.total_fee),
+      output_impact_pct: decimal_string(fees.output_impact_pct)
+    }
+  end
+
+  defp leg_json(leg) do
+    %{
+      step: leg.step,
+      kind: atom_string(leg.kind),
+      source_chain: leg.source_chain,
+      source_asset: leg.source_asset,
+      source_address: leg.source_address,
+      dest_chain: leg.dest_chain,
+      dest_asset: leg.dest_asset,
+      dest_address: leg.dest_address,
+      input_amount: decimal_string(leg.input_amount),
+      output_amount: decimal_string(leg.output_amount),
+      protocol: leg.protocol,
+      pool_address: leg.pool_address,
+      eta_seconds: leg.eta_seconds
+    }
+  end
+
+  defp selector_metadata_json(nil), do: %{considered: 0, errors: []}
+
+  defp selector_metadata_json(meta) do
+    %{
+      considered: meta[:considered] || 0,
+      errors:
+        Enum.map(meta[:errors] || [], fn e ->
+          %{provider: provider_id_for(e.provider), error: inspect(e.error)}
+        end)
+    }
+  end
+
+  defp atom_string(nil), do: nil
+  defp atom_string(value) when is_atom(value), do: Atom.to_string(value)
+  defp atom_string(value), do: value
+
+  defp decimal_string(nil), do: nil
+  defp decimal_string(%Decimal{} = value), do: Decimal.to_string(value, :normal)
+  defp decimal_string(value), do: to_string(value)
+
+  defp datetime_string(nil), do: nil
+  defp datetime_string(%DateTime{} = value), do: DateTime.to_iso8601(value)
 end

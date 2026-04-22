@@ -15,6 +15,7 @@ defmodule Bank.Stablecoins.ProviderHealth do
       record_failure(provider_id, reason)
       get(provider_id)
       all()
+      reset()
   """
 
   use GenServer
@@ -44,12 +45,13 @@ defmodule Bank.Stablecoins.ProviderHealth do
     now = DateTime.utc_now()
     current = get(provider_id)
 
-    state = %{
-      current
-      | status: :healthy,
-        success_count: current.success_count + 1,
-        last_success_at: now
-    }
+    state =
+      %{
+        current
+        | success_count: current.success_count + 1,
+          last_success_at: now
+      }
+      |> compute_status()
 
     :ets.insert(@table, {provider_id, state})
     :ok
@@ -85,6 +87,23 @@ defmodule Bank.Stablecoins.ProviderHealth do
   @spec all() :: [provider_state()]
   def all do
     :ets.tab2list(@table) |> Enum.map(fn {_k, v} -> v end)
+  end
+
+  @doc """
+  Clear node-local provider health state.
+
+  This is intentionally operational/test plumbing only; provider
+  health is volatile by design, so resetting the ETS table does not
+  affect any durable audit trail.
+  """
+  @spec reset() :: :ok
+  def reset do
+    case :ets.whereis(@table) do
+      :undefined -> :ok
+      _table -> :ets.delete_all_objects(@table)
+    end
+
+    :ok
   end
 
   # --- Observation from RouteSelector results ---

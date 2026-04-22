@@ -1,6 +1,7 @@
 defmodule Bank.Stablecoins.IntentRoutingTest do
-  use ExUnit.Case, async: false
+  use Bank.DataCase, async: false
 
+  alias Bank.{Audit, Fixtures}
   alias Bank.Stablecoins.{IntentRouting, ProviderHealth, QuoteRequest, RouteLeg, RouteQuote}
 
   defmodule FakeProvider do
@@ -46,13 +47,86 @@ defmodule Bank.Stablecoins.IntentRoutingTest do
     end
   end
 
+  defmodule FakeSwapProvider do
+    @behaviour Bank.Stablecoins.Provider
+
+    @impl true
+    def provider_id, do: "swap_fake"
+
+    @impl true
+    def quote(%QuoteRequest{} = req) do
+      out = Decimal.sub(req.amount, Decimal.new("0.5"))
+      now = DateTime.utc_now()
+
+      {:ok,
+       %RouteQuote{
+         provider: provider_id(),
+         request: req,
+         route_kind: :swap,
+         legs: [
+           %RouteLeg{
+             step: 1,
+             kind: :swap,
+             source_chain: req.source_chain,
+             source_asset: req.source_asset,
+             dest_chain: req.dest_chain,
+             dest_asset: req.dest_asset,
+             input_amount: req.amount,
+             output_amount: out,
+             protocol: "FakeSwap"
+           }
+         ],
+         input_amount: req.amount,
+         output_amount: out,
+         quoted_at: now,
+         fees: %{total_fee: Decimal.new("0.5")}
+       }}
+    end
+  end
+
+  defmodule FakeBridgeProvider do
+    @behaviour Bank.Stablecoins.Provider
+
+    @impl true
+    def provider_id, do: "bridge_fake"
+
+    @impl true
+    def quote(%QuoteRequest{} = req) do
+      now = DateTime.utc_now()
+
+      {:ok,
+       %RouteQuote{
+         provider: provider_id(),
+         request: req,
+         route_kind: :bridge,
+         legs: [
+           %RouteLeg{
+             step: 1,
+             kind: :bridge,
+             source_chain: req.source_chain,
+             source_asset: req.source_asset,
+             dest_chain: req.dest_chain,
+             dest_asset: req.dest_asset,
+             input_amount: req.amount,
+             output_amount: req.amount,
+             protocol: "FakeBridge"
+           }
+         ],
+         input_amount: req.amount,
+         output_amount: req.amount,
+         quoted_at: now,
+         fees: %{bridge_fee: Decimal.new(0), total_fee: Decimal.new(0)}
+       }}
+    end
+  end
+
   setup do
-    start_supervised!(ProviderHealth)
+    ProviderHealth.reset()
     :ok
   end
 
   describe "evaluate_for_intent/2 — allowed" do
-    test "allowed route maps to auto_exec with planned state" do
+    test "allowed route maps to auto_exec but requires adapter dispatch" do
       {:ok, result} =
         IntentRouting.evaluate_for_intent(
           %{
@@ -68,7 +142,7 @@ defmodule Bank.Stablecoins.IntentRoutingTest do
 
       assert result.outcome == :auto_exec
       assert result.reason_code == :stablecoin_route_allowed
-      assert result.execution_state == :planned
+      assert result.execution_state == :requires_adapter
       assert result.evaluation != nil
       assert result.evaluation.decision == :allowed
     end
@@ -91,7 +165,7 @@ defmodule Bank.Stablecoins.IntentRoutingTest do
 
       assert result.outcome == :approval_required
       assert result.reason_code == :stablecoin_route_needs_approval
-      assert result.execution_state == :planned
+      assert result.execution_state == :requires_adapter
     end
   end
 
@@ -163,14 +237,16 @@ defmodule Bank.Stablecoins.IntentRoutingTest do
       evidence = IntentRouting.build_evidence(result)
       route = evidence.stablecoin_route
 
-      assert route.decision == :auto_exec
-      assert route.policy_decision == :allowed
-      assert route.route_kind == :swap
+      assert route.decision == "auto_exec"
+      assert route.execution_state == "requires_adapter"
+      assert route.policy_decision == "allowed"
+      assert route.route_kind == "swap"
       assert route.provider == "fake"
       assert length(route.legs) == 1
-      assert route.fee_summary != nil
+      assert route.fee_summary.total_fee == "0.6"
       assert route.score > 0
       assert route.selector_metadata.considered == 1
+      assert route.quote_request.amount == "100"
     end
 
     test "nil evaluation returns nil evidence" do
@@ -205,6 +281,68 @@ defmodule Bank.Stablecoins.IntentRoutingTest do
       state = ProviderHealth.get("fake")
       assert state.success_count >= 1
       assert state.status == :healthy
+    end
+
+    test "records underlying providers for composite swap+bridge routes" do
+      {:ok, _result} =
+        IntentRouting.evaluate_for_intent(
+          %{
+            source_chain: "base",
+            source_asset: "USDT",
+            dest_chain: "ethereum",
+            dest_asset: "USDC",
+            amount: Decimal.new("100"),
+            metadata: %{taker_address: "0x0000000000000000000000000000000000000abc"}
+          },
+          swap_providers: [FakeSwapProvider],
+          bridge_providers: [FakeBridgeProvider]
+        )
+
+      assert ProviderHealth.get("swap_fake").success_count == 1
+      assert ProviderHealth.get("bridge_fake").success_count == 1
+      assert ProviderHealth.get("composite").success_count == 0
+    end
+  end
+
+  describe "audit and replay integration" do
+    test "writes route evidence to the audit trail when intent_id is supplied" do
+      intent =
+        Fixtures.agent_intent(
+          kind: :swap,
+          asset: "USDC",
+          chain: "ethereum",
+          target_counterparty_id: nil,
+          target_raw_address: "0x0000000000000000000000000000000000000abc"
+        )
+
+      {:ok, _result} =
+        IntentRouting.evaluate_for_intent(
+          %{
+            intent_id: intent.id,
+            source_chain: "ethereum",
+            source_asset: "USDC",
+            dest_chain: "ethereum",
+            dest_asset: "USDT",
+            amount: Decimal.new("100"),
+            metadata: %{taker_address: "0x0000000000000000000000000000000000000abc"}
+          },
+          providers: [FakeProvider]
+        )
+
+      %{events: [event]} =
+        Audit.list_events(%{
+          correlation_id: intent.id,
+          event_type: "stablecoin.route_evaluated"
+        })
+
+      assert event.subject_id == intent.id
+
+      {:ok, bundle} = Audit.replay(intent.id)
+      assert [route] = bundle.stablecoin_route_evidence
+      assert route["provider"] == "fake"
+      assert route["decision"] == "auto_exec"
+      assert route["execution_state"] == "requires_adapter"
+      assert route["fee_summary"]["total_fee"] == "0.6"
     end
   end
 end

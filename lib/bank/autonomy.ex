@@ -114,6 +114,11 @@ defmodule Bank.Autonomy do
     * `:screening` — (optional) pre-computed screening result from
       `Bank.WalletScreening.IntentScreening.screen/1`. If not supplied,
       screening is resolved from the intent automatically.
+    * `:stablecoin_route` — (optional) pre-computed stablecoin route
+      result from `Bank.Stablecoins.IntentRouting.evaluate_for_intent/2`.
+      The current runtime can reason over this result and persist it in
+      decision rationale; on-chain swap/bridge adapter dispatch remains
+      a later execution-layer issue.
 
   Options:
 
@@ -158,6 +163,12 @@ defmodule Bank.Autonomy do
 
       screening_unresolved?(inputs) ->
         build_screening_unresolved(inputs)
+
+      stablecoin_route_blocked?(inputs) ->
+        build_stablecoin_route_block(inputs)
+
+      stablecoin_route_approval_required?(inputs) ->
+        build_stablecoin_route_approval(inputs)
 
       preview_degraded?(inputs) ->
         build_preview_degraded(inputs)
@@ -221,6 +232,7 @@ defmodule Bank.Autonomy do
         )
     end
     |> annotate_screening(inputs)
+    |> annotate_stablecoin_route(inputs)
     |> emit()
   end
 
@@ -248,6 +260,12 @@ defmodule Bank.Autonomy do
   end
 
   defp annotate_screening(decision, _inputs), do: decision
+
+  defp annotate_stablecoin_route(decision, %{stablecoin_route: route}) when is_map(route) do
+    put_in(decision, [:rationale, :stablecoin_route], stablecoin_route_annotation(route))
+  end
+
+  defp annotate_stablecoin_route(decision, _inputs), do: decision
 
   defp emit(%{} = decision) do
     Bank.Runtime.Telemetry.decision(decision)
@@ -322,6 +340,18 @@ defmodule Bank.Autonomy do
   defp screening_unresolved?(%{screening: %{status: :unresolved}}), do: true
   defp screening_unresolved?(_), do: false
 
+  # --- Stablecoin route guards ------------------------------------------
+
+  defp stablecoin_route_blocked?(%{stablecoin_route: %{outcome: :block}}), do: true
+  defp stablecoin_route_blocked?(_), do: false
+
+  defp stablecoin_route_approval_required?(%{
+         stablecoin_route: %{outcome: :approval_required}
+       }),
+       do: true
+
+  defp stablecoin_route_approval_required?(_), do: false
+
   defp build_screening_block(%{screening: screening}) do
     build(
       :block,
@@ -362,6 +392,26 @@ defmodule Bank.Autonomy do
         screening_reason: screening[:reason],
         screening_chain: screening[:chain]
       }
+    )
+  end
+
+  defp build_stablecoin_route_block(%{stablecoin_route: route}) do
+    build(
+      :block,
+      :severe,
+      route_reason_code(route, :stablecoin_route_blocked),
+      route[:reason] || "stablecoin route blocked by route policy",
+      %{stablecoin_route: stablecoin_route_annotation(route)}
+    )
+  end
+
+  defp build_stablecoin_route_approval(%{stablecoin_route: route}) do
+    build(
+      :approval_required,
+      :elevated,
+      route_reason_code(route, :stablecoin_route_needs_approval),
+      route[:reason] || "stablecoin route requires operator approval",
+      %{stablecoin_route: stablecoin_route_annotation(route)}
     )
   end
 
@@ -506,6 +556,25 @@ defmodule Bank.Autonomy do
   defp reject_nil_values(map) do
     Map.reject(map, fn {_key, value} -> is_nil(value) end)
   end
+
+  defp stablecoin_route_annotation(route) do
+    evaluation = Map.get(route, :evaluation)
+    quote = if is_map(evaluation), do: Map.get(evaluation, :quote), else: nil
+
+    %{
+      outcome: Map.get(route, :outcome),
+      reason_code: Map.get(route, :reason_code),
+      execution_state: Map.get(route, :execution_state),
+      policy_decision: if(is_map(evaluation), do: Map.get(evaluation, :decision)),
+      provider: if(is_map(quote), do: Map.get(quote, :provider)),
+      route_kind: if(is_map(quote), do: Map.get(quote, :route_kind)),
+      score: if(is_map(evaluation), do: Map.get(evaluation, :score))
+    }
+    |> reject_nil_values()
+  end
+
+  defp route_reason_code(%{reason_code: code}, _default) when is_atom(code), do: code
+  defp route_reason_code(_route, default), do: default
 
   defp trust_confidence(%{trust: %{confidence: c}}), do: c
   defp trust_confidence(_), do: :low

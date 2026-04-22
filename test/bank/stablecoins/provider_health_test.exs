@@ -4,7 +4,7 @@ defmodule Bank.Stablecoins.ProviderHealthTest do
   alias Bank.Stablecoins.ProviderHealth
 
   setup do
-    start_supervised!(ProviderHealth)
+    ProviderHealth.reset()
     :ok
   end
 
@@ -70,6 +70,17 @@ defmodule Bank.Stablecoins.ProviderHealthTest do
       for _ <- 1..2, do: ProviderHealth.record_failure("mixed", :provider_unavailable)
       state = ProviderHealth.get("mixed")
       assert state.status == :degraded
+    end
+
+    test "a single later success does not hide a still-failing provider" do
+      for _ <- 1..5, do: ProviderHealth.record_failure("bad", :provider_unavailable)
+
+      ProviderHealth.record_success("bad")
+
+      state = ProviderHealth.get("bad")
+      assert state.success_count == 1
+      assert state.failure_count == 5
+      assert state.status == :failing
     end
   end
 end

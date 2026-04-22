@@ -1337,7 +1337,19 @@
             },
             "type": "array"
           },
+          "screening_evidence": {
+            "additionalProperties": true,
+            "type": "object"
+          },
           "simulations": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "stablecoin_route_evidence": {
+            "description": "Stablecoin route evaluations captured in the audit trail for\nthis intent. Each entry includes the selected provider, route\nkind, policy decision, fee summary, provider errors, and the\nexecution-state truth (`requires_adapter` until swap/bridge\nadapter dispatch is wired).\n",
             "items": {
               "additionalProperties": true,
               "type": "object"

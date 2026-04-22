@@ -210,6 +210,18 @@ defmodule BankWeb.OpenApi.Schemas.IntentReplayResponse do
       audit: %Schema{
         type: :array,
         items: %Schema{type: :object, additionalProperties: true}
+      },
+      screening_evidence: %Schema{type: :object, additionalProperties: true},
+      stablecoin_route_evidence: %Schema{
+        description: """
+        Stablecoin route evaluations captured in the audit trail for
+        this intent. Each entry includes the selected provider, route
+        kind, policy decision, fee summary, provider errors, and the
+        execution-state truth (`requires_adapter` until swap/bridge
+        adapter dispatch is wired).
+        """,
+        type: :array,
+        items: %Schema{type: :object, additionalProperties: true}
       }
     }
   })
