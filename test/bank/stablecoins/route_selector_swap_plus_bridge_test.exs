@@ -165,7 +165,7 @@ defmodule Bank.Stablecoins.RouteSelector.SwapPlusBridgeTest do
     test "composes USDT->USDC swap + USDC bridge across chains" do
       req = build_composite_request()
 
-      assert {:ok, %RouteQuote{} = quote, meta} =
+      assert {:ok, %RouteQuote{} = quote, _meta} =
                RouteSelector.select(req, composite_opts())
 
       assert quote.provider == "composite"
@@ -357,11 +357,11 @@ defmodule Bank.Stablecoins.RouteSelector.SwapPlusBridgeTest do
                RouteSelector.select(req, composite_opts())
     end
 
-    test "rejects USDT->USDT cross-chain" do
+    test "does not treat USDT->USDT cross-chain as swap_plus_bridge" do
       req = build_composite_request(%{dest_asset: "USDT"})
 
-      assert req.route_kind != :swap_plus_bridge ||
-               {:error, _} = RouteSelector.select(req, composite_opts())
+      assert req.route_kind == :bridge
+      assert {:error, :unsupported_route} = RouteSelector.select(req, providers: [])
     end
   end
 

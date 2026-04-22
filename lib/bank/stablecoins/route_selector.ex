@@ -80,11 +80,13 @@ defmodule Bank.Stablecoins.RouteSelector do
     * `:providers` — override provider module list (for testing)
   """
   @spec select(QuoteRequest.t(), keyword()) :: select_result()
+  def select(req, opts \\ [])
+
   def select(%QuoteRequest{route_kind: :swap_plus_bridge} = req, opts) do
     select_composite(req, opts)
   end
 
-  def select(%QuoteRequest{} = req, opts \\ []) do
+  def select(%QuoteRequest{} = req, opts) do
     providers = providers_for(req, opts)
 
     case providers do
