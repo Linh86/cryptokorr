@@ -1,0 +1,29 @@
+{
+  "name": "cryptobank-ts-adapter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "TypeScript chain adapter for Bank v0.1 — Base + USDC execution",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "typecheck:scripts": "tsc --noEmit --module NodeNext --moduleResolution NodeNext --target ES2022 --types node --skipLibCheck scripts/provision-kernel.ts scripts/verify-installed-validator.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint src/ test/"
+  },
+  "dependencies": {
+    "fastify": "^5.3.3",
+    "viem": "^2.31.3",
+    "zod": "^3.25.23"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "eslint": "^9.27.0",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.1"
+  }
+}

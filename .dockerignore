@@ -1,0 +1,16 @@
+.git
+_build
+deps
+assets/node_modules
+chain_adapter/node_modules
+chain_adapter/dist
+chain_adapter/coverage
+chain_adapter/.npm
+cover
+doc
+tmp
+.env
+.env.*
+!.env.*.example
+npm-debug.log
+erl_crash.dump

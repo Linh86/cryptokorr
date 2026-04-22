@@ -3,8 +3,8 @@
 Phoenix control plane for Bank v0.1, an internal codename for a non-custodial
 AI treasury runtime. This application is the decision authority: it accepts
 agent intents, evaluates policy, consults trust and simulation inputs, writes
-decisions, manages approvals, and orchestrates execution through a separate
-TypeScript chain-adapter service.
+decisions, manages approvals, and orchestrates execution through the
+TypeScript chain-adapter service in [`chain_adapter/`](chain_adapter/).
 
 Authoritative references (do not edit implementation assumptions without
 updating these docs first):
@@ -38,10 +38,13 @@ Agent -> POST /v1/intents -> Phoenix (decision authority)
 
 * **Phoenix (this app)** owns decisioning, approvals, audit, pause, and the
   external `/v1/` API.
-* **TypeScript adapter** (separate service, not in this repo) wraps simulation
-  providers, bundlers / RPC, and wallet / smart-account behavior. It receives
-  `ExecutionPlan` skeletons, fills in chain-specific steps, signs, broadcasts,
-  and reports outcomes back over a private internal contract.
+* **TypeScript adapter** ([`chain_adapter/`](chain_adapter/)) wraps simulation
+  providers, bundlers / RPC, and wallet / smart-account behavior. It is
+  deployed as a separate service, but versioned in this monorepo so the
+  Phoenix dispatch contract, revoke semantics, and adapter tests evolve
+  together. It receives `ExecutionPlan` skeletons, fills in chain-specific
+  steps, signs, broadcasts, and reports outcomes back over a private internal
+  contract.
 * **Postgres** is the source of truth for every domain object.
 * **Oban** drives async orchestration (evaluation, approval TTL, execution,
   confirmation polling, delegation revoke).
@@ -49,6 +52,19 @@ Agent -> POST /v1/intents -> Phoenix (decision authority)
 
 Failure in the adapter or any provider widens caution in Phoenix; it never
 widens autonomy.
+
+## Monorepo layout
+
+The repo tracks both halves of the runtime contract:
+
+| Path | Purpose | Local check |
+|------|---------|-------------|
+| `./` | Phoenix control plane, API, UI, jobs, audit, policy, and operator tooling. | `mix precommit` |
+| `chain_adapter/` | TypeScript chain-adapter service that executes Base user-ops and reports callbacks. | `npm ci && npm run typecheck && npm test` |
+
+GitHub CI runs both checks. Keep adapter contract changes and Phoenix dispatch
+changes in the same PR whenever they depend on each other; this is especially
+important for the #84 -> #83 -> #58 -> #31 revoke chain.
 
 ## Bounded contexts
 

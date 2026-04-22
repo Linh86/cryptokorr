@@ -1,7 +1,7 @@
 # Common ops for the Bank control plane.
 # Run `make help` for the full list.
 
-.PHONY: help setup test precommit run release image staging-up staging-down staging-logs migrate seed
+.PHONY: help setup test precommit adapter-check run release image staging-up staging-down staging-logs migrate seed
 
 help:
 	@echo "Bank — common make targets"
@@ -9,6 +9,7 @@ help:
 	@echo "  setup         Install deps, set up DB and assets."
 	@echo "  test          Run the test suite."
 	@echo "  precommit     Warn-as-error compile, unused deps check, format, test."
+	@echo "  adapter-check Typecheck and test the TypeScript chain adapter."
 	@echo "  run           Start Phoenix on :4000 (dev)."
 	@echo "  release       Build a mix release into _build/prod/rel/bank."
 	@echo "  image         Build the Docker image tagged bank:staging."
@@ -26,6 +27,9 @@ test:
 
 precommit:
 	mix precommit
+
+adapter-check:
+	cd chain_adapter && npm ci && npm run typecheck && npm run typecheck:scripts && npm test
 
 run:
 	mix phx.server

@@ -14,7 +14,7 @@ defmodule Bank.Delegations.Provisioning do
       pin.
 
   Anything that would touch Base Sepolia or Base mainnet remains
-  operator-side work in `cryptobank-ts-adapter/scripts/`.
+  operator-side work in `chain_adapter/scripts/`.
   """
 
   @allowed_chain_ids [84532, 8453]

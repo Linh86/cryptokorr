@@ -34,9 +34,12 @@ bank-*.tar
 # In case you use Node.js/npm, you want to ignore these.
 npm-debug.log
 /assets/node_modules/
+/chain_adapter/node_modules/
 
 # Local env files (never commit secrets). The *.example files are tracked.
 .env
 .env.*
 !.env.*.example
-
+/chain_adapter/.env
+/chain_adapter/.env.*
+!/chain_adapter/.env.*.example

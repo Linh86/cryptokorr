@@ -328,11 +328,11 @@ audit, not a window of unguarded execution.
   - **#84 (provisioning)** — deploy a Kernel v3 smart account on
     Base + install a Permission Validator against it. Operator
     runbook: [docs/provisioning-kernel-v3.md](provisioning-kernel-v3.md);
-    templates under `cryptobank-ts-adapter/scripts/`.
+    templates under `chain_adapter/scripts/`.
   - **#83 (verification)** — pin the validator's disable ABI
     against a verified deployment (audit / source / on-chain
     bytecode hash). The verify script
-    `cryptobank-ts-adapter/scripts/verify-installed-validator.ts`
+    `chain_adapter/scripts/verify-installed-validator.ts`
     emits the bytecode keccak hash that #83 binds as a tripwire
     fixture.
   - **#58 (wiring)** — swap the sentinel inner call for the real

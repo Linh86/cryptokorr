@@ -28,7 +28,7 @@ deployment, is in place:
 
 - **Mapping convention.** `delegation_id` ↔ `permissionId` round
   trip in
-  [`cryptobank-ts-adapter/src/chains/base/permission_validator.ts`](../../cryptobank-ts-adapter/src/chains/base/permission_validator.ts)
+  [`chain_adapter/src/chains/base/permission_validator.ts`](../chain_adapter/src/chains/base/permission_validator.ts)
   (`permissionIdFromDelegationId`, `delegationIdFromPermissionId`).
   The convention — lowercase 0x-prefixed hex form of `bytes32`, 66
   chars total — is our design choice and does not depend on which
@@ -36,7 +36,7 @@ deployment, is in place:
   placeholder ids are rejected explicitly so a Kernel revoke against
   one fails loudly rather than silently degrading.
 - **ERC-7579 outer envelope.** Pinned in
-  [`cryptobank-ts-adapter/src/chains/base/erc7579.ts`](../../cryptobank-ts-adapter/src/chains/base/erc7579.ts)
+  [`chain_adapter/src/chains/base/erc7579.ts`](../chain_adapter/src/chains/base/erc7579.ts)
   against EIP-7579's normative `execute(bytes32 mode, bytes
   executionCalldata)` signature (selector `0xe9ae5c53`), the
   all-zeros single-call ModeCode, and the packed body layout
@@ -50,9 +50,9 @@ deployment, is in place:
   `#58`-referencing error when unset — so the live revoke cannot
   silently degrade back to a sentinel after #58 ships.
 - **Tripwire tests.**
-  [`cryptobank-ts-adapter/test/permission-validator.test.ts`](../../cryptobank-ts-adapter/test/permission-validator.test.ts)
+  [`chain_adapter/test/permission-validator.test.ts`](../chain_adapter/test/permission-validator.test.ts)
   pins the mapping round trip and the strict accessor;
-  [`cryptobank-ts-adapter/test/erc7579.test.ts`](../../cryptobank-ts-adapter/test/erc7579.test.ts)
+  [`chain_adapter/test/erc7579.test.ts`](../chain_adapter/test/erc7579.test.ts)
   pins the ERC-7579 selector, mode constant, packed body shape, and
   structural distinction from the SimpleAccount envelope.
 - **Fixture.** The mapping is pinned byte-for-byte against the
@@ -93,14 +93,14 @@ real funded keys + RPC + bundler credentials this repo does not have:
   binding the resulting addresses to the adapter's runtime env.
   Sequenced Sepolia-first then mainnet promotion.
 - **Provisioning template.**
-  [`cryptobank-ts-adapter/scripts/provision-kernel.ts`](../../cryptobank-ts-adapter/scripts/provision-kernel.ts)
+  [`chain_adapter/scripts/provision-kernel.ts`](../chain_adapter/scripts/provision-kernel.ts)
   — viem-based template with the ZeroDev SDK call sequence
   documented inline as comments. Two phases gated on
   `INSTALL_VALIDATOR=true` so Phase 1 (deploy account) can be
   verified before committing to Phase 2 (install validator). Refuses
   to run with placeholder env values.
 - **Verification template.**
-  [`cryptobank-ts-adapter/scripts/verify-installed-validator.ts`](../../cryptobank-ts-adapter/scripts/verify-installed-validator.ts)
+  [`chain_adapter/scripts/verify-installed-validator.ts`](../chain_adapter/scripts/verify-installed-validator.ts)
   — read-only check that the smart account has bytecode, the
   validator has bytecode, and the smart account reports the
   validator as installed via the ERC-7579 standard
@@ -108,7 +108,7 @@ real funded keys + RPC + bundler credentials this repo does not have:
   the validator's bytecode keccak256 — that hash is the artifact
   #83 pins as a tripwire fixture.
 - **Env hygiene.**
-  [`cryptobank-ts-adapter/scripts/check-env.sh`](../../cryptobank-ts-adapter/scripts/check-env.sh)
+  [`chain_adapter/scripts/check-env.sh`](../chain_adapter/scripts/check-env.sh)
   — confirms every required adapter env is set and reports whether
   the host is in `SENTINEL-ERA` mode (no validator address) or
   `KERNEL-PROVISIONED` mode. Run it from the staging deploy
@@ -149,7 +149,7 @@ because the prerequisite chain-side artifact does not yet exist:
 What landed under #83 to make the eventual pin frictionless when the
 artifact arrives, without introducing speculation:
 
-- **Pin contract.** [`cryptobank-ts-adapter/src/chains/base/permission_validator.ts`](../../cryptobank-ts-adapter/src/chains/base/permission_validator.ts)
+- **Pin contract.** [`chain_adapter/src/chains/base/permission_validator.ts`](../chain_adapter/src/chains/base/permission_validator.ts)
   now documents the exact `VerifiedPermissionValidator` shape #83's
   pin must populate: `chainId`, `address`, `deployedBytecodeKeccak256`,
   `artifactSource{kind,url,note}`, and the `disableFunction` ABI
@@ -157,7 +157,7 @@ artifact arrives, without introducing speculation:
   values, the bytecode-tripwire behaviour the runtime will enforce
   on startup, and what #83 MUST NOT do (pin from a plausible name
   without provenance; pin against an undeployed chain).
-- **Receipt → pin handoff.** [`cryptobank-ts-adapter/scripts/verify-installed-validator.ts`](../../cryptobank-ts-adapter/scripts/verify-installed-validator.ts)
+- **Receipt → pin handoff.** [`chain_adapter/scripts/verify-installed-validator.ts`](../chain_adapter/scripts/verify-installed-validator.ts)
   emits a JSON receipt whose three load-bearing fields
   (`chain_id`, `permission_validator_address`,
   `permission_validator_bytecode_keccak256`) map 1:1 to the
@@ -167,7 +167,7 @@ artifact arrives, without introducing speculation:
   source from, plus a "Next steps for #83" instruction block that
   describes the chain-side vs artifact-side handoff explicitly.
 - **Sub-prereq enumeration.** The `TODO(#58)` block in
-  [`cryptobank-ts-adapter/src/chains/base/revoke.ts`](../../cryptobank-ts-adapter/src/chains/base/revoke.ts)
+  [`chain_adapter/src/chains/base/revoke.ts`](../chain_adapter/src/chains/base/revoke.ts)
   now references #84 (provisioning), #83 (artifact + ABI pin), and
   #58 (the wire-up here) so the next implementer sees the full
   tracked chain.
@@ -222,7 +222,7 @@ no separate, individually disableable delegation authority on chain.
 The "revoke" path is therefore a sentinel UserOperation with inner
 call `execute(self, 0, 0x)`: a real on-chain anchor with a real
 user-op hash and receipt, but not a cryptographic disablement of
-the signing key. See [adapter `userop.ts`](../../cryptobank-ts-adapter/src/chains/base/userop.ts)
+the signing key. See [adapter `userop.ts`](../chain_adapter/src/chains/base/userop.ts)
 for the sentinel and the tripwire test pinning it byte-for-byte.
 
 ### Phoenix already speaks the right state machine
@@ -386,7 +386,7 @@ validator deployment #58 picks and are deliberately not pinned here
 or in `permission_validator.ts`, because pinning a specific selector
 before a deployment is verified would surface as a silent on-chain
 revert at the first real revoke. The OUTER ERC-7579 envelope IS
-pinned (in `cryptobank-ts-adapter/src/chains/base/erc7579.ts`)
+pinned (in `chain_adapter/src/chains/base/erc7579.ts`)
 because it is normative in EIP-7579 and stable across every
 candidate ERC-7579 implementation.
 

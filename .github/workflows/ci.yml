@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  precommit:
+  phoenix:
     name: mix precommit
     runs-on: ubuntu-latest
     env:
@@ -52,3 +52,25 @@ jobs:
 
       - run: mix deps.get
       - run: mix precommit
+
+  chain-adapter:
+    name: chain adapter
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: chain_adapter
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: chain_adapter/package-lock.json
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run typecheck:scripts
+      - run: npm test
