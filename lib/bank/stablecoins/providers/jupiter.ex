@@ -2,23 +2,23 @@ defmodule Bank.Stablecoins.Providers.Jupiter do
   @moduledoc """
   Jupiter adapter for same-chain Solana USDC/USDT swaps.
 
-  Implements `Bank.Stablecoins.Provider`, calling the Jupiter Quote
-  API v6 for same-chain swap quotes on Solana and normalizing
+  Implements `Bank.Stablecoins.Provider`, calling Jupiter's Metis
+  Swap API v1 quote endpoint for same-chain swap quotes on Solana and normalizing
   responses into `%RouteQuote{}`.
 
   Supported chain: solana only.
   Supported pairs: USDC <-> USDT (same chain only).
 
-  The adapter calls `/v6/quote` to obtain pricing and the route plan.
+  The adapter calls `/swap/v1/quote` to obtain pricing and the route plan.
   The full quote response is preserved in `provider_metadata` so the
-  execution layer can pass it to Jupiter's `/v6/swap` endpoint later
+  execution layer can pass it to Jupiter's `/swap/v1/swap` endpoint later
   to build a serialized Solana transaction.
 
   ## Configuration
 
       config :bank, Bank.Stablecoins.Providers.Jupiter,
-        base_url: "https://quote-api.jup.ag",
-        api_key: nil, # optional; Jupiter public API works without auth
+        base_url: "https://lite-api.jup.ag",
+        api_key: nil, # optional for lite-api; sent as x-api-key when configured
         req_options: []
 
   Tests override `:req_options` with
@@ -70,7 +70,7 @@ defmodule Bank.Stablecoins.Providers.Jupiter do
   end
 
   defp request_quote(params, config) do
-    base_url = Keyword.get(config, :base_url, "https://quote-api.jup.ag")
+    base_url = Keyword.get(config, :base_url, "https://lite-api.jup.ag")
     api_key = Keyword.get(config, :api_key)
     extra = Keyword.get(config, :req_options, [])
 
@@ -81,7 +81,7 @@ defmodule Bank.Stablecoins.Providers.Jupiter do
     req_opts =
       [
         base_url: base_url,
-        url: "/v6/quote",
+        url: "/swap/v1/quote",
         method: :get,
         headers: headers,
         params: params,
@@ -97,7 +97,7 @@ defmodule Bank.Stablecoins.Providers.Jupiter do
 
   defp maybe_append_auth(headers, nil), do: headers
   defp maybe_append_auth(headers, ""), do: headers
-  defp maybe_append_auth(headers, key), do: [{"authorization", "Bearer " <> key} | headers]
+  defp maybe_append_auth(headers, key), do: [{"x-api-key", key} | headers]
 
   # -- Response classification ----------------------------------------------
 
@@ -130,16 +130,17 @@ defmodule Bank.Stablecoins.Providers.Jupiter do
     {:error, :provider_unavailable}
   end
 
+  defp no_route?(%{"errorCode" => code}) when is_binary(code) do
+    code == "ROUTE_NOT_FOUND"
+  end
+
   defp no_route?(%{"error" => err}) when is_binary(err) do
     downcased = String.downcase(err)
 
     String.contains?(downcased, "could not find route") or
       String.contains?(downcased, "no route found") or
+      String.contains?(downcased, "no routes found") or
       String.contains?(downcased, "insufficient liquidity")
-  end
-
-  defp no_route?(%{"errorCode" => code}) when is_binary(code) do
-    code == "ROUTE_NOT_FOUND"
   end
 
   defp no_route?(_), do: false
@@ -187,8 +188,7 @@ defmodule Bank.Stablecoins.Providers.Jupiter do
          },
          eta_seconds: nil,
          risk_flags: [],
-         explanation:
-           "#{req.source_asset}->#{req.dest_asset} swap via Jupiter on solana",
+         explanation: "#{req.source_asset}->#{req.dest_asset} swap via Jupiter on solana",
          provider_metadata: provider_metadata(body)
        }}
     else
@@ -230,7 +230,9 @@ defmodule Bank.Stablecoins.Providers.Jupiter do
 
   defp parse_platform_fee(body, decimals) do
     case get_in(body, ["platformFee", "amount"]) do
-      nil -> nil
+      nil ->
+        nil
+
       raw ->
         case from_base_units(raw, decimals) do
           {:ok, d} -> d

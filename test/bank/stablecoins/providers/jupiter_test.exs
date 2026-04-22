@@ -174,7 +174,7 @@ defmodule Bank.Stablecoins.Providers.JupiterTest do
       {:ok, req} = build_swap_request(%{amount: Decimal.new("250.50"), slippage_bps: 75})
 
       Req.Test.stub(Jupiter, fn conn ->
-        assert conn.request_path == "/v6/quote"
+        assert conn.request_path == "/swap/v1/quote"
 
         conn = Plug.Conn.fetch_query_params(conn)
         params = conn.query_params
@@ -243,6 +243,7 @@ defmodule Bank.Stablecoins.Providers.JupiterTest do
       Req.Test.stub(Jupiter, fn conn ->
         headers = Map.new(conn.req_headers)
         refute Map.has_key?(headers, "authorization")
+        refute Map.has_key?(headers, "x-api-key")
 
         Req.Test.json(conn, success_body())
       end)
@@ -250,7 +251,7 @@ defmodule Bank.Stablecoins.Providers.JupiterTest do
       assert {:ok, _} = Jupiter.quote(req)
     end
 
-    test "sends Bearer auth when API key is configured" do
+    test "sends x-api-key header when API key is configured" do
       original = Application.get_env(:bank, Jupiter)
 
       Application.put_env(:bank, Jupiter,
@@ -263,7 +264,7 @@ defmodule Bank.Stablecoins.Providers.JupiterTest do
 
       Req.Test.stub(Jupiter, fn conn ->
         headers = Map.new(conn.req_headers)
-        assert headers["authorization"] == "Bearer test-jupiter-key"
+        assert headers["x-api-key"] == "test-jupiter-key"
 
         Req.Test.json(conn, success_body())
       end)
