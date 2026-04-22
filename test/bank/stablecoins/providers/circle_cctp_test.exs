@@ -155,6 +155,7 @@ defmodule Bank.Stablecoins.Providers.CircleCCTPTest do
 
       assert leg.metadata["source_domain"] == 0
       assert leg.metadata["dest_domain"] == 6
+      assert leg.metadata["transfer_type"] == "standard"
     end
 
     test "leg has ETA based on chain finality" do
@@ -244,6 +245,9 @@ defmodule Bank.Stablecoins.Providers.CircleCCTPTest do
 
       {:ok, quote} = CircleCCTP.quote(req)
       assert quote.provider_metadata["protocol_version"] == "v2"
+      assert quote.provider_metadata["transfer_type"] == "standard"
+      assert quote.provider_metadata["fast_transfer"] == false
+      assert quote.provider_metadata["fee_model"] =~ "standard transfer only"
     end
 
     test "includes attestation URL" do
@@ -257,7 +261,7 @@ defmodule Bank.Stablecoins.Providers.CircleCCTPTest do
       {:ok, req} = build_bridge_request()
 
       {:ok, quote} = CircleCCTP.quote(req)
-      assert quote.provider_metadata["execution_flow"] == "burn → attestation → mint"
+      assert quote.provider_metadata["execution_flow"] == "burn → standard_attestation → mint"
     end
   end
 
@@ -323,6 +327,25 @@ defmodule Bank.Stablecoins.Providers.CircleCCTPTest do
           route_kind: :bridge,
           source_token: %{default_source_token() | asset: "USDT"},
           dest_token: %{default_dest_token() | asset: "USDT"}
+        })
+
+      assert {:error, :unsupported_route} = CircleCCTP.quote(req)
+    end
+
+    test "rejects token/request chain mismatch" do
+      req =
+        build_raw_request(%{
+          source_chain: "base",
+          source_token: default_source_token()
+        })
+
+      assert {:error, :unsupported_route} = CircleCCTP.quote(req)
+    end
+
+    test "rejects token asset mismatch even when request asset says USDC" do
+      req =
+        build_raw_request(%{
+          source_token: %{default_source_token() | asset: "USDT"}
         })
 
       assert {:error, :unsupported_route} = CircleCCTP.quote(req)

@@ -8,10 +8,15 @@ defmodule Bank.Stablecoins.Providers.CircleCCTP do
   an attestation from Circle's attestation service, then mint USDC on
   the destination chain.
 
-  Unlike swap aggregator adapters, CCTP quotes are deterministic:
+  This adapter models a CCTP v2 Standard Transfer quote only. Unlike
+  swap aggregator adapters, standard CCTP quotes are deterministic:
   output equals input (1:1 bridge, no slippage). Gas is paid in
   the native chain token and is not reflected in the bridge fee. No
   HTTP call is needed at quote time.
+
+  It does not quote CCTP Fast Transfer liquidity or fees. If we add
+  Fast Transfer later, that should be a separate provider mode with an
+  explicit fee model rather than silently changing this standard route.
 
   Supported route kind: `:bridge` only.
   Supported asset: USDC only (canonical, `:active` status).
@@ -29,7 +34,7 @@ defmodule Bank.Stablecoins.Providers.CircleCCTP do
   ## Execution flow (not performed by this adapter)
 
       1. Burn USDC on source chain via TokenMessenger.depositForBurn
-      2. Wait for attestation from Circle's Iris attestation service
+      2. Wait for standard attestation from Circle's Iris attestation service
       3. Mint USDC on dest chain via MessageTransmitter.receiveMessage
 
   The adapter preserves CCTP domain IDs, protocol version, and
@@ -79,8 +84,8 @@ defmodule Bank.Stablecoins.Providers.CircleCCTP do
     with :ok <- validate_usdc_only(req),
          :ok <- validate_chain(req.source_chain),
          :ok <- validate_chain(req.dest_chain),
-         :ok <- validate_canonical(req.source_token, :source),
-         :ok <- validate_canonical(req.dest_token, :dest) do
+         :ok <- validate_cctp_token(req.source_token, req.source_chain),
+         :ok <- validate_cctp_token(req.dest_token, req.dest_chain) do
       :ok
     end
   end
@@ -92,16 +97,13 @@ defmodule Bank.Stablecoins.Providers.CircleCCTP do
     if Map.has_key?(@cctp_domains, chain), do: :ok, else: {:error, :unsupported_route}
   end
 
-  defp validate_canonical(%{status: :active, canonical: true}, _side), do: :ok
+  defp validate_cctp_token(
+         %{chain: chain, asset: "USDC", status: :active, canonical: true},
+         chain
+       ),
+       do: :ok
 
-  defp validate_canonical(%{status: status}, side) when status in [:blocked, :approval_only] do
-    case side do
-      :source -> {:error, :unsupported_route}
-      :dest -> {:error, :unsupported_route}
-    end
-  end
-
-  defp validate_canonical(_, _), do: {:error, :unsupported_route}
+  defp validate_cctp_token(_, _), do: {:error, :unsupported_route}
 
   # -- Quote building -------------------------------------------------------
 
@@ -126,7 +128,8 @@ defmodule Bank.Stablecoins.Providers.CircleCCTP do
       eta_seconds: eta,
       metadata: %{
         "source_domain" => source_domain,
-        "dest_domain" => dest_domain
+        "dest_domain" => dest_domain,
+        "transfer_type" => "standard"
       }
     }
 
@@ -155,8 +158,11 @@ defmodule Bank.Stablecoins.Providers.CircleCCTP do
          "source_domain" => source_domain,
          "dest_domain" => dest_domain,
          "protocol_version" => "v2",
+         "transfer_type" => "standard",
+         "fast_transfer" => false,
+         "fee_model" => "standard transfer only; no Circle fast-transfer fee quoted",
          "attestation_url" => @attestation_url,
-         "execution_flow" => "burn → attestation → mint"
+         "execution_flow" => "burn → standard_attestation → mint"
        }
      }}
   end
