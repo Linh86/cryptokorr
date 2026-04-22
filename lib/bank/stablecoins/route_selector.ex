@@ -19,7 +19,7 @@ defmodule Bank.Stablecoins.RouteSelector do
     * `:swap` on EVM chains → 0x + 1inch (best of two)
     * `:swap` on Solana → Jupiter
     * `:bridge` → Circle CCTP
-    * `:swap_plus_bridge` → not yet supported (follow-up)
+    * `:swap_plus_bridge` → composite: swap source USDT→USDC + CCTP bridge
 
   ## Failure handling
 
@@ -46,6 +46,7 @@ defmodule Bank.Stablecoins.RouteSelector do
           {:ok, RouteQuote.t(), select_metadata()}
           | {:error, :unsupported_route}
           | {:error, {:no_quotes, [provider_error()]}}
+          | {:error, {:composite_route_failed, composite_error()}}
 
   @type select_metadata :: %{
           considered: non_neg_integer(),
@@ -56,6 +57,11 @@ defmodule Bank.Stablecoins.RouteSelector do
   @type provider_error :: %{
           provider: module(),
           error: term()
+        }
+
+  @type composite_error :: %{
+          failed_leg: :swap | :bridge,
+          reason: term()
         }
 
   @type collected_quote :: %{
@@ -74,7 +80,13 @@ defmodule Bank.Stablecoins.RouteSelector do
     * `:providers` — override provider module list (for testing)
   """
   @spec select(QuoteRequest.t(), keyword()) :: select_result()
-  def select(%QuoteRequest{} = req, opts \\ []) do
+  def select(req, opts \\ [])
+
+  def select(%QuoteRequest{route_kind: :swap_plus_bridge} = req, opts) do
+    select_composite(req, opts)
+  end
+
+  def select(%QuoteRequest{} = req, opts) do
     providers = providers_for(req, opts)
 
     case providers do
@@ -228,4 +240,153 @@ defmodule Bank.Stablecoins.RouteSelector do
 
   defp priority_index(provider_id),
     do: Enum.find_index(@default_priority, &(&1 == provider_id)) || 999
+
+  # -- Composite swap+bridge routing ----------------------------------------
+
+  defp select_composite(req, opts) do
+    with :ok <- validate_composite(req),
+         {:swap, {:ok, swap_quote, swap_meta}} <-
+           {:swap, select_swap_leg(req, opts)},
+         {:bridge, {:ok, bridge_quote, bridge_meta}} <-
+           {:bridge, select_bridge_leg(req, swap_quote, opts)} do
+      compose_route(req, swap_quote, swap_meta, bridge_quote, bridge_meta)
+    else
+      {:error, _} = err ->
+        err
+
+      {:swap, {:error, reason}} ->
+        {:error, {:composite_route_failed, %{failed_leg: :swap, reason: reason}}}
+
+      {:bridge, {:error, reason}} ->
+        {:error, {:composite_route_failed, %{failed_leg: :bridge, reason: reason}}}
+    end
+  end
+
+  defp validate_composite(%QuoteRequest{source_asset: "USDT", dest_asset: "USDC"}) do
+    :ok
+  end
+
+  defp validate_composite(_), do: {:error, :unsupported_route}
+
+  defp select_swap_leg(req, opts) do
+    swap_params = %{
+      source_chain: req.source_chain,
+      source_asset: req.source_asset,
+      dest_chain: req.source_chain,
+      dest_asset: "USDC",
+      amount: req.amount,
+      slippage_bps: req.slippage_bps,
+      metadata: req.metadata
+    }
+
+    with {:ok, swap_req} <- QuoteRequest.build(swap_params) do
+      swap_opts =
+        case Keyword.fetch(opts, :swap_providers) do
+          {:ok, list} -> [providers: list]
+          :error -> []
+        end
+
+      select(swap_req, swap_opts)
+    end
+  end
+
+  defp select_bridge_leg(req, swap_quote, opts) do
+    bridge_params = %{
+      source_chain: req.source_chain,
+      source_asset: "USDC",
+      dest_chain: req.dest_chain,
+      dest_asset: "USDC",
+      amount: swap_quote.output_amount,
+      metadata: req.metadata
+    }
+
+    with {:ok, bridge_req} <- QuoteRequest.build(bridge_params),
+         :ok <- validate_bridge_tokens(bridge_req) do
+      bridge_opts =
+        case Keyword.fetch(opts, :bridge_providers) do
+          {:ok, list} -> [providers: list]
+          :error -> []
+        end
+
+      select(bridge_req, bridge_opts)
+    end
+  end
+
+  defp validate_bridge_tokens(bridge_req) do
+    source = bridge_req.source_token
+    dest = bridge_req.dest_token
+
+    if source[:canonical] == true and source[:status] == :active and
+         dest[:canonical] == true and dest[:status] == :active do
+      :ok
+    else
+      {:error, :unsupported_route}
+    end
+  end
+
+  defp compose_route(req, swap_quote, swap_meta, bridge_quote, bridge_meta) do
+    now = DateTime.utc_now()
+    [swap_leg] = swap_quote.legs
+    [bridge_leg] = bridge_quote.legs
+
+    legs = [
+      swap_leg,
+      %{bridge_leg | step: 2}
+    ]
+
+    total_fee = sum_decimals(swap_quote.fees[:total_fee], bridge_quote.fees[:total_fee])
+    eta = sum_nillable(swap_quote.eta_seconds, bridge_quote.eta_seconds)
+
+    composite_quote = %RouteQuote{
+      provider: "composite",
+      request: req,
+      route_kind: :swap_plus_bridge,
+      legs: legs,
+      input_amount: req.amount,
+      output_amount: bridge_quote.output_amount,
+      quoted_at: now,
+      expires_at: swap_quote.expires_at,
+      fees: %{
+        gas_fee: nil,
+        protocol_fee: nil,
+        bridge_fee: bridge_quote.fees[:bridge_fee],
+        cryptobank_fee: nil,
+        total_fee: total_fee
+      },
+      eta_seconds: eta,
+      risk_flags: Enum.uniq(swap_quote.risk_flags ++ bridge_quote.risk_flags),
+      explanation:
+        "#{req.source_asset}->USDC swap on #{req.source_chain}, then USDC bridge to #{req.dest_chain}",
+      provider_metadata: %{
+        "swap_leg" => %{
+          "provider" => swap_quote.provider,
+          "provider_metadata" => swap_quote.provider_metadata
+        },
+        "bridge_leg" => %{
+          "provider" => bridge_quote.provider,
+          "provider_metadata" => bridge_quote.provider_metadata
+        }
+      }
+    }
+
+    meta = %{
+      considered: 1,
+      errors: swap_meta.errors ++ bridge_meta.errors,
+      all_quotes: [composite_quote],
+      swap_meta: swap_meta,
+      bridge_meta: bridge_meta
+    }
+
+    {:ok, composite_quote, meta}
+  end
+
+  defp sum_decimals(nil, nil), do: Decimal.new(0)
+  defp sum_decimals(nil, b), do: b
+  defp sum_decimals(a, nil), do: a
+  defp sum_decimals(a, b), do: Decimal.add(a, b)
+
+  defp sum_nillable(nil, nil), do: nil
+  defp sum_nillable(nil, b), do: b
+  defp sum_nillable(a, nil), do: a
+  defp sum_nillable(a, b), do: a + b
 end
