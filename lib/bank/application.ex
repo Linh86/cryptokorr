@@ -16,6 +16,8 @@ defmodule Bank.Application do
       Bank.Security.PauseState,
       # Feed freshness tracking for wallet screening sources.
       Bank.WalletScreening.FeedHealth,
+      # Node-local health tracking for stablecoin quote providers.
+      Bank.Stablecoins.ProviderHealth,
       # Delegation state is now durable in Postgres (see Bank.Delegations).
       # Background workers for runtime orchestration (see Bank.Runtime).
       {Oban, Application.fetch_env!(:bank, Oban)},

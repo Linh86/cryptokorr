@@ -382,8 +382,9 @@ defmodule Bank.Decisions do
   Gates:
     1. Envelope must exist and be current with outcome `:auto_exec`
     2. No active execution plan already exists for this decision
-    3. Runtime must not be globally paused
-    4. Smart account delegation must be `:active`
+    3. Stablecoin routes must not require an unwired adapter dispatch
+    4. Runtime must not be globally paused
+    5. Smart account delegation must be `:active`
 
   On success, creates an execution plan in `:prepared` state and
   enqueues it for execution via `Bank.Runtime.enqueue_execution/1`.
@@ -396,6 +397,7 @@ defmodule Bank.Decisions do
     with {:ok, envelope} <- get_envelope(envelope_id),
          :ok <- validate_executable_envelope(envelope),
          :ok <- validate_no_active_plan(envelope_id),
+         :ok <- validate_stablecoin_adapter_ready(envelope),
          :ok <- validate_not_paused(),
          :ok <- validate_delegation_active(smart_account_id) do
       reason = Keyword.get(opts, :reason, "manual_confirm")
@@ -455,6 +457,41 @@ defmodule Bank.Decisions do
       _plan -> {:error, :active_plan_exists}
     end
   end
+
+  defp validate_stablecoin_adapter_ready(%DecisionEnvelope{} = envelope) do
+    if stablecoin_route_requires_adapter?(envelope.reasons) do
+      {:error, :stablecoin_adapter_not_wired}
+    else
+      :ok
+    end
+  end
+
+  defp stablecoin_route_requires_adapter?(%{"items" => items}) when is_list(items) do
+    Enum.any?(items, fn item ->
+      item
+      |> reason_details()
+      |> stablecoin_route_from_details()
+      |> route_requires_adapter?()
+    end)
+  end
+
+  defp stablecoin_route_requires_adapter?(%{items: items}) when is_list(items) do
+    stablecoin_route_requires_adapter?(%{"items" => items})
+  end
+
+  defp stablecoin_route_requires_adapter?(_), do: false
+
+  defp reason_details(%{"details" => details}), do: details
+  defp reason_details(%{details: details}), do: details
+  defp reason_details(_), do: %{}
+
+  defp stablecoin_route_from_details(%{"stablecoin_route" => route}), do: route
+  defp stablecoin_route_from_details(%{stablecoin_route: route}), do: route
+  defp stablecoin_route_from_details(_), do: nil
+
+  defp route_requires_adapter?(%{"execution_state" => "requires_adapter"}), do: true
+  defp route_requires_adapter?(%{execution_state: :requires_adapter}), do: true
+  defp route_requires_adapter?(_), do: false
 
   defp validate_not_paused do
     if Security.paused?(:global) do

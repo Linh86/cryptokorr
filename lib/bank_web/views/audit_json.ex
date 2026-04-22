@@ -30,7 +30,8 @@ defmodule BankWeb.API.V1.AuditJSON do
       decisions: Enum.map(bundle.decisions, &render_decision/1),
       plans: Enum.map(bundle.plans, &render_plan/1),
       audit: Enum.map(bundle.audit, &render_event/1),
-      screening_evidence: bundle[:screening_evidence]
+      screening_evidence: bundle[:screening_evidence],
+      stablecoin_route_evidence: bundle[:stablecoin_route_evidence] || []
     }
   end
 

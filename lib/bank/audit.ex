@@ -252,7 +252,8 @@ defmodule Bank.Audit do
         simulations: [%SimulationReport{}, ...],    # oldest first
         decisions: [%DecisionEnvelope{}, ...],      # oldest first
         plans: [%ExecutionPlan{}, ...],             # oldest first
-        audit: [%AuditEvent{}, ...]                 # oldest first
+        audit: [%AuditEvent{}, ...],                # oldest first
+        stablecoin_route_evidence: [%{}, ...]       # route evaluations captured in audit
       }
 
   All children are ordered deterministically by `(inserted_at, id)`.
@@ -317,8 +318,19 @@ defmodule Bank.Audit do
       decisions: decisions,
       plans: plans,
       audit: audit,
-      screening_evidence: Bank.WalletScreening.Evidence.for_intent(intent)
+      screening_evidence: Bank.WalletScreening.Evidence.for_intent(intent),
+      stablecoin_route_evidence: stablecoin_route_evidence(audit)
     }
+  end
+
+  defp stablecoin_route_evidence(events) do
+    events
+    |> Enum.filter(&(&1.event_type == "stablecoin.route_evaluated"))
+    |> Enum.map(fn event ->
+      event.after_ref["stablecoin_route"] ||
+        event.after_ref[:stablecoin_route] ||
+        event.after_ref
+    end)
   end
 
   # Union of every rule uuid captured in every decision's policy

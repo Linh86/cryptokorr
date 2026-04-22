@@ -241,7 +241,38 @@ defmodule Bank.DecisionsTest do
                Decisions.request_manual_execution(envelope.id, "sa_g2")
     end
 
-    test "gate 3: rejects when runtime is paused" do
+    test "gate 3: rejects stablecoin routes whose adapter dispatch is not wired" do
+      envelope =
+        decision_envelope(
+          outcome: :auto_exec,
+          current: true,
+          reasons: %{
+            "items" => [
+              %{
+                "code" => "stablecoin_route_allowed",
+                "message" => "stablecoin route selected",
+                "details" => %{
+                  "stablecoin_route" => %{
+                    "execution_state" => "requires_adapter",
+                    "provider" => "zerox",
+                    "route_kind" => "swap"
+                  }
+                }
+              }
+            ]
+          }
+        )
+
+      {:ok, _del} = Delegations.grant("sa_stable", "del_stable")
+
+      assert {:error, :stablecoin_adapter_not_wired} =
+               Decisions.request_manual_execution(envelope.id, "sa_stable")
+
+      refute Decisions.active_plan_for(envelope.id)
+      refute_enqueued(worker: RunExecution)
+    end
+
+    test "gate 4: rejects when runtime is paused" do
       envelope = decision_envelope(outcome: :auto_exec, current: true)
       {:ok, _del} = Delegations.grant("sa_g3", "del_g3")
       {:ok, :paused} = Security.pause(:global)
@@ -250,7 +281,7 @@ defmodule Bank.DecisionsTest do
                Decisions.request_manual_execution(envelope.id, "sa_g3")
     end
 
-    test "gate 4: rejects when delegation is not active" do
+    test "gate 5: rejects when delegation is not active" do
       envelope = decision_envelope(outcome: :auto_exec, current: true)
       # No delegation for sa_g4
 
@@ -258,7 +289,7 @@ defmodule Bank.DecisionsTest do
                Decisions.request_manual_execution(envelope.id, "sa_g4")
     end
 
-    test "gate 4: rejects when delegation is revoking" do
+    test "gate 5: rejects when delegation is revoking" do
       envelope = decision_envelope(outcome: :auto_exec, current: true)
       {:ok, _del} = Delegations.grant("sa_g4b", "del_g4b")
       {:ok, _} = Delegations.record_revoke_requested("sa_g4b")
@@ -267,7 +298,7 @@ defmodule Bank.DecisionsTest do
                Decisions.request_manual_execution(envelope.id, "sa_g4b")
     end
 
-    test "gate 4: rejects when delegation is expired" do
+    test "gate 5: rejects when delegation is expired" do
       envelope = decision_envelope(outcome: :auto_exec, current: true)
 
       {:ok, _del} =

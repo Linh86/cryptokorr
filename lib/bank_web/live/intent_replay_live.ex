@@ -112,6 +112,7 @@ defmodule BankWeb.IntentReplayLive do
       <div class="space-y-6">
         <.intent_card intent={@bundle.intent} />
         <.audit_timeline_card events={@bundle.audit} />
+        <.stablecoin_route_card routes={@bundle[:stablecoin_route_evidence] || []} />
         <.trust_history_card trust_assessments={@bundle.trust_assessments} />
         <.simulation_history_card simulations={@bundle.simulations} />
         <.decision_history_card decisions={@bundle.decisions} />
@@ -213,6 +214,69 @@ defmodule BankWeb.IntentReplayLive do
             </div>
             <span class="text-xs text-base-content/40 font-mono shrink-0">
               {format_datetime(event.ts)}
+            </span>
+          </div>
+        </li>
+      </ol>
+    </section>
+    """
+  end
+
+  # --- Section: stablecoin route evidence ----------------------------------
+
+  attr :routes, :list, required: true
+
+  defp stablecoin_route_card(assigns) do
+    ~H"""
+    <section
+      id="replay-stablecoin-routes"
+      class="rounded-xl border border-base-300 bg-base-100 shadow-sm overflow-hidden"
+    >
+      <header class="px-6 py-4 border-b border-base-300 flex items-center justify-between">
+        <h2 class="text-sm font-semibold flex items-center gap-1.5">
+          <.icon name="hero-arrows-right-left" class="size-4" /> Stablecoin routes
+        </h2>
+        <span class="badge badge-sm badge-ghost">{length(@routes)}</span>
+      </header>
+      <div :if={@routes == []} class="px-6 py-6 text-sm text-base-content/50 text-center">
+        No stablecoin route evaluations captured.
+      </div>
+      <ol :if={@routes != []} class="divide-y divide-base-300">
+        <li :for={{route, idx} <- Enum.with_index(@routes, 1)} class="px-6 py-4">
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="text-[0.65rem] text-base-content/30 font-mono">v{idx}</span>
+                <span class={[
+                  "badge badge-sm",
+                  stablecoin_decision_class(route_value(route, "decision"))
+                ]}>
+                  {route_value(route, "decision")}
+                </span>
+                <span class="badge badge-sm badge-outline">
+                  {route_value(route, "route_kind")}
+                </span>
+                <span class="badge badge-sm badge-ghost">
+                  provider: {route_value(route, "provider")}
+                </span>
+              </div>
+              <div class="mt-1 text-xs text-base-content/50 flex items-center gap-3 flex-wrap">
+                <span>policy: {route_value(route, "policy_decision")}</span>
+                <span>state: {route_value(route, "execution_state")}</span>
+                <span>score: {route_value(route, "score")}</span>
+                <span :if={route_value(route, "input_amount")}>
+                  in: {route_value(route, "input_amount")}
+                </span>
+                <span :if={route_value(route, "output_amount")}>
+                  out: {route_value(route, "output_amount")}
+                </span>
+              </div>
+              <div :if={route_value(route, "reason")} class="mt-1 text-xs text-base-content/50 italic">
+                {route_value(route, "reason")}
+              </div>
+            </div>
+            <span class="text-xs text-base-content/40 font-mono shrink-0">
+              {route_value(route, "evaluated_at")}
             </span>
           </div>
         </li>
@@ -566,6 +630,11 @@ defmodule BankWeb.IntentReplayLive do
   defp final_outcome_class(:aborted), do: "badge-error"
   defp final_outcome_class(_), do: "badge-ghost"
 
+  defp stablecoin_decision_class("auto_exec"), do: "badge-success"
+  defp stablecoin_decision_class("approval_required"), do: "badge-info"
+  defp stablecoin_decision_class("block"), do: "badge-error"
+  defp stablecoin_decision_class(_), do: "badge-ghost"
+
   defp policy_state_class(:active), do: "badge-success"
   defp policy_state_class(:draft), do: "badge-warning"
   defp policy_state_class(:superseded), do: "badge-ghost"
@@ -587,6 +656,28 @@ defmodule BankWeb.IntentReplayLive do
   defp actor_icon(:runtime), do: "hero-cog-6-tooth"
   defp actor_icon(:adapter), do: "hero-link"
   defp actor_icon(_), do: "hero-question-mark-circle"
+
+  defp route_value(route, key) do
+    value = route[key] || route[route_atom_key(key)]
+
+    case value do
+      nil -> nil
+      atom when is_atom(atom) -> Atom.to_string(atom)
+      other -> other
+    end
+  end
+
+  defp route_atom_key("decision"), do: :decision
+  defp route_atom_key("route_kind"), do: :route_kind
+  defp route_atom_key("provider"), do: :provider
+  defp route_atom_key("policy_decision"), do: :policy_decision
+  defp route_atom_key("execution_state"), do: :execution_state
+  defp route_atom_key("score"), do: :score
+  defp route_atom_key("input_amount"), do: :input_amount
+  defp route_atom_key("output_amount"), do: :output_amount
+  defp route_atom_key("reason"), do: :reason
+  defp route_atom_key("evaluated_at"), do: :evaluated_at
+  defp route_atom_key(_), do: :unknown
 
   defp short_id(nil), do: "-"
   defp short_id(id) when byte_size(id) > 12, do: String.slice(id, 0, 8) <> "..."
