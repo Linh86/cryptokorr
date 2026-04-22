@@ -47,6 +47,18 @@ defmodule Bank.Runtime.Telemetry do
     safe_emit([:bank, :security, :event], %{count: 1}, %{event: event, scope: scope})
   end
 
+  @doc "Record a stablecoin route evaluation."
+  @spec stablecoin_route(map()) :: :ok
+  def stablecoin_route(%{decision: decision, route_kind: route_kind, provider: provider} = meta) do
+    safe_emit(
+      [:bank, :stablecoins, :route],
+      %{count: 1, score: meta[:score] || 0.0},
+      %{decision: decision, route_kind: route_kind, provider: provider}
+    )
+  end
+
+  def stablecoin_route(_), do: :ok
+
   defp safe_emit(event, measurements, metadata) do
     try do
       :telemetry.execute(event, measurements, metadata)
