@@ -86,6 +86,33 @@ Hard requirements before starting the checklist:
    Whichever secret store the deployment uses (Fly secrets, AWS
    Secrets Manager, etc.).
 
+## No-secret preflight from Phoenix
+
+Before touching the adapter scripts or any funded key, run the
+Phoenix-side preflight. It validates only presence and shape of the
+operator inputs, prints redacted values, and makes **no RPC calls**:
+
+```sh
+mix bank.kernel.preflight --phase deploy
+mix bank.kernel.preflight --phase install
+mix bank.kernel.preflight --phase verify
+```
+
+Phases mean:
+
+| Phase | Checks | Chain side effects |
+| ----- | ------ | ------------------ |
+| `deploy` | operator key, delegation signer pubkey, Base RPC, bundler RPC, Kernel factory, Permission Validator address | none |
+| `install` | all deploy inputs plus `SMART_ACCOUNT_ADDRESS` from phase 1 | none |
+| `verify` | all install inputs before running the read-only adapter verifier | none |
+| `runtime` | runtime binding has `SMART_ACCOUNT_ADDRESS` + `PERMISSION_VALIDATOR_ADDRESS` | none |
+
+The preflight is intentionally conservative: placeholder values,
+non-Base chain ids, malformed EVM addresses, and malformed RPC URLs
+block the run before a provisioning script can be started. A green
+preflight means "safe to run the adapter script", not "provisioning
+has succeeded".
+
 ## Step-by-step checklist
 
 > Each step is reversible-ish: you can throw away the deployment and
@@ -214,6 +241,14 @@ The template asserts:
    bytecode and its keccak hash. The hash goes into the operator's
    deployment journal alongside the addresses; #83 pins it as a
    tripwire fixture.
+
+Once the verifier emits a receipt, validate the journal shape with
+`Bank.Delegations.Provisioning.validate_receipt/1` (or an equivalent
+IEx call) before handing it to #83. That validator checks the Base
+chain id, all three EVM addresses, the validator bytecode hash, the
+vendor source URL, and the Basescan URL. It does not verify bytecode
+against chain state — the adapter verifier already did that — but it
+prevents #83 from pinning an incomplete or placeholder journal entry.
 
 If any assertion fails, **do NOT bind the addresses to the runtime
 env**. Fix the failure, redo Steps 4–5, and re-verify. A failing
