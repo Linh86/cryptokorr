@@ -98,3 +98,8 @@ config :bank, Bank.Stablecoins.Providers.OneInch,
   base_url: "http://oneinch.test",
   api_key: "test-1inch-api-key",
   req_options: [plug: {Req.Test, Bank.Stablecoins.Providers.OneInch}]
+
+# Jupiter swap adapter: route HTTP to Req.Test so tests can stub per-process.
+config :bank, Bank.Stablecoins.Providers.Jupiter,
+  base_url: "http://jupiter.test",
+  req_options: [plug: {Req.Test, Bank.Stablecoins.Providers.Jupiter}]
