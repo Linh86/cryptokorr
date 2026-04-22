@@ -140,6 +140,35 @@ defmodule Bank.Delegations.Provisioning do
     end
   end
 
+  @doc """
+  Read and validate a JSON receipt file from the adapter verification script.
+
+  This is still a no-secret, no-RPC check. It exists so operators can
+  validate the `verify-installed-validator.ts` output before handing it
+  to #83 for ABI/artifact pinning.
+  """
+  @spec validate_receipt_file(Path.t()) ::
+          {:ok, map()}
+          | {:error, [problem()]}
+          | {:error, {:read_failed, File.posix()}}
+          | {:error, {:decode_failed, Jason.DecodeError.t()}}
+  def validate_receipt_file(path) when is_binary(path) do
+    with {:ok, body} <- File.read(path),
+         {:ok, decoded} <- Jason.decode(body),
+         true <- is_map(decoded) do
+      validate_receipt(decoded)
+    else
+      {:error, reason} when is_atom(reason) ->
+        {:error, {:read_failed, reason}}
+
+      {:error, %Jason.DecodeError{} = reason} ->
+        {:error, {:decode_failed, reason}}
+
+      false ->
+        {:error, [problem("receipt", :invalid, "must be a JSON object")]}
+    end
+  end
+
   @doc "Return true for lowercase `0x` + 32-byte permission ids."
   @spec permission_id?(term()) :: boolean()
   def permission_id?(value), do: hex?(value, 32)
