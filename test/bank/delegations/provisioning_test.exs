@@ -123,6 +123,39 @@ defmodule Bank.Delegations.ProvisioningTest do
       assert Enum.any?(problems, &(&1.key == "validator_bytecode_keccak256"))
       assert Enum.any?(problems, &(&1.key == "vendor_source"))
     end
+
+    test "validates receipt files emitted by the adapter verify script" do
+      path = tmp_path("kernel-receipt.json")
+
+      File.write!(path, Jason.encode!(complete_receipt()))
+
+      assert {:ok, handoff} = Provisioning.validate_receipt_file(path)
+      assert handoff.chain_id == 84532
+      assert handoff.next_issue == "#83"
+    after
+      cleanup_tmp("kernel-receipt.json")
+    end
+
+    test "rejects missing, malformed, and non-object receipt files" do
+      missing = tmp_path("missing-receipt.json")
+      malformed = tmp_path("malformed-receipt.json")
+      array = tmp_path("array-receipt.json")
+
+      File.write!(malformed, "{not json")
+      File.write!(array, "[]")
+
+      assert {:error, {:read_failed, :enoent}} = Provisioning.validate_receipt_file(missing)
+
+      assert {:error, {:decode_failed, %Jason.DecodeError{}}} =
+               Provisioning.validate_receipt_file(malformed)
+
+      assert {:error, [%{key: "receipt", severity: :invalid}]} =
+               Provisioning.validate_receipt_file(array)
+    after
+      cleanup_tmp("missing-receipt.json")
+      cleanup_tmp("malformed-receipt.json")
+      cleanup_tmp("array-receipt.json")
+    end
   end
 
   describe "permission_id?/1" do
@@ -131,6 +164,31 @@ defmodule Bank.Delegations.ProvisioningTest do
       refute Provisioning.permission_id?("0x" <> String.duplicate("AB", 32))
       refute Provisioning.permission_id?("del_primary")
       refute Provisioning.permission_id?("0x" <> String.duplicate("ab", 20))
+    end
+  end
+
+  defp complete_receipt do
+    %{
+      "chain_id" => "84532",
+      "smart_account_address" => @smart_account,
+      "permission_validator_address" => @validator,
+      "kernel_factory_address" => @factory,
+      "permission_validator_bytecode_keccak256" => @bytecode_hash,
+      "vendor_source" => "https://docs.zerodev.app/",
+      "chain_explorer_url" => "https://sepolia.basescan.org/address/#{@validator}"
+    }
+  end
+
+  defp tmp_path(name) do
+    Path.join(System.tmp_dir!(), "bank-provisioning-test-#{name}")
+  end
+
+  defp cleanup_tmp(name) do
+    tmp_path(name)
+    |> File.rm()
+    |> case do
+      :ok -> :ok
+      {:error, :enoent} -> :ok
     end
   end
 end

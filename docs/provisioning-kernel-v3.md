@@ -242,13 +242,19 @@ The template asserts:
    deployment journal alongside the addresses; #83 pins it as a
    tripwire fixture.
 
-Once the verifier emits a receipt, validate the journal shape with
-`Bank.Delegations.Provisioning.validate_receipt/1` (or an equivalent
-IEx call) before handing it to #83. That validator checks the Base
-chain id, all three EVM addresses, the validator bytecode hash, the
-vendor source URL, and the Basescan URL. It does not verify bytecode
-against chain state — the adapter verifier already did that — but it
-prevents #83 from pinning an incomplete or placeholder journal entry.
+Once the verifier emits a receipt, validate the journal shape before
+handing it to #83:
+
+```sh
+mix bank.kernel.receipt.check /path/to/kernel-receipt.json
+```
+
+The task calls `Bank.Delegations.Provisioning.validate_receipt/1` and
+checks the Base chain id, all three EVM addresses, the validator
+bytecode hash, the vendor source URL, and the Basescan URL. It does
+not verify bytecode against chain state — the adapter verifier already
+did that — but it prevents #83 from pinning an incomplete or
+placeholder journal entry.
 
 If any assertion fails, **do NOT bind the addresses to the runtime
 env**. Fix the failure, redo Steps 4–5, and re-verify. A failing
