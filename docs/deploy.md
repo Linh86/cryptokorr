@@ -61,12 +61,12 @@ Provisioning is a one-shot operator procedure, not part of the
 release-time release flow. It is documented in
 [`docs/provisioning-kernel-v3.md`](provisioning-kernel-v3.md), with
 operator templates under
-[`cryptobank-ts-adapter/scripts/`](../../cryptobank-ts-adapter/scripts/).
+[`chain_adapter/scripts/`](../chain_adapter/scripts/).
 That runbook is the source of truth; this section is just a deploy-
 time pointer at it. Tracked in #84 (provisioning) and #83 (validator
 ABI verification).
 
-The deploy-time check is `cryptobank-ts-adapter/scripts/check-env.sh`,
+The deploy-time check is `chain_adapter/scripts/check-env.sh`,
 which reports whether the adapter is in `SENTINEL-ERA` mode (no
 validator address bound — fine for v0.1) or `KERNEL-PROVISIONED` mode
 (validator address bound — required once #58 ships). Run it on the
@@ -109,7 +109,7 @@ The happy path:
 > imply that the on-chain authority is gone — see
 > [docs/smart-account-and-revoke-design.md](smart-account-and-revoke-design.md)
 > and the "Adapter mode" output of
-> `cryptobank-ts-adapter/scripts/check-env.sh`.
+> `chain_adapter/scripts/check-env.sh`.
 
 ## Rollback
 

@@ -132,7 +132,7 @@ The in-repo artifacts are ready. What's left is:
 9. **Smoke test end-to-end.** `mix bank.smoke.transfer` +
    `mix bank.smoke.revoke` from the operator host; see
    [docs/smoke-tests.md](smoke-tests.md). Run
-   `cryptobank-ts-adapter/scripts/check-env.sh` on the adapter host
+   `chain_adapter/scripts/check-env.sh` on the adapter host
    first to confirm whether the deploy is in `SENTINEL-ERA` or
    `KERNEL-PROVISIONED` mode — the smoke result must be interpreted
    in light of that mode.

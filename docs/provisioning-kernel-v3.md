@@ -7,8 +7,8 @@ the sentinel-era and into a Kernel-provisioned state. Pairs with:
 - [docs/deploy.md](deploy.md) — generic Phoenix deploy procedure; this runbook is the chain-side prereq.
 - [docs/staging.md](staging.md) — staging topology; the "Kernel-provisioning" subsection there points back here.
 - [docs/incident-runbook.md](incident-runbook.md) — what to do when revoke does not land (still useful in both modes).
-- [`cryptobank-ts-adapter/README.md`](../../cryptobank-ts-adapter/README.md) — adapter env table; this runbook fills in the values it asks for.
-- [`cryptobank-ts-adapter/scripts/`](../../cryptobank-ts-adapter/scripts/) — provisioning + verification template scripts referenced inline below.
+- [`chain_adapter/README.md`](../chain_adapter/README.md) — adapter env table; this runbook fills in the values it asks for.
+- [`chain_adapter/scripts/`](../chain_adapter/scripts/) — provisioning + verification template scripts referenced inline below.
 
 Tracks: GitHub #84. Completion of this runbook is the prerequisite
 for #83 (verifying the validator interface) and #58 (wiring the
@@ -178,7 +178,7 @@ npm install viem @zerodev/sdk
 # (or the equivalent Biconomy Nexus packages if pivoting to fallback)
 
 # Copy the template script and edit:
-cp /path/to/cryptobank-ts-adapter/scripts/provision-kernel.ts .
+cp /path/to/chain_adapter/scripts/provision-kernel.ts .
 $EDITOR provision-kernel.ts
 
 # Set runtime env for the script:
@@ -228,7 +228,7 @@ Run the verification template against the freshly provisioned account:
 export SMART_ACCOUNT_ADDRESS=0x...        # Step 4
 export PERMISSION_VALIDATOR_ADDRESS=0x... # Step 3
 
-npx tsx /path/to/cryptobank-ts-adapter/scripts/verify-installed-validator.ts
+npx tsx /path/to/chain_adapter/scripts/verify-installed-validator.ts
 ```
 
 The template asserts:
@@ -277,7 +277,7 @@ DELEGATION_SIGNER_KEY=0x...           # the private key matching the pubkey from
 Restart the adapter container. Verify with:
 
 ```sh
-sh /path/to/cryptobank-ts-adapter/scripts/check-env.sh
+sh /path/to/chain_adapter/scripts/check-env.sh
 ```
 
 The check-env script prints PASS/FAIL per required var and indicates
@@ -336,7 +336,7 @@ Beyond the immediate smoke checks, confirm:
 The adapter has exactly two operational modes for revoke. The check
 is a single env-var presence test, enforced by
 `requirePermissionValidatorAddress(config)` in
-`cryptobank-ts-adapter/src/config/index.ts`:
+`chain_adapter/src/config/index.ts`:
 
 | Mode                  | `PERMISSION_VALIDATOR_ADDRESS` | What `executeRevoke` does                                                         |
 | --------------------- | ------------------------------ | --------------------------------------------------------------------------------- |
@@ -393,10 +393,10 @@ operator decides to scrap the deployment:
 
 ## Templates referenced
 
-- [`scripts/provision-kernel.ts`](../../cryptobank-ts-adapter/scripts/provision-kernel.ts) — viem + ZeroDev SDK provisioning template (Steps 4 + 5).
-- [`scripts/verify-installed-validator.ts`](../../cryptobank-ts-adapter/scripts/verify-installed-validator.ts) — on-chain install verification (Step 6).
-- [`scripts/check-env.sh`](../../cryptobank-ts-adapter/scripts/check-env.sh) — runtime env hygiene check (Step 7).
-- [`scripts/README.md`](../../cryptobank-ts-adapter/scripts/README.md) — overview of what the templates do and what they deliberately leave to the operator.
+- [`scripts/provision-kernel.ts`](../chain_adapter/scripts/provision-kernel.ts) — viem + ZeroDev SDK provisioning template (Steps 4 + 5).
+- [`scripts/verify-installed-validator.ts`](../chain_adapter/scripts/verify-installed-validator.ts) — on-chain install verification (Step 6).
+- [`scripts/check-env.sh`](../chain_adapter/scripts/check-env.sh) — runtime env hygiene check (Step 7).
+- [`scripts/README.md`](../chain_adapter/scripts/README.md) — overview of what the templates do and what they deliberately leave to the operator.
 
 ## What #83 and #58 still need next, after this runbook lands
 
