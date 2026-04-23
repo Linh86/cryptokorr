@@ -110,12 +110,20 @@ defmodule Bank.Smoke do
   def run_revoke(opts) do
     with {:ok, smart_account_id} <- fetch_required(opts, :smart_account_id),
          {:ok, reason} <- fetch(opts, :reason, "smoke_test"),
-         %Delegation{state: state} when state in [:active, :pending] <-
+         %Delegation{state: state, delegation_id: delegation_id}
+         when state in [:active, :pending] and is_binary(delegation_id) <-
            Delegations.get(smart_account_id) || {:error, :no_delegation} do
-      Logger.info("Bank.Smoke: dispatching revoke for #{smart_account_id}")
+      Logger.info(
+        "Bank.Smoke: dispatching revoke for #{smart_account_id} (delegation_id=#{delegation_id})"
+      )
 
+      # `dispatch_revoke_delegation/2` requires `delegation_id` so the
+      # adapter can target the right authority record once #58 swaps
+      # the inner call for the real ERC-7579 disable (sentinel path
+      # just echoes the id into the callback projection).
       case Bank.AdapterClient.dispatch_revoke_delegation(%{
              smart_account_id: smart_account_id,
+             delegation_id: delegation_id,
              reason: reason
            }) do
         {:ok, %{accepted: true}} ->
