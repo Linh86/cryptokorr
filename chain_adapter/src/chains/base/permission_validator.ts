@@ -176,10 +176,70 @@
  * function name.
  */
 
-import { isHex, type Hex } from "viem";
+import { isHex, type AbiFunction, type Hex } from "viem";
 
 /** Length of a `bytes32` permission id in its 0x-prefixed hex form. */
 export const PERMISSION_ID_HEX_LENGTH = 2 + 64;
+
+/**
+ * Shape the #83 pin MUST populate. Promoted from the module-level
+ * JSDoc above into an actual exported type so the eventual pin lands
+ * as a type-checked value rather than a hand-rolled literal.
+ *
+ * The four `artifactSource.kind` values are the only provenance
+ * categories the pin reviewer accepts; every other field is strictly
+ * bound to what a specific verified deployment produces. See the
+ * "What #83 must populate" section above for the behavioural
+ * contract each field carries.
+ */
+export interface VerifiedPermissionValidator {
+  chainId: 8453 | 84532;
+  address: `0x${string}`;
+  deployedBytecodeKeccak256: Hex;
+  artifactSource: {
+    kind:
+      | "etherscan_verified_contract"
+      | "basescan_verified_contract"
+      | "vendor_audited_package"
+      | "vendor_deployment_manifest";
+    url: string;
+    note: string;
+  };
+  disableFunction: AbiFunction;
+}
+
+/**
+ * Pinned Permission Validator artifact for the live revoke encoder.
+ *
+ * `null` until GitHub #83 lands a `VerifiedPermissionValidator`
+ * sourced from ONE verified deployment (Base Sepolia first, then
+ * mainnet). This is the ONLY runtime state the sentinel-era
+ * adapter supports; the live revoke path keeps using
+ * `buildSentinelRevokeCallData` while the pin is null. When #83
+ * flips this to a populated value:
+ *
+ *   - The startup bytecode tripwire activates:
+ *     `keccak256(eth_getCode(pin.address))` against the configured
+ *     `BASE_RPC_URL` must equal `pin.deployedBytecodeKeccak256`, or
+ *     startup fails closed.
+ *   - `executeRevoke` routes the real ERC-7579 disable body:
+ *     `buildErc7579ExecuteCallData(pin.address, 0n,
+ *     encodeFunctionData({ abi: [pin.disableFunction],
+ *     args: [permissionIdFromDelegationId(delegationId)] }))`.
+ *   - `test/permission-validator-pin.test.ts` flips from asserting
+ *     null to pinning the disable function selector byte-for-byte,
+ *     and `test/base-revoke-sentinel-pin.test.ts` is replaced by a
+ *     sibling test pinning the new outer calldata.
+ *
+ * The `VerifiedPermissionValidator | null` annotation is deliberate
+ * — callers that want to reach the real path narrow via
+ * `if (KERNEL_PERMISSION_VALIDATOR_PIN !== null)`, which TypeScript
+ * narrows to `VerifiedPermissionValidator` inside the guard. That
+ * narrowing is what makes the sentinel-vs-real branch clean to add
+ * in the final #58 diff without re-structuring the signature.
+ */
+export const KERNEL_PERMISSION_VALIDATOR_PIN: VerifiedPermissionValidator | null =
+  null;
 
 /**
  * Parse a Phoenix-side `delegation_id` into a `bytes32 permissionId`.

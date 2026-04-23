@@ -8,7 +8,7 @@
  * signing behavior is exercised end-to-end.
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import type { Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { getUserOperationHash } from "viem/account-abstraction";
@@ -18,7 +18,9 @@ import {
   resetCallbackSeq,
 } from "../src/callbacks/client.js";
 import type { BaseClients } from "../src/chains/base/client.js";
+import { testConfig } from "../src/config/index.js";
 import { ExecutionError } from "../src/lib/errors.js";
+import { logger } from "../src/lib/logger.js";
 
 const SMART_ACCOUNT =
   "0x000000000000000000000000000000000000a11c" as const;
@@ -129,7 +131,9 @@ describe("executeRevoke — Base sentinel (AA v0.7)", () => {
 
     const result = await executeRevoke(
       "sa_test",
+      "del_primary",
       "operator_requested",
+      testConfig(),
       clients,
       callbackClient,
     );
@@ -146,12 +150,87 @@ describe("executeRevoke — Base sentinel (AA v0.7)", () => {
     if (cb.kind !== "delegation.state_changed") throw new Error("unreachable");
     expect(cb.state).toBe("revoked");
     expect(cb.reason).toBe("operator_requested");
+    // delegation_id is echoed straight from the caller into the
+    // projection-level callback; the sentinel body does not consume
+    // it yet (see TODO(#58) in `src/chains/base/revoke.ts`).
+    expect(cb.delegation_id).toBe("del_primary");
     expect(cb.tx_refs![0]!.userop_hash).toBe(result.userOpHash);
     expect(cb.tx_refs![0]!.hash).toBe(TX_HASH);
     expect(cb.tx_refs![0]!.block_number).toBe(100);
     expect(cb.tx_refs![0]!.status).toBe("success");
     expect(cb.tx_refs![0]!.bundler).toBe("base-v07-bundler");
     expect(cb.tx_refs![0]!.nonce).toBe("0x7");
+  });
+
+  it("warns but still uses sentinel body when PERMISSION_VALIDATOR_ADDRESS is set but pin is null (#83 pending)", async () => {
+    // An operator who runs Kernel provisioning before #83 lands
+    // populates PERMISSION_VALIDATOR_ADDRESS but leaves the pin
+    // slot null. The runtime must not claim a cryptographic revoke
+    // in that state — it stays on the sentinel body AND surfaces
+    // the straddle in the logs so ops sees it. This pins both
+    // halves of that invariant.
+    const warnSpy = vi.spyOn(logger, "warn");
+    try {
+      const callbackClient = createTestCallbackClient();
+      const clients = mockClients();
+      const configWithEnvSet = testConfig({
+        permissionValidatorAddress:
+          "0x000000000000000000000000000000000000b0b0" as `0x${string}`,
+      });
+
+      const result = await executeRevoke(
+        "sa_test",
+        "del_primary",
+        "operator_requested",
+        configWithEnvSet,
+        clients,
+        callbackClient,
+      );
+
+      // Sentinel still anchors on chain — same shape as the no-env
+      // happy path above.
+      expect(result.status).toBe("success");
+      expect(callbackClient.payloads).toHaveLength(1);
+      const cb = callbackClient.payloads[0]!;
+      if (cb.kind !== "delegation.state_changed")
+        throw new Error("unreachable");
+      expect(cb.state).toBe("revoked");
+
+      // The asymmetric-state warn fires exactly once, at the top
+      // of `executeRevoke`.
+      const pinWarns = warnSpy.mock.calls.filter(
+        (args) =>
+          typeof args[0] === "string" &&
+          args[0].includes("KERNEL_PERMISSION_VALIDATOR_PIN is not yet landed"),
+      );
+      expect(pinWarns).toHaveLength(1);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("threads a Kernel-shaped bytes32 permissionId hex into the callback", async () => {
+    // The dispatch schema accepts any non-empty delegation_id; the
+    // sentinel path must not choke on the post-Kernel 66-char hex
+    // form either. Once #58 wires the real disable body this same
+    // value will also feed `permissionIdFromDelegationId`.
+    const permissionHex = ("0x" + "ab".repeat(32)) as `0x${string}`;
+    const callbackClient = createTestCallbackClient();
+    const clients = mockClients();
+
+    await executeRevoke(
+      "sa_test",
+      permissionHex,
+      "operator_requested",
+      testConfig(),
+      clients,
+      callbackClient,
+    );
+
+    const cb = callbackClient.payloads[0]!;
+    if (cb.kind !== "delegation.state_changed") throw new Error("unreachable");
+    expect(cb.delegation_id).toBe(permissionHex);
+    expect(cb.state).toBe("revoked");
   });
 
   it("emits revoke_failed with bundler_rejected when the bundler rejects the user-op", async () => {
@@ -163,7 +242,14 @@ describe("executeRevoke — Base sentinel (AA v0.7)", () => {
     });
 
     await expect(
-      executeRevoke("sa_test", "operator_requested", clients, callbackClient),
+      executeRevoke(
+        "sa_test",
+        "del_primary",
+        "operator_requested",
+        testConfig(),
+        clients,
+        callbackClient,
+      ),
     ).rejects.toThrow(ExecutionError);
 
     expect(callbackClient.payloads).toHaveLength(1);
@@ -183,7 +269,14 @@ describe("executeRevoke — Base sentinel (AA v0.7)", () => {
     });
 
     await expect(
-      executeRevoke("sa_test", "operator_requested", clients, callbackClient),
+      executeRevoke(
+        "sa_test",
+        "del_primary",
+        "operator_requested",
+        testConfig(),
+        clients,
+        callbackClient,
+      ),
     ).rejects.toThrow(ExecutionError);
 
     expect(callbackClient.payloads).toHaveLength(1);
@@ -202,7 +295,14 @@ describe("executeRevoke — Base sentinel (AA v0.7)", () => {
     });
 
     await expect(
-      executeRevoke("sa_test", "operator_requested", clients, callbackClient),
+      executeRevoke(
+        "sa_test",
+        "del_primary",
+        "operator_requested",
+        testConfig(),
+        clients,
+        callbackClient,
+      ),
     ).rejects.toThrow(ExecutionError);
 
     expect(callbackClient.payloads).toHaveLength(1);
@@ -222,7 +322,14 @@ describe("executeRevoke — Base sentinel (AA v0.7)", () => {
     });
 
     await expect(
-      executeRevoke("sa_test", "operator_requested", clients, callbackClient),
+      executeRevoke(
+        "sa_test",
+        "del_primary",
+        "operator_requested",
+        testConfig(),
+        clients,
+        callbackClient,
+      ),
     ).rejects.toThrow(ExecutionError);
 
     expect(callbackClient.payloads).toHaveLength(1);
@@ -244,7 +351,14 @@ describe("executeRevoke — Base sentinel (AA v0.7)", () => {
     });
 
     await expect(
-      executeRevoke("sa_test", "operator_requested", clients, callbackClient),
+      executeRevoke(
+        "sa_test",
+        "del_primary",
+        "operator_requested",
+        testConfig(),
+        clients,
+        callbackClient,
+      ),
     ).rejects.toThrow(ExecutionError);
 
     const cb = callbackClient.payloads[0]!;
@@ -267,7 +381,14 @@ describe("executeRevoke — Base sentinel (AA v0.7)", () => {
     });
 
     await expect(
-      executeRevoke("sa_test", "operator_requested", clients, callbackClient),
+      executeRevoke(
+        "sa_test",
+        "del_primary",
+        "operator_requested",
+        testConfig(),
+        clients,
+        callbackClient,
+      ),
     ).rejects.toThrow(ExecutionError);
 
     expect(callbackClient.payloads).toHaveLength(1);

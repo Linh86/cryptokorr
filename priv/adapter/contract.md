@@ -434,10 +434,20 @@ See `fixtures/dispatch_revoke_delegation.json`.
 {
   "action": "revoke_delegation",
   "smart_account_id": "sa_...",
+  "delegation_id": "del_...",            // opaque to Phoenix; hex
+                                         // form of bytes32 permissionId
+                                         // once #58 ships against a
+                                         // Kernel v3 account
   "reason": "operator_requested",
   "correlation_id": null                 // runtime-scoped
 }
 ```
+
+`delegation_id` is pulled from the Phoenix `delegations` projection at
+dispatch time — the worker reads the current non-terminal row's
+`delegation_id` and sends it through. If no non-terminal row exists
+the worker cancels with `:no_such_delegation` without reaching the
+adapter, since there is nothing to cryptographically revoke.
 
 ## Callbacks (Adapter → Phoenix)
 

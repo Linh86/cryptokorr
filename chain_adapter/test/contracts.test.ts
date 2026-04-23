@@ -64,6 +64,9 @@ describe("Contract: dispatch schemas match Phoenix fixtures", () => {
       expect(result.data.action).toBe("revoke_delegation");
       expect(result.data.reason).toBe("operator_requested");
       expect(result.data.correlation_id).toBeNull();
+      // `delegation_id` is required on the wire — Phoenix sources it
+      // from the `delegations` projection row at dispatch time.
+      expect(result.data.delegation_id).toBe("del_primary");
     }
   });
 });
@@ -147,6 +150,19 @@ describe("Contract: schemas reject malformed payloads", () => {
   it("rejects swap with non-integer slippage_bps", () => {
     const bad = { ...dispatchSwap, slippage_bps: "fifty" };
     expect(DispatchSwapSchema.safeParse(bad).success).toBe(false);
+  });
+
+  it("rejects revoke_delegation with missing delegation_id", () => {
+    const { delegation_id: _drop, ...bad } =
+      dispatchRevokeDelegation as typeof dispatchRevokeDelegation & {
+        delegation_id: string;
+      };
+    expect(DispatchRevokeDelegationSchema.safeParse(bad).success).toBe(false);
+  });
+
+  it("rejects revoke_delegation with empty delegation_id", () => {
+    const bad = { ...dispatchRevokeDelegation, delegation_id: "" };
+    expect(DispatchRevokeDelegationSchema.safeParse(bad).success).toBe(false);
   });
 
   it("rejects callback with invalid kind", () => {

@@ -36,12 +36,23 @@ import {
 } from "../contracts/schemas.js";
 import { ValidationError } from "../lib/errors.js";
 import { logger } from "../lib/logger.js";
+import type { AdapterConfig } from "../config/index.js";
 import type { CallbackClient } from "../callbacks/client.js";
 import { nextCallbackId } from "../callbacks/client.js";
 import type { BaseClients } from "../chains/base/client.js";
 import { executeRevoke } from "../chains/base/revoke.js";
 
 export interface RevokeDeps {
+  /**
+   * Adapter runtime config. `executeRevoke` reads
+   * `permissionValidatorAddress` off it to decide whether it is
+   * running in sentinel-era (env unset or pin not yet landed) or in
+   * Kernel-provisioned mode — the latter is gated on both the env
+   * value AND `KERNEL_PERMISSION_VALIDATOR_PIN` being non-null, so
+   * the sentinel can never silently degrade into claiming a
+   * cryptographic revoke.
+   */
+  config: AdapterConfig;
   callbackClient: CallbackClient;
   baseClients: BaseClients;
 }
@@ -75,10 +86,10 @@ export async function handleRevokeDispatch(
   }
 
   const dispatch: DispatchRevokeDelegation = parsed.data;
-  const delegationId = "del_primary";
 
   logger.info("Revoke delegation dispatch received", {
     smart_account_id: dispatch.smart_account_id,
+    delegation_id: dispatch.delegation_id,
     reason: dispatch.reason,
   });
 
@@ -87,7 +98,7 @@ export async function handleRevokeDispatch(
     callback_id: nextCallbackId(),
     kind: "delegation.state_changed",
     smart_account_id: dispatch.smart_account_id,
-    delegation_id: delegationId,
+    delegation_id: dispatch.delegation_id,
     state: "revoking",
     reason: dispatch.reason,
     emitted_at: new Date().toISOString(),
@@ -109,7 +120,9 @@ export async function handleRevokeDispatch(
   try {
     await executeRevoke(
       dispatch.smart_account_id,
+      dispatch.delegation_id,
       dispatch.reason,
+      deps.config,
       deps.baseClients,
       deps.callbackClient,
     );
