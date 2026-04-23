@@ -75,6 +75,24 @@ SMART_ACCOUNT_ID=sa_alpha_01 \
 mix bank.smoke.revoke
 ```
 
+`delegation_id` is resolved from the `delegations` row keyed by
+`SMART_ACCOUNT_ID`; the task fails with `:no_active_delegation` if
+there is no active or pending delegation row. Phoenix then threads
+that `delegation_id` into the adapter dispatch payload
+(`POST /dispatch/revoke_delegation`, required field since #58's
+threading commit), and the adapter echoes it back on every
+`delegation.state_changed` callback so Phoenix's audit chain is keyed
+to the same identity end-to-end.
+
+For a Kernel-provisioned smart account, `delegation_id` is the
+lowercase hex form of the Permission Validator's `bytes32 permissionId`
+(66 chars total, `0x` + 64 hex). For pre-Kernel / sentinel accounts it
+is the legacy `del_*` placeholder; the mapping helpers in
+`chain_adapter/src/chains/base/permission_validator.ts` deliberately
+reject the placeholder in `permissionIdFromDelegationId` so the
+cryptographic revoke (#58) cannot silently degrade against a legacy
+id.
+
 ### PASS
 
 ```
@@ -87,6 +105,21 @@ PASS — revoke smoke
 
 Exit code 0.
 
+> **What `state: revoked` means in the current (sentinel-era) runtime.**
+> Until #58 ships, the adapter's revoke path broadcasts a no-op
+> sentinel UserOp and treats a successful receipt as an **on-chain
+> anchor** of the revoke intent. Phoenix transitions the delegation
+> row to `:revoked` to reflect the trust downgrade — it does NOT
+> imply the delegation key is cryptographically unable to sign. A
+> `revoked` smoke PASS in sentinel-era mode means "the AA pipeline
+> went end-to-end and the anchor landed", not "the authority record
+> on chain has been disabled". Run `chain_adapter/scripts/check-env.sh`
+> on the adapter host to see which mode it is in; if the `mode:`
+> line is `sentinel-era` or `straddle`, the above caveat applies.
+> Once #58 lands against a `kernel-provisioned` host, the same
+> `state: revoked` additionally means the Permission Validator
+> cryptographically rejected the delegation's `permissionId`.
+
 ### Typical FAIL modes
 
 | `reason`                          | Likely cause                                              |
@@ -95,7 +128,7 @@ Exit code 0.
 | `{:delegation_not_active, state}` | Delegation is already `:revoking`, `:revoke_failed`, `:revoked`, or `:expired`. |
 | `{:dispatch_failed, :adapter_unavailable}` | Adapter unreachable. |
 | `{:timeout, :revoking}`           | Adapter accepted but no terminal callback yet. Check the adapter + bundler. |
-| `{:revoke_failed, reason}`        | Adapter attempted the revoke but the chain-level attempt failed (send rejected, confirmation timeout, sentinel reverted). `reason` is the `last_reason` recorded on the delegation row. Operator must retry. |
+| `{:revoke_failed, reason}`        | Adapter attempted the revoke but the chain-level attempt failed (send rejected, confirmation timeout, sentinel reverted, bundler hash mismatch). `reason` is the `last_reason` recorded on the delegation row. Operator must retry. |
 
 ## After a smoke run
 

@@ -5,6 +5,7 @@ the sentinel-era and into a Kernel-provisioned state. Pairs with:
 
 - [docs/smart-account-and-revoke-design.md](smart-account-and-revoke-design.md) — the architectural decision and the runtime contract this provisioning satisfies (#56).
 - [docs/deploy.md](deploy.md) — generic Phoenix deploy procedure; this runbook is the chain-side prereq.
+- [docs/operator-secrets-checklist.md](operator-secrets-checklist.md) — plain-language checklist for preparing the required secrets and env values before touching the chain.
 - [docs/staging.md](staging.md) — staging topology; the "Kernel-provisioning" subsection there points back here.
 - [docs/incident-runbook.md](incident-runbook.md) — what to do when revoke does not land (still useful in both modes).
 - [`chain_adapter/README.md`](../chain_adapter/README.md) — adapter env table; this runbook fills in the values it asks for.
@@ -312,7 +313,8 @@ ships:
   cryptographically; the sentinel just anchors the intent. This is
   correct pre-#58 behaviour.
 
-After #58 ships against the same provisioned account:
+After both #83 (verified pin populated) and #58 (encoder guard
+wired) ship against the same provisioned account:
 
 - `mix bank.smoke.revoke` — PASS via the cryptographic revoke. The
   `:revoked` state then means the Permission Validator has actually
@@ -333,22 +335,29 @@ Beyond the immediate smoke checks, confirm:
 
 ## Sentinel-era vs Kernel-provisioned mode
 
-The adapter has exactly two operational modes for revoke. The check
-is a single env-var presence test, enforced by
-`requirePermissionValidatorAddress(config)` in
-`chain_adapter/src/config/index.ts`:
+The adapter's revoke path observably depends on two runtime inputs:
+the `PERMISSION_VALIDATOR_ADDRESS` env var (set by this runbook) and
+`KERNEL_PERMISSION_VALIDATOR_PIN` in
+`chain_adapter/src/chains/base/permission_validator.ts` (populated by
+#83, `null` today). Both must be present for the cryptographic path.
+The strict accessor `requirePermissionValidatorAddress(config)` in
+`chain_adapter/src/config/index.ts` is the fail-closed gate that #58
+will call when it reads the env var; it is not invoked by
+`executeRevoke` today because the sentinel body does not need the
+address.
 
-| Mode                  | `PERMISSION_VALIDATOR_ADDRESS` | What `executeRevoke` does                                                         |
-| --------------------- | ------------------------------ | --------------------------------------------------------------------------------- |
-| Sentinel-era (today)  | unset                          | Sentinel UserOp `execute(self, 0, 0x)`. Anchor only — no cryptographic disable.   |
-| Kernel-provisioned (target post-#84) | set                  | Still sentinel until #58 ships. After #58: real ERC-7579 disable wrapped via `buildErc7579ExecuteCallData`. |
+| `PERMISSION_VALIDATOR_ADDRESS` | `KERNEL_PERMISSION_VALIDATOR_PIN` | What `executeRevoke` does today                                                                                                |
+| ------------------------------ | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| unset                          | `null`                            | Sentinel UserOp `execute(self, 0, 0x)`. Anchor only — no cryptographic disable. No warning.                                    |
+| set (post-#84 runbook)         | `null` (pre-#83)                  | Still sentinel. Emits an asymmetric-state warn log so operators know the env alone does not upgrade the path.                  |
+| set (post-#84 runbook)         | non-null (post-#83)               | Once #58 wires the guard: real ERC-7579 disable wrapped via `buildErc7579ExecuteCallData`, inner body from the pinned fragment. |
 
 Note that **provisioning alone does not make the revoke
-cryptographic** — that is #58's wiring. Provisioning establishes the
-on-chain target so #58 has something real to call. Before #58, the
-operator may set `PERMISSION_VALIDATOR_ADDRESS` to a valid
-provisioned address and the live revoke will still be sentinel; the
-strict accessor only triggers when #58's encoder reads it.
+cryptographic**. Provisioning establishes the on-chain target so
+#83 has something to verify and #58 has something real to call.
+Before both #83 (pin populated) and #58 (encoder guard wired) ship,
+the operator may set `PERMISSION_VALIDATOR_ADDRESS` to a valid
+provisioned address and the live revoke will still be sentinel.
 
 ## What this runbook does NOT do
 

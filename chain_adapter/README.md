@@ -125,24 +125,30 @@ Status of the implementation:
      v0.1; the strict accessor `requirePermissionValidatorAddress`
      fails loudly at revoke time when the live revoke begins
      reading it).
-3. **Validator interface pin — DEFERRED to #58.** The Permission
+3. **Validator interface pin — DEFERRED to #83.** The Permission
    Validator's own disable function name + selector + ABI fragment
    was deliberately not pinned at #57. Pinning it from a plausible
    reference name without verifying it against an actual deployed
    bytecode would be speculation, and a wrong selector would surface
    as a silent on-chain revert at the first real revoke. The
-   verifiable scaffolding above is what #58 will plug a verified
-   inner body into.
-4. **A deployed Permission Validator on Base — pending operator
-   action.** When the validator is deployed, `SMART_ACCOUNT_ADDRESS`
-   is migrated to a Kernel-shaped account, and the validator's
-   disable interface is captured in a tripwire test, the address
-   goes into `PERMISSION_VALIDATOR_ADDRESS` and the env is
-   fail-closed without any further code change.
+   `VerifiedPermissionValidator` interface and the
+   `KERNEL_PERMISSION_VALIDATOR_PIN: VerifiedPermissionValidator | null`
+   slot are exported from `permission_validator.ts` (pin is `null`
+   today) so #83 can populate a single verified record without
+   further scaffolding.
+4. **A deployed Permission Validator on Base — tracked in #84.**
+   Operator-side provisioning runbook:
+   [`docs/provisioning-kernel-v3.md`](../docs/provisioning-kernel-v3.md)
+   in the Phoenix repo. When #84 completes, `SMART_ACCOUNT_ADDRESS`
+   is migrated to the Kernel-shaped account and the address can
+   go into `PERMISSION_VALIDATOR_ADDRESS`; #83 then verifies the
+   install artifact and populates the pin.
 5. **Sentinel → real swap in `executeRevoke` — tracked in #58.** The
    swap is documented inline as a `TODO(#58)` block in
    [`src/chains/base/revoke.ts`](src/chains/base/revoke.ts) with the
-   three remaining sub-prereqs spelled out. The tripwire test
+   two external prereqs (#84 provisioning + #83 verified pin) spelled
+   out alongside the exact guard #58 adds against
+   `KERNEL_PERMISSION_VALIDATOR_PIN`. The tripwire test
    `test/base-revoke-sentinel-pin.test.ts` will fail loudly the
    moment the inner call shape changes, forcing whoever lands #58 to
    update this README, the contract docs, and the runbook.
@@ -298,10 +304,13 @@ Test suites:
   exercises the full AA callback plumbing, but it does not disable
   the delegation key at the contract level. The smart-account choice
   (Kernel v3) is decided in #56 and the adapter-side ABI / mapping /
-  config scaffolding landed in #57; what remains is deploying a
-  Permission Validator and swapping the sentinel inner call for the
-  real disable call (#58). The full architectural rationale lives in
-  the Phoenix repo at `docs/smart-account-and-revoke-design.md`.
+  config scaffolding landed in #57; what remains is provisioning a
+  Kernel v3 account + Permission Validator on Base (#84), pinning
+  the validator's disable fragment as a verified
+  `KERNEL_PERMISSION_VALIDATOR_PIN` (#83, `null` today), and then
+  swapping the sentinel inner call for the real disable call gated
+  on that pin (#58). The full architectural rationale lives in the
+  Phoenix repo at `docs/smart-account-and-revoke-design.md`.
   Phoenix issue #31 stays open until #58 ships end-to-end. See the
   "Revoke delegation" subsection above for the exact swap when #58
   is landed.
@@ -312,13 +321,12 @@ Test suites:
 - **Confirmation polling.** The current flow waits synchronously on
   `waitForUserOperationReceipt`. Production will use async polling
   with retry.
-- **Dispatch endpoint authentication.** `/dispatch/transfer`,
-  `/dispatch/swap`, and `/dispatch/revoke_delegation` accept any
-  caller — there is no bearer or other auth check on the dispatch
-  side. Phoenix does send `Authorization: Bearer …`, but the adapter
-  does not validate it. Tracked in Phoenix issue #33.
-- **mTLS.** Dev uses a shared bearer secret (outbound callbacks
-  only). Production uses mutual TLS per the contract spec; not yet
-  wired in either direction.
+- **mTLS.** Dev uses a shared bearer secret in both directions:
+  inbound `/dispatch/*` requires `Authorization: Bearer
+  $ADAPTER_DISPATCH_SECRET` (enforced in `src/app.ts` by
+  `verifyDispatchAuth`, constant-time compared), and outbound
+  callbacks sign with `$ADAPTER_CALLBACK_SECRET`. Production will
+  add mutual TLS per the contract spec; not yet wired in either
+  direction.
 - **Multi-chain support.** Only Base. Schema is chain-aware but
   runtime rejects non-Base dispatches.
