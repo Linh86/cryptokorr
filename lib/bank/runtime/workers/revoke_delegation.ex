@@ -40,6 +40,8 @@ defmodule Bank.Runtime.Workers.RevokeDelegation do
     max_attempts: 5
 
   alias Bank.AdapterClient
+  alias Bank.Delegations
+  alias Bank.Delegations.Delegation
   alias Bank.Runtime
   alias Bank.Runtime.Notifier
 
@@ -80,9 +82,32 @@ defmodule Bank.Runtime.Workers.RevokeDelegation do
     {:cancel, :malformed_args}
   end
 
+  # The adapter needs `delegation_id` so its cryptographic revoke can
+  # target the right authority record (`bytes32 permissionId` in the
+  # Kernel-provisioned mode; the legacy sentinel placeholder in v0.1).
+  # We read it off the Phoenix projection here rather than stuffing it
+  # into Oban args so the dispatch always reflects the latest row —
+  # including on retries after a revoke_failed. Missing rows are a
+  # deterministic failure: without a delegation to revoke there is
+  # nothing the adapter can encode.
   defp dispatch(smart_account_id, reason) do
+    case Delegations.get(smart_account_id) do
+      %Delegation{delegation_id: delegation_id} when is_binary(delegation_id) ->
+        call_adapter(smart_account_id, delegation_id, reason)
+
+      nil ->
+        Logger.error(
+          "RevokeDelegation: no non-terminal delegation found for smart_account #{smart_account_id}; cancelling"
+        )
+
+        {:cancel, :no_such_delegation}
+    end
+  end
+
+  defp call_adapter(smart_account_id, delegation_id, reason) do
     case AdapterClient.dispatch_revoke_delegation(%{
            smart_account_id: smart_account_id,
+           delegation_id: delegation_id,
            reason: reason
          }) do
       {:ok, %{accepted: true}} ->

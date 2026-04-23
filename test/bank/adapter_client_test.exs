@@ -185,4 +185,62 @@ defmodule Bank.AdapterClientTest do
                AdapterClient.dispatch_transfer(plan)
     end
   end
+
+  describe "dispatch_revoke_delegation/2 — payload shape" do
+    test "threads smart_account_id, delegation_id, and reason into the adapter body" do
+      test_pid = self()
+
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        payload = Jason.decode!(body)
+
+        send(
+          test_pid,
+          {:dispatch, payload, conn.method, conn.request_path, conn.req_headers}
+        )
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(
+          202,
+          Jason.encode!(%{"accepted" => true, "smart_account_id" => "sa_test"})
+        )
+      end)
+
+      assert {:ok, result} =
+               AdapterClient.dispatch_revoke_delegation(%{
+                 smart_account_id: "sa_test",
+                 delegation_id: "del_primary",
+                 reason: "operator_requested"
+               })
+
+      assert result.accepted == true
+      assert result.smart_account_id == "sa_test"
+
+      assert_received {:dispatch, payload, "POST", "/dispatch/revoke_delegation", headers}
+
+      assert {"authorization", "Bearer test-adapter-dispatch-secret"} in headers
+
+      assert payload["contract_version"] == 1
+      assert payload["action"] == "revoke_delegation"
+      assert payload["smart_account_id"] == "sa_test"
+      assert payload["delegation_id"] == "del_primary"
+      assert payload["reason"] == "operator_requested"
+      assert payload["correlation_id"] == nil
+      assert is_binary(payload["emitted_at"])
+    end
+
+    test "raises FunctionClauseError when delegation_id is missing" do
+      # Required by contract — the adapter needs an id to carry into the
+      # cryptographic disable body once #58 swaps the inner call. If
+      # Phoenix forgets to thread it through, that's a programming
+      # bug, not a retryable transport failure.
+      assert_raise FunctionClauseError, fn ->
+        AdapterClient.dispatch_revoke_delegation(%{
+          smart_account_id: "sa_test",
+          reason: "operator_requested"
+        })
+      end
+    end
+  end
 end

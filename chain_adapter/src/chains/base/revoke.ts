@@ -106,24 +106,30 @@ export interface RevokeResult {
 /**
  * Execute the sentinel revoke UserOp for a smart account.
  *
+ * `delegationId` is Phoenix's identifier for the authority record
+ * being revoked — opaque to this function (just echoed into
+ * callbacks) until #58 wires the real ERC-7579 disable, at which
+ * point `permissionIdFromDelegationId` parses it into `bytes32
+ * permissionId` and the inner call encodes against the Permission
+ * Validator.
+ *
  * Emits callbacks on every terminal transition; throws
  * `ExecutionError` on failure after emitting the terminal
  * `revoke_failed` callback.
  */
 export async function executeRevoke(
   smartAccountId: string,
+  delegationId: string,
   reason: string,
   clients: BaseClients,
   callbackClient: CallbackClient,
 ): Promise<RevokeResult> {
-  const delegationId = "del_primary";
-
   // TODO(#58): Replace this sentinel call with the real
-  // permission-disable call. The swap is NOT a one-liner — it has
-  // three sub-prereqs that must land in order, each tracked
-  // separately so the prerequisites do not silently bundle.
+  // permission-disable call. The remaining swap has two external
+  // prereqs that must land first — each tracked separately so the
+  // prerequisites do not silently bundle.
   //
-  // What #57 leaves behind for #58:
+  // What #57 leaves behind, verified:
   //
   //   - the `delegation_id` ↔ `permissionId` mapping helpers in
   //     `./permission_validator.ts` (mapping convention is our design
@@ -137,14 +143,17 @@ export async function executeRevoke(
   //     against EIP-7579's `execute(bytes32,bytes)` selector
   //     `0xe9ae5c53`.
   //
-  // What #57 deliberately did NOT pin:
+  // What the current change (delegation_id threading) adds:
   //
-  //   - the Permission Validator's own disable ABI fragment +
-  //     selector. That is deployment-specific and pinning it from a
-  //     plausible-sounding name would be speculation. That pin is
-  //     #83's job.
+  //   - `delegationId` is now a parameter, sourced from the Phoenix
+  //     dispatch payload (`DispatchRevokeDelegationSchema`). Phoenix
+  //     populates it from the `delegations` projection row. The
+  //     sentinel body does not use the id — it is echoed into the
+  //     callbacks so Phoenix's projection stays tied to the same id
+  //     it enqueued — but the real disable body will consume it via
+  //     `permissionIdFromDelegationId`.
   //
-  // What #58 must do, in this order:
+  // What still needs to land before #58 closes:
   //
   //   1. Provision a Kernel v3 / ERC-7579 deployment on Base and
   //      install a Permission Validator against it. Tracked in #84.
@@ -165,7 +174,10 @@ export async function executeRevoke(
   //      `./permission_validator.ts` under "What #83 must populate".
   //   3. Build the inner body from that verified ABI fragment
   //      (`encodeFunctionData(...)` against the validator) and wrap
-  //      it with the ERC-7579 envelope:
+  //      it with the ERC-7579 envelope. With `delegationId` already
+  //      threaded through, the only remaining parameters to plumb are
+  //      the adapter `config` (for `requirePermissionValidatorAddress`)
+  //      and the pinned ABI fragment from #83:
   //
   //        import { requirePermissionValidatorAddress } from "../../config/index.js";
   //        import { permissionIdFromDelegationId } from "./permission_validator.js";
@@ -182,9 +194,7 @@ export async function executeRevoke(
   //          validatorAddress, 0n, innerBody,
   //        );
   //
-  //   4. Take `config` and `delegationId` as parameters to
-  //      `executeRevoke` (instead of hardcoding `"del_primary"`), and
-  //      update `test/base-revoke-sentinel-pin.test.ts` to pin the
+  //   4. Update `test/base-revoke-sentinel-pin.test.ts` to pin the
   //      new outer wrap. Tracked in #58 itself.
   //
   // The rest of this function — bundler submit, hash equality check,
@@ -195,6 +205,7 @@ export async function executeRevoke(
 
   logger.info("Executing Base delegation revoke (sentinel UserOp)", {
     smart_account_id: smartAccountId,
+    delegation_id: delegationId,
     reason,
     smart_account: clients.smartAccountAddress,
   });

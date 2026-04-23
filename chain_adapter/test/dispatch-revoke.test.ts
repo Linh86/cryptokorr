@@ -164,6 +164,44 @@ describe("POST /dispatch/revoke_delegation", () => {
 
       expect(response.statusCode).toBe(400);
     });
+
+    it("rejects missing delegation_id", async () => {
+      // Phoenix is contractually required to thread `delegation_id`
+      // through the dispatch payload so the adapter knows which
+      // authority record to revoke. Dropping the field is a
+      // programming error, not a retryable runtime failure.
+      app = await buildWithClients();
+      const { delegation_id: _drop, ...withoutDelegationId } =
+        dispatchRevokeDelegation as typeof dispatchRevokeDelegation & {
+          delegation_id: string;
+        };
+      const response = await app.inject({
+        method: "POST",
+        url: "/dispatch/revoke_delegation",
+        headers: dispatchAuthHeaders,
+        payload: withoutDelegationId,
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json().error.code).toBe("validation_error");
+      expect(callbackClient.payloads).toHaveLength(0);
+    });
+
+    it("rejects empty delegation_id", async () => {
+      app = await buildWithClients();
+      const payload = {
+        ...dispatchRevokeDelegation,
+        delegation_id: "",
+      };
+      const response = await app.inject({
+        method: "POST",
+        url: "/dispatch/revoke_delegation",
+        headers: dispatchAuthHeaders,
+        payload,
+      });
+
+      expect(response.statusCode).toBe(400);
+    });
   });
 
   describe("on-chain success path", () => {

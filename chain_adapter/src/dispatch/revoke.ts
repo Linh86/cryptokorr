@@ -75,10 +75,10 @@ export async function handleRevokeDispatch(
   }
 
   const dispatch: DispatchRevokeDelegation = parsed.data;
-  const delegationId = "del_primary";
 
   logger.info("Revoke delegation dispatch received", {
     smart_account_id: dispatch.smart_account_id,
+    delegation_id: dispatch.delegation_id,
     reason: dispatch.reason,
   });
 
@@ -87,7 +87,7 @@ export async function handleRevokeDispatch(
     callback_id: nextCallbackId(),
     kind: "delegation.state_changed",
     smart_account_id: dispatch.smart_account_id,
-    delegation_id: delegationId,
+    delegation_id: dispatch.delegation_id,
     state: "revoking",
     reason: dispatch.reason,
     emitted_at: new Date().toISOString(),
@@ -109,6 +109,7 @@ export async function handleRevokeDispatch(
   try {
     await executeRevoke(
       dispatch.smart_account_id,
+      dispatch.delegation_id,
       dispatch.reason,
       deps.baseClients,
       deps.callbackClient,

@@ -113,17 +113,31 @@ defmodule Bank.AdapterClient do
   (`revoking` → `revoked`). The revoke is runtime-scoped and carries a
   `null` correlation id per the contract.
 
-  Accepts a map with `:smart_account_id` (required) and `:reason`
-  (optional; defaults to `"unspecified"`).
+  Accepts a map with `:smart_account_id` (required), `:delegation_id`
+  (required — opaque to Phoenix; for a Kernel-provisioned smart
+  account this is the lowercase hex form of the Permission Validator's
+  `bytes32 permissionId`, and for pre-Kernel sentinel accounts it is
+  the legacy `del_…` placeholder), and `:reason` (optional; defaults
+  to `"unspecified"`).
+
+  The adapter needs `delegation_id` so it can encode a cryptographic
+  disable against the right authority record once #58 swaps the inner
+  call for the real ERC-7579 disable. Before that swap, the adapter
+  still routes the value through its callback projection so Phoenix's
+  `delegation.state_changed` stream stays tied to the same id.
   """
   @spec dispatch_revoke_delegation(map(), keyword()) ::
           {:ok, revoke_ok()} | {:error, revoke_error()}
-  def dispatch_revoke_delegation(%{smart_account_id: smart_account_id} = args, opts \\ [])
-      when is_binary(smart_account_id) do
+  def dispatch_revoke_delegation(
+        %{smart_account_id: smart_account_id, delegation_id: delegation_id} = args,
+        opts \\ []
+      )
+      when is_binary(smart_account_id) and is_binary(delegation_id) do
     payload = %{
       contract_version: @contract_version,
       action: "revoke_delegation",
       smart_account_id: smart_account_id,
+      delegation_id: delegation_id,
       reason: Map.get(args, :reason, "unspecified"),
       correlation_id: nil,
       emitted_at: DateTime.utc_now() |> DateTime.to_iso8601()
