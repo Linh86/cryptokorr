@@ -85,10 +85,12 @@
 import type { Hash } from "viem";
 import type { BaseClients } from "./client.js";
 import { BASE_CHAIN } from "../../config/chains.js";
+import type { AdapterConfig } from "../../config/index.js";
 import type { CallbackClient } from "../../callbacks/client.js";
 import { nextCallbackId } from "../../callbacks/client.js";
 import { ExecutionError } from "../../lib/errors.js";
 import { logger } from "../../lib/logger.js";
+import { KERNEL_PERMISSION_VALIDATOR_PIN } from "./permission_validator.js";
 import {
   buildAndSignUserOp,
   buildSentinelRevokeCallData,
@@ -121,13 +123,14 @@ export async function executeRevoke(
   smartAccountId: string,
   delegationId: string,
   reason: string,
+  config: AdapterConfig,
   clients: BaseClients,
   callbackClient: CallbackClient,
 ): Promise<RevokeResult> {
-  // TODO(#58): Replace this sentinel call with the real
-  // permission-disable call. The remaining swap has two external
-  // prereqs that must land first — each tracked separately so the
-  // prerequisites do not silently bundle.
+  // TODO(#58): Replace the sentinel call below with the real
+  // permission-disable call. The remaining swap has exactly two
+  // external prereqs — each tracked separately so the prerequisites
+  // do not silently bundle.
   //
   // What #57 leaves behind, verified:
   //
@@ -143,15 +146,24 @@ export async function executeRevoke(
   //     against EIP-7579's `execute(bytes32,bytes)` selector
   //     `0xe9ae5c53`.
   //
-  // What the current change (delegation_id threading) adds:
+  // What subsequent plumbing has added:
   //
-  //   - `delegationId` is now a parameter, sourced from the Phoenix
+  //   - `delegationId` is a parameter sourced from the Phoenix
   //     dispatch payload (`DispatchRevokeDelegationSchema`). Phoenix
-  //     populates it from the `delegations` projection row. The
-  //     sentinel body does not use the id — it is echoed into the
-  //     callbacks so Phoenix's projection stays tied to the same id
-  //     it enqueued — but the real disable body will consume it via
-  //     `permissionIdFromDelegationId`.
+  //     populates it from the `delegations` projection row.
+  //   - `config` is a parameter (this function), threaded via
+  //     `RevokeDeps` from `buildApp` → `handleRevokeDispatch`. The
+  //     eventual real path reads
+  //     `requirePermissionValidatorAddress(config)` and compares it
+  //     against the live-pinned
+  //     `KERNEL_PERMISSION_VALIDATOR_PIN.address` at startup via the
+  //     bytecode tripwire.
+  //   - `KERNEL_PERMISSION_VALIDATOR_PIN` is exported from
+  //     `./permission_validator.ts` and remains `null` until #83
+  //     lands a `VerifiedPermissionValidator` sourced from a
+  //     verified deployment artifact. The sentinel path is the only
+  //     state where the pin is `null`; once non-null, the runtime
+  //     routes the real body instead.
   //
   // What still needs to land before #58 closes:
   //
@@ -167,38 +179,55 @@ export async function executeRevoke(
   //      its disable function name + selector against a concrete
   //      artifact (verified contract / canonical audited package /
   //      vendor-published deployment manifest). Add a tripwire test
-  //      pinning that fragment alongside `permission_validator.ts`.
-  //      Tracked in #83. The chain-side handoff format is the
-  //      receipt emitted by `scripts/verify-installed-validator.ts`;
-  //      the full pin contract is documented in
-  //      `./permission_validator.ts` under "What #83 must populate".
-  //   3. Build the inner body from that verified ABI fragment
-  //      (`encodeFunctionData(...)` against the validator) and wrap
-  //      it with the ERC-7579 envelope. With `delegationId` already
-  //      threaded through, the only remaining parameters to plumb are
-  //      the adapter `config` (for `requirePermissionValidatorAddress`)
-  //      and the pinned ABI fragment from #83:
+  //      pinning that fragment. Tracked in #83. The chain-side
+  //      handoff format is the receipt emitted by
+  //      `scripts/verify-installed-validator.ts`; the full pin
+  //      contract is documented on `VerifiedPermissionValidator` in
+  //      `./permission_validator.ts`.
   //
-  //        import { requirePermissionValidatorAddress } from "../../config/index.js";
-  //        import { permissionIdFromDelegationId } from "./permission_validator.js";
-  //        import { buildErc7579ExecuteCallData } from "./erc7579.js";
+  // When #83 populates `KERNEL_PERMISSION_VALIDATOR_PIN`, the swap
+  // here fits into a narrow guard — no further signature changes
+  // needed:
   //
-  //        const validatorAddress = requirePermissionValidatorAddress(config);
-  //        const permissionId = permissionIdFromDelegationId(delegationId);
-  //        const innerBody = encodeFunctionData({
-  //          abi: [KERNEL_PERMISSION_VALIDATOR_PIN.disableFunction], // pinned in #83
-  //          functionName: KERNEL_PERMISSION_VALIDATOR_PIN.disableFunction.name,
-  //          args: [permissionId],
-  //        });
-  //        const callData = buildErc7579ExecuteCallData(
-  //          validatorAddress, 0n, innerBody,
-  //        );
+  //     if (KERNEL_PERMISSION_VALIDATOR_PIN !== null) {
+  //       const pin = KERNEL_PERMISSION_VALIDATOR_PIN;
+  //       const validatorAddress = requirePermissionValidatorAddress(config);
+  //       // pin.address === validatorAddress enforced at startup
+  //       const permissionId = permissionIdFromDelegationId(delegationId);
+  //       const innerBody = encodeFunctionData({
+  //         abi: [pin.disableFunction],
+  //         functionName: pin.disableFunction.name,
+  //         args: [permissionId],
+  //       });
+  //       const callData = buildErc7579ExecuteCallData(
+  //         pin.address, 0n, innerBody,
+  //       );
+  //       // sign + submit + callback is unchanged from here down.
+  //     }
   //
-  //   4. Update `test/base-revoke-sentinel-pin.test.ts` to pin the
-  //      new outer wrap. Tracked in #58 itself.
-  //
-  // The rest of this function — bundler submit, hash equality check,
-  // receipt wait, callback emission — is unchanged.
+  // Updating `test/base-revoke-sentinel-pin.test.ts` to pin the new
+  // outer wrap is the last step in the #58 PR.
+
+  // Operational warning: the env var is set but the pin has not
+  // landed yet, so the runtime is straddling the transition. This
+  // shouldn't occur in production because the pin + env typically
+  // land together, but the asymmetric state is visible here so an
+  // operator who points the adapter at a Kernel-provisioned account
+  // before #83 ships gets a clear signal that the revoke is still
+  // sentinel-anchored, not cryptographic.
+  if (
+    config.permissionValidatorAddress !== undefined &&
+    KERNEL_PERMISSION_VALIDATOR_PIN === null
+  ) {
+    logger.warn(
+      "PERMISSION_VALIDATOR_ADDRESS is set but KERNEL_PERMISSION_VALIDATOR_PIN is not yet landed (#83); still using sentinel revoke body",
+      {
+        smart_account_id: smartAccountId,
+        permission_validator_address: config.permissionValidatorAddress,
+      },
+    );
+  }
+
   const sentinelCallData = buildSentinelRevokeCallData(
     clients.smartAccountAddress,
   );

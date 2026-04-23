@@ -148,6 +148,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     { preHandler: verifyDispatchAuth },
     async (request: FastifyRequest, reply) => {
       const result = await handleRevokeDispatch(request.body, {
+        config,
         callbackClient,
         baseClients: baseClients!,
       });
