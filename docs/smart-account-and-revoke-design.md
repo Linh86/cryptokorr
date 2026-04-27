@@ -10,6 +10,33 @@ cryptographic delegation revoke on Base. It is the durable answer to
 call?" The contract docs and the adapter README defer to this file
 for that answer; the runbook only describes operator behavior.
 
+> **MODEL CORRECTION — 2026-04-23.** The sections below describing
+> a single deployable Permission Validator contract — pinned via
+> `PERMISSION_VALIDATOR_ADDRESS`, verified by a single
+> `disableFunction(bytes32)` ABI fragment, with a 66-char
+> `bytes32` `permissionId` round-trip — are wrong against
+> `@zerodev/permissions@5.6.3`. ZeroDev's
+> `toPermissionValidator()` returns a plugin whose `.address` is
+> `zeroAddress`; permissions compose from CREATE2 signer + policy
+> modules and a 4-byte `permissionId`; revoke is
+> `Kernel.uninstallValidation(bytes21,bytes,bytes)` on the smart
+> account itself, not on a separate validator.
+>
+> See [`docs/zerodev-permissions-integration.md`](zerodev-permissions-integration.md)
+> for the corrected model, the actual on-chain primitives, the
+> hard-blocker list, and the implementation sketch. Wherever the
+> rest of this file refers to "the Permission Validator", "the
+> validator address", or "the disable ABI fragment", read those
+> as artefacts of the wrong-model assumption — the integration
+> doc is canonical.
+>
+> What the rest of this file gets right: the smart-account choice
+> (Kernel v3 / ERC-7579), the wire-level dispatch contract
+> (`delegation_id` opaque to Phoenix), the ERC-7579 outer-execute
+> envelope pin, and the sentinel revoke posture. What survives the
+> correction is documented under "What survives the correction" in
+> the integration doc.
+
 ## Status
 
 Decided. Implementation tracked through a chain of follow-ups: #57

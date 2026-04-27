@@ -132,24 +132,15 @@ The remaining work is split across three concrete follow-up issues:
      (`cryptobank-ts-adapter/src/chains/base/erc7579.ts`) — pinned
      against EIP-7579's normative `execute(bytes32, bytes)`
      signature (selector `0xe9ae5c53`), the all-zeros single-call
-     ModeCode, and the packed body layout;
-   - the new `PERMISSION_VALIDATOR_ADDRESS` env (optional in v0.1)
-     and the strict accessor `requirePermissionValidatorAddress`
-     that fails loudly when the live revoke begins reading it.
+     ModeCode, and the packed body layout.
 
-   What #57 deliberately did NOT land: the Permission Validator's
-   own disable function name + selector + ABI fragment. That depends
-   on the specific deployment #58 picks; pinning a name like
-   `disablePermission(bytes32)` from a plausible reference
-   implementation — without verifying it against the bytecode of an
-   actual deployment we will use — would be speculation, and a wrong
-   selector would surface as a silent on-chain revert at the first
-   real revoke. That pin is part of #58.
-
-   Phoenix-side, the only change is documentation + a fixture
-   (`priv/adapter/fixtures/permission_id_mapping.json`) — no schema
-   or runtime change is needed because `delegations.delegation_id`
-   was already a free-form string column.
+   The earlier `PERMISSION_VALIDATOR_ADDRESS` env + strict
+   `requirePermissionValidatorAddress` accessor have been removed
+   as artefacts of a wrong-model assumption — see
+   [`docs/zerodev-permissions-integration.md`](../../docs/zerodev-permissions-integration.md)
+   for the corrected model. Phoenix-side, no schema change is
+   needed because `delegations.delegation_id` is a free-form
+   string column.
 3. **#58 — pending. NOT a one-liner.** Three sub-prereqs in order,
    each tracked separately so the prerequisites do not silently bundle:
    (a) provision a Kernel v3 / ERC-7579 deployment on Base and install

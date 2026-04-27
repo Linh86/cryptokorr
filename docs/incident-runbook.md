@@ -320,11 +320,13 @@ audit, not a window of unguarded execution.
   - **#56 (DECIDED)** — chose Kernel v3 (ERC-7579 modular account)
     with a Permission Validator module installed against it. See
     [docs/smart-account-and-revoke-design.md](smart-account-and-revoke-design.md).
-  - **#57 (LANDED, narrowed)** — adapter-side mapping
-    (`delegation_id` ↔ `permissionId`), config key
-    (`PERMISSION_VALIDATOR_ADDRESS` + strict accessor), and the
-    EIP-7579 outer execute envelope. The validator's INNER disable
-    ABI was deliberately not pinned without a verified deployment.
+  - **#57 (LANDED, narrowed)** — EIP-7579 outer execute envelope
+    pin in the adapter. The earlier `delegation_id ↔ permissionId`
+    mapping helpers and `PERMISSION_VALIDATOR_ADDRESS` env (with
+    its strict accessor) were removed when the corrected ZeroDev
+    model in
+    [docs/zerodev-permissions-integration.md](zerodev-permissions-integration.md)
+    invalidated the wrong-shape enforcement.
   - **#84 (provisioning)** — deploy a Kernel v3 smart account on
     Base + install a Permission Validator against it. Operator
     runbook: [docs/provisioning-kernel-v3.md](provisioning-kernel-v3.md);

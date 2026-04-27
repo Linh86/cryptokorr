@@ -56,16 +56,3 @@ export const callbackExecutionAborted = loadFixture(
 export const callbackDelegationStateChanged = loadFixture(
   "callback_delegation_state_changed.json",
 );
-
-// ---- Mapping fixtures (issue #57) ----
-
-/**
- * Canonical `delegation_id` ↔ `permissionId` mapping example. Pinned in
- * the Phoenix repo so a Phoenix-side change forces an adapter-side test
- * update and vice versa. See `permission_validator.ts`.
- */
-export const permissionIdMapping = loadFixture<{
-  delegation_id: string;
-  permission_id: string;
-  encoding: { rule: string; length_chars: number; case: string };
-}>("permission_id_mapping.json");

@@ -97,64 +97,63 @@ permission-module surface is wired in.
 
 The architectural decision is recorded in
 [`docs/smart-account-and-revoke-design.md`](../docs/smart-account-and-revoke-design.md)
-(GitHub #56) in the Phoenix repo: a **Kernel v3 (ERC-7579)** modular
-account on Base, with delegation authority registered as a
-**per-delegation permission on a Kernel-compatible Permission Validator
-module**. The on-chain authority record is the validator's
-`bytes32 permissionId`, and Phoenix's `delegations.delegation_id`
-column maps 1:1 to the lowercase hex form of that id.
+(GitHub #56): a **Kernel v3 (ERC-7579)** modular account on Base.
+The earlier framing of "delegation authority registered as a
+per-delegation permission on a single Permission Validator module"
+turned out to be wrong against `@zerodev/permissions@5.6.3` —
+ZeroDev's permissions compose from CREATE2 signer + policy
+modules and a 4-byte `permissionId`, not from a single
+deployable validator contract. See
+[`docs/zerodev-permissions-integration.md`](../docs/zerodev-permissions-integration.md)
+for the corrected on-chain model and the hard blockers.
 
 Status of the implementation:
 
 1. **Smart-account choice — DECIDED in #56.** Kernel v3 modular
-   account; Permission Validator module installed once per smart
-   account, per-delegation state managed by `permissionId`.
-2. **Mapping convention + config key + ERC-7579 outer wrap — LANDED
-   in #57 (narrowed scope).** What this means concretely:
-   - [`src/chains/base/permission_validator.ts`](src/chains/base/permission_validator.ts)
-     pins the `delegation_id` ↔ `permissionId` round trip
-     (lowercase 0x-prefixed hex form of `bytes32`, 66 chars total).
-   - [`src/chains/base/erc7579.ts`](src/chains/base/erc7579.ts)
-     pins the EIP-7579 standard outer envelope
-     `execute(bytes32 mode, bytes executionCalldata)` — selector
-     `0xe9ae5c53`, all-zeros single-call ModeCode, packed body
-     layout. Distinct from the SimpleAccount-shaped
-     `execute(address,uint256,bytes)` envelope (selector
-     `0xb61d27f6`) the v0.1 paths use today.
-   - The env key is `PERMISSION_VALIDATOR_ADDRESS` (optional in
-     v0.1; the strict accessor `requirePermissionValidatorAddress`
-     fails loudly at revoke time when the live revoke begins
-     reading it).
-3. **Validator interface pin — DEFERRED to #83.** The Permission
-   Validator's own disable function name + selector + ABI fragment
-   was deliberately not pinned at #57. Pinning it from a plausible
-   reference name without verifying it against an actual deployed
-   bytecode would be speculation, and a wrong selector would surface
-   as a silent on-chain revert at the first real revoke. The
-   `VerifiedPermissionValidator` interface and the
-   `KERNEL_PERMISSION_VALIDATOR_PIN: VerifiedPermissionValidator | null`
-   slot are exported from `permission_validator.ts` (pin is `null`
-   today) so #83 can populate a single verified record without
-   further scaffolding.
-4. **A deployed Permission Validator on Base — tracked in #84.**
-   Operator-side provisioning runbook:
-   [`docs/provisioning-kernel-v3.md`](../docs/provisioning-kernel-v3.md)
-   in the Phoenix repo. When #84 completes, `SMART_ACCOUNT_ADDRESS`
-   is migrated to the Kernel-shaped account and the address can
-   go into `PERMISSION_VALIDATOR_ADDRESS`; #83 then verifies the
-   install artifact and populates the pin.
-5. **Sentinel → real swap in `executeRevoke` — tracked in #58.** The
-   swap is documented inline as a `TODO(#58)` block in
-   [`src/chains/base/revoke.ts`](src/chains/base/revoke.ts) with the
-   two external prereqs (#84 provisioning + #83 verified pin) spelled
-   out alongside the exact guard #58 adds against
-   `KERNEL_PERMISSION_VALIDATOR_PIN`. The tripwire test
-   `test/base-revoke-sentinel-pin.test.ts` will fail loudly the
-   moment the inner call shape changes, forcing whoever lands #58 to
-   update this README, the contract docs, and the runbook.
+   account on Base. Independent of the permission-model correction
+   below.
+2. **ERC-7579 outer wrap — LANDED in #57 (still valid).**
+   [`src/chains/base/erc7579.ts`](src/chains/base/erc7579.ts) pins
+   the EIP-7579 normative outer envelope
+   `execute(bytes32 mode, bytes executionCalldata)` — selector
+   `0xe9ae5c53`, all-zeros single-call ModeCode, packed body
+   layout. Distinct from the SimpleAccount-shaped
+   `execute(address,uint256,bytes)` envelope (selector
+   `0xb61d27f6`) the sentinel still uses. Independent of the
+   permission system above it; survives the model correction.
+3. **Permission pin shape — RE-SCOPED on #83.** The earlier
+   `VerifiedPermissionValidator` interface tried to pin a single
+   deployable validator address + a single
+   `disablePermission(bytes32)` ABI fragment. The corrected
+   `KernelPermissionPin` interface in
+   [`src/chains/base/permission_validator.ts`](src/chains/base/permission_validator.ts)
+   reserves a slot for ZeroDev's actual primitives (CREATE2
+   signer + policy module addresses, kernel `uninstallValidation`
+   ABI, package version). The slot is `null` today; populating it
+   is part of #83 alongside the SDK integration described in the
+   tracking doc.
+4. **Provisioning template — RE-SCOPED on #84.** The
+   provisioning + verification scripts in
+   [`scripts/`](scripts/) are currently deferred stubs. The
+   smart-account deploy portion of the runbook is still
+   operationally meaningful — see
+   [`docs/provisioning-kernel-v3.md`](../docs/provisioning-kernel-v3.md).
+5. **Sentinel → real revoke swap — RE-SCOPED on #58.** The earlier
+   plan ("wrap a `disableFunction(bytes32)` selector in the
+   ERC-7579 envelope") was based on the wrong-model assumption.
+   The corrected swap targets
+   `Kernel.uninstallValidation(bytes21,bytes,bytes)` ON the smart
+   account itself, signed by a sudo signer the adapter does not
+   yet hold. See the integration doc for the full hard-blocker
+   list. The TODO(#58) block in
+   [`src/chains/base/revoke.ts`](src/chains/base/revoke.ts) is
+   updated. The tripwire test
+   `test/base-revoke-sentinel-pin.test.ts` continues to pin the
+   sentinel inner call so any change to the revoke body fails
+   loudly and forces a doc update.
 
-Phoenix issue #31 stays open until #58 ships end-to-end against a
-Kernel-provisioned account.
+Phoenix issue #31 stays open until #58 ships end-to-end against
+a Kernel-provisioned account.
 
 ## Local setup
 
@@ -183,7 +182,6 @@ npm run dev        # starts on PORT from .env (default 4100)
 | `DELEGATION_SIGNER_KEY`     | Private key for delegation signing       |
 | `USDC_CONTRACT_ADDRESS`     | USDC contract on Base                    |
 | `ENTRY_POINT_ADDRESS`       | Optional; defaults to EntryPoint v0.7    |
-| `PERMISSION_VALIDATOR_ADDRESS` | Optional in v0.1; required for #58. Kernel v3 Permission Validator address bound to `SMART_ACCOUNT_ADDRESS`. The sentinel revoke path does not read it; the cryptographic revoke does, via `requirePermissionValidatorAddress` (fails loudly when unset). |
 | `ADAPTER_TLS_CERT_PATH`     | Optional; if set with key, Fastify serves HTTPS instead of plain HTTP. |
 | `ADAPTER_TLS_KEY_PATH`      | Optional; partner to cert path above. Both must be set together. |
 
@@ -220,25 +218,30 @@ placeholders, and runs it once.
 | [`scripts/verify-installed-validator.ts`](scripts/verify-installed-validator.ts) | Read-only ERC-7579 install check. Outputs a Phoenix-ready receipt with the validator bytecode keccak hash, Kernel factory, Basescan URL, and vendor artifact source for #83. |
 | [`scripts/check-env.sh`](scripts/check-env.sh)    | Runtime env hygiene check: confirms every required adapter env is set and reports `SENTINEL-ERA` vs `KERNEL-PROVISIONED` mode. |
 
-The expected end-to-end flow:
+The expected end-to-end flow today (sentinel-era; the corrected
+ZeroDev SDK integration is tracked in
+[`docs/zerodev-permissions-integration.md`](../docs/zerodev-permissions-integration.md)):
 
-1. Run `provision-kernel.ts` against a fresh Base Sepolia operator
-   workspace (Phase 1 + Phase 2). Record the smart account address.
-2. Run `verify-installed-validator.ts` against the same workspace.
-   Provide `KERNEL_FACTORY_ADDRESS` and `VENDOR_SOURCE`; record the
-   full JSON receipt, not just the bytecode hash.
-3. Set the resulting addresses (`SMART_ACCOUNT_ADDRESS`,
-   `PERMISSION_VALIDATOR_ADDRESS`) on the adapter host. Run
+1. Deploy a Kernel v3 smart account on Base Sepolia in a separate
+   operator workspace using `@zerodev/sdk` directly. Record the
+   address. The `provision-kernel.ts` template is currently a
+   deferred stub — see scripts/README.md for why.
+2. Set `SMART_ACCOUNT_ADDRESS`, `KERNEL_FACTORY_ADDRESS`, and
+   `DELEGATION_SIGNER_KEY` on the adapter host. Run
    `check-env.sh` to confirm the runtime env is consistent.
-4. Run the Phoenix smoke (`mix bank.smoke.transfer`,
-   `mix bank.smoke.revoke`) end-to-end. Note that until #58 ships, the
-   revoke smoke still exercises the sentinel path.
-5. Repeat against Base mainnet only after Sepolia is proven and #58
-   has shipped against Sepolia.
+3. Run the Phoenix smokes (`mix bank.smoke.transfer`,
+   `mix bank.smoke.revoke`) end-to-end. The revoke smoke
+   exercises the sentinel path — `state: revoked` means
+   "on-chain anchored, trust downgraded", not "cryptographically
+   impossible".
+4. Promote to Base mainnet only after Sepolia is proven AND the
+   cryptographic revoke (#58) has shipped against Sepolia.
 
 What this provisioning step does NOT do:
 
-- It does not pin the validator's disable ABI fragment. That is #83.
+- It does not install ZeroDev permissions on the smart account.
+  That is part of the SDK integration tracked in the integration
+  doc above.
 - It does not wire the cryptographic revoke into `executeRevoke`.
   That is #58.
 
@@ -277,12 +280,10 @@ Test suites:
   callback carries AA-shaped `tx_refs` (userop_hash, tx hash, hex
   nonce, bundler label), and that every failure path emits
   `state: revoke_failed` (never `revoked`).
-- **Permission validator** (`test/permission-validator.test.ts`) —
-  pins what is verifiable today, independently of any specific
-  validator deployment: the `delegation_id` ↔ `permissionId` mapping
-  (round trip + rejection of malformed and pre-Kernel placeholder
-  inputs) and the strict `requirePermissionValidatorAddress`
-  fail-closed accessor for #58.
+- **Permission pin tripwire** (`test/permission-validator-pin.test.ts`) —
+  pins that `KERNEL_PERMISSION_PIN` is `null` until #83 populates
+  it, and asserts the structural shape of the `KernelPermissionPin`
+  interface so the eventual pin's type can't drift silently.
 - **ERC-7579 outer wrap** (`test/erc7579.test.ts`) — pins the
   EIP-7579 normative `execute(bytes32 mode, bytes executionCalldata)`
   ABI shape, the selector `0xe9ae5c53`, the all-zeros single-call
@@ -302,18 +303,15 @@ Test suites:
 - **Cryptographic delegation revoke at the smart-account level.**
   The current sentinel user-op anchors the revoke on chain and
   exercises the full AA callback plumbing, but it does not disable
-  the delegation key at the contract level. The smart-account choice
-  (Kernel v3) is decided in #56 and the adapter-side ABI / mapping /
-  config scaffolding landed in #57; what remains is provisioning a
-  Kernel v3 account + Permission Validator on Base (#84), pinning
-  the validator's disable fragment as a verified
-  `KERNEL_PERMISSION_VALIDATOR_PIN` (#83, `null` today), and then
-  swapping the sentinel inner call for the real disable call gated
-  on that pin (#58). The full architectural rationale lives in the
-  Phoenix repo at `docs/smart-account-and-revoke-design.md`.
-  Phoenix issue #31 stays open until #58 ships end-to-end. See the
-  "Revoke delegation" subsection above for the exact swap when #58
-  is landed.
+  the delegation key at the contract level. The smart-account
+  choice (Kernel v3) is decided in #56; the corrected
+  ZeroDev permissions integration (SDK runtime deps, per-account
+  sudo signer, plugin-blob persistence,
+  `Kernel.uninstallValidation` wiring) is tracked in
+  [`docs/zerodev-permissions-integration.md`](../docs/zerodev-permissions-integration.md).
+  Phoenix issue #31 stays open until #58 ships end-to-end against
+  a Kernel-provisioned account. See the "Revoke delegation"
+  subsection above for the swap shape when it lands.
 - **Paymaster / sponsored flow.** The adapter funds user-ops from
   the smart account itself. Paymaster support remains reserved in
   the contract (`paymaster_denied` abort reason) but no code emits

@@ -1,20 +1,39 @@
 defmodule Bank.Delegations.Provisioning do
   @moduledoc """
-  No-secret planning and validation helpers for Kernel v3 provisioning.
+  No-secret operator preflight for the eventual ZeroDev kernel
+  permissions integration.
 
-  This module deliberately does **not** call RPC endpoints, sign
-  UserOperations, or claim that a smart account has been deployed. It
-  gives operators and CI a safe preflight surface for GitHub #84:
+  An earlier version of this module validated a "Permission Validator
+  address" env var and a deployment-receipt shape that was specific
+  to a wrong model — see `docs/zerodev-permissions-integration.md`.
+  ZeroDev's `@zerodev/permissions@5.6.3` does not have a single
+  Permission Validator contract; permissions compose from CREATE2
+  signer + policy modules and a 4-byte `permissionId`.
 
-    * validate that required environment variables are present and
-      shaped correctly before running adapter-side provisioning scripts;
-    * build a redacted command plan that can be pasted into an operator
-      workspace without printing private keys;
-    * validate the deployment-journal receipt that unblocks #83's ABI
-      pin.
+  What this module still does:
 
-  Anything that would touch Base Sepolia or Base mainnet remains
-  operator-side work in `chain_adapter/scripts/`.
+    * Validate the *secret-bearing* env vars an operator needs for
+      any kind of Kernel v3 provisioning (operator EOA private key,
+      delegation signer public key, RPC + bundler URLs, optional
+      Kernel factory address, optional smart account address).
+    * Redact private-key-shaped values when echoing env to the
+      operator console.
+
+  What this module no longer does:
+
+    * Validate the `PERMISSION_VALIDATOR_ADDRESS` env — it has been
+      removed because ZeroDev does not produce a single value to put
+      there.
+    * Validate `permission_validator_address` /
+      `validator_bytecode_keccak256` fields in a deployment receipt
+      — the verification script that produced them was wrong-model.
+      `validate_receipt/1` now returns a deferred-blocker error
+      pointing at the integration doc until the corrected receipt
+      shape is decided.
+    * Pretend a `:kernel_provisioning_ready` runtime mode exists
+      based on env presence. The runtime is sentinel-era until the
+      ZeroDev SDK integration ships; preflight reports
+      `:awaiting_zerodev_integration` instead.
   """
 
   @allowed_chain_ids [84532, 8453]
@@ -26,7 +45,6 @@ defmodule Bank.Delegations.Provisioning do
     BASE_RPC_URL
     BUNDLER_RPC_URL
     KERNEL_FACTORY_ADDRESS
-    PERMISSION_VALIDATOR_ADDRESS
   )
 
   @smart_account_env "SMART_ACCOUNT_ADDRESS"
@@ -44,7 +62,7 @@ defmodule Bank.Delegations.Provisioning do
           phase: phase(),
           status: :ready | :blocked,
           chain_id: pos_integer(),
-          mode: :sentinel_era | :kernel_provisioning_ready,
+          mode: :sentinel_era | :awaiting_zerodev_integration,
           required_env: [String.t()],
           problems: [problem()],
           redacted_env: map()
@@ -55,7 +73,7 @@ defmodule Bank.Delegations.Provisioning do
   def required_env(:deploy), do: @base_required_env
   def required_env(:install), do: @base_required_env ++ [@smart_account_env]
   def required_env(:verify), do: @base_required_env ++ [@smart_account_env]
-  def required_env(:runtime), do: ~w(SMART_ACCOUNT_ADDRESS PERMISSION_VALIDATOR_ADDRESS)
+  def required_env(:runtime), do: ~w(SMART_ACCOUNT_ADDRESS)
 
   @doc """
   Validate environment shape for a provisioning phase.
@@ -80,7 +98,7 @@ defmodule Bank.Delegations.Provisioning do
       phase: phase,
       status: if(problems == [], do: :ready, else: :blocked),
       chain_id: chain_id,
-      mode: mode(env),
+      mode: mode(),
       required_env: required,
       problems: problems,
       redacted_env: redact_env(env, required ++ ["BASE_CHAIN_ID"])
@@ -106,7 +124,8 @@ defmodule Bank.Delegations.Provisioning do
          mode: checked.mode,
          commands: commands_for(checked.phase),
          redacted_env: checked.redacted_env,
-         next_issue: "After verify succeeds, hand the receipt to #83 for ABI/selector pinning."
+         next_issue:
+           "ZeroDev SDK integration is pending — see docs/zerodev-permissions-integration.md before running phase commands."
        }}
     else
       {:error, checked}
@@ -114,42 +133,41 @@ defmodule Bank.Delegations.Provisioning do
   end
 
   @doc """
-  Validate the deployment-journal receipt emitted after #84 verification.
+  Validate a deployment-journal receipt (deferred).
 
-  This is the handoff contract from #84 to #83. It proves only that the
-  receipt is complete and well-formed; it does not verify bytecode
-  against the chain.
+  The earlier shape of this validator (`permission_validator_address`,
+  `validator_bytecode_keccak256`, `permission_id?`) was tied to the
+  wrong-model assumption that ZeroDev produces a single deployable
+  validator with a single ABI fragment. The corrected ZeroDev model
+  has neither — `toPermissionValidator()` returns
+  `address: zeroAddress` and revoke is a kernel-account
+  `uninstallValidation` call. Until the corrected receipt shape is
+  decided alongside the ZeroDev SDK integration, this function
+  refuses to validate. Operators are pointed at the tracking doc.
   """
-  @spec validate_receipt(map()) :: {:ok, map()} | {:error, [problem()]}
+  @spec validate_receipt(map()) :: {:error, [problem()]}
   def validate_receipt(receipt) when is_map(receipt) do
-    normalised = atomise_known_receipt_keys(receipt)
-
-    problems =
-      []
-      |> validate_receipt_chain(normalised)
-      |> validate_receipt_address(normalised, :smart_account_address)
-      |> validate_receipt_address(normalised, :permission_validator_address)
-      |> validate_receipt_address(normalised, :kernel_factory_address)
-      |> validate_receipt_hash(normalised, :validator_bytecode_keccak256)
-      |> validate_receipt_required_string(normalised, :vendor_source)
-      |> validate_receipt_required_string(normalised, :basescan_validator_url)
-
-    case problems do
-      [] -> {:ok, build_handoff(normalised)}
-      _ -> {:error, Enum.reverse(problems)}
-    end
+    {:error,
+     [
+       problem(
+         "receipt",
+         :invalid,
+         "deployment-receipt validator was wrong-model and has been deferred; " <>
+           "see docs/zerodev-permissions-integration.md for the corrected ZeroDev model"
+       )
+     ]}
   end
 
   @doc """
-  Read and validate a JSON receipt file from the adapter verification script.
+  File-shape gate around `validate_receipt/1`.
 
-  This is still a no-secret, no-RPC check. It exists so operators can
-  validate the `verify-installed-validator.ts` output before handing it
-  to #83 for ABI/artifact pinning.
+  Surfaces the same deferred-blocker error after the file has been
+  read and parsed. The file IO and JSON-decode error paths still
+  fire in case an operator points the task at a missing or
+  malformed file.
   """
   @spec validate_receipt_file(Path.t()) ::
-          {:ok, map()}
-          | {:error, [problem()]}
+          {:error, [problem()]}
           | {:error, {:read_failed, File.posix()}}
           | {:error, {:decode_failed, Jason.DecodeError.t()}}
   def validate_receipt_file(path) when is_binary(path) do
@@ -168,10 +186,6 @@ defmodule Bank.Delegations.Provisioning do
         {:error, [problem("receipt", :invalid, "must be a JSON object")]}
     end
   end
-
-  @doc "Return true for lowercase `0x` + 32-byte permission ids."
-  @spec permission_id?(term()) :: boolean()
-  def permission_id?(value), do: hex?(value, 32)
 
   # --- env validation ----------------------------------------------------
 
@@ -198,7 +212,7 @@ defmodule Bank.Delegations.Provisioning do
       key in ~w(OPERATOR_PRIVATE_KEY) and not hex?(value, 32) ->
         [problem(key, :invalid, "must be a 32-byte 0x-prefixed hex private key")]
 
-      key in ~w(DELEGATION_SIGNER_PUBKEY KERNEL_FACTORY_ADDRESS PERMISSION_VALIDATOR_ADDRESS SMART_ACCOUNT_ADDRESS) and
+      key in ~w(DELEGATION_SIGNER_PUBKEY KERNEL_FACTORY_ADDRESS SMART_ACCOUNT_ADDRESS) and
           not address?(value) ->
         [problem(key, :invalid, "must be a 20-byte 0x-prefixed EVM address")]
 
@@ -234,12 +248,10 @@ defmodule Bank.Delegations.Provisioning do
     _ -> -1
   end
 
-  defp mode(env) do
-    case Map.get(env, "PERMISSION_VALIDATOR_ADDRESS") do
-      value when is_binary(value) and value != "" -> :kernel_provisioning_ready
-      _ -> :sentinel_era
-    end
-  end
+  # The runtime is sentinel-era today and will stay that way until the
+  # ZeroDev SDK integration in `docs/zerodev-permissions-integration.md`
+  # ships. There is no longer an env-derived "ready" state.
+  defp mode, do: :awaiting_zerodev_integration
 
   defp redact_env(env, keys) do
     keys
@@ -264,156 +276,42 @@ defmodule Bank.Delegations.Provisioning do
 
   defp redact_secret(_), do: "<redacted>"
 
-  # --- receipt validation ------------------------------------------------
+  # --- shape helpers -----------------------------------------------------
 
-  defp atomise_known_receipt_keys(receipt) do
-    known = %{
-      "chain_id" => :chain_id,
-      "smart_account_address" => :smart_account_address,
-      "permission_validator_address" => :permission_validator_address,
-      "validator_bytecode_keccak256" => :validator_bytecode_keccak256,
-      "permission_validator_bytecode_keccak256" => :validator_bytecode_keccak256,
-      "kernel_factory_address" => :kernel_factory_address,
-      "vendor_source" => :vendor_source,
-      "basescan_validator_url" => :basescan_validator_url,
-      "chain_explorer_url" => :basescan_validator_url
-    }
+  @placeholder_pattern ~r/_placeholder|placeholder_|_dev_placeholder|^0x_/
 
-    Enum.reduce(receipt, %{}, fn {key, value}, acc ->
-      Map.put(acc, Map.get(known, key, key), value)
-    end)
-  end
+  defp placeholder?(value), do: Regex.match?(@placeholder_pattern, value)
 
-  defp validate_receipt_chain(problems, %{chain_id: chain_id})
-       when chain_id in @allowed_chain_ids,
-       do: problems
+  defp hex?(value, byte_len) when is_binary(value) and is_integer(byte_len) do
+    expected = 2 + byte_len * 2
 
-  defp validate_receipt_chain(problems, %{chain_id: chain_id}) when is_binary(chain_id) do
-    case Integer.parse(chain_id) do
-      {parsed, ""} -> validate_receipt_chain(problems, %{chain_id: parsed})
-      _ -> [problem("chain_id", :invalid, "must be 84532 or 8453") | problems]
+    case value do
+      "0x" <> rest ->
+        String.length(value) == expected and Regex.match?(~r/^[0-9a-f]+$/, rest)
+
+      _ ->
+        false
     end
   end
 
-  defp validate_receipt_chain(problems, _receipt) do
-    [problem("chain_id", :missing, "is required") | problems]
-  end
-
-  defp validate_receipt_address(problems, receipt, key) do
-    value = Map.get(receipt, key)
-
-    if address?(value) do
-      problems
-    else
-      [
-        problem(Atom.to_string(key), problem_severity(value), "must be a 20-byte EVM address")
-        | problems
-      ]
-    end
-  end
-
-  defp validate_receipt_hash(problems, receipt, key) do
-    value = Map.get(receipt, key)
-
-    if hex?(value, 32) do
-      problems
-    else
-      [
-        problem(
-          Atom.to_string(key),
-          problem_severity(value),
-          "must be a 32-byte 0x-prefixed hash"
-        )
-        | problems
-      ]
-    end
-  end
-
-  defp validate_receipt_required_string(problems, receipt, key) do
-    case Map.get(receipt, key) do
-      value when is_binary(value) and value != "" ->
-        problems
-
-      value ->
-        [problem(Atom.to_string(key), problem_severity(value), "is required") | problems]
-    end
-  end
-
-  defp build_handoff(receipt) do
-    %{
-      chain_id: int_chain_id(receipt.chain_id),
-      smart_account_address: String.downcase(receipt.smart_account_address),
-      permission_validator_address: String.downcase(receipt.permission_validator_address),
-      kernel_factory_address: String.downcase(receipt.kernel_factory_address),
-      deployed_bytecode_keccak256: String.downcase(receipt.validator_bytecode_keccak256),
-      artifact_source_required: true,
-      artifact_source_hint: receipt.vendor_source,
-      chain_explorer_url: receipt.basescan_validator_url,
-      next_issue: "#83"
-    }
-  end
-
-  defp int_chain_id(value) when is_integer(value), do: value
-  defp int_chain_id(value) when is_binary(value), do: String.to_integer(value)
-
-  # --- commands ----------------------------------------------------------
-
-  defp commands_for(:deploy) do
-    [
-      "npx tsx provision-kernel.ts",
-      "record SMART_ACCOUNT_ADDRESS from stdout before continuing"
-    ]
-  end
-
-  defp commands_for(:install) do
-    [
-      "export INSTALL_VALIDATOR=true",
-      "npx tsx provision-kernel.ts",
-      "record the install user-op hash and receipt"
-    ]
-  end
-
-  defp commands_for(:verify) do
-    [
-      "unset INSTALL_VALIDATOR",
-      "npx tsx verify-installed-validator.ts",
-      "record permission_validator_bytecode_keccak256 for #83"
-    ]
-  end
-
-  defp commands_for(:runtime) do
-    [
-      "set SMART_ACCOUNT_ADDRESS and PERMISSION_VALIDATOR_ADDRESS in the adapter secret store",
-      "restart the adapter",
-      "bash scripts/check-env.sh"
-    ]
-  end
-
-  # --- primitives --------------------------------------------------------
+  defp hex?(_, _), do: false
 
   defp address?(value), do: hex?(value, 20)
 
-  defp hex?(value, bytes) when is_binary(value) do
-    Regex.match?(~r/^0x[0-9a-f]{#{bytes * 2}}$/, value)
+  defp url?(value) when is_binary(value) do
+    Regex.match?(~r"^https?://[^\s]+$", value)
   end
 
-  defp hex?(_value, _bytes), do: false
+  defp url?(_), do: false
 
-  defp url?(value), do: String.starts_with?(value, ["http://", "https://"])
+  defp commands_for(:deploy), do: ["npx tsx provision-kernel.ts"]
+  defp commands_for(:install), do: ["INSTALL_VALIDATOR=true npx tsx provision-kernel.ts"]
+  defp commands_for(:verify), do: ["npx tsx verify-installed-validator.ts"]
 
-  defp placeholder?(value) do
-    value = String.downcase(value)
-    String.contains?(value, "placeholder") or String.contains?(value, "...")
+  defp commands_for(:runtime),
+    do: ["check-env.sh"]
+
+  defp problem(key, severity, detail) do
+    %{key: key, severity: severity, detail: detail}
   end
-
-  defp problem(key, severity, detail), do: %{key: key, severity: severity, detail: detail}
-
-  defp problem_severity(nil), do: :missing
-  defp problem_severity(""), do: :missing
-
-  defp problem_severity(value) when is_binary(value) do
-    if placeholder?(value), do: :placeholder, else: :invalid
-  end
-
-  defp problem_severity(_), do: :invalid
 end

@@ -84,14 +84,14 @@ threading commit), and the adapter echoes it back on every
 `delegation.state_changed` callback so Phoenix's audit chain is keyed
 to the same identity end-to-end.
 
-For a Kernel-provisioned smart account, `delegation_id` is the
-lowercase hex form of the Permission Validator's `bytes32 permissionId`
-(66 chars total, `0x` + 64 hex). For pre-Kernel / sentinel accounts it
-is the legacy `del_*` placeholder; the mapping helpers in
-`chain_adapter/src/chains/base/permission_validator.ts` deliberately
-reject the placeholder in `permissionIdFromDelegationId` so the
-cryptographic revoke (#58) cannot silently degrade against a legacy
-id.
+`delegation_id` is opaque to Phoenix and to the smoke task — both
+sides treat it as a free-form string. The on-the-wire encoding for
+ZeroDev permissions (4-byte `permissionId`, 21-byte
+`validationId`, or a serialized plugin blob) is deferred until the
+SDK integration described in
+[docs/zerodev-permissions-integration.md](zerodev-permissions-integration.md)
+ships. Pre-integration grants continue to use the legacy `del_*`
+placeholder shape.
 
 ### PASS
 

@@ -1,21 +1,31 @@
 defmodule Mix.Tasks.Bank.Kernel.Receipt.Check do
   @moduledoc """
-  Validate a Kernel v3 provisioning verification receipt file.
+  DEFERRED — validate a Kernel v3 provisioning receipt.
 
       mix bank.kernel.receipt.check /path/to/receipt.json
 
-  The receipt is the no-secret handoff from #84 to #83. This task reads
-  a local JSON file, validates that it contains the deployment fields
-  required by `Bank.Delegations.Provisioning.validate_receipt/1`, and
-  prints the normalized #83 handoff. It never calls RPC and never reads
-  private keys.
+  An earlier version of this task validated a deployment receipt
+  whose shape (`permission_validator_address`,
+  `validator_bytecode_keccak256`, etc.) was tied to a wrong-model
+  assumption. ZeroDev's `@zerodev/permissions` does not produce
+  such a single-validator receipt — see
+  `docs/zerodev-permissions-integration.md` for the corrected model.
+
+  Until the corrected receipt shape is decided alongside the
+  ZeroDev SDK integration, this task surfaces the deferral and
+  exits non-zero so an operator does not believe a malformed
+  receipt is valid.
+
+  IO + JSON-decode errors still fire before the deferral so the
+  operator gets a sensible message when the file is missing or
+  malformed.
   """
 
   use Mix.Task
 
   alias Bank.Delegations.Provisioning
 
-  @shortdoc "Validate Kernel provisioning receipt JSON for the #84 -> #83 handoff"
+  @shortdoc "Deferred — receipt format pending ZeroDev SDK integration"
 
   @impl Mix.Task
   def run(args) do
@@ -32,23 +42,6 @@ defmodule Mix.Tasks.Bank.Kernel.Receipt.Check do
 
   defp check(path) do
     case Provisioning.validate_receipt_file(path) do
-      {:ok, handoff} ->
-        Mix.shell().info("Kernel provisioning receipt is valid")
-        Mix.shell().info("  chain_id: #{handoff.chain_id}")
-        Mix.shell().info("  smart_account_address: #{handoff.smart_account_address}")
-
-        Mix.shell().info(
-          "  permission_validator_address: #{handoff.permission_validator_address}"
-        )
-
-        Mix.shell().info("  kernel_factory_address: #{handoff.kernel_factory_address}")
-        Mix.shell().info("  deployed_bytecode_keccak256: #{handoff.deployed_bytecode_keccak256}")
-        Mix.shell().info("  artifact_source_hint: #{handoff.artifact_source_hint}")
-        Mix.shell().info("  chain_explorer_url: #{handoff.chain_explorer_url}")
-        Mix.shell().info("  next_issue: #{handoff.next_issue}")
-        Mix.shell().info("")
-        Mix.shell().info("No RPC calls were made and no secret values were read.")
-
       {:error, {:read_failed, reason}} ->
         Mix.raise("Could not read receipt file #{path}: #{reason}")
 
@@ -57,12 +50,12 @@ defmodule Mix.Tasks.Bank.Kernel.Receipt.Check do
 
       {:error, problems} ->
         print_problems(problems)
-        Mix.raise("Kernel provisioning receipt is incomplete or malformed")
+        Mix.raise("Receipt validation is deferred — see docs/zerodev-permissions-integration.md")
     end
   end
 
   defp print_problems(problems) do
-    Mix.shell().info("Kernel provisioning receipt problems:")
+    Mix.shell().info("Kernel provisioning receipt — deferred:")
 
     Enum.each(problems, fn problem ->
       Mix.shell().info("  - #{problem.key} [#{problem.severity}]: #{problem.detail}")

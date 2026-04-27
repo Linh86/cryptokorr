@@ -44,7 +44,6 @@ Recommended fields:
 - `BUNDLER_RPC_URL`
 - `PHOENIX_BASE_URL`
 - `KERNEL_FACTORY_ADDRESS`
-- `PERMISSION_VALIDATOR_ADDRESS`
 - `SMART_ACCOUNT_ADDRESS`
 
 ## Real secrets you must protect
@@ -171,17 +170,7 @@ save it as `KERNEL_FACTORY_ADDRESS`.
 If you do not have the verified vendor source yet, leave the field
 blank for now instead of inventing a placeholder.
 
-### 10. Prepare `PERMISSION_VALIDATOR_ADDRESS`
-
-This is also a public on-chain address, not a secret.
-
-Look up the Permission Validator deployment for Base Sepolia and save it
-as `PERMISSION_VALIDATOR_ADDRESS`.
-
-If the validator deployment has not yet been chosen or verified, leave
-the field blank for now.
-
-### 11. Leave `SMART_ACCOUNT_ADDRESS` empty for now
+### 10. Leave `SMART_ACCOUNT_ADDRESS` empty for now
 
 Do not invent this value.
 
@@ -202,7 +191,6 @@ should be filled in only after that run succeeds.
 | `BUNDLER_RPC_URL` | sensitive config | provisioning and adapter runtime |
 | `PHOENIX_BASE_URL` | config | adapter runtime |
 | `KERNEL_FACTORY_ADDRESS` | public | provisioning |
-| `PERMISSION_VALIDATOR_ADDRESS` | public | provisioning and later runtime |
 | `SMART_ACCOUNT_ADDRESS` | public | runtime after provisioning |
 
 ## Minimum ready state before testing
@@ -221,7 +209,15 @@ The following can remain blank until the chain-side provisioning run:
 
 - `SMART_ACCOUNT_ADDRESS`
 - `KERNEL_FACTORY_ADDRESS` if not yet confirmed
-- `PERMISSION_VALIDATOR_ADDRESS` if not yet confirmed
+
+> An earlier version of this checklist asked the operator to also
+> capture `PERMISSION_VALIDATOR_ADDRESS`. That field has been
+> removed — ZeroDev's `@zerodev/permissions` does not have a single
+> deployable validator contract, so there is no value to put in it.
+> See [`docs/zerodev-permissions-integration.md`](zerodev-permissions-integration.md)
+> for the corrected model. The runtime is sentinel-era until that
+> integration ships and operators do not need to capture any
+> validator address today.
 
 ## Safety rules
 

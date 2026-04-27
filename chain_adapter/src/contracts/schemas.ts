@@ -76,12 +76,13 @@ export const DispatchRevokeDelegationSchema = z.object({
   action: z.literal("revoke_delegation"),
   smart_account_id: z.string().min(1),
   // Opaque identifier that Phoenix has already stored against the
-  // delegation row. For a Kernel-provisioned smart account this is
-  // the lowercase 0x-prefixed hex form of the Permission Validator's
-  // `bytes32 permissionId`; for pre-Kernel sentinels it is the legacy
-  // `del_…` placeholder. The adapter accepts both shapes here and only
-  // parses the Kernel shape when it actually needs to encode a
-  // cryptographic disable (see `permissionIdFromDelegationId`).
+  // delegation row. The adapter echoes it into callbacks today and
+  // does not parse it. The eventual cryptographic revoke (#58) will
+  // need to commit to a concrete shape — 4-byte ZeroDev
+  // `permissionId`, 21-byte Kernel `validationId`, or a serialized
+  // plugin blob — alongside the SDK integration in
+  // `docs/zerodev-permissions-integration.md`. Until then any
+  // non-empty string is accepted on the wire.
   delegation_id: z.string().min(1),
   reason: z.string().min(1),
   correlation_id: z.string().nullable(),
