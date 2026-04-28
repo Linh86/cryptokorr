@@ -160,6 +160,48 @@ defmodule BankWeb.Internal.AdapterCallbackControllerTest do
       assert event.after_ref["state"] == "revoked"
     end
 
+    test "grant_failed callback returns accepted_with_warning and does not create a delegation row",
+         %{conn: conn} do
+      # PR #130 contract: when the adapter's grant install fails it
+      # emits state=grant_failed with NO `permission` block. Phoenix
+      # MUST NOT create an active delegation row in that case — if
+      # this test starts failing because a row landed, the grant
+      # path would be silently treating a failed install as a
+      # successful grant, which would let autonomous execution
+      # broadcast against a permission that was never installed.
+      conn =
+        post(conn, "/internal/adapter/callback", %{
+          "contract_version" => 1,
+          "kind" => "delegation.state_changed",
+          "smart_account_id" => "sa_grant_failed",
+          "delegation_id" => "grant_failed_legacy",
+          "state" => "grant_failed",
+          "reason" => "operator_key_missing"
+        })
+
+      body = json_response(conn, 200)
+      assert body["status"] == "accepted_with_warning"
+      assert body["warning"] == "grant_failed"
+
+      # No delegation row, so a follow-up `request_connect/1` is
+      # not blocked by `:already_exists`.
+      assert is_nil(Delegations.get("sa_grant_failed"))
+
+      # And no `delegation.state_changed` audit event fires —
+      # apply_callback returns {:error, :grant_failed} before
+      # any audit emission. The pre-dispatch
+      # `security.grant_requested` audit (emitted by the
+      # GrantDelegation worker, not this callback path) is the
+      # only operator anchor for the failed install attempt.
+      assert [] =
+               Repo.all(
+                 from e in AuditEvent,
+                   where:
+                     e.event_type == "delegation.state_changed" and
+                       fragment("?->>'smart_account_id' = ?", e.after_ref, "sa_grant_failed")
+               )
+    end
+
     test "duplicate revoked callback returns accepted_with_warning without side effects",
          %{conn: conn} do
       delegation("sa_idemp", "del_idemp")

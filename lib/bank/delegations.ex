@@ -66,8 +66,12 @@ defmodule Bank.Delegations do
   What survives the model correction is the wire-level field
   itself; the format-validation helpers that previously enforced
   66-char hex have been removed because they would reject every
-  real ZeroDev id. The cryptographic revoke remains a sentinel
-  UserOp until the SDK integration ships (#58).
+  real ZeroDev id. The cryptographic revoke is now wired (#58 PR
+  #129 + #130): rows that carry the full permission artifact set
+  drive `Kernel.uninstallValidation(...)` automatically. Rows
+  without artifacts continue to take the sentinel path. #58 stays
+  open until a real on-chain grant + revoke confirms on Base
+  Sepolia.
 
   ## Public API
 
@@ -421,8 +425,9 @@ defmodule Bank.Delegations do
     * `:smart_account_id` — string
     * `:chain_id` — integer (must be Base or Base Sepolia)
     * `:account` — string (EOA / session key address)
-    * `:delegation_payload` — map (signed payload, optional during
-      the v1.1 stub phase)
+    * `:delegation_payload` — map (signed payload, optional;
+      threaded to the adapter for future signature verification
+      and persisted on the audit trail today)
 
   Returns `{:ok, :accepted}` once the audit event is written and
   the worker is enqueued. The synchronous response is acceptance

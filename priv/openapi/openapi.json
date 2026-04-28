@@ -2339,7 +2339,7 @@
                 "schema": "Elixir.BankWeb.OpenApi.Schemas.ConnectSmartAccountResponse"
               }
             },
-            "description": "Connect accepted (adapter dispatch stubbed)"
+            "description": "Connect accepted (audited and enqueued for adapter dispatch)"
           },
           "422": {
             "$ref": "#/components/responses/UnprocessableEntity"
