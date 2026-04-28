@@ -1,37 +1,39 @@
 /**
- * Pin slot for the ZeroDev kernel permission system. Currently
- * `null`. The original design here was wrong; this file documents
- * the correction and reserves a typed slot for the future, real
- * integration tracked in `docs/zerodev-permissions-integration.md`.
+ * Declarative pin for the ZeroDev kernel permission system,
+ * populated under #83. The `KERNEL_PERMISSION_PIN` constant below
+ * carries the canonical signer + policy module addresses sourced
+ * from `@zerodev/permissions@5.6.3` and the kernel-account
+ * `uninstallValidation(bytes21,bytes,bytes)` ABI fragment sourced
+ * from `KernelV3_1AccountAbi` in `@zerodev/sdk@5.5.10`.
  *
- * ## What this file used to claim
- *
- * Earlier revisions exported `permissionIdFromDelegationId` /
- * `delegationIdFromPermissionId` mapping helpers, a
- * `VerifiedPermissionValidator` interface, and a
- * `KERNEL_PERMISSION_VALIDATOR_PIN` constant — all built around the
- * assumption that ZeroDev's permissions architecture has a single
- * deployable Permission Validator contract at one address with a
- * single `disablePermission(bytes32)` ABI fragment. That assumption
- * is wrong.
+ * The pin is purely declarative. The runtime revoke path is still
+ * sentinel — `executeRevoke` does NOT consume this pin today.
+ * Wiring it in is #58's scope (alongside the remaining hard
+ * blockers documented in `docs/zerodev-permissions-integration.md`:
+ * per-account sudo signer, plugin-blob persistence, on-the-wire
+ * `delegation_id` encoding decision, per-permission vs
+ * `invalidateNonce` design call).
  *
  * ## What ZeroDev's `@zerodev/permissions@5.6.3` actually exposes
  *
  *   - `toPermissionValidator()` returns a plugin object whose
  *     `.address === zeroAddress`. There is NO single Permission
  *     Validator contract address to pin.
- *   - The on-chain primitives are CREATE2-deployed (same address on
- *     every chain) signer + policy modules:
+ *   - The on-chain primitives are CREATE2-deployed signer + policy
+ *     modules. ZeroDev publishes these with the same address on
+ *     every chain (verified manually for two representative modules
+ *     during the model-correction research; not enforced by an
+ *     automated cross-chain check in this repo).
  *       * signers: `ECDSA_SIGNER_CONTRACT`,
  *         `WEBAUTHN_SIGNER_CONTRACT_V0_0_4`, …
  *       * policies: `CALL_POLICY_CONTRACT_V0_0_5`, `GAS_POLICY_CONTRACT`,
  *         `RATE_LIMIT_POLICY_CONTRACT`, `SUDO_POLICY_CONTRACT`,
  *         `SIGNATURE_POLICY_CONTRACT`, `TIMESTAMP_POLICY_CONTRACT`, …
  *   - `permissionId` is `bytes4` (4 bytes / 8 hex chars), computed
- *     as `keccak256(abi.encode(policyAndSignerData))[0:4]`. The
- *     earlier helpers in this file enforced 66 chars (0x + 64 hex,
- *     i.e. `bytes32`) and would have rejected every real ZeroDev
- *     permissionId.
+ *     as `keccak256(abi.encode(policyAndSignerData))[0:4]`. An
+ *     earlier revision of this file enforced 66 chars (0x + 64
+ *     hex, i.e. `bytes32`) and would have rejected every real
+ *     ZeroDev permissionId; that enforcement was removed.
  *   - The on-chain revoke entry point is
  *     `Kernel.uninstallValidation(bytes21 vId, bytes deinitData,
  *     bytes hookDeinitData)`, called ON the smart account itself —
@@ -41,24 +43,12 @@
  *     payload that requires reconstructing the same plugin object
  *     used at grant-time.
  *
- * ## Why the file is intentionally thin today
- *
- * The corrected pin is not a single ABI fragment. It is a tuple of
- * canonical CREATE2 module addresses, the kernel implementation's
- * bytecode hash for the chosen kernel version, and the npm version
- * range of `@zerodev/permissions` whose exported constants the
- * runtime accepts. None of those values are decided in this repo
- * yet — `@zerodev/sdk` and `@zerodev/permissions` are not even
- * listed as runtime deps in `chain_adapter/package.json`. The
- * concrete `KernelPermissionPin` shape and the `executeRevoke`
- * call-site changes will land alongside the SDK integration.
- *
- * ## What survives the correction
+ * ## What survives the original wrong-model correction
  *
  *   - The wire-level `delegation_id` field (Phoenix → adapter via
  *     `DispatchRevokeDelegationSchema`) is still a meaningful
- *     opaque identifier — only the FORMAT-enforcing helpers below
- *     were wrong, not the threading.
+ *     opaque identifier — only the FORMAT-enforcing helpers were
+ *     wrong, not the threading.
  *   - The ERC-7579 outer-execute envelope pin in `./erc7579.ts`
  *     (selector `0xe9ae5c53`) is independent of the permission
  *     model above it. Kernel v3 still routes execution through
@@ -67,33 +57,38 @@
  *     0x)`) is unaffected — it does not depend on any validator
  *     concept.
  *
- * Tracking: GitHub #83 (was: "verify validator ABI"; now: "design
- * the ZeroDev permission pin and integrate the SDK"). #58 ("swap
- * sentinel for cryptographic revoke") still depends on #83 +
- * provisioning under #84, but both #83 and #84 now need re-scoping
- * before they can produce verifiable artifacts. See
- * `docs/zerodev-permissions-integration.md` for the corrected
- * model and hard blockers.
+ * Tracking: GitHub #83 was "verify validator ABI"; re-scoped under
+ * the model correction to "populate `KernelPermissionPin` against
+ * ZeroDev's actual primitives" and landed by populating the
+ * `KERNEL_PERMISSION_PIN` literal below + the
+ * `permission-validator-pin.test.ts` tripwire. #58 ("swap sentinel
+ * for cryptographic revoke") is the remaining open issue — it has
+ * to consume this pin from `executeRevoke` once the integration
+ * doc's other hard blockers are resolved. See that doc for the
+ * full status.
  */
 
 import type { AbiFunction, Hex } from "viem";
 
 /**
- * Reserved type for the future ZeroDev permission pin. Every field
- * shape here is provisional pending the SDK integration described
- * in `docs/zerodev-permissions-integration.md`. Populating this
- * slot is part of #83.
+ * Shape of `KERNEL_PERMISSION_PIN` below. The pin is the
+ * runtime's allowlist of ZeroDev signer + policy modules plus the
+ * kernel-account method that performs revoke.
  *
  * NOTE: this interface deliberately does NOT include a single
- * `validatorAddress` or `disableFunction` field. The earlier
- * version did, and that was the bug.
+ * `validatorAddress` or `disableFunction` field. An earlier
+ * revision did, modelled on a wrong assumption that ZeroDev
+ * permissions were a single deployable validator contract; see
+ * `docs/zerodev-permissions-integration.md` for the corrected
+ * model.
  */
 export interface KernelPermissionPin {
   /**
-   * The ZeroDev signer contracts (CREATE2 — same address on every
-   * chain) the runtime is willing to accept. Pinning here lets
-   * startup refuse to revoke against a permission whose signer
-   * module is unknown to the adapter.
+   * The ZeroDev signer contracts the runtime is willing to accept.
+   * Each address is sourced from `@zerodev/permissions` constants;
+   * the package publishes the same address on every chain via
+   * CREATE2. The companion tripwire test asserts these match the
+   * package's exported constants byte-for-byte.
    */
   acceptedSignerContracts: readonly `0x${string}`[];
 
@@ -104,10 +99,13 @@ export interface KernelPermissionPin {
   acceptedPolicyContracts: readonly `0x${string}`[];
 
   /**
-   * Pinned npm version range of `@zerodev/permissions` whose
-   * exported constants match the addresses above. The adapter
-   * refuses to start if the runtime SDK version is outside this
-   * range.
+   * Exact npm version of `@zerodev/permissions` whose exported
+   * constants match the addresses above. The companion tripwire
+   * test reads the resolved package version from `node_modules`
+   * and asserts it equals this string, so a future bump that
+   * drifts cannot land silently — either the lockfile pulls a
+   * different version (test fails) or the pin literal is bumped
+   * without re-verifying (test fails).
    */
   zeroDevPermissionsPackageVersion: string;
 
@@ -187,9 +185,11 @@ export const KERNEL_PERMISSION_PIN: KernelPermissionPin = {
   ],
 
   // Pinned npm version of `@zerodev/permissions` whose exported
-  // constants the addresses above were verified against. The
-  // lockfile + the tripwire test together enforce that the
-  // resolved package version stays compatible.
+  // constants the addresses above were verified against. Exact
+  // version, not a range — `chain_adapter/package.json` pins the
+  // dep to `"5.6.3"` and the companion tripwire test reads
+  // `node_modules/@zerodev/permissions/package.json` at test time
+  // to assert the resolved version equals this string.
   zeroDevPermissionsPackageVersion: "5.6.3",
 
   artifactSource: {
@@ -197,9 +197,10 @@ export const KERNEL_PERMISSION_PIN: KernelPermissionPin = {
     url: "https://www.npmjs.com/package/@zerodev/permissions/v/5.6.3",
     note:
       "Addresses sourced from `constants.ts` in the `@zerodev/permissions@5.6.3` " +
-      "tarball. Confirmed CREATE2 same-on-every-chain via contractscan.xyz for " +
-      "ECDSA_SIGNER_CONTRACT and CALL_POLICY_CONTRACT_V0_0_5; the rest of the " +
-      "modules are deployed by the same factory pattern per the package README.",
+      "tarball; the companion tripwire test imports each constant from the " +
+      "package and asserts equality with the literals below. Cross-chain " +
+      "address consistency is asserted by ZeroDev (CREATE2 deployment) but is " +
+      "NOT enforced by an automated check in this repo.",
   },
 
   // `Kernel.uninstallValidation(bytes21,bytes,bytes)` is the

@@ -31,6 +31,9 @@
  * guard between #83 and #58.
  */
 
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
 import {
   ECDSA_SIGNER_CONTRACT,
@@ -46,6 +49,28 @@ import {
   KERNEL_PERMISSION_PIN,
   type KernelPermissionPin,
 } from "../src/chains/base/permission_validator.js";
+
+// Read the resolved package's `package.json` directly off disk.
+// `createRequire` would normally do this, but `@zerodev/permissions`
+// declares an `exports` field that does not list `./package.json`,
+// so Node refuses the resolution. Reading the file by absolute
+// path bypasses the exports gate; the path is constructed from the
+// test file's own URL so it does not depend on a particular
+// working directory.
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const resolvedPermissionsPkg = JSON.parse(
+  readFileSync(
+    join(
+      __dirname,
+      "..",
+      "node_modules",
+      "@zerodev",
+      "permissions",
+      "package.json",
+    ),
+    "utf8",
+  ),
+) as { name: string; version: string };
 
 describe("KERNEL_PERMISSION_PIN — accepted module addresses match @zerodev/permissions", () => {
   it("acceptedSignerContracts is exactly the package's ECDSA_SIGNER_CONTRACT", () => {
@@ -87,6 +112,20 @@ describe("KERNEL_PERMISSION_PIN — accepted module addresses match @zerodev/per
   it("zeroDevPermissionsPackageVersion records the verified version", () => {
     expect(KERNEL_PERMISSION_PIN.zeroDevPermissionsPackageVersion).toBe(
       "5.6.3",
+    );
+  });
+
+  it("the resolved @zerodev/permissions package matches the pinned version", () => {
+    // Closes the loop on the version pin: the test imports the
+    // package's own `package.json` and asserts the running version
+    // matches what `KERNEL_PERMISSION_PIN.zeroDevPermissionsPackageVersion`
+    // claims. If `chain_adapter/package.json` ever drifts (someone
+    // bumps the dep without re-verifying the addresses, or
+    // someone updates the pin literal without bumping the dep),
+    // this test fails.
+    expect(resolvedPermissionsPkg.name).toBe("@zerodev/permissions");
+    expect(resolvedPermissionsPkg.version).toBe(
+      KERNEL_PERMISSION_PIN.zeroDevPermissionsPackageVersion,
     );
   });
 
