@@ -32,23 +32,27 @@ this file; the runbook only describes operator behavior.
   Base. The decision is independent of the permission-model
   correction below: a kernel-modular account is still the right
   host for a real cryptographic revoke once the integration lands.
-- **#84 — PARTIAL.** The smart-account-deploy portion of the
-  operator runbook is documented in
-  [`docs/provisioning-kernel-v3.md`](provisioning-kernel-v3.md).
-  The earlier "install a single Permission Validator at a recorded
-  address" + "verify the validator's bytecode hash" steps were
-  artefacts of the wrong-model assumption and are removed; the
-  template scripts (`chain_adapter/scripts/provision-kernel.ts`,
-  `verify-installed-validator.ts`) are now deferred stubs.
-- **#83 — RE-SCOPED.** Was "pin the Permission Validator's
+- **#84 — CLOSED on Base Sepolia.** The
+  smart-account-deploy portion of the operator runbook is in
+  [`docs/provisioning-kernel-v3.md`](provisioning-kernel-v3.md);
+  `chain_adapter/scripts/provision-kernel.ts` is the runnable
+  template. A real Kernel v3.1 smart account was deployed at
+  `0xacb3390BF0E13eB0755317Fbb2C73Ed185F4142C` and verified
+  against the same pinned values (factory
+  `0xaac5D4240AF87249B3f71BC8E4A2cae074A3E419`, implementation
+  `0xBAC849bB641841b44E965fB01A4Bf5F074f84b4D`, root validator
+  `0x845ADb2C711129d4f3966735eD98a9F09fC4cE57`); deploy tx
+  `0xe6ad5263ed7023ee6b5f7dd2c529efda27ccb4cebce449c52a58a882c9fe4724`.
+- **#83 — LANDED.** Was "pin the Permission Validator's
   `disablePermission(bytes32)` ABI fragment against a verified
-  deployment." Re-scoped to "design and populate
-  `KernelPermissionPin` from
+  deployment." Re-scoped to "populate `KernelPermissionPin` from
   `chain_adapter/src/chains/base/permission_validator.ts` against
-  ZeroDev's actual primitives" — see the integration doc. The
-  exported pin slot is `KERNEL_PERMISSION_PIN: KernelPermissionPin
-  | null = null` today; populating it depends on the SDK
-  integration.
+  ZeroDev's actual primitives". The pin is populated with the
+  ECDSA signer + the six modern policy modules from
+  `@zerodev/permissions@5.6.3` and the
+  `uninstallValidation(bytes21,bytes,bytes)` ABI fragment from
+  `KernelV3_1AccountAbi`; both halves are verified by the
+  `permission-validator-pin.test.ts` tripwire.
 - **#58 — STILL OPEN.** The sentinel-era revoke is unchanged. The
   swap target is no longer "a Permission Validator's disable
   function"; it is `Kernel.uninstallValidation(bytes21,bytes,bytes)`
@@ -79,12 +83,17 @@ What is verifiable today, independent of the integration:
   The tripwire fails loudly if the inner call shape changes,
   forcing whoever lands #58 to update this ADR + the integration
   doc + the operator runbooks in lockstep.
-- **`KernelPermissionPin` slot.** Exported from
-  [`permission_validator.ts`](../chain_adapter/src/chains/base/permission_validator.ts);
-  `KERNEL_PERMISSION_PIN` is `null` until #83 populates it. The
-  `permission-validator-pin.test.ts` tripwire pins both the null
-  state and the structural shape so the eventual pin's type
-  cannot drift silently.
+- **`KernelPermissionPin` populated.** Exported from
+  [`permission_validator.ts`](../chain_adapter/src/chains/base/permission_validator.ts).
+  `KERNEL_PERMISSION_PIN` carries the canonical ECDSA signer
+  (`0x6A6F0…D4FF`) plus the six modern policy modules from
+  `@zerodev/permissions@5.6.3` (CALL v0.0.5, GAS, RATE_LIMIT,
+  SIGNATURE, SUDO, TIMESTAMP), and the
+  `uninstallValidation(bytes21,bytes,bytes)` ABI fragment from
+  `KernelV3_1AccountAbi` in `@zerodev/sdk@5.5.10`. The
+  `permission-validator-pin.test.ts` tripwire imports the same
+  package values and asserts equality, so a future package bump
+  that drifts cannot land silently.
 
 ## Decision
 

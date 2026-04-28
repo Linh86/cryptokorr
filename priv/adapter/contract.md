@@ -131,18 +131,23 @@ What is verifiable today:
   `requirePermissionValidatorAddress` accessor, a fixture pinning
   the 66-char convention) was removed as an artefact of a
   wrong-model assumption — see the integration doc.
-- **#84 — partial.** Smart-account-deploy portion of the runbook
-  is documented in
-  [`docs/provisioning-kernel-v3.md`](../../docs/provisioning-kernel-v3.md).
-  The earlier "install a single Permission Validator" + "verify
-  its bytecode hash" steps are removed; the corresponding script
-  templates (`scripts/provision-kernel.ts`,
-  `scripts/verify-installed-validator.ts`) are deferred stubs.
-- **#83 — re-scoped.** Was "pin the validator's disable ABI
-  fragment". Now "design and populate `KernelPermissionPin`
-  against ZeroDev's actual primitives" — the slot is exported as
-  `KERNEL_PERMISSION_PIN: KernelPermissionPin | null = null` in
-  [`permission_validator.ts`](../../chain_adapter/src/chains/base/permission_validator.ts).
+- **#84 — closed on Base Sepolia.** Operator runbook is in
+  [`docs/provisioning-kernel-v3.md`](../../docs/provisioning-kernel-v3.md);
+  scripts `provision-kernel.ts` and `verify-installed-validator.ts`
+  are real, no-secret-safe templates targeting Kernel v3.1. A
+  smart account was deployed at
+  `0xacb3390BF0E13eB0755317Fbb2C73Ed185F4142C` on chain 84532;
+  deploy tx
+  `0xe6ad5263ed7023ee6b5f7dd2c529efda27ccb4cebce449c52a58a882c9fe4724`.
+- **#83 — landed.** Was "pin the validator's disable ABI
+  fragment". Re-scoped to "populate `KernelPermissionPin` against
+  ZeroDev's actual primitives". The slot is populated with the
+  ECDSA signer + six modern policy modules from
+  `@zerodev/permissions@5.6.3` and the
+  `uninstallValidation(bytes21,bytes,bytes)` ABI fragment from
+  `KernelV3_1AccountAbi`; the
+  `permission-validator-pin.test.ts` tripwire imports the same
+  package values and asserts equality.
 - **#58 — open.** The swap target is `Kernel.uninstallValidation`
   ON the smart account itself, signed by a sudo signer the adapter
   does not yet hold. There is no separate validator address to
