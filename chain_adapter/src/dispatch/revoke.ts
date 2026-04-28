@@ -20,14 +20,14 @@
  * socket even if Phoenix recorded a timeout). Duplicates still receive
  * a fresh `revoking` callback so the Phoenix projection stays synced.
  *
- * Cryptographic revocation at the smart-account level remains
- * blocked on three concrete missing artifacts (see
- * `chains/base/revoke.ts` and `chains/base/userop.ts` for the exact
- * one-line swap): a smart-account implementation that supports
- * modules, a deployed permission-module address, and the module's
- * revoke ABI. The sentinel tx does not prevent the delegation key
- * from signing another userop. Phoenix enforces fail-closed on its
- * side for the entire window. Tracked in Phoenix issue #31.
+ * Cryptographic revocation at the smart-account level is still
+ * pending: the runtime would need to call
+ * `Kernel.uninstallValidation(...)` on the smart account itself,
+ * which depends on the ZeroDev SDK integration described in
+ * `docs/zerodev-permissions-integration.md`. The sentinel tx
+ * anchors the attempt on chain but does NOT prevent the delegation
+ * key from signing another userop; Phoenix enforces fail-closed on
+ * its side for the entire window. Tracked in Phoenix issue #31.
  */
 
 import {
@@ -44,13 +44,11 @@ import { executeRevoke } from "../chains/base/revoke.js";
 
 export interface RevokeDeps {
   /**
-   * Adapter runtime config. `executeRevoke` reads
-   * `permissionValidatorAddress` off it to decide whether it is
-   * running in sentinel-era (env unset or pin not yet landed) or in
-   * Kernel-provisioned mode — the latter is gated on both the env
-   * value AND `KERNEL_PERMISSION_VALIDATOR_PIN` being non-null, so
-   * the sentinel can never silently degrade into claiming a
-   * cryptographic revoke.
+   * Adapter runtime config. Threaded into `executeRevoke` so the
+   * eventual real revoke can read whatever the ZeroDev SDK
+   * integration (see `docs/zerodev-permissions-integration.md`)
+   * needs without further signature changes. The sentinel path
+   * uses it only for chain-id logging today.
    */
   config: AdapterConfig;
   callbackClient: CallbackClient;

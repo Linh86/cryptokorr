@@ -18,22 +18,19 @@
  *      (selector `0xe9ae5c53`, see `./erc7579.ts`). The delegation
  *      key IS the SimpleAccount owner today, so there is no separate
  *      authority to disable until provisioning moves to Kernel.
- *   2. **Adapter env scaffolding** — LANDED in #57:
- *      `PERMISSION_VALIDATOR_ADDRESS` env key + the strict accessor
- *      `requirePermissionValidatorAddress(config)` so the live revoke
- *      cannot silently degrade to a sentinel after #58 ships.
- *   3. **Mapping convention** — LANDED in #57: the
- *      `delegation_id` ↔ `permissionId` round trip in
- *      `./permission_validator.ts`, plus the verifiable ERC-7579
- *      outer wrap in `./erc7579.ts`.
- *   4. **Validator interface pin** — STILL PENDING for #58: the
- *      specific Permission Validator deployment on Base, its
- *      disable function name + selector, and a tripwire test pinning
- *      that fragment. Deferred from #57 because pinning a name like
- *      `disablePermission(bytes32)` from a plausible reference
- *      implementation — without verifying it against the actual
- *      bytecode of a deployment we will use — would surface as a
- *      silent on-chain revert at the first real revoke.
+ *   2. **ERC-7579 outer wrap** — LANDED in #57: the verifiable
+ *      `execute(bytes32 mode, bytes executionCalldata)` envelope
+ *      pin in `./erc7579.ts`.
+ *   3. **ZeroDev SDK integration + cryptographic revoke wiring** —
+ *      DEFERRED. The earlier plan around a single
+ *      `PERMISSION_VALIDATOR_ADDRESS` env, a strict accessor, a
+ *      66-char `permissionId` mapping, and a single
+ *      `disablePermission(bytes32)` ABI fragment was wrong-model
+ *      against `@zerodev/permissions@5.6.3`. See
+ *      `docs/zerodev-permissions-integration.md` for the corrected
+ *      architecture (CREATE2 signer + policy modules, 4-byte
+ *      `permissionId`, kernel-account `uninstallValidation`) and
+ *      the hard-blocker list.
  *
  * What this path does in v0.1:
  *
@@ -57,11 +54,13 @@
  *     reverted) are already exercised end-to-end. When #31 lands,
  *     the AA pipeline outside `callData` (build, sign, submit, wait,
  *     callback emission) is unchanged; only the `callData` itself
- *     swaps — from the SimpleAccount-shaped sentinel envelope to the
- *     ERC-7579 envelope wrapping a verified Permission Validator
- *     disable body. Both the outer execute selector AND the inner
- *     body change in that swap; see the `TODO(#58)` block below for
- *     the exact replacement.
+ *     swaps — from the SimpleAccount-shaped sentinel envelope to
+ *     the ERC-7579 envelope wrapping a kernel-account
+ *     `uninstallValidation(bytes21,bytes,bytes)` call. There is no
+ *     separate validator address to target. Both the outer execute
+ *     selector AND the inner body change in that swap; see the
+ *     `TODO(#58)` block below + the integration doc for the exact
+ *     replacement.
  *
  * What it does NOT buy us:
  *
@@ -90,7 +89,6 @@ import type { CallbackClient } from "../../callbacks/client.js";
 import { nextCallbackId } from "../../callbacks/client.js";
 import { ExecutionError } from "../../lib/errors.js";
 import { logger } from "../../lib/logger.js";
-import { KERNEL_PERMISSION_VALIDATOR_PIN } from "./permission_validator.js";
 import {
   buildAndSignUserOp,
   buildSentinelRevokeCallData,
@@ -110,10 +108,11 @@ export interface RevokeResult {
  *
  * `delegationId` is Phoenix's identifier for the authority record
  * being revoked — opaque to this function (just echoed into
- * callbacks) until #58 wires the real ERC-7579 disable, at which
- * point `permissionIdFromDelegationId` parses it into `bytes32
- * permissionId` and the inner call encodes against the Permission
- * Validator.
+ * callbacks). The eventual cryptographic revoke (see TODO(#58)
+ * below) will be a `Kernel.uninstallValidation(...)` call ON the
+ * smart account itself, NOT on a separate Permission Validator
+ * contract; an earlier version of this file pretended such a
+ * contract existed.
  *
  * Emits callbacks on every terminal transition; throws
  * `ExecutionError` on failure after emitting the terminal
@@ -127,106 +126,53 @@ export async function executeRevoke(
   clients: BaseClients,
   callbackClient: CallbackClient,
 ): Promise<RevokeResult> {
-  // TODO(#58): Replace the sentinel call below with the real
-  // permission-disable call. The remaining swap has exactly two
-  // external prereqs — each tracked separately so the prerequisites
-  // do not silently bundle.
+  // TODO(#58): Replace the sentinel call below with a real
+  // ZeroDev kernel permission revoke. An earlier version of this
+  // block described the swap as "wrap the validator's
+  // disablePermission(bytes32) in the ERC-7579 envelope" — that
+  // model was wrong. The actual on-chain entry point is
+  // `Kernel.uninstallValidation(bytes21 vId, bytes deinitData,
+  // bytes hookDeinitData)` called ON the smart account itself, not
+  // on a separate "Permission Validator" contract.
   //
-  // What #57 leaves behind, verified:
-  //
-  //   - the `delegation_id` ↔ `permissionId` mapping helpers in
-  //     `./permission_validator.ts` (mapping convention is our design
-  //     choice and verifiable today),
-  //   - the strict env accessor `requirePermissionValidatorAddress`
-  //     in `../../config/index.ts` so the live revoke cannot silently
-  //     degrade to a sentinel if the env var is forgotten on a
-  //     Kernel-provisioned deploy,
-  //   - the verifiable ERC-7579 outer wrap
-  //     `buildErc7579ExecuteCallData` in `./erc7579.ts`, pinned
-  //     against EIP-7579's `execute(bytes32,bytes)` selector
-  //     `0xe9ae5c53`.
-  //
-  // What subsequent plumbing has added:
-  //
+  // What still survives from earlier work:
   //   - `delegationId` is a parameter sourced from the Phoenix
-  //     dispatch payload (`DispatchRevokeDelegationSchema`). Phoenix
-  //     populates it from the `delegations` projection row.
-  //   - `config` is a parameter (this function), threaded via
-  //     `RevokeDeps` from `buildApp` → `handleRevokeDispatch`. The
-  //     eventual real path reads
-  //     `requirePermissionValidatorAddress(config)` and compares it
-  //     against the live-pinned
-  //     `KERNEL_PERMISSION_VALIDATOR_PIN.address` at startup via the
-  //     bytecode tripwire.
-  //   - `KERNEL_PERMISSION_VALIDATOR_PIN` is exported from
-  //     `./permission_validator.ts` and remains `null` until #83
-  //     lands a `VerifiedPermissionValidator` sourced from a
-  //     verified deployment artifact. The sentinel path is the only
-  //     state where the pin is `null`; once non-null, the runtime
-  //     routes the real body instead.
+  //     dispatch payload (`DispatchRevokeDelegationSchema`). Its
+  //     opaque-string semantics are stable; only the FORMAT (4-byte
+  //     `permissionId` vs 21-byte `validationId` vs serialized
+  //     plugin blob) is part of the redesign.
+  //   - `config` is threaded via `RevokeDeps` and is here for the
+  //     eventual SDK + sudo-signer wiring.
+  //   - The ERC-7579 outer-execute envelope pin in `./erc7579.ts`
+  //     is independent of the permission model and still applies.
   //
-  // What still needs to land before #58 closes:
+  // What still needs to land before #58 closes (see
+  // `docs/zerodev-permissions-integration.md` for the full,
+  // verified ZeroDev model and the hard blockers list):
   //
-  //   1. Provision a Kernel v3 / ERC-7579 deployment on Base and
-  //      install a Permission Validator against it. Tracked in #84.
-  //      Runbook: `docs/provisioning-kernel-v3.md`.
-  //      Templates: `scripts/provision-kernel.ts` +
-  //      `scripts/verify-installed-validator.ts`. Until #84 lands
-  //      against a real deployment, the outer envelope here is
-  //      correctly the SimpleAccount one
-  //      (`buildSentinelRevokeCallData`).
-  //   2. Verify the Permission Validator deployment artifact and pin
-  //      its disable function name + selector against a concrete
-  //      artifact (verified contract / canonical audited package /
-  //      vendor-published deployment manifest). Add a tripwire test
-  //      pinning that fragment. Tracked in #83. The chain-side
-  //      handoff format is the receipt emitted by
-  //      `scripts/verify-installed-validator.ts`; the full pin
-  //      contract is documented on `VerifiedPermissionValidator` in
-  //      `./permission_validator.ts`.
+  //   1. Add `@zerodev/sdk` + `@zerodev/permissions` as runtime
+  //      deps in `chain_adapter/package.json`. Currently absent.
+  //   2. Establish a per-kernel-account sudo signer the adapter
+  //      can use to sign `uninstallValidation` UserOps. The
+  //      sentinel-era delegation signer is NOT sufficient.
+  //   3. Wire a bundler RPC + paymaster (or native funding) for
+  //      the revoke UserOp.
+  //   4. Persist the serialized plugin blob (or raw policy + signer
+  //      reconstruction params) at grant-time so the adapter can
+  //      rebuild the plugin and produce the multi-policy
+  //      `deinitData` payload at revoke-time.
+  //   5. Pin the canonical `@zerodev/permissions` package version +
+  //      signer/policy module addresses (#83 — re-scoped on top
+  //      of the new `KernelPermissionPin` slot in
+  //      `./permission_validator.ts`).
+  //   6. Decide the on-the-wire shape of `delegation_id`
+  //      (4-byte permissionId vs 21-byte validationId vs blob).
+  //      Phoenix's column is opaque, but the adapter and Phoenix
+  //      must agree.
   //
-  // When #83 populates `KERNEL_PERMISSION_VALIDATOR_PIN`, the swap
-  // here fits into a narrow guard — no further signature changes
-  // needed:
-  //
-  //     if (KERNEL_PERMISSION_VALIDATOR_PIN !== null) {
-  //       const pin = KERNEL_PERMISSION_VALIDATOR_PIN;
-  //       const validatorAddress = requirePermissionValidatorAddress(config);
-  //       // pin.address === validatorAddress enforced at startup
-  //       const permissionId = permissionIdFromDelegationId(delegationId);
-  //       const innerBody = encodeFunctionData({
-  //         abi: [pin.disableFunction],
-  //         functionName: pin.disableFunction.name,
-  //         args: [permissionId],
-  //       });
-  //       const callData = buildErc7579ExecuteCallData(
-  //         pin.address, 0n, innerBody,
-  //       );
-  //       // sign + submit + callback is unchanged from here down.
-  //     }
-  //
-  // Updating `test/base-revoke-sentinel-pin.test.ts` to pin the new
-  // outer wrap is the last step in the #58 PR.
-
-  // Operational warning: the env var is set but the pin has not
-  // landed yet, so the runtime is straddling the transition. This
-  // shouldn't occur in production because the pin + env typically
-  // land together, but the asymmetric state is visible here so an
-  // operator who points the adapter at a Kernel-provisioned account
-  // before #83 ships gets a clear signal that the revoke is still
-  // sentinel-anchored, not cryptographic.
-  if (
-    config.permissionValidatorAddress !== undefined &&
-    KERNEL_PERMISSION_VALIDATOR_PIN === null
-  ) {
-    logger.warn(
-      "PERMISSION_VALIDATOR_ADDRESS is set but KERNEL_PERMISSION_VALIDATOR_PIN is not yet landed (#83); still using sentinel revoke body",
-      {
-        smart_account_id: smartAccountId,
-        permission_validator_address: config.permissionValidatorAddress,
-      },
-    );
-  }
+  // Until those land, this function stays on the sentinel body
+  // below. That body anchors the revoke attempt on chain but does
+  // NOT cryptographically disable the delegation (#31 stays open).
 
   const sentinelCallData = buildSentinelRevokeCallData(
     clients.smartAccountAddress,
@@ -236,6 +182,7 @@ export async function executeRevoke(
     smart_account_id: smartAccountId,
     delegation_id: delegationId,
     reason,
+    chain_id: config.baseChainId,
     smart_account: clients.smartAccountAddress,
   });
 

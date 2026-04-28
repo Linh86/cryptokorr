@@ -109,15 +109,14 @@ The in-repo artifacts are ready. What's left is:
    that repo's deploy doc). Must be reachable from Phoenix over an
    internal network and vice versa.
 5. **Provision the on-chain smart account.** A Kernel v3 modular
-   account on Base, with a Permission Validator module installed
-   against it. This is a one-shot operator procedure — see
+   account on Base. This is a one-shot operator procedure — see
    [`docs/provisioning-kernel-v3.md`](provisioning-kernel-v3.md) for
-   the runbook. The output addresses (`SMART_ACCOUNT_ADDRESS`,
-   `PERMISSION_VALIDATOR_ADDRESS`) feed the adapter's env in step 6.
-   Tracked in #84 (provisioning) and #83 (validator ABI verification);
-   the cryptographic revoke that consumes the validator is #58. Until
-   #58 ships, leaving `PERMISSION_VALIDATOR_ADDRESS` unset is
-   intentional and selects the sentinel revoke path.
+   the runbook. The output address (`SMART_ACCOUNT_ADDRESS`) feeds
+   the adapter's env in step 6. Per-permission install (and the
+   cryptographic revoke that consumes it) depends on the ZeroDev
+   SDK integration tracked in
+   [`docs/zerodev-permissions-integration.md`](zerodev-permissions-integration.md);
+   until that ships the runtime is sentinel-era.
 6. **Issue and distribute secrets.** `SECRET_KEY_BASE`,
    `ADAPTER_DISPATCH_SECRET`, `ADAPTER_CALLBACK_SECRET`, bundler API
    keys, paymaster API keys. See [docs/security.md](security.md) for
@@ -133,9 +132,12 @@ The in-repo artifacts are ready. What's left is:
    `mix bank.smoke.revoke` from the operator host; see
    [docs/smoke-tests.md](smoke-tests.md). Run
    `chain_adapter/scripts/check-env.sh` on the adapter host
-   first to confirm whether the deploy is in `SENTINEL-ERA` or
-   `KERNEL-PROVISIONED` mode — the smoke result must be interpreted
-   in light of that mode.
+   first; it reports `mode: sentinel-era (awaiting ZeroDev SDK
+   integration)` and the smoke `state: revoked` must be read as
+   "on-chain anchored, trust downgraded" rather than
+   cryptographically disabled until the integration in
+   [docs/zerodev-permissions-integration.md](zerodev-permissions-integration.md)
+   ships.
 
 ## Blocker note for issue #35
 

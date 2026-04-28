@@ -29,15 +29,15 @@ defmodule Bank.Delegations.Delegation do
 
   Free-form string column. Phoenix never parses it; it is the
   adapter's identifier for the on-chain authority record being
-  managed. After GitHub #58 ships against a Kernel v3 modular
-  account, fresh `delegation_id` values are the lowercase
-  0x-prefixed hex form of the Permission Validator's `bytes32
-  permissionId` (66 chars total). The full mapping rationale lives
-  in `docs/smart-account-and-revoke-design.md` (#56); the
-  `delegation_id` ↔ `permissionId` round-trip helpers and the
-  ERC-7579 outer-execute pin landed under #57. The validator's own
-  disable ABI is pinned later, by #58, against a specific verified
-  deployment — see the adapter's `permission_validator.ts` for why.
+  managed. The on-the-wire encoding (4-byte ZeroDev `permissionId`,
+  21-byte Kernel `validationId`, or a serialized plugin blob) is
+  deferred until the ZeroDev SDK integration described in
+  `docs/zerodev-permissions-integration.md` lands. An earlier
+  version of this docstring claimed the value was a 66-char
+  `bytes32 permissionId` derived from a single Permission
+  Validator contract — that was a wrong-model assumption (see the
+  integration doc). The column itself stays opaque, so no
+  migration is needed.
   """
 
   use Bank.Schema

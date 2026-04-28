@@ -97,27 +97,6 @@ export interface AdapterConfig {
    * for test networks that deploy a non-canonical EntryPoint. */
   entryPointAddress: `0x${string}`;
 
-  /**
-   * Address of the Kernel v3 Permission Validator module installed on
-   * `smartAccountAddress`. Optional in v0.1 because the live revoke
-   * path is still the sentinel UserOp (see
-   * `src/chains/base/revoke.ts`); it does NOT touch the validator
-   * yet. The cryptographic revoke that does is GitHub #58.
-   *
-   * The architectural decision behind this field is captured in
-   * `docs/smart-account-and-revoke-design.md` (GitHub #56) in the
-   * Phoenix repo. The mapping helpers and ABI fragment that consume
-   * this address live in `src/chains/base/permission_validator.ts`.
-   *
-   * Fail-closed posture: leaving this unset is FINE for v0.1 because
-   * the sentinel path doesn't read it — but accessing it MUST be
-   * routed through `requirePermissionValidatorAddress(config)`, which
-   * throws a loud, #58-referencing error when unset. The strict
-   * accessor exists so #58 cannot silently degrade back to a sentinel
-   * if the env var is forgotten on a Kernel-provisioned deploy.
-   */
-  permissionValidatorAddress?: `0x${string}`;
-
   /** Smart account / delegation */
   delegationSignerKey: string;
 
@@ -151,47 +130,12 @@ export function loadConfig(): AdapterConfig {
       "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
     ) as `0x${string}`,
 
-    permissionValidatorAddress: optionalString("PERMISSION_VALIDATOR_ADDRESS") as
-      | `0x${string}`
-      | undefined,
-
     delegationSignerKey: required("DELEGATION_SIGNER_KEY"),
 
     usdcContractAddress: required("USDC_CONTRACT_ADDRESS") as `0x${string}`,
 
     contractVersion: optionalInt("CONTRACT_VERSION", 1),
   };
-}
-
-/**
- * Strict accessor for `permissionValidatorAddress`.
- *
- * The sentinel revoke path (v0.1) does NOT need a validator address;
- * leaving `PERMISSION_VALIDATOR_ADDRESS` unset is fine. The real
- * cryptographic revoke (#58) DOES need it, and silently falling back
- * to a sentinel if the env var is missing on a Kernel-provisioned
- * smart account would be a critical correctness bug — the operator
- * would believe a delegation was revoked when in fact only an anchor
- * was written. This accessor throws loudly to make that impossible.
- *
- * Call this from the real revoke encoder when #58 wires it; do NOT
- * read `config.permissionValidatorAddress` directly from execution
- * paths.
- */
-export function requirePermissionValidatorAddress(
-  config: AdapterConfig,
-): `0x${string}` {
-  if (!config.permissionValidatorAddress) {
-    throw new Error(
-      "PERMISSION_VALIDATOR_ADDRESS is not configured. " +
-        "A cryptographic delegation revoke (Phoenix issue #58) requires the " +
-        "Kernel v3 Permission Validator address bound to this smart account. " +
-        "See docs/smart-account-and-revoke-design.md (#56) for provisioning, " +
-        "or fall back to the sentinel revoke path if you intentionally have " +
-        "no validator installed.",
-    );
-  }
-  return config.permissionValidatorAddress;
 }
 
 /**

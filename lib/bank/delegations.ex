@@ -51,28 +51,23 @@ defmodule Bank.Delegations do
 
   `delegations.delegation_id` is an opaque string from Phoenix's
   perspective — Phoenix never parses or interprets it. The adapter
-  owns its meaning. After GitHub #58 ships against a Kernel v3
-  smart account, fresh `delegation_id` values are the lowercase
-  hex form of the Permission Validator's `bytes32 permissionId`
-  (`0x` + 64 lowercase hex digits, 66 characters total). The
-  cryptographic revoke is then a single ERC-7579 `execute(...)`
-  call against that validator using that id; everything Phoenix
-  observes — `:revoking → :revoked`, the `tx_refs` carried in the
-  callback, the audit chain — is unchanged from the v0.1 sentinel
-  path.
+  owns its meaning. The wire-level field is stable; the on-the-wire
+  encoding will be decided alongside the ZeroDev SDK integration
+  described in `docs/zerodev-permissions-integration.md`. ZeroDev's
+  real `permissionId` is 4 bytes (8 hex chars), and the kernel's
+  on-chain `validationId` is 21 bytes; an earlier version of this
+  module claimed the value was a 32-byte `permissionId` (66 hex
+  chars total), which was a wrong-model assumption. Phoenix does
+  not enforce any specific encoding here; the adapter accepts and
+  echoes whatever string it receives.
 
-  The decision behind that mapping lives in
-  `docs/smart-account-and-revoke-design.md` (#56). What landed under
-  #57 is the verifiable scaffolding — the `delegation_id` ↔
-  `permissionId` mapping helpers, the ERC-7579 outer execute envelope
-  pin, the strict adapter env accessor for the validator address, and
-  tripwire tests pinning each. The Permission Validator's own disable
-  ABI was deliberately not pinned at #57: it depends on the specific
-  validator deployment #58 picks, and pinning a function name without
-  a verified deployment would surface as a silent on-chain revert at
-  the first real revoke. Pre-Kernel grants continue to use the v0.1
-  `del_…` placeholder shape and remain stuck on the sentinel revoke
-  until the smart account is migrated.
+  The architectural decision to use a Kernel v3 modular account on
+  Base lives in `docs/smart-account-and-revoke-design.md` (#56).
+  What survives the model correction is the wire-level field
+  itself; the format-validation helpers that previously enforced
+  66-char hex have been removed because they would reject every
+  real ZeroDev id. The cryptographic revoke remains a sentinel
+  UserOp until the SDK integration ships (#58).
 
   ## Public API
 

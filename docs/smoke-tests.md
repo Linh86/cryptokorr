@@ -84,14 +84,14 @@ threading commit), and the adapter echoes it back on every
 `delegation.state_changed` callback so Phoenix's audit chain is keyed
 to the same identity end-to-end.
 
-For a Kernel-provisioned smart account, `delegation_id` is the
-lowercase hex form of the Permission Validator's `bytes32 permissionId`
-(66 chars total, `0x` + 64 hex). For pre-Kernel / sentinel accounts it
-is the legacy `del_*` placeholder; the mapping helpers in
-`chain_adapter/src/chains/base/permission_validator.ts` deliberately
-reject the placeholder in `permissionIdFromDelegationId` so the
-cryptographic revoke (#58) cannot silently degrade against a legacy
-id.
+`delegation_id` is opaque to Phoenix and to the smoke task — both
+sides treat it as a free-form string. The on-the-wire encoding for
+ZeroDev permissions (4-byte `permissionId`, 21-byte
+`validationId`, or a serialized plugin blob) is deferred until the
+SDK integration described in
+[docs/zerodev-permissions-integration.md](zerodev-permissions-integration.md)
+ships. Pre-integration grants continue to use the legacy `del_*`
+placeholder shape.
 
 ### PASS
 
@@ -111,14 +111,15 @@ Exit code 0.
 > anchor** of the revoke intent. Phoenix transitions the delegation
 > row to `:revoked` to reflect the trust downgrade — it does NOT
 > imply the delegation key is cryptographically unable to sign. A
-> `revoked` smoke PASS in sentinel-era mode means "the AA pipeline
-> went end-to-end and the anchor landed", not "the authority record
-> on chain has been disabled". Run `chain_adapter/scripts/check-env.sh`
-> on the adapter host to see which mode it is in; if the `mode:`
-> line is `sentinel-era` or `straddle`, the above caveat applies.
-> Once #58 lands against a `kernel-provisioned` host, the same
-> `state: revoked` additionally means the Permission Validator
-> cryptographically rejected the delegation's `permissionId`.
+> `revoked` smoke PASS in sentinel-era means "the AA pipeline went
+> end-to-end and the anchor landed", not "the authority record on
+> chain has been disabled". `chain_adapter/scripts/check-env.sh`
+> reports `mode: sentinel-era (awaiting ZeroDev SDK integration)`
+> on every host today. Once #58 lands the cryptographic revoke (a
+> `Kernel.uninstallValidation` call on the smart account itself —
+> see [docs/zerodev-permissions-integration.md](zerodev-permissions-integration.md)),
+> the same `state: revoked` additionally means the kernel rejected
+> further user-ops from the disabled permission.
 
 ### Typical FAIL modes
 

@@ -46,7 +46,6 @@ Doporučená pole:
 - `BUNDLER_RPC_URL`
 - `PHOENIX_BASE_URL`
 - `KERNEL_FACTORY_ADDRESS`
-- `PERMISSION_VALIDATOR_ADDRESS`
 - `SMART_ACCOUNT_ADDRESS`
 
 ## Skutečné secrets, které nesmí uniknout
@@ -172,17 +171,7 @@ uložte jej jako `KERNEL_FACTORY_ADDRESS`.
 Pokud ověřený zdroj od vendora ještě nemáte, nechte pole prázdné —
 nevymýšlejte placeholder.
 
-### 10. Připravit `PERMISSION_VALIDATOR_ADDRESS`
-
-Jde rovněž o veřejnou on-chain adresu, ne o secret.
-
-Dohledejte deployment Permission Validatoru pro Base Sepolia a uložte
-jej jako `PERMISSION_VALIDATOR_ADDRESS`.
-
-Pokud deployment validatoru ještě nebyl zvolen nebo ověřen, nechte pole
-prázdné.
-
-### 11. `SMART_ACCOUNT_ADDRESS` prozatím ponechat prázdné
+### 10. `SMART_ACCOUNT_ADDRESS` prozatím ponechat prázdné
 
 Tuto hodnotu nevymýšlejte. `SMART_ACCOUNT_ADDRESS` vzniká až při
 provisioning runu a vyplňuje se pouze po jeho úspěšném dokončení.
@@ -201,7 +190,6 @@ provisioning runu a vyplňuje se pouze po jeho úspěšném dokončení.
 | `BUNDLER_RPC_URL` | citlivá konfigurace | provisioning a runtime adapteru |
 | `PHOENIX_BASE_URL` | konfigurace | runtime adapteru |
 | `KERNEL_FACTORY_ADDRESS` | veřejná hodnota | provisioning |
-| `PERMISSION_VALIDATOR_ADDRESS` | veřejná hodnota | provisioning a později runtime |
 | `SMART_ACCOUNT_ADDRESS` | veřejná hodnota | runtime po provisioningu |
 
 ## Minimální připravený stav před testováním
@@ -221,7 +209,15 @@ provisioning runu:
 
 - `SMART_ACCOUNT_ADDRESS`
 - `KERNEL_FACTORY_ADDRESS`, pokud ještě není potvrzen
-- `PERMISSION_VALIDATOR_ADDRESS`, pokud ještě není potvrzen
+
+> Dřívější verze tohoto checklistu vyžadovala také
+> `PERMISSION_VALIDATOR_ADDRESS`. Pole bylo odstraněno —
+> `@zerodev/permissions` nemá jediný nasazený Permission Validator
+> kontrakt, takže do něj není co zapsat. Korekci modelu popisuje
+> [`docs/zerodev-permissions-integration.md`](zerodev-permissions-integration.md).
+> Runtime zůstává v sentinel-era režimu do doby, než tato
+> integrace dorazí; operátor dnes žádnou validátor adresu
+> nepotřebuje.
 
 ## Bezpečnostní pravidla
 

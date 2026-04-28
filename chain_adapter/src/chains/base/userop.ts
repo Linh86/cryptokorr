@@ -115,35 +115,23 @@ export function buildTransferCallData(
  * `docs/smart-account-and-revoke-design.md` (GitHub #56):
  *
  *   1. Smart-account implementation — DECIDED in #56: Kernel v3
- *      (ERC-7579) modular account on Base. SimpleAccount has no
- *      module system and the signing key IS the owner, so a real
- *      revoke is structurally impossible against it; Kernel's
- *      Permission Validator pattern gives us a per-delegation
- *      `bytes32 permissionId` we can disable independently.
- *   2. Adapter env scaffolding + mapping convention + verifiable
- *      ERC-7579 outer wrap — LANDED in #57. See
- *      `permission_validator.ts`, `erc7579.ts`, and the strict
- *      accessor `requirePermissionValidatorAddress` in `config/index.ts`.
- *   3. Permission Validator address + verified disable ABI fragment
- *      + the swap in `executeRevoke` — PENDING for #58. The validator
- *      interface was deliberately not pinned at #57 because doing so
- *      from a plausible reference name (without verifying it against
- *      the bytecode of an actual deployment) would surface as a silent
- *      on-chain revert at the first real revoke.
+ *      (ERC-7579) modular account on Base.
+ *   2. ERC-7579 outer wrap — LANDED in #57. See `erc7579.ts`.
+ *   3. ZeroDev SDK integration + per-account sudo signer +
+ *      cryptographic revoke wiring — DEFERRED. The earlier plan
+ *      ("pin a single Permission Validator address + a single
+ *      `disablePermission(bytes32)` ABI fragment") was wrong-model
+ *      against `@zerodev/permissions@5.6.3`. See
+ *      `docs/zerodev-permissions-integration.md` for the corrected
+ *      architecture (CREATE2 signer + policy modules, 4-byte
+ *      `permissionId`, kernel-account `uninstallValidation`) and
+ *      the hard-blocker list.
  *
- * When #58 lands, this function body is replaced. The replacement
- * uses a different OUTER envelope as well as a different inner body:
- *
- *     // Outer: ERC-7579, not SimpleAccount.
- *     buildErc7579ExecuteCallData(
- *       PERMISSION_VALIDATOR_ADDRESS,
- *       0n,
- *       encodeFunctionData({
- *         abi: KERNEL_PERMISSION_VALIDATOR_ABI, // pinned at #58 time
- *         functionName: KERNEL_PERMISSION_DISABLE_FUNCTION,
- *         args: [permissionId],
- *       }),
- *     )
+ * When the integration lands, this function body is replaced. The
+ * replacement uses a different OUTER envelope (ERC-7579 instead of
+ * SimpleAccount) AND a different inner body — namely, the kernel
+ * account's own `uninstallValidation(bytes21,bytes,bytes)` rather
+ * than a separate validator's disable function.
  *
  * The callback shape, idempotency, AA pipeline, and Phoenix state
  * machine all stay the same. The tripwire test

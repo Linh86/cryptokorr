@@ -114,17 +114,19 @@ defmodule Bank.AdapterClient do
   `null` correlation id per the contract.
 
   Accepts a map with `:smart_account_id` (required), `:delegation_id`
-  (required — opaque to Phoenix; for a Kernel-provisioned smart
-  account this is the lowercase hex form of the Permission Validator's
-  `bytes32 permissionId`, and for pre-Kernel sentinel accounts it is
-  the legacy `del_…` placeholder), and `:reason` (optional; defaults
-  to `"unspecified"`).
+  (required — opaque to Phoenix; the on-the-wire encoding is deferred
+  to the ZeroDev SDK integration in
+  `docs/zerodev-permissions-integration.md` and is one of: a 4-byte
+  ZeroDev `permissionId`, a 21-byte Kernel `validationId`, or a
+  serialized plugin blob. Pre-integration sentinel accounts continue
+  to send the legacy `del_…` placeholder), and `:reason` (optional;
+  defaults to `"unspecified"`).
 
-  The adapter needs `delegation_id` so it can encode a cryptographic
-  disable against the right authority record once #58 swaps the inner
-  call for the real ERC-7579 disable. Before that swap, the adapter
-  still routes the value through its callback projection so Phoenix's
-  `delegation.state_changed` stream stays tied to the same id.
+  The adapter receives `delegation_id` opaquely today and echoes it
+  into `delegation.state_changed` callbacks. The eventual
+  cryptographic revoke (#58) will consume it to identify which
+  authority record to disable against; until that integration ships
+  the value flows through unchanged.
   """
   @spec dispatch_revoke_delegation(map(), keyword()) ::
           {:ok, revoke_ok()} | {:error, revoke_error()}
