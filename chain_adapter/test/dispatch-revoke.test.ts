@@ -357,6 +357,7 @@ describe("POST /dispatch/revoke_delegation", () => {
       validation_id: "0x02a1b2c3d400000000000000000000000000000000",
       kernel_version: "0.3.1",
       package_version: "5.6.3",
+      session_signer_address: "0x" + "11".repeat(20),
     };
 
     it("rejects a permission block whose permission_id is malformed (schema-level)", async () => {
@@ -474,6 +475,38 @@ describe("POST /dispatch/revoke_delegation", () => {
         throw new Error("unreachable");
       expect(terminal.state).toBe("revoke_failed");
       expect(terminal.reason).toBe("validation_id_mismatch");
+    });
+
+    it("emits revoke_failed with session_signer_missing when the keyless-blob design is violated", async () => {
+      // Subagent D's review forces a keyless blob, which means the
+      // session-signer EOA must travel separately. A `permission`
+      // block without `session_signer_address` cannot rebuild the
+      // stub ModularSigner that `deserializePermissionAccount`
+      // requires for keyless input. We refuse upfront with a
+      // precise reason rather than letting the SDK throw an
+      // opaque "No signer or serialized sessionKey provided".
+      app = await buildWithClients();
+
+      const { session_signer_address: _drop, ...withoutSigner } =
+        validPermissionBlock;
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/dispatch/revoke_delegation",
+        headers: dispatchAuthHeaders,
+        payload: {
+          ...dispatchRevokeDelegation,
+          permission: withoutSigner,
+        },
+      });
+
+      expect(response.statusCode).toBe(202);
+      const terminal =
+        callbackClient.payloads[callbackClient.payloads.length - 1]!;
+      if (terminal.kind !== "delegation.state_changed")
+        throw new Error("unreachable");
+      expect(terminal.state).toBe("revoke_failed");
+      expect(terminal.reason).toBe("session_signer_missing");
     });
 
     it("emits revoke_failed with package_version_mismatch when the blob's package version drifts from the pin", async () => {

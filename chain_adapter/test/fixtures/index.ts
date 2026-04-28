@@ -38,6 +38,9 @@ export const dispatchSwap = loadFixture("dispatch_swap.json");
 export const dispatchRevokeDelegation = loadFixture(
   "dispatch_revoke_delegation.json",
 );
+export const dispatchGrantDelegation = loadFixture(
+  "dispatch_grant_delegation.json",
+);
 
 // ---- Callback fixtures ----
 
@@ -55,4 +58,7 @@ export const callbackExecutionAborted = loadFixture(
 );
 export const callbackDelegationStateChanged = loadFixture(
   "callback_delegation_state_changed.json",
+);
+export const callbackDelegationGranted = loadFixture(
+  "callback_delegation_granted.json",
 );

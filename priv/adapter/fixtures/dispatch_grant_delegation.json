@@ -1,0 +1,13 @@
+{
+  "contract_version": 1,
+  "action": "grant_delegation",
+  "smart_account_id": "sa_demo_01",
+  "chain_id": 84532,
+  "account": "0xabc000000000000000000000000000000000dead",
+  "scope": {
+    "asset": "USDC"
+  },
+  "delegation_payload": null,
+  "correlation_id": null,
+  "emitted_at": "2026-04-28T12:00:00Z"
+}

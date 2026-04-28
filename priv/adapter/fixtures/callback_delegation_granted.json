@@ -1,0 +1,20 @@
+{
+  "contract_version": 1,
+  "callback_id": "cb_grant_01",
+  "kind": "delegation.state_changed",
+  "smart_account_id": "sa_demo_01",
+  "delegation_id": "0xa1b2c3d4",
+  "state": "granted",
+  "reason": "wallet_connect_install",
+  "permission": {
+    "blob": "eyJzZXJpYWxpemVkUGVybWlzc2lvbkFjY291bnQiOiJ0ZXN0In0=",
+    "permission_id": "0xa1b2c3d4",
+    "validation_id": "0x02a1b2c3d400000000000000000000000000000000",
+    "kernel_version": "0.3.1",
+    "package_version": "5.6.3",
+    "session_signer_address": "0x1111111111111111111111111111111111111111",
+    "installed_at_block": 12345678,
+    "install_tx_hash": "0xdeadbeef00000000000000000000000000000000000000000000000000000000"
+  },
+  "emitted_at": "2026-04-28T12:00:30Z"
+}

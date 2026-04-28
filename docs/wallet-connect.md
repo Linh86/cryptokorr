@@ -110,24 +110,42 @@ Blocked on choices we should make together:
   (Base/Base Sepolia) before signing. The hook enforces this and
   refuses to sign on wrong-network wallets.
 
-## Blocker note for issue #43
+## Status — #43 / #58 grant flow
 
-In-repo scaffolding is complete and mergeable:
+Server-side flow now lands end-to-end:
 
 - `POST /v1/connect/smart_account` endpoint with a JSON contract.
-- `BankWeb.API.V1.ConnectController` calling a stub
-  `Bank.Delegations.request_connect/1`.
-- `assets/js/hooks/wallet_connect.js` with the EIP-1193 detection
-  shape, TODO markers, and the Phoenix push glue.
-- This doc covering target flow, open SDK choices, and security
-  considerations.
+- `BankWeb.API.V1.ConnectController` audits the request and calls
+  `Bank.Delegations.request_connect/1`, which now enqueues
+  `Bank.Runtime.Workers.GrantDelegation` (#58 grant flow).
+- The worker calls `Bank.AdapterClient.dispatch_grant_delegation/2`
+  on `POST /dispatch/grant_delegation`.
+- The adapter's `executeGrant` builds a real ZeroDev permission
+  plugin (`toPermissionValidator(...)`, sudo + regular slots)
+  signed by `OPERATOR_PRIVATE_KEY`, sends a no-op first UserOp to
+  trigger the EIP-712 enable signature, and emits
+  `delegation.state_changed{state: "granted"}` with a populated
+  KEYLESS `permission` block (no session privateKey embedded —
+  see `docs/security.md` and Subagent D's review under the #58
+  grant-flow PR).
+- `Bank.Delegations.apply_callback/1` decodes the artifacts; the
+  resulting row is `cryptographically_revocable?/1` and a future
+  revoke takes the cryptographic `Kernel.uninstallValidation(...)`
+  path (#58 PR #129).
 
-**What's blocked**: (a) SDK + delegation-type decisions, (b) adapter
-repo adding `POST /dispatch/grant_delegation` and the matching
-`delegation.state_changed{state: "granted"}` callback with the new
-payload shape. Once both land, wiring this up is a couple hundred
-lines of client code and an `AdapterClient.dispatch_grant_delegation/1`
-on the Phoenix side.
+**Still client-side scaffolding**: `assets/js/hooks/wallet_connect.js`
+detects EIP-1193 providers and pushes a `wallet_connect:request`
+event, but the actual signing of a delegation payload requires a
+wallet SDK choice (wagmi vs WalletConnect) plus a delegation
+type (ERC-7579 session key vs EntryPoint v0.7 native session
+key). Until that lands the JS hook reports `wallet_connect:stub`
+and the controller's `delegation_payload` field carries `null`.
 
-Track the SDK-side work in its own issue once we pick wagmi vs
-WalletConnect; track the adapter-side work in the adapter repo.
+**Operator runbook step required to actually exercise on chain**:
+end-to-end cryptographic grant + revoke needs a provisioned
+`OPERATOR_PRIVATE_KEY` matching the kernel's root validator (see
+`scripts/provision-kernel.ts`), a real Base Sepolia bundler
+endpoint, and a kernel deployed under that operator EOA. The
+adapter unit tests mock the SDK; the broadcast path is not
+exercised in CI. #31 stays open until the first real grant +
+revoke confirms on chain.

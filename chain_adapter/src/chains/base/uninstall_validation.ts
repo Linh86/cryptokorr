@@ -87,6 +87,7 @@ export const VALIDATOR_TYPE_PERMISSION_PREFIX = "0x02" as const satisfies Hex;
 export type CryptographicRevokeFailureCode =
   | "validation_id_mismatch"
   | "package_version_mismatch"
+  | "session_signer_missing"
   | "permission_deserialization_failed"
   | "deinit_computation_failed"
   | "operator_key_missing";

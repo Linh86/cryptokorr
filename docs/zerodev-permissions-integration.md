@@ -178,21 +178,39 @@ provisioned through is reused at revoke-time.
    operator is provisioned. Paymaster is unwired — the revoke
    UserOp carries `value: 0n` so native funding on the smart
    account is sufficient.
-4. ✅ **Persistence of the serialized plugin blob + denormalized
-   header.** Phoenix's `delegations` table now carries
-   `permission_blob`, `permission_id`, `validation_id`,
-   `kernel_version`, `permission_package_version`,
-   `installed_at_block`, and `install_tx_hash` (migration
-   `20260427120000_add_delegation_permission_artifacts.exs`). All
-   nullable; legacy rows stay sentinel. The `Bank.Delegations`
-   context decodes the artifacts from `granted` callbacks and
-   builds the wire-shaped `permission` block via
-   `permission_dispatch_block/1`. **Open**: the adapter-side
-   grant flow (`wallet_connect.js` + the upcoming
-   `dispatch_grant_delegation`) does not yet emit a populated
-   `granted` callback — until it does, no row carries artifacts
-   and every revoke continues on the sentinel path. Tracked
-   under `docs/wallet-connect.md` v1.1.
+4. ✅ **Persistence + grant-flow plumbing complete.** Phoenix's
+   `delegations` table now carries `permission_blob`,
+   `permission_id`, `validation_id`, `kernel_version`,
+   `permission_package_version`, `installed_at_block`,
+   `install_tx_hash` (migration
+   `20260427120000_add_delegation_permission_artifacts.exs`),
+   plus `session_signer_address` (migration
+   `20260428120000_add_delegation_session_signer_address.exs`).
+   The grant flow lands end-to-end: `Bank.Delegations.request_connect/1`
+   enqueues `Bank.Runtime.Workers.GrantDelegation` →
+   `Bank.AdapterClient.dispatch_grant_delegation/2` → adapter's
+   `POST /dispatch/grant_delegation` → `executeGrant` (builds a
+   `PermissionPlugin` via `toPermissionValidator(...)`, installs
+   via `createKernelAccount({ plugins: { sudo, regular } })` + a
+   no-op first UserOp signed by `OPERATOR_PRIVATE_KEY`,
+   serializes the account KEYLESS via
+   `serializePermissionAccount(account, undefined)`, emits
+   `delegation.state_changed{state: "granted"}` with a populated
+   `permission` block). The session signer is the configured
+   `DELEGATION_SIGNER_KEY`, so later runtime UserOps can actually
+   sign through the installed permission. The session signer's EOA travels
+   separately as `session_signer_address` because the blob is
+   keyless; at revoke time the adapter rebuilds a stub
+   `ModularSigner` from that address — `getEnableData(...)` only
+   reads the address, so no signing ever happens during revoke
+   and Phoenix never holds session-signing material. **Open at
+   the operator-runbook layer**: actually running the install +
+   revoke on Base Sepolia. The adapter's `executeGrant` and
+   `executeCryptographicRevoke` are unit-tested via mocks; the
+   successful broadcast paths require a provisioned
+   `OPERATOR_PRIVATE_KEY`, a real bundler, and the kernel
+   already deployed under that operator EOA. See the operator
+   runbook step below.
 5. ✅ **`KernelPermissionPin` populated.**
    `chain_adapter/src/chains/base/permission_validator.ts` exports
    `KERNEL_PERMISSION_PIN` with the canonical signer + policy

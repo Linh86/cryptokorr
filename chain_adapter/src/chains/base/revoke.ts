@@ -450,6 +450,48 @@ function bundlerLabel(): string {
 }
 
 /**
+ * Build a viem-shaped `LocalAccount` whose only correct field is
+ * `address` and whose every signing method throws. Used at
+ * revoke-time to satisfy `deserializePermissionAccount`'s
+ * external-`modularSigner` requirement when the persisted blob
+ * is keyless.
+ *
+ * Why throw on sign: `getEnableData` does not sign — it just
+ * reads `signer.account.address` to recompute the kernel-stored
+ * deinitData. If any code path sneaks a sign call past the type
+ * system the stub's throw makes the failure loud (rather than
+ * producing a wrong-key signature that the bundler then rejects
+ * with an opaque AA24).
+ */
+function makeStubLocalAccount(address: `0x${string}`): {
+  address: `0x${string}`;
+  type: "local";
+  source: "stub";
+  publicKey: `0x${string}`;
+  signMessage: () => Promise<never>;
+  signTransaction: () => Promise<never>;
+  signTypedData: () => Promise<never>;
+} {
+  const fail = async (): Promise<never> => {
+    throw new Error(
+      "stub session signer cannot sign — revoke path must not reach a signing call",
+    );
+  };
+  return {
+    address,
+    type: "local",
+    source: "stub",
+    // viem's `LocalAccount` carries a `publicKey`; the stub does
+    // not have one. Returning a 65-byte zero hex makes any code
+    // that read it visibly invalid rather than crashing.
+    publicKey: ("0x" + "00".repeat(65)) as `0x${string}`,
+    signMessage: fail,
+    signTransaction: fail,
+    signTypedData: fail,
+  };
+}
+
+/**
  * Cryptographic revoke (#58). Reconstructs the ZeroDev permission
  * plugin from `permissionBlock.blob`, builds a sudo-only kernel
  * account at `clients.smartAccountAddress` signed by
@@ -524,11 +566,26 @@ async function executeCryptographicRevoke(
     throw new ExecutionError("operator_key_missing", message);
   }
 
-  // Guards 2 + 3: pin checks. Throw `CryptographicRevokeError` with
-  // a specific code; we map that onto the callback `reason` below.
+  // Guards 2 + 3 + 4: pin checks + session signer presence. Throw
+  // `CryptographicRevokeError` with a specific code; we map that
+  // onto the callback `reason` below.
   try {
     assertValidationIdConsistent(permissionBlock);
     assertPackageVersionPinned(permissionBlock);
+    if (!permissionBlock.session_signer_address) {
+      // Subagent D's keyless-blob design (PR #129 grant-flow
+      // follow-up) requires the session signer's EOA to be
+      // shipped separately so we can rebuild a stub
+      // `ModularSigner` for `deserializePermissionAccount`.
+      // Without it the deserializer throws "No signer or
+      // serialized sessionKey provided"; we refuse upfront with
+      // a precise reason so Phoenix surfaces the missing field
+      // instead of opaque deserialization noise.
+      throw new CryptographicRevokeError(
+        "session_signer_missing",
+        "permission block missing session_signer_address (keyless blobs require it for stub signer reconstruction)",
+      );
+    }
   } catch (err) {
     const code =
       err instanceof CryptographicRevokeError
@@ -608,16 +665,30 @@ async function executeCryptographicRevoke(
     );
 
     // Reconstruct the regular permission plugin from the persisted
-    // blob. `deserializePermissionAccount` builds a kernel account
-    // whose `kernelPluginManager.regularValidator` IS the original
-    // permission plugin. We extract that handle to feed into
-    // `uninstallPlugin`; the account itself is discarded because
-    // `uninstallPlugin` requires a sudo-context kernel client.
+    // blob. The blob is KEYLESS by design (Subagent D's review
+    // forbids embedding the session privateKey in
+    // Phoenix-persisted material), so we MUST hand
+    // `deserializePermissionAccount` an external `modularSigner`.
+    // The signer's only relevant property at revoke-time is
+    // `account.address` because `getEnableData(...)` reads that
+    // address to recompute the kernel-stored deinitData; no
+    // signing happens during revoke. We therefore build a stub
+    // local account whose `signMessage` / `signTransaction` /
+    // `signTypedData` all reject — if any code path tries to sign
+    // with the stub, the revoke fails loudly instead of silently
+    // producing a wrong-key signature.
+    const permissionsSigners = await import("@zerodev/permissions/signers");
+    const stubSigner = await permissionsSigners.toECDSASigner({
+      signer: makeStubLocalAccount(
+        permissionBlock.session_signer_address as `0x${string}`,
+      ),
+    });
     const permissionAccount = await permissions.deserializePermissionAccount(
       clients.publicClient as never,
       entryPoint,
       kernelVersion,
       permissionBlock.blob,
+      stubSigner,
     );
     const permissionPlugin = (
       permissionAccount as unknown as {

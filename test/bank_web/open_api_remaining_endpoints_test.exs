@@ -239,11 +239,15 @@ defmodule BankWeb.OpenApiRemainingEndpointsTest do
     end
   end
 
-  describe "connect — truthful adapter-stub note" do
-    test "POST /v1/connect/smart_account response schema carries the adapter-stub note field" do
+  describe "connect — truthful adapter-dispatch note" do
+    test "POST /v1/connect/smart_account response schema carries the connect-flow note field" do
       response_schema = BankWeb.OpenApi.Schemas.ConnectSmartAccountResponse.schema()
       assert :note in response_schema.required
-      assert response_schema.properties.note.example =~ "stubbed"
+      # The example walks the operator through the actual semantics:
+      # 202 acknowledges receipt + enqueue, NOT an active delegation
+      # row. The row arrives via the granted callback path. Pinning
+      # this example fails loudly if anyone re-stubs the controller.
+      assert response_schema.properties.note.example =~ "Observe the delegation.state_changed"
     end
 
     test "account is documented as a loose non-empty string, NOT as EvmAddress" do
