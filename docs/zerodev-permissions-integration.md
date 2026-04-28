@@ -196,7 +196,9 @@ provisioned through is reused at revoke-time.
    serializes the account KEYLESS via
    `serializePermissionAccount(account, undefined)`, emits
    `delegation.state_changed{state: "granted"}` with a populated
-   `permission` block). The session signer's EOA travels
+   `permission` block). The session signer is the configured
+   `DELEGATION_SIGNER_KEY`, so later runtime UserOps can actually
+   sign through the installed permission. The session signer's EOA travels
    separately as `session_signer_address` because the blob is
    keyless; at revoke time the adapter rebuilds a stub
    `ModularSigner` from that address — `getEnableData(...)` only

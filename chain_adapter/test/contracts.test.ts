@@ -308,4 +308,15 @@ describe("Contract: schemas reject malformed payloads", () => {
       CallbackDelegationStateChangedSchema.safeParse(ok).success,
     ).toBe(true);
   });
+
+  it("accepts delegation state_changed with state=grant_failed", () => {
+    const ok = {
+      ...callbackDelegationStateChanged,
+      state: "grant_failed",
+      reason: "operator_key_missing",
+    };
+    expect(
+      CallbackDelegationStateChangedSchema.safeParse(ok).success,
+    ).toBe(true);
+  });
 });

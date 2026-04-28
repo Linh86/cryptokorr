@@ -35,18 +35,16 @@
  * EIP-712 signature on the enable typed data — only that EOA's
  * key produces a valid one. If `config.operatorPrivateKey` is
  * missing the grant fails closed: it emits
- * `delegation.state_changed{state: "granted", reason:
- * "operator_key_missing"}` with NO `permission` block, so
- * Phoenix's `cryptographically_revocable?/1` returns false and
- * the operator triages the missing key.
+ * `delegation.state_changed{state: "grant_failed", reason:
+ * "operator_key_missing"}` with NO `permission` block, so Phoenix
+ * does not create an active delegation row.
  *
  * Errors at every other step (deserialization-shape failures,
  * RPC errors, bundler rejections, install reversion) emit a
- * `granted` callback with no `permission` block and a precise
- * `reason` so Phoenix records the request audit-trail without
- * marking the row as cryptographic. The dispatch handler is
- * still 202 — failures are reported via callback shape, not
- * HTTP status, matching the rest of the adapter contract.
+ * `grant_failed` callback with a precise `reason`. The dispatch
+ * handler is still 202 — failures are reported via callback
+ * shape, not HTTP status, matching the rest of the adapter
+ * contract.
  */
 
 import {
@@ -58,7 +56,7 @@ import {
   http,
   pad,
 } from "viem";
-import { privateKeyToAccount, generatePrivateKey } from "viem/accounts";
+import { privateKeyToAccount } from "viem/accounts";
 
 import type { AdapterConfig } from "../../config/index.js";
 import type { CallbackClient } from "../../callbacks/client.js";
@@ -70,7 +68,7 @@ import { KERNEL_PERMISSION_PIN } from "./permission_validator.js";
 
 /**
  * Specific failure codes emitted via `delegation.state_changed`
- * `reason` on the granted-but-without-permission-block path.
+ * `reason` on the `grant_failed` callback path.
  * Mapping each to a stable code lets a future operator runbook
  * match remediation steps to specific failure modes.
  */
@@ -142,10 +140,9 @@ export async function executeGrant(args: {
   });
 
   // Lazy import: keeps the SDK out of the cold path for adapters
-  // that never grant cryptographically. The packages are already
-  // devDependencies for the encoder + revoke path; the runtime
-  // image needs them under the grant flow specifically. Same
-  // pattern `executeCryptographicRevoke` uses.
+  // that never grant cryptographically. These are production
+  // dependencies because both grant and cryptographic revoke load
+  // them at runtime. Same pattern `executeCryptographicRevoke` uses.
   let result: GrantResult;
   try {
     const sdk = await import("@zerodev/sdk");
@@ -170,16 +167,15 @@ export async function executeGrant(args: {
       },
     );
 
-    // SECRET: fresh session-key EOA. Generated per grant so each
-    // permission has its own signer. The privateKey is held in
-    // memory only for the duration of the install UserOp signature
-    // and the serialized account (which we deliberately serialize
-    // WITHOUT it). After this function returns the local binding
-    // goes out of scope; the GC reclaims it when no other
-    // reference holds it. The runtime never persists it and it
-    // never crosses the wire to Phoenix.
-    const sessionPrivateKey = generatePrivateKey();
-    const sessionAccount = privateKeyToAccount(sessionPrivateKey);
+    // SECRET: runtime session-key EOA. This MUST be the configured
+    // `DELEGATION_SIGNER_KEY`, not a throwaway generated key:
+    // later UserOperations under the installed permission are
+    // signed by the adapter's runtime delegation signer. Installing
+    // the permission for a key we immediately discard would make
+    // the permission impossible to use.
+    const sessionAccount = privateKeyToAccount(
+      config.delegationSignerKey as `0x${string}`,
+    );
     const sessionSigner = await permissionsSigners.toECDSASigner({
       signer: sessionAccount,
     });
@@ -278,7 +274,8 @@ export async function executeGrant(args: {
     }
 
     // KEYLESS serialization. Pass `undefined` for privateKey so the
-    // session signer never crosses the wire. See Subagent D's review.
+    // session private key never crosses the wire. The public signer
+    // address is sent separately as `session_signer_address`.
     let blob: string;
     try {
       blob = await permissions.serializePermissionAccount(
@@ -351,18 +348,12 @@ export async function executeGrant(args: {
 }
 
 /**
- * Emit a failure-shaped granted callback (no `permission` block,
- * specific `reason`) and throw `ExecutionError`. The dispatch
+ * Emit a failure-shaped `grant_failed` callback (no `permission`
+ * block, specific `reason`) and throw `ExecutionError`. The dispatch
  * handler unwraps the error so the outer 202 is preserved — the
- * granted-without-permission-block shape is how Phoenix learns
- * that the grant failed without losing the audit anchor.
- *
- * Phoenix's `Bank.Delegations.apply_callback/1` decodes a granted
- * callback without a permission block as a legacy-shape grant
- * (the row is :active but `cryptographically_revocable?/1` returns
- * false). That is the right shape for "we attempted but the row is
- * not yet cryptographic" — the operator can re-trigger via the
- * connect endpoint.
+ * callback shape is how Phoenix learns that the grant failed
+ * without losing the audit anchor. It must NOT be reported as
+ * `state: "granted"` because that creates an active delegation row.
  */
 async function emitGrantFailure(args: {
   smartAccountId: string;
@@ -385,7 +376,7 @@ async function emitGrantFailure(args: {
     // synthetic placeholder — the row stays opaque on Phoenix.
     // Real grants set it to the 4-byte permissionId hex.
     delegation_id: `grant_failed_${Date.now()}`,
-    state: "granted",
+    state: "grant_failed",
     reason: args.reason,
     emitted_at: new Date().toISOString(),
   });

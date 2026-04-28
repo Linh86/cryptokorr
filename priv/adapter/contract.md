@@ -71,6 +71,10 @@ What landed under #31:
       :granted → :revoking → :revoke_failed         (any failure)
       :revoke_failed → :revoking → :revoked         (operator retry)
 
+  Grant install failures use callback `state=grant_failed`. Phoenix
+  accepts the callback for audit visibility but does not create an
+  active delegation row.
+
   `:revoke_failed` is a non-terminal state — the on-chain delegation
   is still live — so the row stays visible to `Bank.Delegations.get/1`,
   continues to occupy the per-smart-account uniqueness slot (a fresh
@@ -452,13 +456,11 @@ The synchronous response is `202 accepted` regardless of on-chain
 outcome — failure verdicts ride on the callback shape, not HTTP
 status. On any fail-closed branch (operator key missing, chain
 mismatch, install reverted, serialization failed) the adapter
-emits a `granted` callback **without** a `permission` block and
-with a precise `reason` (`operator_key_missing`,
-`chain_id_mismatch`, `permission_install_failed`,
-`permission_serialization_failed`). Phoenix records the row as
-`:active` but `cryptographically_revocable?/1` returns false —
-the row stays on the sentinel revoke path and the operator
-triages the missing artifacts.
+emits `state: "grant_failed"` with a precise `reason`
+(`operator_key_missing`, `chain_id_mismatch`,
+`permission_install_failed`, `permission_serialization_failed`).
+Phoenix does not create an active delegation row for a permission
+that was never installed.
 
 ### `revoke_delegation`
 
@@ -587,7 +589,7 @@ Fixture: `fixtures/callback_execution_aborted.json`.
 
 ### `delegation.state_changed`
 
-One of `granted | revoking | revoke_failed | revoked | expired`.
+One of `granted | grant_failed | revoking | revoke_failed | revoked | expired`.
 Phoenix updates `Bank.Delegations` and appends audit.
 
 Semantics of the failure state:
@@ -599,6 +601,9 @@ Semantics of the failure state:
   not complete it (send rejected, confirmation timeout, sentinel
   reverted). The on-chain delegation is still live; Phoenix stays
   fail-closed and the operator must retry.
+- `grant_failed` means the adapter attempted to install a
+  permission and could not complete it. Phoenix must not create an
+  active delegation row for this callback.
 
 The adapter MUST NOT emit `revoked` on a failure path.
 
@@ -612,14 +617,12 @@ verdict carrier:
   `Bank.Delegations.apply_callback/1` and `cryptographically_revocable?/1`
   returns true on the resulting row. `delegation_id` MUST equal
   `permission.permission_id`.
-- `granted` **WITHOUT** a `permission` block → grant attempted but
-  failed (operator key missing, install reverted, serialization
-  error, chain mismatch). The `reason` field carries the precise
-  code (`operator_key_missing`, `permission_install_failed`,
+- `grant_failed` → grant attempted but failed (operator key
+  missing, install reverted, serialization error, chain mismatch).
+  The `reason` field carries the precise code
+  (`operator_key_missing`, `permission_install_failed`,
   `permission_serialization_failed`, `chain_id_mismatch`).
-  Phoenix still creates a row in `:active`, but
-  `cryptographically_revocable?/1` returns false — the row is
-  legacy-shaped and revoke takes the sentinel path.
+  Phoenix does not create an active delegation row.
 
 Fixtures:
 - `fixtures/callback_delegation_state_changed.json` — revoked

@@ -8,9 +8,9 @@
  *      `delegation.state_changed{state: "granted"}` callback.
  *   3. Return `202 accepted` regardless of on-chain outcome —
  *      callbacks carry the verdict (success: granted with
- *      permission block; failure: granted without permission block
- *      + precise `reason`). HTTP status is acknowledgement of the
- *      dispatch only.
+ *      permission block; failure: `grant_failed` + precise
+ *      `reason`). HTTP status is acknowledgement of the dispatch
+ *      only.
  *
  * Idempotency: an in-memory set of in-flight `smart_account_id`s
  * suppresses duplicate on-chain installs triggered by Oban
@@ -100,7 +100,7 @@ export async function handleGrantDispatch(
       callbackClient: deps.callbackClient,
     });
   } catch (err) {
-    // executeGrant emits a failure-shaped callback before throwing,
+    // executeGrant emits a grant_failed callback before throwing,
     // so the request audit trail is intact. We swallow the error
     // here so the dispatch returns 202 — the contract is "callback
     // shape carries the verdict".

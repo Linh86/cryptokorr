@@ -255,21 +255,23 @@ both env vars derive to the same EOA.
   grant path (#58 part 2). When absent, the adapter:
    * Refuses any revoke dispatch carrying a `permission` block
      (`state=revoke_failed, reason=operator_key_missing`).
-   * Refuses any grant dispatch (`state=granted, reason=operator_key_missing`,
-     no `permission` block — Phoenix records the row but
-     `cryptographically_revocable?/1` returns false so revoke
-     takes the sentinel path).
+   * Refuses any grant dispatch (`state=grant_failed,
+     reason=operator_key_missing`). Phoenix does not create an
+     active delegation row for a permission that was never
+     installed.
   Should live behind tighter controls than the runtime session
   key (HSM / KMS / cold-signing sidecar — tracked as a follow-up
   hardening track per Subagent D's review).
 
 ### Session-key secrecy (#58 grant flow)
 
-The grant flow generates a fresh ECDSA session key per
-permission inside the adapter (`generatePrivateKey()` in
-`src/chains/base/grant.ts`). The key is held in adapter memory
-ONLY for the duration of the install UserOp's enable-signature
-flow, then discarded.
+The grant flow binds the ZeroDev permission to the adapter's
+configured runtime session key (`DELEGATION_SIGNER_KEY`). That is
+the same key the adapter uses to sign later UserOperations under
+the installed regular validator. Installing a permission for a
+throwaway key would be safer-looking but unusable: after the grant
+returns, no runtime component would be able to sign through that
+permission.
 
 The serialized blob persisted in Phoenix is **KEYLESS**:
 `serializePermissionAccount(account, undefined)` — the optional
@@ -285,14 +287,15 @@ The session signer's EOA address rides on the wire as
 rebuilds a stub `ModularSigner` whose `account.address` equals
 that value; `getEnableData(...)` reads only the address (no
 signing), so the keyless blob round-trips cleanly without
-holding any signing authority outside the adapter's grant-time
-window.
+holding any signing authority outside the adapter.
 
 **Operator implication**: a leak of the Phoenix database does
-NOT compromise any session signing key. The session keys live
-ephemerally in adapter memory; the only persistent signing
-material is `OPERATOR_PRIVATE_KEY`, which an attacker would also
-need to leverage Phoenix data into actual on-chain action.
+NOT compromise any session signing key. The runtime session key
+lives only in the adapter environment; the only signing material
+Phoenix stores is none. An attacker would still need adapter
+secrets (`DELEGATION_SIGNER_KEY` for regular UserOps or
+`OPERATOR_PRIVATE_KEY` for root operations) to turn Phoenix data
+into on-chain action.
 
 Both keys are validated at startup:
 

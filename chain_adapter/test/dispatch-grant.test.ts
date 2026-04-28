@@ -5,8 +5,7 @@
  *
  *   - schema validation rejects malformed payloads
  *   - operator-key-missing branch fails closed with the right
- *     callback shape (`granted` callback with NO permission block,
- *     reason=operator_key_missing)
+ *     callback shape (`grant_failed`, reason=operator_key_missing)
  *   - chain_id mismatch branch fails closed
  *   - duplicate-in-flight idempotency
  *
@@ -117,14 +116,12 @@ describe("POST /dispatch/grant_delegation", () => {
   });
 
   describe("fail-closed branches", () => {
-    it("emits granted-without-permission-block with operator_key_missing when operator key is unset", async () => {
+    it("emits grant_failed with operator_key_missing when operator key is unset", async () => {
       // Fresh `testConfig` populates the operator key by default;
       // clearing both fields exercises the
-      // operator-key-missing branch. Phoenix's apply_callback for
-      // a granted callback without `permission` creates a
-      // legacy-shaped row (`cryptographically_revocable?/1` =
-      // false), which is the right outcome — the operator triages
-      // the missing key.
+      // operator-key-missing branch. This must NOT be reported as
+      // `granted`, because Phoenix would create an active
+      // delegation row for a permission that was never installed.
       app = await buildWithConfig({
         operatorPrivateKey: undefined,
         operatorAddress: undefined,
@@ -145,12 +142,12 @@ describe("POST /dispatch/grant_delegation", () => {
       const cb = callbackClient.payloads[0]!;
       if (cb.kind !== "delegation.state_changed")
         throw new Error("unreachable");
-      expect(cb.state).toBe("granted");
+      expect(cb.state).toBe("grant_failed");
       expect(cb.reason).toBe("operator_key_missing");
       expect(cb.permission).toBeUndefined();
     });
 
-    it("emits granted-without-permission-block with chain_id_mismatch when adapter is configured for a different chain", async () => {
+    it("emits grant_failed with chain_id_mismatch when adapter is configured for a different chain", async () => {
       // The dispatch's chain_id is 84532; configure adapter for
       // 8453 (Base mainnet) and verify the cross-check trips.
       app = await buildWithConfig({ baseChainId: 8453 });
@@ -168,7 +165,7 @@ describe("POST /dispatch/grant_delegation", () => {
       const cb = callbackClient.payloads[0]!;
       if (cb.kind !== "delegation.state_changed")
         throw new Error("unreachable");
-      expect(cb.state).toBe("granted");
+      expect(cb.state).toBe("grant_failed");
       expect(cb.reason).toBe("chain_id_mismatch");
       expect(cb.permission).toBeUndefined();
     });

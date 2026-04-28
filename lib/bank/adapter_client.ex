@@ -143,7 +143,8 @@ defmodule Bank.AdapterClient do
         permission_id: "0x<8 hex>",
         validation_id: "0x<42 hex>",
         kernel_version: "0.3.1",
-        package_version: "5.6.3"
+        package_version: "5.6.3",
+        session_signer_address: "0x<40 hex>"
       }
 
   See `Bank.Delegations.permission_dispatch_block/1` for the

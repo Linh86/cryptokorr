@@ -172,7 +172,7 @@ export type DispatchRevokeDelegation = z.infer<typeof DispatchRevokeDelegationSc
  *
  *   1. Builds a `PermissionPlugin` via
  *      `toPermissionValidator(...)` using a session signer derived
- *      from the runtime `delegationSignerKey`.
+ *      from the runtime `DELEGATION_SIGNER_KEY`.
  *   2. Installs it via `createKernelAccount({ plugins: { sudo,
  *      regular } })` + a no-op first UserOp signed by the operator
  *      (sudo) EOA — that triggers the EIP-712 enable signature
@@ -185,9 +185,9 @@ export type DispatchRevokeDelegation = z.infer<typeof DispatchRevokeDelegationSc
  *
  * The synchronous response is `202 accepted`; chain progress is
  * reported via the callback path. The grant fails closed with a
- * `delegation.state_changed{state: "revoke_failed"}` is NOT used
- * here — granted/install_failed semantics ride on the granted
- * callback's `reason` field plus a missing `permission` block.
+ * `delegation.state_changed{state: "grant_failed"}` callback. It
+ * must not emit `state: "granted"` without a `permission` block,
+ * because Phoenix treats `granted` as an active delegation.
  */
 export const DispatchGrantDelegationSchema = z.object({
   contract_version: z.literal(1),
@@ -289,7 +289,14 @@ export const CallbackDelegationStateChangedSchema = z.object({
   kind: z.literal("delegation.state_changed"),
   smart_account_id: z.string().min(1),
   delegation_id: z.string().min(1),
-  state: z.enum(["granted", "revoking", "revoke_failed", "revoked", "expired"]),
+  state: z.enum([
+    "granted",
+    "grant_failed",
+    "revoking",
+    "revoke_failed",
+    "revoked",
+    "expired",
+  ]),
   reason: z.string().min(1),
   tx_refs: z.array(TxRefSchema).optional(),
   // Optional permission artifact block, populated when the adapter

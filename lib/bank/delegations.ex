@@ -102,6 +102,13 @@ defmodule Bank.Delegations do
   alias Bank.Delegations.Delegation
   alias Bank.Repo
 
+  @grant_failure_reasons ~w(
+    operator_key_missing
+    chain_id_mismatch
+    permission_install_failed
+    permission_serialization_failed
+  )
+
   @type smart_account_id :: String.t()
 
   # --- Read API -----------------------------------------------------------
@@ -305,6 +312,7 @@ defmodule Bank.Delegations do
 
   Maps adapter states to context transitions:
     - "granted" → grant (upsert: creates if not found)
+    - "grant_failed" → reject without creating an active row
     - "revoking" → record_revoke_requested
     - "revoke_failed" → record_revoke_failed
     - "revoked" → record_revoked (success only)
@@ -325,32 +333,45 @@ defmodule Bank.Delegations do
 
     case callback_state do
       "granted" ->
-        artifact_attrs = decode_permission_artifacts(Map.get(params, "permission"))
+        permission = Map.get(params, "permission")
+        artifact_attrs = decode_permission_artifacts(permission)
 
-        case get(smart_account_id) do
-          nil ->
-            grant(
-              smart_account_id,
-              delegation_id,
-              Map.merge(artifact_attrs, %{
-                last_reason: reason,
-                scope: Map.get(params, "scope", %{})
-              })
-            )
+        cond do
+          is_nil(permission) and reason in @grant_failure_reasons ->
+            {:error, :grant_failed}
 
-          %Delegation{state: :pending} = delegation ->
-            delegation
-            |> Delegation.changeset(Map.merge(artifact_attrs, %{last_reason: reason}))
-            |> Ecto.Changeset.put_change(:state, :active)
-            |> Ecto.Changeset.put_change(:granted_at, DateTime.utc_now())
-            |> Repo.update()
+          true ->
+            case get(smart_account_id) do
+              nil ->
+                grant(
+                  smart_account_id,
+                  delegation_id,
+                  Map.merge(artifact_attrs, %{
+                    last_reason: reason,
+                    scope: Map.get(params, "scope", %{})
+                  })
+                )
 
-          %Delegation{state: :active} = delegation ->
-            {:ok, delegation}
+              %Delegation{state: :pending} = delegation ->
+                delegation
+                |> Delegation.changeset(Map.merge(artifact_attrs, %{last_reason: reason}))
+                |> Ecto.Changeset.put_change(:state, :active)
+                |> Ecto.Changeset.put_change(:granted_at, DateTime.utc_now())
+                |> Repo.update()
 
-          _ ->
-            {:error, :invalid_transition}
+              %Delegation{state: :active} = delegation ->
+                {:ok, delegation}
+
+              _ ->
+                {:error, :invalid_transition}
+            end
         end
+
+      "grant_failed" ->
+        # A failed install must not create an active delegation. The
+        # adapter sends this for operator-key-missing, chain mismatch,
+        # install reverts, or serialization failures on the grant path.
+        {:error, :grant_failed}
 
       "revoking" ->
         record_revoke_requested(smart_account_id, %{
@@ -472,7 +493,8 @@ defmodule Bank.Delegations do
         permission_id: "0x...",      # 4-byte permissionId, 10 hex chars
         validation_id: "0x...",      # 21-byte validationId, 44 hex chars
         kernel_version: "0.3.1",
-        package_version: "5.6.3"
+        package_version: "5.6.3",
+        session_signer_address: "0x..."
       }
 
   The adapter feeds `validation_id` to

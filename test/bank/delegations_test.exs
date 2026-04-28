@@ -307,6 +307,32 @@ defmodule Bank.DelegationsTest do
                })
     end
 
+    test "grant_failed callback does not create an active delegation" do
+      assert {:error, :grant_failed} =
+               Delegations.apply_callback(%{
+                 "smart_account_id" => "sa_failed_grant",
+                 "delegation_id" => "grant_failed_1",
+                 "state" => "grant_failed",
+                 "reason" => "operator_key_missing"
+               })
+
+      refute Delegations.executable?("sa_failed_grant")
+      assert is_nil(Delegations.get("sa_failed_grant"))
+    end
+
+    test "granted callback with a known grant-failure reason is rejected defensively" do
+      assert {:error, :grant_failed} =
+               Delegations.apply_callback(%{
+                 "smart_account_id" => "sa_old_failure_shape",
+                 "delegation_id" => "grant_failed_legacy",
+                 "state" => "granted",
+                 "reason" => "operator_key_missing"
+               })
+
+      refute Delegations.executable?("sa_old_failure_shape")
+      assert is_nil(Delegations.get("sa_old_failure_shape"))
+    end
+
     test "invalid callback shape returns error" do
       assert {:error, :invalid_callback} = Delegations.apply_callback(%{"bad" => "shape"})
     end
