@@ -342,6 +342,187 @@ describe("POST /dispatch/revoke_delegation", () => {
     });
   });
 
+  describe("permission block routing (#58)", () => {
+    // Phoenix may include an optional `permission` block on the
+    // revoke dispatch. Presence of the block selects the
+    // cryptographic path; absence keeps the existing sentinel path.
+    // Tests below exercise the schema acceptance + the operator-key
+    // fail-closed branch — the actual cryptographic broadcast needs
+    // a real bundler + a real grant-time blob, exercised in
+    // operator runbooks rather than unit tests.
+
+    const validPermissionBlock = {
+      blob: "eyJzZXJpYWxpemVkUGVybWlzc2lvbkFjY291bnQiOiJ0ZXN0In0=",
+      permission_id: "0xa1b2c3d4",
+      validation_id: "0x02a1b2c3d400000000000000000000000000000000",
+      kernel_version: "0.3.1",
+      package_version: "5.6.3",
+    };
+
+    it("rejects a permission block whose permission_id is malformed (schema-level)", async () => {
+      app = await buildWithClients();
+      const response = await app.inject({
+        method: "POST",
+        url: "/dispatch/revoke_delegation",
+        headers: dispatchAuthHeaders,
+        payload: {
+          ...dispatchRevokeDelegation,
+          permission: { ...validPermissionBlock, permission_id: "0x12" }, // 1 byte
+        },
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json().error.code).toBe("validation_error");
+      expect(callbackClient.payloads).toHaveLength(0);
+    });
+
+    it("rejects a permission block whose validation_id is the wrong length", async () => {
+      app = await buildWithClients();
+      const response = await app.inject({
+        method: "POST",
+        url: "/dispatch/revoke_delegation",
+        headers: dispatchAuthHeaders,
+        payload: {
+          ...dispatchRevokeDelegation,
+          permission: {
+            ...validPermissionBlock,
+            validation_id: "0x02", // 1 byte instead of 21
+          },
+        },
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json().error.code).toBe("validation_error");
+    });
+
+    it("emits revoke_failed with operator_key_missing when permission block is present but operator key is unset", async () => {
+      // Test config provides an operator key by default; clearing it
+      // here simulates an adapter deployment that hasn't been
+      // provisioned yet. The cryptographic path MUST refuse — never
+      // silently downgrade to sentinel — so Phoenix sees a precise
+      // `revoke_failed` and the operator triages the missing key.
+      const deps: AppDeps = {
+        config: testConfig({
+          operatorPrivateKey: undefined,
+          operatorAddress: undefined,
+        }),
+        callbackClient,
+        baseClients: mockClients(),
+      };
+      app = buildApp(deps);
+      await app.ready();
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/dispatch/revoke_delegation",
+        headers: dispatchAuthHeaders,
+        payload: {
+          ...dispatchRevokeDelegation,
+          permission: validPermissionBlock,
+        },
+      });
+
+      // Dispatch acknowledges the request 202 even though the
+      // execution failed — the contract is "callback shape carries
+      // the verdict", not "HTTP status carries the verdict".
+      expect(response.statusCode).toBe(202);
+      expect(callbackClient.payloads).toHaveLength(2);
+
+      const revoking = callbackClient.payloads[0]!;
+      if (revoking.kind !== "delegation.state_changed")
+        throw new Error("unreachable");
+      expect(revoking.state).toBe("revoking");
+
+      const terminal = callbackClient.payloads[1]!;
+      if (terminal.kind !== "delegation.state_changed")
+        throw new Error("unreachable");
+      expect(terminal.state).toBe("revoke_failed");
+      expect(terminal.reason).toBe("operator_key_missing");
+      // No tx_refs because we never reached the chain.
+      expect(terminal.tx_refs).toBeUndefined();
+    });
+
+    it("emits revoke_failed with validation_id_mismatch when the block is internally inconsistent", async () => {
+      // permission_id and validation_id must satisfy
+      // validation_id == 0x02 ‖ rightPad(permission_id, 20). A
+      // mismatch means upstream produced garbage; we refuse
+      // BEFORE deserializing the blob so a malformed dispatch
+      // never causes an SDK roundtrip.
+      app = await buildWithClients();
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/dispatch/revoke_delegation",
+        headers: dispatchAuthHeaders,
+        payload: {
+          ...dispatchRevokeDelegation,
+          permission: {
+            ...validPermissionBlock,
+            // Same length (44 chars), but permissionId hex is
+            // left-padded instead of right-padded — a plausible
+            // serializer bug. 0x + 1 byte (0x02) + 16 zero bytes
+            // + 4 byte permissionId = 21 bytes / 42 hex chars.
+            validation_id: "0x0200000000000000000000000000000000a1b2c3d4",
+          },
+        },
+      });
+
+      expect(response.statusCode).toBe(202);
+      const terminal =
+        callbackClient.payloads[callbackClient.payloads.length - 1]!;
+      if (terminal.kind !== "delegation.state_changed")
+        throw new Error("unreachable");
+      expect(terminal.state).toBe("revoke_failed");
+      expect(terminal.reason).toBe("validation_id_mismatch");
+    });
+
+    it("emits revoke_failed with package_version_mismatch when the blob's package version drifts from the pin", async () => {
+      app = await buildWithClients();
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/dispatch/revoke_delegation",
+        headers: dispatchAuthHeaders,
+        payload: {
+          ...dispatchRevokeDelegation,
+          permission: { ...validPermissionBlock, package_version: "5.5.0" },
+        },
+      });
+
+      expect(response.statusCode).toBe(202);
+      const terminal =
+        callbackClient.payloads[callbackClient.payloads.length - 1]!;
+      if (terminal.kind !== "delegation.state_changed")
+        throw new Error("unreachable");
+      expect(terminal.state).toBe("revoke_failed");
+      expect(terminal.reason).toBe("package_version_mismatch");
+    });
+
+    it("absent permission block keeps the sentinel path (idempotency baseline)", async () => {
+      // This is a regression guard — the sentinel test cases above
+      // already exercise the absent-block path indirectly because
+      // the dispatch fixture has no `permission` field. The test
+      // here makes that contract explicit so a future schema edit
+      // making `permission` required without removing all sentinel
+      // tests would not silently break legacy dispatches.
+      app = await buildWithClients();
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/dispatch/revoke_delegation",
+        headers: dispatchAuthHeaders,
+        payload: dispatchRevokeDelegation, // no `permission` key
+      });
+
+      expect(response.statusCode).toBe(202);
+      const terminal = callbackClient.payloads[1]!;
+      if (terminal.kind !== "delegation.state_changed")
+        throw new Error("unreachable");
+      // Sentinel path completed normally, NOT revoke_failed.
+      expect(terminal.state).toBe("revoked");
+    });
+  });
+
   describe("idempotency", () => {
     it("suppresses a duplicate on-chain send while one is in flight", async () => {
       // Gate the first call's send so we can fire a second dispatch

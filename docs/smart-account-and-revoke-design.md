@@ -53,14 +53,33 @@ this file; the runbook only describes operator behavior.
   `uninstallValidation(bytes21,bytes,bytes)` ABI fragment from
   `KernelV3_1AccountAbi`; both halves are verified by the
   `permission-validator-pin.test.ts` tripwire.
-- **#58 — STILL OPEN.** The sentinel-era revoke is unchanged. The
-  swap target is no longer "a Permission Validator's disable
-  function"; it is `Kernel.uninstallValidation(bytes21,bytes,bytes)`
-  ON the smart account itself, signed by a sudo signer the adapter
-  does not yet hold. The full hard-blocker list is in the
-  integration doc.
-- **#31 — STILL OPEN.** Closes when #58 ships against a
-  Kernel-provisioned account.
+- **#58 — ENCODER + EXECUTOR + PERSISTENCE LANDED.** The
+  sentinel revoke is now the LEGACY path; it runs only when the
+  dispatch carries no `permission` block. The cryptographic path
+  (`executeCryptographicRevoke` in
+  [`chain_adapter/src/chains/base/revoke.ts`](../chain_adapter/src/chains/base/revoke.ts))
+  reconstructs the ZeroDev plugin via
+  `deserializePermissionAccount`, validates the block against
+  `KERNEL_PERMISSION_PIN`, and dispatches
+  `Kernel.uninstallValidation(...)` through the SDK's
+  `uninstallPlugin` action signed by `OPERATOR_PRIVATE_KEY`. The
+  pure encoder + validation guards live in
+  [`uninstall_validation.ts`](../chain_adapter/src/chains/base/uninstall_validation.ts)
+  and are unit-tested in
+  [`uninstall-validation-encoder.test.ts`](../chain_adapter/test/uninstall-validation-encoder.test.ts).
+  Phoenix carries the artifacts in `delegations.permission_blob` /
+  `permission_id` / `validation_id` / `kernel_version` /
+  `permission_package_version` (migration `20260427120000`).
+  The cryptographic path runs the moment two operator-driven gates
+  close: (a) provisioning the actual `OPERATOR_PRIVATE_KEY` in
+  adapter env, and (b) the grant flow emitting a `granted`
+  callback that populates the artifact columns. Until both close,
+  every revoke continues on the sentinel path; the cryptographic
+  branch fails closed with a precise reason rather than downgrading
+  silently.
+- **#31 — UNCHANGED.** Closes when the first end-to-end
+  cryptographic revoke confirms on chain (operator runbook step,
+  not blocked by code).
 
 What is verifiable today, independent of the integration:
 
@@ -76,13 +95,25 @@ What is verifiable today, independent of the integration:
   survives the ZeroDev model correction because EIP-7579 is
   normative across every kernel-shaped account, regardless of how
   permissions above it compose.
-- **Sentinel revoke pin.** The sentinel `executeRevoke` body is
-  `SimpleAccount.execute(self, 0, 0x)` — a real on-chain anchor,
-  not a cryptographic disablement. Pinned byte-for-byte in
+- **Sentinel revoke pin.** The sentinel `executeSentinelRevoke`
+  body is `SimpleAccount.execute(self, 0, 0x)` — a real on-chain
+  anchor, not a cryptographic disablement. Pinned byte-for-byte in
   [`chain_adapter/test/base-revoke-sentinel-pin.test.ts`](../chain_adapter/test/base-revoke-sentinel-pin.test.ts).
-  The tripwire fails loudly if the inner call shape changes,
-  forcing whoever lands #58 to update this ADR + the integration
-  doc + the operator runbooks in lockstep.
+  Still active for legacy rows that have no persisted
+  `permission_blob`. The tripwire fails loudly if the sentinel
+  inner call shape changes; that pin survives #58 because the
+  cryptographic path is a SEPARATE function (`executeCryptographicRevoke`),
+  not a swap of the sentinel body.
+- **Cryptographic revoke encoder pin (#58).** The pure encoder in
+  [`uninstall_validation.ts`](../chain_adapter/src/chains/base/uninstall_validation.ts)
+  consumes
+  `KERNEL_PERMISSION_PIN.uninstallValidationFunction` directly and
+  is asserted in
+  [`uninstall-validation-encoder.test.ts`](../chain_adapter/test/uninstall-validation-encoder.test.ts)
+  to (a) match `viem.encodeFunctionData` against the same pin and
+  (b) start with the canonical `0xe6f3d50a` selector. A future
+  drift in either the pin or the function shape fails the test
+  loudly.
 - **`KernelPermissionPin` populated.** Exported from
   [`permission_validator.ts`](../chain_adapter/src/chains/base/permission_validator.ts).
   `KERNEL_PERMISSION_PIN` carries the canonical ECDSA signer

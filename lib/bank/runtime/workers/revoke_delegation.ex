@@ -92,10 +92,23 @@ defmodule Bank.Runtime.Workers.RevokeDelegation do
   # retries after a revoke_failed. Missing rows are a deterministic
   # failure: without a delegation to revoke there is nothing the
   # adapter can encode.
+  #
+  # When the row is `cryptographically_revocable?/1` (issue #58 has
+  # populated the permission artifact columns) the worker also
+  # threads the wire-shaped `permission` block through to the
+  # adapter so the `Kernel.uninstallValidation(...)` UserOp can
+  # reconstruct the plugin without a Phoenix round-trip. Legacy
+  # rows have nil artifacts and the adapter takes the sentinel
+  # path.
   defp dispatch(smart_account_id, reason) do
     case Delegations.get(smart_account_id) do
-      %Delegation{delegation_id: delegation_id} when is_binary(delegation_id) ->
-        call_adapter(smart_account_id, delegation_id, reason)
+      %Delegation{delegation_id: delegation_id} = delegation when is_binary(delegation_id) ->
+        call_adapter(
+          smart_account_id,
+          delegation_id,
+          reason,
+          Delegations.permission_dispatch_block(delegation)
+        )
 
       nil ->
         Logger.error(
@@ -106,12 +119,16 @@ defmodule Bank.Runtime.Workers.RevokeDelegation do
     end
   end
 
-  defp call_adapter(smart_account_id, delegation_id, reason) do
-    case AdapterClient.dispatch_revoke_delegation(%{
-           smart_account_id: smart_account_id,
-           delegation_id: delegation_id,
-           reason: reason
-         }) do
+  defp call_adapter(smart_account_id, delegation_id, reason, permission_block) do
+    args =
+      %{
+        smart_account_id: smart_account_id,
+        delegation_id: delegation_id,
+        reason: reason
+      }
+      |> maybe_put_permission(permission_block)
+
+    case AdapterClient.dispatch_revoke_delegation(args) do
       {:ok, %{accepted: true}} ->
         :ok
 
@@ -144,4 +161,7 @@ defmodule Bank.Runtime.Workers.RevokeDelegation do
         {:cancel, :invalid_response}
     end
   end
+
+  defp maybe_put_permission(args, nil), do: args
+  defp maybe_put_permission(args, %{} = block), do: Map.put(args, :permission, block)
 end

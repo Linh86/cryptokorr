@@ -416,13 +416,20 @@ See `fixtures/dispatch_revoke_delegation.json`.
 {
   "action": "revoke_delegation",
   "smart_account_id": "sa_...",
-  "delegation_id": "del_...",            // opaque on the wire; final
-                                         // encoding (4-byte ZeroDev
-                                         // permissionId, 21-byte Kernel
-                                         // validationId, or serialized
-                                         // plugin blob) is deferred to
-                                         // docs/zerodev-permissions-integration.md
+  "delegation_id": "del_...",            // opaque on the wire; new
+                                         // rows under #58 carry the
+                                         // 4-byte permissionId hex
+                                         // for human readability,
+                                         // legacy rows still carry
+                                         // del_… placeholders.
   "reason": "operator_requested",
+  "permission": {                        // OPTIONAL — see #58 below.
+    "blob": "<base64>",
+    "permission_id": "0x<8 hex>",
+    "validation_id": "0x<42 hex>",
+    "kernel_version": "0.3.1",
+    "package_version": "5.6.3"
+  },
   "correlation_id": null                 // runtime-scoped
 }
 ```
@@ -432,6 +439,50 @@ dispatch time — the worker reads the current non-terminal row's
 `delegation_id` and sends it through. If no non-terminal row exists
 the worker cancels with `:no_such_delegation` without reaching the
 adapter, since there is nothing to cryptographically revoke.
+
+#### Optional `permission` block (#58)
+
+When present, the adapter MUST attempt a real
+`Kernel.uninstallValidation(bytes21,bytes,bytes)` UserOp signed by
+the kernel's ROOT validator EOA. When absent, the adapter falls back
+to the sentinel `SimpleAccount.execute(self, 0, 0x)` no-op self-call
+(legacy behaviour). The block is additive and non-breaking — older
+adapters silently drop it; newer adapters refuse to honor it without
+a configured operator key (`OPERATOR_PRIVATE_KEY` /
+`OPERATOR_ADDRESS`) and emit `state=revoke_failed,
+reason=operator_key_missing` rather than downgrade silently.
+
+Field semantics:
+
+- `blob` — `serializePermissionAccount(...)` output (base64 string).
+  Phoenix stores it verbatim in `delegations.permission_blob` and
+  ships it through; the adapter reconstitutes the
+  `PermissionPlugin` via `deserializePermissionAccount(...)` to
+  rebuild the same plugin the grant flow installed.
+- `permission_id` — 0x-prefixed 4-byte ZeroDev `permissionId`
+  (10 hex chars). Denormalized for audit lookups.
+- `validation_id` — 0x-prefixed 21-byte Kernel `validationId`
+  (44 hex chars). The adapter feeds this directly to
+  `uninstallValidation` as `vId`; it MUST equal
+  `0x02 ‖ rightPad(permission_id, 20)`. The runtime asserts this
+  consistency before any chain interaction; mismatch surfaces as
+  `state=revoke_failed, reason=validation_id_mismatch`.
+- `kernel_version` — kernel implementation version the blob was
+  produced under (e.g. `"0.3.1"`).
+- `package_version` — `@zerodev/permissions` package version pinned
+  at grant-time. The adapter refuses if it differs from
+  `KERNEL_PERMISSION_PIN.zeroDevPermissionsPackageVersion`
+  (mismatch surfaces as `revoke_failed,
+  reason=package_version_mismatch`). Defense against silent package
+  drift on either side of the wire.
+
+Phoenix populates the block via
+`Bank.Delegations.permission_dispatch_block/1` at dispatch time
+when the row is `cryptographically_revocable?/1` (i.e.
+`permission_blob` and a 21-byte `validation_id` are both stored).
+Sentinel-era rows have neither and continue to take the legacy
+path. There is no plan to backfill artifacts onto legacy rows; new
+grants populate them as they land.
 
 ## Callbacks (Adapter → Phoenix)
 

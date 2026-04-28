@@ -6,6 +6,9 @@
  * fails at startup rather than mid-request.
  */
 
+import { getAddress, isAddress, isHex } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+
 function required(key: string): string {
   const value = process.env[key];
   if (!value) {
@@ -30,6 +33,8 @@ function optionalString(key: string): string | undefined {
   const value = process.env[key];
   return value && value.length > 0 ? value : undefined;
 }
+
+const PLACEHOLDER_PATTERN = /placeholder|0x_/i;
 
 export interface AdapterConfig {
   /** HTTP server */
@@ -100,6 +105,30 @@ export interface AdapterConfig {
   /** Smart account / delegation */
   delegationSignerKey: string;
 
+  /**
+   * Optional kernel ROOT-validator (sudo) signer. Required only for the
+   * cryptographic revoke path (#58); when unset the adapter falls back
+   * to the sentinel revoke and refuses to honor any dispatch carrying a
+   * `permission` block.
+   *
+   * `operatorPrivateKey` is the EOA bound to the kernel's root ECDSA
+   * validator at provisioning time (`provision-kernel.ts` deploys the
+   * kernel with this same EOA). Used to sign
+   * `Kernel.uninstallValidation(...)` UserOps because the kernel's
+   * `onlyEntryPointOrSelfOrRoot` guard demands a sudo signature. NOT
+   * the same key as `delegationSignerKey` — that is the runtime
+   * session key for transfers, with strictly narrower authority.
+   *
+   * If set, both must be set together and the private key must derive
+   * to the public address. The two keys must also derive to DIFFERENT
+   * EOAs — refusing to conflate the runtime session key with the
+   * kernel root key is a defense-in-depth invariant: a leak of the
+   * delegation key must not also disclose sudo authority over the
+   * smart account.
+   */
+  operatorPrivateKey?: `0x${string}`;
+  operatorAddress?: `0x${string}`;
+
   /** USDC on Base */
   usdcContractAddress: `0x${string}`;
 
@@ -107,7 +136,90 @@ export interface AdapterConfig {
   contractVersion: number;
 }
 
+/**
+ * Read the optional operator-signer pair, refusing pasted placeholders
+ * and any half-set / mismatched / role-conflated configuration. Returns
+ * `{ key: undefined, address: undefined }` only if BOTH env vars are
+ * absent — otherwise throws so the adapter fails at startup rather
+ * than mid-request.
+ *
+ * Validation matches `provision-kernel.ts`'s `readPrivateKey` /
+ * `readAddress` posture: 0x-prefixed 32-byte hex, address must be
+ * checksum-castable, derived EOA must equal the public address.
+ *
+ * The `delegationSignerKey` is passed in so we can refuse a pasted
+ * config that uses the same EOA for both roles — the kernel root key
+ * and the runtime session key MUST be distinct EOAs.
+ */
+function readOperatorSigner(
+  env: NodeJS.ProcessEnv,
+  delegationSignerKey: string,
+): { key?: `0x${string}`; address?: `0x${string}` } {
+  const rawKey = env.OPERATOR_PRIVATE_KEY;
+  const rawAddress = env.OPERATOR_ADDRESS;
+  const keySet = rawKey !== undefined && rawKey.length > 0;
+  const addressSet = rawAddress !== undefined && rawAddress.length > 0;
+
+  if (!keySet && !addressSet) {
+    return {};
+  }
+  if (keySet !== addressSet) {
+    throw new Error(
+      "OPERATOR_PRIVATE_KEY and OPERATOR_ADDRESS must be set together (or both unset to fall back to the sentinel revoke path).",
+    );
+  }
+
+  // Both set — validate.
+  if (PLACEHOLDER_PATTERN.test(rawKey!) || PLACEHOLDER_PATTERN.test(rawAddress!)) {
+    throw new Error(
+      "OPERATOR_PRIVATE_KEY / OPERATOR_ADDRESS still contain a placeholder value",
+    );
+  }
+  if (!isHex(rawKey!) || rawKey!.length !== 66) {
+    throw new Error(
+      "OPERATOR_PRIVATE_KEY must be a 0x-prefixed 32-byte hex private key",
+    );
+  }
+  if (!isAddress(rawAddress!)) {
+    throw new Error("OPERATOR_ADDRESS must be a valid 0x-prefixed EVM address");
+  }
+
+  const operatorPrivateKey = rawKey as `0x${string}`;
+  const operatorAddress = getAddress(rawAddress!);
+
+  // Derived EOA must match the public address.
+  const derived = privateKeyToAccount(operatorPrivateKey).address;
+  if (derived !== operatorAddress) {
+    throw new Error(
+      `OPERATOR_PRIVATE_KEY does not derive to OPERATOR_ADDRESS (key derives ${derived}, env says ${operatorAddress})`,
+    );
+  }
+
+  // Refuse role conflation. The cryptographic revoke (#58) needs the
+  // ROOT validator EOA for `onlyEntryPointOrSelfOrRoot`; the runtime
+  // delegation signer is a SESSION key. A single EOA serving both
+  // roles would let a leak of the session key escalate to root.
+  // `delegationSignerKey` may be a placeholder during early dev,
+  // which would make `privateKeyToAccount` throw — guard with
+  // `isHex` so we only apply the check when both keys are real.
+  if (isHex(delegationSignerKey) && delegationSignerKey.length === 66) {
+    const delegationDerived = privateKeyToAccount(
+      delegationSignerKey as `0x${string}`,
+    ).address;
+    if (delegationDerived === operatorAddress) {
+      throw new Error(
+        "OPERATOR_PRIVATE_KEY and DELEGATION_SIGNER_KEY MUST derive to different EOAs (refusing to conflate the kernel root validator with the runtime session signer)",
+      );
+    }
+  }
+
+  return { key: operatorPrivateKey, address: operatorAddress };
+}
+
 export function loadConfig(): AdapterConfig {
+  const delegationSignerKey = required("DELEGATION_SIGNER_KEY");
+  const operator = readOperatorSigner(process.env, delegationSignerKey);
+
   return {
     port: optionalInt("PORT", 4100),
     host: optional("HOST", "0.0.0.0"),
@@ -130,7 +242,10 @@ export function loadConfig(): AdapterConfig {
       "0x0000000071727De22E5E9d8BAf0edAc6f37da032",
     ) as `0x${string}`,
 
-    delegationSignerKey: required("DELEGATION_SIGNER_KEY"),
+    delegationSignerKey,
+
+    operatorPrivateKey: operator.key,
+    operatorAddress: operator.address,
 
     usdcContractAddress: required("USDC_CONTRACT_ADDRESS") as `0x${string}`,
 
@@ -140,8 +255,17 @@ export function loadConfig(): AdapterConfig {
 
 /**
  * Test-safe config with sensible defaults. Use in tests only.
+ *
+ * Operator key fields are populated with a distinct test fixture so
+ * the cryptographic revoke path can be exercised in unit tests
+ * without leaking a real key. The key is `0x` + `cd` × 32, distinct
+ * from `delegationSignerKey` (`ab` × 32) so the role-conflation
+ * guard in `readOperatorSigner` does not trip when both are set.
  */
 export function testConfig(overrides: Partial<AdapterConfig> = {}): AdapterConfig {
+  const delegationSignerKey = ("0x" + "ab".repeat(32)) as `0x${string}`;
+  const operatorPrivateKey = ("0x" + "cd".repeat(32)) as `0x${string}`;
+
   return {
     port: 0, // random port
     host: "127.0.0.1",
@@ -153,7 +277,9 @@ export function testConfig(overrides: Partial<AdapterConfig> = {}): AdapterConfi
     bundlerRpcUrl: "http://localhost:4337",
     smartAccountAddress: "0x0000000000000000000000000000000000000a11",
     entryPointAddress: "0x0000000071727de22e5e9d8baf0edac6f37da032",
-    delegationSignerKey: "0x" + "ab".repeat(32),
+    delegationSignerKey,
+    operatorPrivateKey,
+    operatorAddress: privateKeyToAccount(operatorPrivateKey).address,
     usdcContractAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
     contractVersion: 1,
     ...overrides,

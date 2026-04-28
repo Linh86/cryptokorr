@@ -143,35 +143,55 @@ to per-permission revoke.
 
 ## Hard blockers (for #58 / #83 / #84 to actually close)
 
-Blockers (1), (5), and the smart-account-deploy half of (2) are
-now resolved. Blocker (1) was resolved when the provisioning
-skeleton + dev-deps landed (#84). Blocker (5) is resolved by this
-PR (#83) — `KERNEL_PERMISSION_PIN` is populated against
-`@zerodev/permissions@5.6.3` and verified by a tripwire test.
-The remaining items gate the cryptographic revoke (#58).
+Blockers (1), (4) (Phoenix-side persistence half), (5), and (6) are
+now resolved by the #58 PR. Blocker (2) is resolved at the
+config-plumbing level (operator key field is wired through
+`AdapterConfig` with full validation); the operator must
+provision the actual key in their secrets manager before the
+cryptographic revoke can broadcast. Blocker (3) is unchanged from
+the deploy path — the same bundler config the kernel was
+provisioned through is reused at revoke-time.
 
-1. ✅ **`@zerodev/sdk` + `@zerodev/ecdsa-validator` deps installed.**
-   Both are pinned in `chain_adapter/package.json` `devDependencies`
-   so the production runtime image can omit them via
-   `npm ci --omit=dev`. `@zerodev/permissions@5.6.3` is now also
-   installed as a devDependency (used by the #83 tripwire test);
-   the runtime image still omits it.
-2. ⏳ **Per-account sudo signer for revoke.** `provision-kernel.ts`
-   `--broadcast` mode signs the deploy UserOp with the operator
-   EOA bound to `OPERATOR_ADDRESS`; that same EOA is the kernel's
-   root ECDSA validator. The adapter runtime currently does NOT
-   hold that key (`DELEGATION_SIGNER_KEY` is the runtime signer,
-   not the root). Per-account sudo signer storage +
-   secrets-management policy is still open.
+1. ✅ **`@zerodev/sdk` + `@zerodev/ecdsa-validator` +
+   `@zerodev/permissions@5.6.3` deps installed.** All pinned in
+   `chain_adapter/package.json` `devDependencies`; production
+   runtime image omits them via `npm ci --omit=dev` for the
+   sentinel path. The cryptographic path lazy-imports them at
+   first use (see `chain_adapter/src/chains/base/revoke.ts`
+   `executeCryptographicRevoke`), so a runtime image that DOES
+   include them is required to honor `permission`-block dispatches.
+2. ⏳ **Per-account sudo signer for revoke — config wired,
+   provisioning still operator-driven.** `AdapterConfig.operatorPrivateKey`
+   + `operatorAddress` are now first-class env vars validated at
+   startup (placeholder rejection, derived-address match, refuses
+   to conflate with `DELEGATION_SIGNER_KEY`). The adapter refuses
+   to broadcast a cryptographic revoke without them and emits
+   `state=revoke_failed, reason=operator_key_missing` — never
+   silently downgrades to sentinel. The operator still has to
+   provision the actual key (HSM / KMS / secrets-manager policy
+   open as a separate hardening track per Subagent D's review).
 3. ⏳ **Bundler RPC + paymaster (or native gas) for the revoke
    UserOp.** `provision-kernel.ts --broadcast` already routes the
-   deploy through a bundler; the revoke path will reuse the same
-   bundler config. No new infrastructure once the operator is
-   provisioned.
-4. ⏳ **Persistence of the serialized plugin blob (or raw policy +
-   signer reconstruction params) at grant-time** so the adapter
-   can rebuild the plugin at revoke-time. Phoenix's
-   `delegations.delegation_id` is still opaque-string-only.
+   deploy through a bundler; the cryptographic revoke uses the
+   same `BUNDLER_RPC_URL` env. No new infrastructure once the
+   operator is provisioned. Paymaster is unwired — the revoke
+   UserOp carries `value: 0n` so native funding on the smart
+   account is sufficient.
+4. ✅ **Persistence of the serialized plugin blob + denormalized
+   header.** Phoenix's `delegations` table now carries
+   `permission_blob`, `permission_id`, `validation_id`,
+   `kernel_version`, `permission_package_version`,
+   `installed_at_block`, and `install_tx_hash` (migration
+   `20260427120000_add_delegation_permission_artifacts.exs`). All
+   nullable; legacy rows stay sentinel. The `Bank.Delegations`
+   context decodes the artifacts from `granted` callbacks and
+   builds the wire-shaped `permission` block via
+   `permission_dispatch_block/1`. **Open**: the adapter-side
+   grant flow (`wallet_connect.js` + the upcoming
+   `dispatch_grant_delegation`) does not yet emit a populated
+   `granted` callback — until it does, no row carries artifacts
+   and every revoke continues on the sentinel path. Tracked
+   under `docs/wallet-connect.md` v1.1.
 5. ✅ **`KernelPermissionPin` populated.**
    `chain_adapter/src/chains/base/permission_validator.ts` exports
    `KERNEL_PERMISSION_PIN` with the canonical signer + policy
@@ -180,27 +200,37 @@ The remaining items gate the cryptographic revoke (#58).
    ABI fragment sourced from `KernelV3_1AccountAbi` in
    `@zerodev/sdk@5.5.10`. Both halves are verified by
    `test/permission-validator-pin.test.ts` so a future package bump
-   that drifts cannot land silently.
-6. ⏳ **Decision on the on-the-wire shape of `delegation_id`.**
-   Phoenix's column is opaque; either side has to commit to one of:
-   4-byte `permissionId` hex (10 chars), 21-byte `validationId` hex
-   (44 chars), or a serialized plugin blob (kilobytes per
-   delegation). Storing both `permissionId` and the blob is also
-   reasonable.
+   that drifts cannot land silently. The cryptographic revoke
+   encoder consumes the pin's `uninstallValidationFunction` ABI
+   fragment directly.
+6. ✅ **Decision on the on-the-wire shape of `delegation_id`:
+   4-byte `permissionId` hex (10 chars).** New rows write
+   `permission_id` as the `delegation_id` so an operator pasting
+   the field into Etherscan or `kernel.permissionConfig(bytes4)`
+   gets a real lookup. The denormalized `permission.permission_id`
+   field on the dispatch payload carries the same value
+   redundantly; the adapter feeds `permission.validation_id` to
+   `uninstallValidation` rather than re-deriving from
+   `delegation_id`, so the wire field stays decorative for
+   cryptographic rows. Sentinel-era rows continue to send `del_…`
+   placeholders unchanged.
 7. ⏳ **Decision on whether per-permission revoke is the right
    design, or whether session-key rotation / `invalidateNonce` is a
-   better fit for our threat model.** Per-permission revoke is
-   surgical but requires plugin-blob persistence; rotation is
-   coarser but simpler.
+   better fit for our threat model.** Per-permission revoke is now
+   the default code path (#58 lands the encoder + executor); the
+   `invalidateNonce` coarser path is documented as the operator
+   recovery option when the per-permission attempt fails closed
+   (e.g. corrupted blob, missing operator key, package version
+   drift). Either path stays available; this is no longer a
+   blocker.
 
 ## Issue impact (current state)
 
-- **#83** — **closeable after this PR merges.** Re-scoped from
-  "verify validator ABI" to "populate the `KernelPermissionPin`
-  slot with the verified signer + policy module addresses +
-  uninstallValidation ABI fragment + version range". The slot is
-  populated; the tripwire test guards against package drift.
-  Wiring the pin into `executeRevoke` is #58's scope, not #83's.
+- **#83** — **CLOSED.** `KernelPermissionPin` populated against
+  `@zerodev/permissions@5.6.3`; tripwire test enforces package +
+  ABI drift. The cryptographic revoke encoder in
+  `chain_adapter/src/chains/base/uninstall_validation.ts`
+  consumes the pin's `uninstallValidationFunction` directly.
 - **#84** — **CLOSED** on Base Sepolia. The smart account at
   `0xacb3390BF0E13eB0755317Fbb2C73Ed185F4142C` was deployed and
   verified against the same Kernel v3.1 deployment values
@@ -209,11 +239,20 @@ The remaining items gate the cryptographic revoke (#58).
   `0xBAC849bB641841b44E965fB01A4Bf5F074f84b4D`, root validator
   `0x845ADb2C711129d4f3966735eD98a9F09fC4cE57`); deploy tx
   `0xe6ad5263ed7023ee6b5f7dd2c529efda27ccb4cebce449c52a58a882c9fe4724`.
-- **#58** — "swap sentinel for cryptographic revoke". Plumbing
-  + #83 pin are in place. Still depends on hard blockers (2),
-  (3), (4), (6), (7) above.
-- **#31** — umbrella for "true cryptographic revoke". Still open;
-  closes when #58 closes.
+- **#58** — "swap sentinel for cryptographic revoke". **Encoder +
+  executor + persistence + config landed under this PR.** The
+  cryptographic path is wired end-to-end and runs the moment two
+  operator-driven gates close: (a) provisioning a real
+  `OPERATOR_PRIVATE_KEY` matching the kernel's root validator EOA
+  in adapter env, and (b) the grant flow emitting a `granted`
+  callback that populates the artifact columns. Until both are in
+  place every revoke continues to take the sentinel path; the
+  cryptographic path's fail-closed posture refuses to downgrade
+  silently if a `permission` block arrives but the operator key is
+  missing.
+- **#31** — umbrella for "true cryptographic revoke". Closes
+  when the first end-to-end cryptographic revoke confirms on
+  chain (operator runbook step, not blocked by code).
 
 ## What survives the correction
 

@@ -242,5 +242,81 @@ defmodule Bank.AdapterClientTest do
         })
       end
     end
+
+    test "omits :permission key when not provided (sentinel path is unchanged)" do
+      # Backwards-compatibility guarantee: legacy delegations whose
+      # rows have NULL permission_blob continue to dispatch without
+      # any `permission` key, matching the v1 wire shape the
+      # adapter's sentinel path expects.
+      test_pid = self()
+
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:payload, Jason.decode!(body)})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(
+          202,
+          Jason.encode!(%{"accepted" => true, "smart_account_id" => "sa_legacy"})
+        )
+      end)
+
+      assert {:ok, _} =
+               AdapterClient.dispatch_revoke_delegation(%{
+                 smart_account_id: "sa_legacy",
+                 delegation_id: "del_legacy",
+                 reason: "operator_requested"
+               })
+
+      assert_received {:payload, payload}
+      refute Map.has_key?(payload, "permission")
+    end
+
+    test "threads :permission block verbatim into the adapter body when present" do
+      # When the worker includes a `:permission` block (because the row
+      # is `cryptographically_revocable?/1`), the adapter receives the
+      # full block under the `permission` key and the legacy fields
+      # alongside it. The adapter consumes the block to build the
+      # cryptographic uninstallValidation UserOp; the block fails
+      # closed if the adapter cannot honor it (no operator key, blob
+      # mismatch, etc.).
+      test_pid = self()
+
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:payload, Jason.decode!(body)})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(
+          202,
+          Jason.encode!(%{"accepted" => true, "smart_account_id" => "sa_crypto"})
+        )
+      end)
+
+      perm_block = %{
+        blob: "eyJzZXJpYWxpemVkUGVybWlzc2lvbkFjY291bnQiOiJ0ZXN0In0=",
+        permission_id: "0xa1b2c3d4",
+        validation_id: "0x02a1b2c3d400000000000000000000000000000000",
+        kernel_version: "0.3.1",
+        package_version: "5.6.3"
+      }
+
+      assert {:ok, _} =
+               AdapterClient.dispatch_revoke_delegation(%{
+                 smart_account_id: "sa_crypto",
+                 delegation_id: "0xa1b2c3d4",
+                 reason: "operator_requested",
+                 permission: perm_block
+               })
+
+      assert_received {:payload, payload}
+      assert payload["permission"]["blob"] == perm_block.blob
+      assert payload["permission"]["permission_id"] == perm_block.permission_id
+      assert payload["permission"]["validation_id"] == perm_block.validation_id
+      assert payload["permission"]["kernel_version"] == "0.3.1"
+      assert payload["permission"]["package_version"] == "5.6.3"
+    end
   end
 end
