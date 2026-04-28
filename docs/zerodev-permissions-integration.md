@@ -154,12 +154,13 @@ provisioned through is reused at revoke-time.
 
 1. ✅ **`@zerodev/sdk` + `@zerodev/ecdsa-validator` +
    `@zerodev/permissions@5.6.3` deps installed.** All pinned in
-   `chain_adapter/package.json` `devDependencies`; production
-   runtime image omits them via `npm ci --omit=dev` for the
-   sentinel path. The cryptographic path lazy-imports them at
-   first use (see `chain_adapter/src/chains/base/revoke.ts`
-   `executeCryptographicRevoke`), so a runtime image that DOES
-   include them is required to honor `permission`-block dispatches.
+   `chain_adapter/package.json` `dependencies`, not
+   `devDependencies`, because the production cryptographic revoke
+   path lazy-imports them at first use (see
+   `chain_adapter/src/chains/base/revoke.ts`
+   `executeCryptographicRevoke`). A runtime image built with
+   `npm ci --omit=dev` still carries these packages and can honor
+   `permission`-block dispatches.
 2. ⏳ **Per-account sudo signer for revoke — config wired,
    provisioning still operator-driven.** `AdapterConfig.operatorPrivateKey`
    + `operatorAddress` are now first-class env vars validated at

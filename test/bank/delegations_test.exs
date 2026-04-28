@@ -530,11 +530,14 @@ defmodule Bank.DelegationsTest do
                List.keyfind(errors, :validation_id, 0)
     end
 
-    test "cryptographically_revocable?/1 returns true when blob + 21-byte vId are present" do
+    test "cryptographically_revocable?/1 returns true when the complete wire-shape is present" do
       {:ok, d} =
         Delegations.grant("sa_yes", "0xa1b2c3d4", %{
           permission_blob: @blob_b64,
-          validation_id: @validation_id
+          permission_id: @perm_id,
+          validation_id: @validation_id,
+          kernel_version: "0.3.1",
+          permission_package_version: "5.6.3"
         })
 
       assert Bank.Delegations.Delegation.cryptographically_revocable?(d)
@@ -548,7 +551,34 @@ defmodule Bank.DelegationsTest do
     test "cryptographically_revocable?/1 returns false when blob is missing" do
       {:ok, d} =
         Delegations.grant("sa_partial_blob", "0xa1b2c3d4", %{
-          validation_id: @validation_id
+          permission_id: @perm_id,
+          validation_id: @validation_id,
+          kernel_version: "0.3.1",
+          permission_package_version: "5.6.3"
+        })
+
+      refute Bank.Delegations.Delegation.cryptographically_revocable?(d)
+    end
+
+    test "cryptographically_revocable?/1 returns false when permission_id is missing" do
+      {:ok, d} =
+        Delegations.grant("sa_partial_pid", "0xa1b2c3d4", %{
+          permission_blob: @blob_b64,
+          validation_id: @validation_id,
+          kernel_version: "0.3.1",
+          permission_package_version: "5.6.3"
+        })
+
+      refute Bank.Delegations.Delegation.cryptographically_revocable?(d)
+    end
+
+    test "cryptographically_revocable?/1 returns false when package version is missing" do
+      {:ok, d} =
+        Delegations.grant("sa_partial_pkg", "0xa1b2c3d4", %{
+          permission_blob: @blob_b64,
+          permission_id: @perm_id,
+          validation_id: @validation_id,
+          kernel_version: "0.3.1"
         })
 
       refute Bank.Delegations.Delegation.cryptographically_revocable?(d)

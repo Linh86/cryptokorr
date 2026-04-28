@@ -565,10 +565,10 @@ async function executeCryptographicRevoke(
     smart_account: clients.smartAccountAddress,
   });
 
-  // Lazy import: keeps the SDK out of the cold path startup cost for
-  // adapters that never see a `permission` block. The SDK is already
-  // a devDependency for the encoder + tripwire test, so this imports
-  // a module the package-lock has guaranteed for us.
+  // Lazy import: keeps the heavier account-client orchestration out
+  // of the sentinel hot path. These are runtime dependencies because
+  // the cryptographic path imports them in production when a dispatch
+  // carries a `permission` block.
   let userOpHash: Hash;
   let txHash: Hash;
   let blockNumber: bigint;

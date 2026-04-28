@@ -68,8 +68,8 @@ defmodule Bank.Delegations.Delegation do
   All seven columns are nullable. Legacy sentinel-era rows have
   them all NULL and stay on the sentinel revoke path. New rows
   populate them at grant-time; `cryptographically_revocable?/1`
-  returns true iff the minimum needed (blob + 21-byte
-  validation_id) is present.
+  returns true iff the row has the complete wire-shape the adapter
+  requires for the `permission` block.
   """
 
   use Bank.Schema
@@ -195,15 +195,15 @@ defmodule Bank.Delegations.Delegation do
   def terminal_states, do: @terminal_states
 
   @doc """
-  Returns true iff this delegation has the minimum permission
-  artifacts required for a cryptographic revoke (#58).
+  Returns true iff this delegation has the complete permission
+  artifact set required for a cryptographic revoke dispatch (#58).
 
-  The adapter needs at least the serialized plugin blob (to
-  reconstruct the permission via `deserializePermissionAccount`) and
-  the 21-byte `validation_id` (the `vId` argument to
-  `Kernel.uninstallValidation`). The other artifact columns are
-  diagnostics or version pins; they do not gate the revoke
-  themselves.
+  The adapter schema requires a serialized plugin blob, 4-byte
+  `permission_id`, 21-byte `validation_id`, `kernel_version`, and
+  `permission_package_version`. Treating a partial row as
+  cryptographically revocable would send malformed JSON and make the
+  adapter reject the request after the worker has already selected the
+  crypto path. We therefore require the complete wire-shape here.
 
   Rows where this returns `false` continue to revoke via the
   sentinel UserOp until their delegation is regranted under the new
@@ -212,9 +212,16 @@ defmodule Bank.Delegations.Delegation do
   @spec cryptographically_revocable?(t()) :: boolean()
   def cryptographically_revocable?(%__MODULE__{
         permission_blob: blob,
-        validation_id: vid
+        permission_id: pid,
+        validation_id: vid,
+        kernel_version: kernel_version,
+        permission_package_version: package_version
       })
-      when is_binary(blob) and byte_size(blob) > 0 and byte_size(vid) == 21,
+      when is_binary(blob) and byte_size(blob) > 0 and
+             is_binary(pid) and byte_size(pid) == 4 and
+             is_binary(vid) and byte_size(vid) == 21 and
+             is_binary(kernel_version) and byte_size(kernel_version) > 0 and
+             is_binary(package_version) and byte_size(package_version) > 0,
       do: true
 
   def cryptographically_revocable?(%__MODULE__{}), do: false

@@ -40,11 +40,14 @@
  *      The pin is the audited contract surface; refusing a
  *      mismatched blob is the fail-closed posture against silent
  *      package drift.
- *   3. The decoded blob's policy + signer modules MUST be in
- *      `KERNEL_PERMISSION_PIN.acceptedSignerContracts` /
- *      `acceptedPolicyContracts`. Pin defense against an attacker
- *      swapping a policy module for an unaudited one between grant
- *      and revoke.
+ *
+ * `KERNEL_PERMISSION_PIN.acceptedSignerContracts` /
+ * `acceptedPolicyContracts` remains the declarative module set the
+ * runtime is designed around, but this module does not yet introspect
+ * a deserialized plugin blob deeply enough to enforce that allowlist
+ * at revoke-time. That enforcement belongs with the grant-flow
+ * artifact producer, where the raw signer + policy config is still
+ * structured.
  *
  * Each invariant failure throws a `CryptographicRevokeError` with a
  * specific reason code so `executeRevoke` can emit a precise
@@ -84,8 +87,6 @@ export const VALIDATOR_TYPE_PERMISSION_PREFIX = "0x02" as const satisfies Hex;
 export type CryptographicRevokeFailureCode =
   | "validation_id_mismatch"
   | "package_version_mismatch"
-  | "unaccepted_signer_module"
-  | "unaccepted_policy_module"
   | "permission_deserialization_failed"
   | "deinit_computation_failed"
   | "operator_key_missing";
