@@ -53,7 +53,8 @@ caught at build time by the contract test suite.
 | GET    | `/health`                     | Live        |
 | POST   | `/dispatch/transfer`          | Live        |
 | POST   | `/dispatch/swap`              | Scaffolded  |
-| POST   | `/dispatch/revoke_delegation` | Live, **sentinel only** (not a cryptographic revoke — see #31 below) |
+| POST   | `/dispatch/grant_delegation`  | Live (#58 grant flow — wired in code; see "Cryptographic grant + revoke status" below) |
+| POST   | `/dispatch/revoke_delegation` | Live, sentinel by default; cryptographic when the dispatch carries a `permission` block (see "Cryptographic grant + revoke status" below) |
 
 **Transfer** is the first real execution path. It builds a USDC
 ERC-20 transfer on Base wrapped in a `SimpleAccount.execute` call,
@@ -140,22 +141,40 @@ Status of the implementation:
    [`docs/provisioning-kernel-v3.md`](../docs/provisioning-kernel-v3.md).
    A real Kernel v3.1 smart account was deployed on Base Sepolia
    at `0xacb3390BF0E13eB0755317Fbb2C73Ed185F4142C`.
-5. **Sentinel → real revoke swap — RE-SCOPED on #58.** The earlier
-   plan ("wrap a `disableFunction(bytes32)` selector in the
-   ERC-7579 envelope") was based on the wrong-model assumption.
-   The corrected swap targets
-   `Kernel.uninstallValidation(bytes21,bytes,bytes)` ON the smart
-   account itself, signed by a sudo signer the adapter does not
-   yet hold. See the integration doc for the full hard-blocker
-   list. The TODO(#58) block in
-   [`src/chains/base/revoke.ts`](src/chains/base/revoke.ts) is
-   updated. The tripwire test
-   `test/base-revoke-sentinel-pin.test.ts` continues to pin the
-   sentinel inner call so any change to the revoke body fails
-   loudly and forces a doc update.
+5. **Cryptographic grant + revoke — WIRED IN CODE (#58 PR #129
+   + #130).** Both paths now exist as real code:
+   - Grant: `executeGrant` in
+     [`src/chains/base/grant.ts`](src/chains/base/grant.ts) builds
+     a `PermissionPlugin` via `toPermissionValidator(...)` (session
+     signer = `DELEGATION_SIGNER_KEY`, sudo = `OPERATOR_PRIVATE_KEY`),
+     installs it via the SDK's first-UserOp enable-signature flow,
+     calls `serializePermissionAccount(account, undefined)` (KEYLESS
+     by design — no session privateKey embedded), and emits a
+     `delegation.state_changed{state: "granted"}` callback whose
+     `permission` block carries the artifact set Phoenix needs.
+   - Revoke: `executeCryptographicRevoke` in
+     [`src/chains/base/revoke.ts`](src/chains/base/revoke.ts) runs
+     when the dispatch carries a `permission` block; rebuilds a
+     stub `ModularSigner` from `permission.session_signer_address`
+     to satisfy the keyless-blob deserializer (no signing happens
+     during revoke), then dispatches
+     `Kernel.uninstallValidation(bytes21,bytes,bytes)` via the
+     SDK's `uninstallPlugin` action signed by
+     `OPERATOR_PRIVATE_KEY`.
+   - Sentinel revoke (`SimpleAccount.execute(self, 0, 0x)`) stays
+     as the fallback path for legacy rows whose grant predates
+     `permission` artifacts. The tripwire test
+     `test/base-revoke-sentinel-pin.test.ts` still pins the
+     sentinel body so any drift surfaces loudly.
 
-Phoenix issue #31 stays open until #58 ships end-to-end against
-a Kernel-provisioned account.
+   **Honesty boundary:** the cryptographic paths are unit-tested
+   (mocking the SDK) and structurally complete, but no real
+   on-chain grant + revoke has run yet on Base Sepolia under
+   the current code. Issues #58 and #31 stay OPEN until that
+   first end-to-end run confirms with public artifacts (install
+   tx hash + revoke tx hash). The operator's runbook step lives
+   in
+   [`docs/zerodev-permissions-integration.md`](../docs/zerodev-permissions-integration.md).
 
 ## Local setup
 

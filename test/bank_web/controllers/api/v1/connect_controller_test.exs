@@ -95,5 +95,41 @@ defmodule BankWeb.API.V1.ConnectControllerTest do
       assert body["error"]["code"] == "invalid_body"
       assert body["error"]["message"] =~ "chain_id"
     end
+
+    test "accepts a re-connect after a prior grant_failed callback", %{conn: conn} do
+      # PR #130 contract: a `state: "grant_failed"` callback does
+      # NOT create an active delegation row. That means a follow-up
+      # connect request for the same smart account must be allowed
+      # — the operator (or the user via the JS hook) needs to be
+      # able to retry after fixing the underlying failure
+      # (operator key missing, chain mismatch, install reverted).
+      # If a grant_failed left a non-terminal row behind, this test
+      # would surface that regression because re-enqueueing would
+      # be silently blocked or the audit trail would diverge.
+      Bank.Delegations.apply_callback(%{
+        "smart_account_id" => "sa_retry_after_failure",
+        "delegation_id" => "grant_failed_legacy",
+        "state" => "grant_failed",
+        "reason" => "operator_key_missing"
+      })
+
+      payload = %{
+        "smart_account_id" => "sa_retry_after_failure",
+        "account" => "0xabc000000000000000000000000000000000dead",
+        "chain_id" => 84_532
+      }
+
+      conn = post(conn, ~p"/v1/connect/smart_account", payload)
+      assert json_response(conn, 202)["status"] == "accepted"
+
+      assert_enqueued(
+        worker: GrantDelegation,
+        args: %{
+          "smart_account_id" => "sa_retry_after_failure",
+          "chain_id" => 84_532,
+          "account" => "0xabc000000000000000000000000000000000dead"
+        }
+      )
+    end
   end
 end

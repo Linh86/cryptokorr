@@ -53,7 +53,7 @@ defmodule BankWeb.API.V1.ConnectController do
        BankWeb.OpenApi.Schemas.ConnectSmartAccountRequest},
     responses: %{
       202 =>
-        {"Connect accepted (adapter dispatch stubbed)", "application/json",
+        {"Connect accepted (audited and enqueued for adapter dispatch)", "application/json",
          BankWeb.OpenApi.Schemas.ConnectSmartAccountResponse},
       422 => @unprocessable_ref
     }
