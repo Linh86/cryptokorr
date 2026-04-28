@@ -28,15 +28,19 @@ no-secret-safe templates targeting **Kernel v3.1** on Base Sepolia
 - Real chain interaction is **opt-in via `--broadcast`** on
   `provision-kernel.ts`.
 
-Per-permission install + cryptographic revoke are wired in code by
-PR #129 + PR #130 — `src/chains/base/grant.ts` runs
-`toPermissionValidator` + sudo-signed install UserOp;
-`src/chains/base/revoke.ts` runs `Kernel.uninstallValidation(...)`
-via the SDK's `uninstallPlugin` action when a dispatch carries a
-`permission` block. Issues #58 and #31 stay open until the first
-real on-chain grant + revoke confirms on Base Sepolia. See
-[`docs/zerodev-permissions-integration.md`](../../docs/zerodev-permissions-integration.md)
-for the operator runbook step.
+Per-permission install + cryptographic revoke are LIVE on Base
+Sepolia (#58 + #31 closed by PR #132).
+`src/chains/base/grant.ts` runs `toPermissionValidator` +
+sudo-signed install UserOp; `src/chains/base/revoke.ts` runs
+`Kernel.uninstallValidation(...)` via the SDK's `uninstallPlugin`
+action when a dispatch carries a `permission` block. Public
+proof: smart account
+`0xacb3390BF0E13eB0755317Fbb2C73Ed185F4142C`, install tx
+`0xbbb3a2e8…`, revoke tx `0xf81c969d…`, block `40820243`. The
+operator smoke runbook is in
+[`docs/mvp-smoke-runbook.md`](../../docs/mvp-smoke-runbook.md);
+the integration model is in
+[`docs/zerodev-permissions-integration.md`](../../docs/zerodev-permissions-integration.md).
 
 ## Inventory
 

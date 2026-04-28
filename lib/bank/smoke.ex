@@ -117,10 +117,12 @@ defmodule Bank.Smoke do
         "Bank.Smoke: dispatching revoke for #{smart_account_id} (delegation_id=#{delegation_id})"
       )
 
-      # `dispatch_revoke_delegation/2` requires `delegation_id` so the
-      # adapter can target the right authority record once #58 swaps
-      # the inner call for the real ERC-7579 disable (sentinel path
-      # just echoes the id into the callback projection).
+      # `dispatch_revoke_delegation/2` requires `delegation_id` so
+      # the adapter can target the right authority record. For rows
+      # with `permission` artifacts (cryptographic path, live since
+      # PR #132 closed #58 / #31) the adapter feeds
+      # `permission.validation_id` to `Kernel.uninstallValidation`;
+      # legacy sentinel rows just echo the id into the callback.
       case Bank.AdapterClient.dispatch_revoke_delegation(%{
              smart_account_id: smart_account_id,
              delegation_id: delegation_id,

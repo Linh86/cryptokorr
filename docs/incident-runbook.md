@@ -270,9 +270,10 @@ audit, not a window of unguarded execution.
    `last_reason` and the state is the source of truth for whether
    the revoke succeeded:
     - `state: :revoked` — chain confirmed; the revoke attempt
-      succeeded. (Cryptographic enforcement still requires the
-      #84 → #83 → #58 sequence; until then, the on-chain anchor is
-      a sentinel UserOp.)
+      succeeded. For rows with `permission_id` populated this is
+      a cryptographic disablement (#58 / #31, closed by PR
+      #132); for legacy rows without artifacts it is an on-chain
+      anchor of intent (the sentinel UserOp).
     - `state: :revoke_failed` — chain-level attempt failed; the
       delegation is still live on-chain.
     - `state: :revoking` with no recent callback — adapter is
@@ -313,44 +314,29 @@ audit, not a window of unguarded execution.
   re-transitions the row `:revoke_failed → :revoking` and the
   adapter submits a fresh sentinel tx. Retry as many times as
   needed; each attempt appends a fresh audit trail.
-- **This sentinel does not cryptographically revoke the delegation
-  key at the smart-account level** — that enforcement is tracked
-  in #31 and is currently sequenced through:
-  - **#56 (DECIDED)** — chose Kernel v3 (ERC-7579 modular
-    account). See
-    [docs/smart-account-and-revoke-design.md](smart-account-and-revoke-design.md).
-  - **#57 (LANDED, narrowed)** — EIP-7579 outer execute envelope
-    pin in the adapter. Earlier scaffolding (`delegation_id ↔
-    bytes32 permissionId` mapping helpers, a
-    `PERMISSION_VALIDATOR_ADDRESS` env with a strict accessor,
-    a fixture pinning the 66-char convention) was removed as an
-    artefact of a wrong-model assumption — see
-    [docs/zerodev-permissions-integration.md](zerodev-permissions-integration.md).
-  - **#84 (provisioning)** — partial. Smart-account-deploy
-    portion of the operator runbook is documented in
-    [docs/provisioning-kernel-v3.md](provisioning-kernel-v3.md).
-    The earlier "install a single Permission Validator" + "verify
-    its bytecode hash" steps are removed; the corresponding
-    templates under `chain_adapter/scripts/` are deferred stubs.
-  - **#83 (pin)** — landed. Was "pin a single validator's
-    disable ABI"; re-scoped and populated as
-    `KERNEL_PERMISSION_PIN` in the adapter's
-    `permission_validator.ts` from `@zerodev/permissions@5.6.3`
-    + `KernelV3_1AccountAbi`. Verified by the
-    `permission-validator-pin.test.ts` tripwire.
-  - **#58 (wiring)** — swap the sentinel inner call for a real
-    `Kernel.uninstallValidation` call on the smart account
-    itself, signed by a sudo signer the adapter does not yet
-    hold. Blocked on the SDK integration plus the hard-blocker
-    list in the integration doc above.
+- **The sentinel path is the LEGACY fallback.** For rows with
+  `permission_id` populated the cryptographic
+  `Kernel.uninstallValidation(...)` runs and `revoked` means the
+  kernel rejects further user-ops from the disabled permission.
+  For legacy rows without `permission` artifacts the sentinel
+  still runs and `revoked` means "on-chain anchored, trust
+  downgraded" only. Cryptographic enforcement landed under PR
+  #132; the operator smoke runbook is in
+  [docs/mvp-smoke-runbook.md](mvp-smoke-runbook.md). Phoenix's
+  fail-closed posture (delegations marked
+  `:revoking`/`:revoke_failed`/`:revoked` are non-executable for
+  `RunExecution`) keeps the delegation off the dispatch path
+  regardless of which revoke path runs.
 
-  Until #58 closes, Phoenix's fail-closed posture (delegations
-  marked `:revoking`/`:revoke_failed`/`:revoked` are non-executable
-  for `RunExecution`) is the only safeguard for the delegation key.
-  If the operator cannot get the revoke through and the situation
-  is dangerous, the fallback is to **rotate the smart account's
-  delegation off chain** — an adapter-side operator procedure that
-  lives in the adapter repo.
+  If the cryptographic revoke fails on a row that should have
+  taken it, the callback's `reason` field carries one of the
+  precise codes the adapter emits — `operator_key_missing`,
+  `validation_id_mismatch`, `package_version_mismatch`,
+  `session_signer_missing`, `permission_deserialization_failed`,
+  `deinit_computation_failed`, `unaccepted_signer_module`,
+  `unaccepted_policy_module`, or `uninstall_validation_reverted`.
+  Match the code against the failure-triage table in the smoke
+  runbook for remediation.
 
 ---
 

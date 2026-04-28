@@ -5,9 +5,10 @@ the repo's runbooks, scripts, and code: that ZeroDev's kernel
 permissions architecture has a single deployable "Permission
 Validator" contract at one address with one `disablePermission(bytes32)`
 ABI fragment. It does not. This file is the single source of truth
-for what the runtime actually has to integrate against, and the
-hard blockers that have to be resolved before cryptographic revoke
-(#58) can ship.
+for what the runtime integrates against. Cryptographic grant +
+revoke now ship live on Base Sepolia (#58 / #31, closed by PR
+#132); the "hard blockers" subsection below is retained as
+historical record of how the gates closed.
 
 Authoritative references inspected on 2026-04-23:
 
@@ -141,16 +142,10 @@ to per-permission revoke.
    adapter still receives `{smart_account_id, delegation_id,
    reason}` and emits `delegation.state_changed` callbacks.
 
-## Hard blockers (for #58 / #83 / #84 to actually close)
+## Hard blockers (historical — all resolved by PR #132)
 
-Blockers (1), (4) (Phoenix-side persistence half), (5), and (6) are
-now resolved by the #58 PR. Blocker (2) is resolved at the
-config-plumbing level (operator key field is wired through
-`AdapterConfig` with full validation); the operator must
-provision the actual key in their secrets manager before the
-cryptographic revoke can broadcast. Blocker (3) is unchanged from
-the deploy path — the same bundler config the kernel was
-provisioned through is reused at revoke-time.
+Every blocker below closed before or under PR #132. Retained
+for historical record so operators can see how the gates closed.
 
 1. ✅ **`@zerodev/sdk` + `@zerodev/ecdsa-validator` +
    `@zerodev/permissions@5.6.3` deps installed.** All pinned in
@@ -161,23 +156,24 @@ provisioned through is reused at revoke-time.
    `executeCryptographicRevoke`). A runtime image built with
    `npm ci --omit=dev` still carries these packages and can honor
    `permission`-block dispatches.
-2. ⏳ **Per-account sudo signer for revoke — config wired,
-   provisioning still operator-driven.** `AdapterConfig.operatorPrivateKey`
-   + `operatorAddress` are now first-class env vars validated at
-   startup (placeholder rejection, derived-address match, refuses
-   to conflate with `DELEGATION_SIGNER_KEY`). The adapter refuses
-   to broadcast a cryptographic revoke without them and emits
+2. ✅ **Per-account sudo signer for revoke — provisioned for
+   the Base Sepolia smoke under PR #132.**
+   `AdapterConfig.operatorPrivateKey` + `operatorAddress` are
+   first-class env vars validated at startup (placeholder
+   rejection, derived-address match, refuses to conflate with
+   `DELEGATION_SIGNER_KEY`). The adapter refuses to broadcast a
+   cryptographic revoke without them and emits
    `state=revoke_failed, reason=operator_key_missing` — never
-   silently downgrades to sentinel. The operator still has to
-   provision the actual key (HSM / KMS / secrets-manager policy
-   open as a separate hardening track per Subagent D's review).
-3. ⏳ **Bundler RPC + paymaster (or native gas) for the revoke
+   silently downgrades to sentinel. Tighter operator-key
+   custody (HSM / KMS / secrets-manager policy) remains a
+   separate hardening track.
+3. ✅ **Bundler RPC + paymaster (or native gas) for the revoke
    UserOp.** `provision-kernel.ts --broadcast` already routes the
    deploy through a bundler; the cryptographic revoke uses the
-   same `BUNDLER_RPC_URL` env. No new infrastructure once the
-   operator is provisioned. Paymaster is unwired — the revoke
-   UserOp carries `value: 0n` so native funding on the smart
-   account is sufficient.
+   same `BUNDLER_RPC_URL` env. The PR #132 smoke ran against the
+   operator-provided bundler with native gas. Paymaster is
+   unwired — the revoke UserOp carries `value: 0n` so native
+   funding on the smart account is sufficient.
 4. ✅ **Persistence + grant-flow plumbing complete.** Phoenix's
    `delegations` table now carries `permission_blob`,
    `permission_id`, `validation_id`, `kernel_version`,
@@ -203,14 +199,11 @@ provisioned through is reused at revoke-time.
    keyless; at revoke time the adapter rebuilds a stub
    `ModularSigner` from that address — `getEnableData(...)` only
    reads the address, so no signing ever happens during revoke
-   and Phoenix never holds session-signing material. **Open at
-   the operator-runbook layer**: actually running the install +
-   revoke on Base Sepolia. The adapter's `executeGrant` and
-   `executeCryptographicRevoke` are unit-tested via mocks; the
-   successful broadcast paths require a provisioned
-   `OPERATOR_PRIVATE_KEY`, a real bundler, and the kernel
-   already deployed under that operator EOA. See the operator
-   runbook step below.
+   and Phoenix never holds session-signing material. The
+   end-to-end broadcast confirmed under PR #132 against smart
+   account `0xacb3390BF0E13eB0755317Fbb2C73Ed185F4142C`. The
+   operator smoke runbook is in
+   [`docs/mvp-smoke-runbook.md`](mvp-smoke-runbook.md).
 5. ✅ **`KernelPermissionPin` populated.**
    `chain_adapter/src/chains/base/permission_validator.ts` exports
    `KERNEL_PERMISSION_PIN` with the canonical signer + policy
@@ -258,20 +251,19 @@ provisioned through is reused at revoke-time.
   `0xBAC849bB641841b44E965fB01A4Bf5F074f84b4D`, root validator
   `0x845ADb2C711129d4f3966735eD98a9F09fC4cE57`); deploy tx
   `0xe6ad5263ed7023ee6b5f7dd2c529efda27ccb4cebce449c52a58a882c9fe4724`.
-- **#58** — "swap sentinel for cryptographic revoke". **Encoder +
-  executor + persistence + config landed under this PR.** The
-  cryptographic path is wired end-to-end and runs the moment two
-  operator-driven gates close: (a) provisioning a real
-  `OPERATOR_PRIVATE_KEY` matching the kernel's root validator EOA
-  in adapter env, and (b) the grant flow emitting a `granted`
-  callback that populates the artifact columns. Until both are in
-  place every revoke continues to take the sentinel path; the
-  cryptographic path's fail-closed posture refuses to downgrade
-  silently if a `permission` block arrives but the operator key is
-  missing.
-- **#31** — umbrella for "true cryptographic revoke". Closes
-  when the first end-to-end cryptographic revoke confirms on
-  chain (operator runbook step, not blocked by code).
+- **#58** — **CLOSED by PR #132.** End-to-end cryptographic
+  grant + revoke confirmed on Base Sepolia. Smart account
+  `0xacb3390BF0E13eB0755317Fbb2C73Ed185F4142C`, permission id
+  `0xbb2f68d9`, install tx `0xbbb3a2e8…`, revoke tx
+  `0xf81c969d…`, block `40820243`. The cryptographic path's
+  fail-closed posture still refuses to downgrade silently if a
+  `permission` block arrives but the operator key is missing —
+  the row surfaces `revoke_failed, reason=operator_key_missing`
+  rather than fall back to sentinel. The legacy sentinel path
+  remains for rows without `permission` artifacts.
+- **#31** — **CLOSED by PR #132.** First end-to-end
+  cryptographic revoke confirmed on chain with public artifacts
+  above.
 
 ## What survives the correction
 

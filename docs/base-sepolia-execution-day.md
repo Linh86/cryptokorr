@@ -11,12 +11,12 @@ content.
 > wrong — `@zerodev/permissions` does not have a single
 > deployable validator contract. See
 > [`docs/zerodev-permissions-integration.md`](zerodev-permissions-integration.md).
-> The provisioning-script templates have been replaced with
-> deferred stubs and the env var has been removed. Today the
-> execution-day flow is: smart-account deploy + env hygiene +
-> sentinel-era smokes; per-permission cryptographic revoke is
-> blocked on the SDK integration described in the integration
-> doc.
+> The env var has been removed. PR #132 closed #58 / #31 with
+> live cryptographic grant + revoke on Base Sepolia; the
+> day-of smoke for the cryptographic path lives in
+> [`docs/mvp-smoke-runbook.md`](mvp-smoke-runbook.md). The flow
+> below covers the chain-side prerequisites (smart-account
+> deploy, env hygiene) before the smoke runs.
 
 Pairs with:
 
@@ -50,7 +50,8 @@ mix bank.kernel.preflight --phase verify    # before adapter bind
 ```
 
 **Expect:** `status: ready` (or `:blocked` listing the missing
-inputs), `mode: awaiting_zerodev_integration`, `chain_id: 84532`,
+inputs), `mode: awaiting_zerodev_integration` (stale label from
+before PR #132 — runtime is no longer awaiting), `chain_id: 84532`,
 redacted private-key fields. No RPC.
 
 **If not:** Common failures: placeholder still set, wrong chain id
@@ -64,8 +65,10 @@ sh scripts/check-env.sh
 # or: ( set -a; . ./.env; sh scripts/check-env.sh )
 ```
 
-**Expect:** `PASS`. `mode: sentinel-era (awaiting ZeroDev SDK
-integration)`.
+**Expect:** `PASS`. The `mode: sentinel-era (awaiting ZeroDev
+SDK integration)` line is stale relative to runtime (PR #132
+landed cryptographic grant + revoke); the `PASS` is what
+matters.
 
 **If not:** `check-env.sh` is no-network; any failure is local env.
 Fix each flagged `MISSING`, `PLACEHOLD`, `WHITESPCE`, or `MALFORMED`.
@@ -137,12 +140,16 @@ state doesn't match the pinned Kernel v3.1 deployment. Do NOT
 bind the address to the adapter; investigate (different version,
 different owner, wrong chain).
 
-## Step 6 — Install permissions on the account `[chain]` — DEFERRED
+## Step 6 — Install permissions on the account `[chain]`
 
-Per-permission install requires the ZeroDev SDK integration tracked
-in the integration doc. Today the smart account stays in its base
-configuration; the adapter's revoke path is sentinel-only and does
-not exercise per-permission install.
+Permission install runs through the adapter runtime
+(`POST /dispatch/grant_delegation`), not from a script here. After
+the adapter env is bound (Step 7), kick off a connect via
+`POST /v1/connect/smart_account`; the adapter's `executeGrant`
+builds the ZeroDev `PermissionPlugin`, installs it via the SDK's
+first-UserOp enable-signature flow, and emits a `granted`
+callback. The full smoke flow is in
+[`docs/mvp-smoke-runbook.md`](mvp-smoke-runbook.md).
 
 ## Step 7 — Bind addresses + restart adapter
 
@@ -151,8 +158,10 @@ not exercise per-permission install.
 Secrets Manager, etc.). Restart the container. Re-run
 `sh scripts/check-env.sh`.
 
-**Expect:** `PASS`. `mode: sentinel-era (awaiting ZeroDev SDK
-integration)`.
+**Expect:** `PASS`. The `mode: sentinel-era (awaiting ZeroDev
+SDK integration)` line is stale relative to runtime (PR #132
+landed cryptographic grant + revoke); the `PASS` is what
+matters.
 
 **If not:** No-network check, so any `FAIL` is an env problem on
 the host.
@@ -173,28 +182,34 @@ mix bank.smoke.revoke
 
 **Expect:** `PASS` + exit 0 for both.
 
-**If not:** See the FAIL tables in `smoke-tests.md`. Note that
-`state: revoked` in sentinel-era mode means **on-chain anchored,
-trust downgraded** — NOT cryptographically impossible. That
-remains true until the ZeroDev SDK integration ships.
+**If not:** See the FAIL tables in `smoke-tests.md`. For rows
+without `permission` artifacts (legacy / non-grant-flow rows),
+`state: revoked` means **on-chain anchored, trust downgraded** —
+NOT cryptographically impossible. For rows with artifacts (new
+grants under PR #132), `revoked` additionally means the kernel
+rejects further user-ops from the disabled permission. The
+cryptographic-path smoke is the day-of focus and lives in
+[`docs/mvp-smoke-runbook.md`](mvp-smoke-runbook.md).
 
 ## After the day
 
 - Commit the deployment journal (chain, addresses, hashes, deploy
   tx) to the team's internal records.
-- Adapter stays in `mode: sentinel-era` until the SDK integration
-  ships. The smoke `state: revoked` continues to mean trust
-  downgrade only.
-- Do NOT promote to Base mainnet until Sepolia is green
-  end-to-end AND the cryptographic revoke (#58) has shipped
-  against Sepolia. Mainnet re-rolls burn real ETH.
+- Cryptographic grant + revoke shipped on Base Sepolia under PR
+  #132 (#58 / #31 closed). For rows with `permission` artifacts
+  the revoke disables the delegation at the contract level; for
+  rows without, the legacy sentinel anchor still runs.
+- Do NOT promote to Base mainnet until the operator's own
+  Sepolia smoke (per
+  [`docs/mvp-smoke-runbook.md`](mvp-smoke-runbook.md)) is green
+  end-to-end. Mainnet re-rolls burn real ETH.
 
 ## Out of scope
 
-- The full ZeroDev SDK integration (per-account sudo signer,
-  plugin-blob persistence, `Kernel.uninstallValidation` wiring).
-  See [docs/zerodev-permissions-integration.md](zerodev-permissions-integration.md).
-- Incident response for failed cryptographic revokes once they
-  ship (issue #38).
+- The cryptographic grant + revoke smoke itself — that lives in
+  [`docs/mvp-smoke-runbook.md`](mvp-smoke-runbook.md).
+- Incident response for failed cryptographic revokes (issue #38);
+  failure-code triage is in the smoke runbook and
+  [`docs/incident-runbook.md`](incident-runbook.md).
 - Anything requiring chain access to validate — every step not
   marked `[chain]` is local.

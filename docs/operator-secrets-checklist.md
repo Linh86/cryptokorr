@@ -215,9 +215,10 @@ The following can remain blank until the chain-side provisioning run:
 > removed — ZeroDev's `@zerodev/permissions` does not have a single
 > deployable validator contract, so there is no value to put in it.
 > See [`docs/zerodev-permissions-integration.md`](zerodev-permissions-integration.md)
-> for the corrected model. The runtime is sentinel-era until that
-> integration ships and operators do not need to capture any
-> validator address today.
+> for the corrected model. Cryptographic grant + revoke shipped
+> live on Base Sepolia under PR #132 (#58 / #31 closed); operators
+> still do not need to capture any validator address today (the
+> runtime composes signer + policy modules off-chain via the SDK).
 
 ## Safety rules
 

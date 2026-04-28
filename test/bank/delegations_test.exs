@@ -444,6 +444,125 @@ defmodule Bank.DelegationsTest do
       # this as accepted_with_warning.
       assert {:error, :not_found} = Delegations.apply_callback(payload)
     end
+
+    test "granted callback for a row already in :revoking is :invalid_transition" do
+      # Regression guard: if the adapter emits a stale `granted` callback
+      # AFTER Phoenix has already moved the row to `:revoking` (e.g. an
+      # in-flight grant beat its first callback while the operator
+      # already kicked off a revoke), Phoenix MUST refuse rather than
+      # silently snap the row back to :active. Without this pin, a
+      # future change to apply_callback/1's `granted` branch could let
+      # the `_` fallthrough convert :revoking back to :active and
+      # un-fail-close the smart account.
+      {:ok, _} = Delegations.grant("sa_grant_during_revoke", "del_x")
+      {:ok, _} = Delegations.record_revoke_requested("sa_grant_during_revoke")
+
+      assert {:error, :invalid_transition} =
+               Delegations.apply_callback(%{
+                 "smart_account_id" => "sa_grant_during_revoke",
+                 "delegation_id" => "del_x",
+                 "state" => "granted",
+                 "reason" => "wallet_connect_install"
+               })
+
+      # Row stayed in :revoking; the smart account remains
+      # non-executable until the revoke resolves.
+      assert %{state: :revoking} = Delegations.get("sa_grant_during_revoke")
+      refute Delegations.executable?("sa_grant_during_revoke")
+    end
+
+    test "revoked callback for a row in :revoke_failed is :invalid_transition" do
+      # Operator-retry contract: a successful revoke MUST always follow
+      # a fresh :revoking dispatch. A `revoked` callback arriving while
+      # the row sits in :revoke_failed (e.g. a duplicated callback from
+      # a previously-failed attempt that quietly confirmed) would be a
+      # contract violation and must not flip the row terminal without
+      # going through a fresh :revoking step. Without this pin, a
+      # state-machine relaxation could let a stale callback retire the
+      # row while the operator still believes a retry is needed.
+      {:ok, _} = Delegations.grant("sa_failed_retry", "del_x")
+      {:ok, _} = Delegations.record_revoke_requested("sa_failed_retry")
+      {:ok, _} = Delegations.record_revoke_failed("sa_failed_retry")
+
+      assert {:error, :invalid_transition} =
+               Delegations.apply_callback(%{
+                 "smart_account_id" => "sa_failed_retry",
+                 "delegation_id" => "del_x",
+                 "state" => "revoked",
+                 "reason" => "stale_confirmation"
+               })
+
+      assert %{state: :revoke_failed} = Delegations.get("sa_failed_retry")
+    end
+
+    test "revoking callback applied to a :revoke_failed row drives the operator retry" do
+      # Operator retry contract: when the previous on-chain revoke
+      # attempt failed (`revoke_failed`), re-enqueueing the worker
+      # produces a fresh dispatch. The adapter emits a `revoking`
+      # callback BEFORE touching chain. apply_callback/1 must accept
+      # that callback against a row in `:revoke_failed` (not just
+      # `:active`) so the row visibly returns to `:revoking` for the
+      # retry attempt. Without this pin, the underlying
+      # `record_revoke_requested/2` path is exercised but the wire
+      # contract from the controller is not.
+      {:ok, _} = Delegations.grant("sa_retry_cb", "del_x")
+      {:ok, _} = Delegations.record_revoke_requested("sa_retry_cb")
+
+      {:ok, _} =
+        Delegations.record_revoke_failed("sa_retry_cb", %{last_reason: "bundler_rejected"})
+
+      assert {:ok, delegation} =
+               Delegations.apply_callback(%{
+                 "smart_account_id" => "sa_retry_cb",
+                 "delegation_id" => "del_x",
+                 "state" => "revoking",
+                 "reason" => "operator_retry"
+               })
+
+      assert delegation.state == :revoking
+      assert delegation.last_reason == "operator_retry"
+    end
+
+    test "every adapter grant_failed reason is recognized as a no-permission grant_failed signal" do
+      # Tripwire: the adapter's `grant_failed` callback path emits one of
+      # `operator_key_missing`, `chain_id_mismatch`,
+      # `permission_install_failed`, `permission_serialization_failed`
+      # (see chain_adapter/src/chains/base/grant.ts `GrantFailureCode`).
+      # Phoenix's defensive guard at the top of the `granted` branch
+      # rejects a callback whose `reason` is in @grant_failure_reasons
+      # AND whose `permission` block is absent — i.e. a malformed
+      # adapter that emitted state="granted" with a failure reason and
+      # no artifact would still be refused. If the adapter introduces a
+      # NEW failure code without updating the Phoenix list, that
+      # callback would slip past the guard and create an active row
+      # for a permission that was never installed.
+      #
+      # Pinning the list here makes the cross-repo contract explicit:
+      # any change to the adapter's GrantFailureCode union forces a
+      # corresponding edit to lib/bank/delegations.ex
+      # @grant_failure_reasons + this fixture.
+      adapter_codes = [
+        "operator_key_missing",
+        "chain_id_mismatch",
+        "permission_install_failed",
+        "permission_serialization_failed"
+      ]
+
+      for code <- adapter_codes do
+        sa_id = "sa_grant_failed_#{code}"
+
+        assert {:error, :grant_failed} =
+                 Delegations.apply_callback(%{
+                   "smart_account_id" => sa_id,
+                   "delegation_id" => "grant_failed_#{:erlang.system_time()}",
+                   "state" => "granted",
+                   "reason" => code
+                 })
+
+        # No active row: the adapter never installed a permission.
+        assert is_nil(Delegations.get(sa_id))
+      end
+    end
   end
 
   describe "ERC-4337 v0.7 AA-shaped callbacks (issue #32)" do

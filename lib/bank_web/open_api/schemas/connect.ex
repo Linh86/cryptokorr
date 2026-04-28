@@ -2,12 +2,19 @@ defmodule BankWeb.OpenApi.Schemas.Connect do
   @moduledoc """
   Per-domain schemas for `POST /v1/connect/smart_account` (issue #89).
 
-  The v0.1 delegation path flows through the adapter callback. This
-  endpoint is the v1.1 scaffolding for the browser-native flow
-  described in `docs/wallet-connect.md`. The controller hands off to
-  `Bank.Delegations.request_connect/1`, which is a stub until the
-  adapter exposes `POST /dispatch/grant_delegation`. The synchronous
-  response says `accepted` with a `note` flagging the adapter stub.
+  Server-side end-to-end as of PR #132 (#58 grant flow): the
+  controller hands off to `Bank.Delegations.request_connect/1`,
+  which enqueues `Bank.Runtime.Workers.GrantDelegation`; the
+  worker dispatches to the adapter's
+  `POST /dispatch/grant_delegation`, which builds + installs a
+  ZeroDev `PermissionPlugin` and emits a `granted` callback with
+  the artifact set Phoenix persists. The browser-side hook in
+  `assets/js/hooks/wallet_connect.js` is still scaffolded — it
+  does not yet sign a delegation payload, so operator-driven
+  flows pass `delegation_payload: null` (see
+  `docs/wallet-connect.md`). The synchronous response says
+  `accepted` with a `note` flagging that the granted artifact
+  rides on the callback.
   """
 end
 

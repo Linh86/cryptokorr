@@ -68,7 +68,7 @@ defmodule BankWeb.Internal.AdapterCallbackController do
 
       {:error, reason} ->
         Logger.warning(
-          "Delegation callback failed: #{inspect(reason)}, params: #{inspect(params)}"
+          "Delegation callback failed: #{inspect(reason)}, params: #{inspect(safe_params(params))}"
         )
 
         conn
@@ -94,7 +94,7 @@ defmodule BankWeb.Internal.AdapterCallbackController do
 
       {:error, :plan_not_found} ->
         Logger.warning(
-          "Execution callback for unknown plan: kind=#{kind}, params=#{inspect(params)}"
+          "Execution callback for unknown plan: kind=#{kind}, params=#{inspect(safe_params(params))}"
         )
 
         conn
@@ -107,7 +107,7 @@ defmodule BankWeb.Internal.AdapterCallbackController do
 
       {:error, reason} ->
         Logger.warning(
-          "Execution callback failed: kind=#{kind}, reason=#{inspect(reason)}, params=#{inspect(params)}"
+          "Execution callback failed: kind=#{kind}, reason=#{inspect(reason)}, params=#{inspect(safe_params(params))}"
         )
 
         conn
@@ -210,6 +210,24 @@ defmodule BankWeb.Internal.AdapterCallbackController do
   end
 
   defp summarise_error(reason), do: inspect(reason)
+
+  # Logging an inbound callback's full params on failure was the
+  # post-PR-132 redaction-audit (Subagent C) finding: today's
+  # callback shapes don't carry secrets, but `inspect(params)` is
+  # a latent leak channel against future schema drift (a new
+  # field — say a signed delegation payload that incidentally
+  # carries auth material — would land in our log files
+  # automatically). `safe_params/1` extracts only the fields we
+  # want surfaced for triage; anything else is dropped from the
+  # log line. The full params still flow to the controller, the
+  # context, and the audit trail (where the schema is policed
+  # field by field) — only the warning log is narrowed.
+  @safe_log_keys ~w(kind smart_account_id execution_plan_id delegation_id state)
+  defp safe_params(%{} = params) do
+    Map.take(params, @safe_log_keys)
+  end
+
+  defp safe_params(other), do: other
 
   defp render_error(conn, %{status: status} = envelope) do
     conn

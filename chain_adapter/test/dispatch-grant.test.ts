@@ -255,6 +255,63 @@ describe("POST /dispatch/grant_delegation", () => {
 
       blockingClient.release();
     });
+
+    it("clears the in-flight registry after the background grant resolves so a retry runs", async () => {
+      // Regression guard: `runGrant`'s `finally` block deletes the
+      // smart_account_id from the in-flight set on BOTH the success
+      // path and the failure path. If a future change moves the
+      // delete into the success branch only, an Oban retry that
+      // arrives after a `grant_failed` callback would be silently
+      // suppressed forever — Phoenix would never get a retry-driven
+      // grant. This test exercises the failure path (operator key
+      // missing → grant_failed → finally), then dispatches a SECOND
+      // time and confirms the second run actually executed (a
+      // second `grant_failed` callback is emitted, not just the
+      // first).
+      app = await buildWithConfig({
+        operatorPrivateKey: undefined,
+        operatorAddress: undefined,
+      });
+
+      const first = await app.inject({
+        method: "POST",
+        url: "/dispatch/grant_delegation",
+        headers: dispatchAuthHeaders,
+        payload: dispatchGrantDelegation,
+      });
+      expect(first.statusCode).toBe(202);
+
+      // Wait for first run's grant_failed callback to land.
+      await eventually(() => {
+        expect(callbackClient.payloads).toHaveLength(1);
+      });
+
+      // Second dispatch for the SAME smart_account_id. The in-flight
+      // set has been cleared by `finally`, so this must produce its
+      // own grant_failed callback rather than being silently dedup'd.
+      const second = await app.inject({
+        method: "POST",
+        url: "/dispatch/grant_delegation",
+        headers: dispatchAuthHeaders,
+        payload: dispatchGrantDelegation,
+      });
+      expect(second.statusCode).toBe(202);
+
+      await eventually(() => {
+        expect(callbackClient.payloads).toHaveLength(2);
+      });
+
+      const cb1 = callbackClient.payloads[0]!;
+      const cb2 = callbackClient.payloads[1]!;
+      if (
+        cb1.kind !== "delegation.state_changed" ||
+        cb2.kind !== "delegation.state_changed"
+      ) {
+        throw new Error("unreachable");
+      }
+      expect(cb1.state).toBe("grant_failed");
+      expect(cb2.state).toBe("grant_failed");
+    });
   });
 
   describe("auth", () => {
