@@ -3,17 +3,24 @@
 Operator-side templates for Kernel v3 smart-account provisioning on
 Base. They live alongside the adapter codebase but are NOT part of
 the adapter runtime — `tsconfig.json` excludes them and `vitest`
-only matches `*.test.ts`. Their dependencies (`@zerodev/sdk`,
-`@zerodev/ecdsa-validator`) are kept in `devDependencies` so a
-production runtime image built with `npm ci --omit=dev` does not
-ship the SDK.
+only matches `*.test.ts`.
+
+The scripts share `@zerodev/sdk` and `@zerodev/ecdsa-validator`
+with the adapter runtime. Both packages live in `dependencies` (not
+`devDependencies`) of `chain_adapter/package.json` because the
+runtime cryptographic grant + revoke paths in
+`src/chains/base/grant.ts` and `src/chains/base/revoke.ts`
+lazy-import them at first dispatch — `npm ci --omit=dev` MUST ship
+them so the production image can honor `permission`-block
+dispatches. The scripts being non-runtime artefacts does not mean
+the SDK is dev-only; only `tsx`, `eslint`, `vitest`, and the like
+are.
 
 ## Status
 
-`provision-kernel.ts` and `verify-installed-validator.ts` were
-previously deferred stubs after the ZeroDev model correction. They
-are now implemented as real, no-secret-safe templates targeting
-**Kernel v3.1** on Base Sepolia (default) or Base mainnet:
+`provision-kernel.ts` and `verify-installed-validator.ts` are real,
+no-secret-safe templates targeting **Kernel v3.1** on Base Sepolia
+(default) or Base mainnet:
 
 - Dry-run by default — pure-local CREATE2 derivation, no RPC, no
   secrets, no broadcast.
@@ -21,9 +28,15 @@ are now implemented as real, no-secret-safe templates targeting
 - Real chain interaction is **opt-in via `--broadcast`** on
   `provision-kernel.ts`.
 
-Per-permission install + cryptographic revoke remain DEFERRED — see
-[`docs/zerodev-permissions-integration.md`](../../docs/zerodev-permissions-integration.md).
-The runtime is sentinel-era until that integration ships.
+Per-permission install + cryptographic revoke are wired in code by
+PR #129 + PR #130 — `src/chains/base/grant.ts` runs
+`toPermissionValidator` + sudo-signed install UserOp;
+`src/chains/base/revoke.ts` runs `Kernel.uninstallValidation(...)`
+via the SDK's `uninstallPlugin` action when a dispatch carries a
+`permission` block. Issues #58 and #31 stay open until the first
+real on-chain grant + revoke confirms on Base Sepolia. See
+[`docs/zerodev-permissions-integration.md`](../../docs/zerodev-permissions-integration.md)
+for the operator runbook step.
 
 ## Inventory
 
@@ -109,16 +122,16 @@ itself).
 
 No-secret, no-network. Validates that every required adapter env is
 present, non-placeholder, and well-shaped (addresses are 0x+20
-bytes, no trailing whitespace). Reports `mode: sentinel-era
-(awaiting ZeroDev SDK integration)` — there used to be a tri-state
-mode keyed on a `PERMISSION_VALIDATOR_ADDRESS` env var; both inputs
-were artefacts of a wrong-model assumption and have been removed.
+bytes, no trailing whitespace). There used to be a tri-state mode
+keyed on a `PERMISSION_VALIDATOR_ADDRESS` env var; both inputs were
+artefacts of a wrong-model assumption and have been removed.
 
 ## What these scripts do NOT do
 
 - They do not install ZeroDev permissions on the kernel account.
-  Per-permission install and cryptographic revoke depend on the
-  full SDK integration in
+  That happens in the adapter runtime via
+  `POST /dispatch/grant_delegation` (`src/chains/base/grant.ts`
+  `executeGrant`); the integration is documented in
   [`docs/zerodev-permissions-integration.md`](../../docs/zerodev-permissions-integration.md).
 - They do not modify any state in Phoenix.
 - They do not write to disk; receipts go to stdout.

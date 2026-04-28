@@ -90,7 +90,9 @@ export type CryptographicRevokeFailureCode =
   | "session_signer_missing"
   | "permission_deserialization_failed"
   | "deinit_computation_failed"
-  | "operator_key_missing";
+  | "operator_key_missing"
+  | "unaccepted_signer_module"
+  | "unaccepted_policy_module";
 
 export class CryptographicRevokeError extends Error {
   constructor(
@@ -190,6 +192,116 @@ export function assertPackageVersionPinned(block: PermissionBlock): void {
       `permission.package_version ${block.package_version} does not match adapter pin ${KERNEL_PERMISSION_PIN.zeroDevPermissionsPackageVersion}`,
     );
   }
+}
+
+/**
+ * Pure allowlist assertions enforced after
+ * `deserializePermissionAccount` reconstructs a permission plugin.
+ *
+ * `KERNEL_PERMISSION_PIN.acceptedSignerContracts` and
+ * `acceptedPolicyContracts` enumerate the ZeroDev modules the
+ * runtime is willing to drive. Until these assertions ran, the
+ * pin was declarative-only — its tripwire test pinned the addresses
+ * against the package, but no production code rejected a blob that
+ * referenced a different module. These assertions close that gap:
+ * if a blob ever references a module outside the pin (e.g. a future
+ * package bump introduces WebAuthn or a new policy variant we have
+ * not audited), the cryptographic revoke fails closed before any
+ * UserOp goes near the bundler.
+ *
+ * The functions are pure: input is a single 0x-prefixed address (or
+ * an array thereof), comparison is case-insensitive, output is a
+ * `CryptographicRevokeError` thrown on first violation. Tests can
+ * exercise them against fixture addresses without mocking
+ * `@zerodev/permissions` deserialization.
+ *
+ * The error's `code` (`unaccepted_signer_module` /
+ * `unaccepted_policy_module`) is mapped to the
+ * `delegation.state_changed{state: "revoke_failed"}` callback's
+ * `reason` field; the offending address is logged in the structured
+ * log line but deliberately NOT included in the callback payload
+ * (Subagent D's redaction discipline review).
+ */
+export function assertSignerModuleAllowed(
+  signerContractAddress: string | undefined,
+  allowed: readonly Hex[] = KERNEL_PERMISSION_PIN.acceptedSignerContracts,
+): void {
+  if (!signerContractAddress) {
+    throw new CryptographicRevokeError(
+      "unaccepted_signer_module",
+      "permission plugin exposes no signerContractAddress",
+    );
+  }
+  const lc = signerContractAddress.toLowerCase();
+  const ok = allowed.some((a) => a.toLowerCase() === lc);
+  if (!ok) {
+    throw new CryptographicRevokeError(
+      "unaccepted_signer_module",
+      `signer contract ${signerContractAddress} is not in KERNEL_PERMISSION_PIN.acceptedSignerContracts`,
+    );
+  }
+}
+
+/**
+ * Validate every entry in a list of policy contract addresses
+ * against the pinned allowlist. Empty list is a refusal — a
+ * permission with zero policies is structurally invalid and we
+ * refuse to proceed rather than silently treat it as "no
+ * restrictions".
+ */
+export function assertPolicyModulesAllowed(
+  policyContractAddresses: readonly (string | undefined)[],
+  allowed: readonly Hex[] = KERNEL_PERMISSION_PIN.acceptedPolicyContracts,
+): void {
+  if (policyContractAddresses.length === 0) {
+    throw new CryptographicRevokeError(
+      "unaccepted_policy_module",
+      "permission plugin carries zero policy modules",
+    );
+  }
+
+  const lcAllowed = allowed.map((a) => a.toLowerCase());
+  for (const addr of policyContractAddresses) {
+    if (!addr) {
+      throw new CryptographicRevokeError(
+        "unaccepted_policy_module",
+        "policy module exposes no contract address",
+      );
+    }
+    if (!lcAllowed.includes(addr.toLowerCase())) {
+      throw new CryptographicRevokeError(
+        "unaccepted_policy_module",
+        `policy contract ${addr} is not in KERNEL_PERMISSION_PIN.acceptedPolicyContracts`,
+      );
+    }
+  }
+}
+
+/**
+ * Extract the policy contract addresses from a deserialized
+ * `PermissionPlugin`. Reads
+ * `plugin.getPluginSerializationParams().policies[].policyParams.policyAddress`
+ * — every reconstructed policy in `@zerodev/permissions@5.6.3`
+ * carries `policyParams.policyAddress` (verified against
+ * `node_modules/@zerodev/permissions/policies/*.ts`'s
+ * `policyParams: { type, policyAddress, ... }` shape).
+ *
+ * Returns the raw values without validation; pair with
+ * `assertPolicyModulesAllowed` to enforce the pin.
+ *
+ * Tolerates a missing `policyParams` or `policyAddress` by
+ * returning `undefined` for that slot — the assertion converts
+ * `undefined` into a precise refusal.
+ */
+export function extractPolicyContractAddresses(plugin: {
+  getPluginSerializationParams: () => {
+    policies?: ReadonlyArray<{
+      policyParams?: { policyAddress?: string };
+    }>;
+  };
+}): (string | undefined)[] {
+  const params = plugin.getPluginSerializationParams();
+  return (params.policies ?? []).map((p) => p?.policyParams?.policyAddress);
 }
 
 /**

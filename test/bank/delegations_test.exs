@@ -649,6 +649,122 @@ defmodule Bank.DelegationsTest do
       refute Bank.Delegations.Delegation.cryptographically_revocable?(d)
     end
 
+    test "cryptographically_revocable?/1 returns false when validation_id is missing" do
+      # The adapter feeds `validation_id` directly to
+      # `Kernel.uninstallValidation(...)` as `vId`. Without it the
+      # cryptographic revoke cannot run, so the predicate must
+      # refuse and let the worker fall back to sentinel.
+      {:ok, d} =
+        Delegations.grant("sa_partial_vid", "0xa1b2c3d4", %{
+          permission_blob: @blob_b64,
+          permission_id: @perm_id,
+          kernel_version: "0.3.1",
+          permission_package_version: "5.6.3",
+          session_signer_address: @session_signer
+        })
+
+      refute Bank.Delegations.Delegation.cryptographically_revocable?(d)
+    end
+
+    test "cryptographically_revocable?/1 returns false when kernel_version is missing" do
+      # The adapter pins kernel_version to deserialize the blob
+      # against the right kernel implementation; missing it
+      # invalidates the row.
+      {:ok, d} =
+        Delegations.grant("sa_partial_kv", "0xa1b2c3d4", %{
+          permission_blob: @blob_b64,
+          permission_id: @perm_id,
+          validation_id: @validation_id,
+          permission_package_version: "5.6.3",
+          session_signer_address: @session_signer
+        })
+
+      refute Bank.Delegations.Delegation.cryptographically_revocable?(d)
+    end
+
+    test "cryptographically_revocable?/1 returns false when permission_id is the wrong byte size" do
+      # `Delegations.grant/3` would refuse to insert a 3-byte
+      # permission_id at the changeset boundary. The predicate
+      # itself is a defense-in-depth pattern match — hand-construct
+      # a struct that bypasses the changeset to confirm the
+      # predicate ALSO refuses, so any future schema relaxation
+      # cannot silently produce a malformed dispatch block.
+      d = %Bank.Delegations.Delegation{
+        smart_account_id: "sa_bad_pid_size",
+        delegation_id: "0xa1b2c3",
+        chain: "base",
+        state: :active,
+        permission_blob: @blob_b64,
+        permission_id: <<0xA1, 0xB2, 0xC3>>,
+        validation_id: @validation_id,
+        kernel_version: "0.3.1",
+        permission_package_version: "5.6.3",
+        session_signer_address: @session_signer
+      }
+
+      refute Bank.Delegations.Delegation.cryptographically_revocable?(d)
+    end
+
+    test "cryptographically_revocable?/1 returns false when validation_id is the wrong byte size" do
+      # Same defense-in-depth posture: bypass the changeset's
+      # byte-size guard to confirm the predicate is independently
+      # safe. Kernel.uninstallValidation takes bytes21; a 22-byte
+      # value would build malformed calldata.
+      d = %Bank.Delegations.Delegation{
+        smart_account_id: "sa_bad_vid_size",
+        delegation_id: "0xa1b2c3d4",
+        chain: "base",
+        state: :active,
+        permission_blob: @blob_b64,
+        permission_id: @perm_id,
+        validation_id: :binary.copy(<<0x00>>, 22),
+        kernel_version: "0.3.1",
+        permission_package_version: "5.6.3",
+        session_signer_address: @session_signer
+      }
+
+      refute Bank.Delegations.Delegation.cryptographically_revocable?(d)
+    end
+
+    test "cryptographically_revocable?/1 returns false when session_signer_address is the wrong length" do
+      # The wire requires `0x` + 40 hex chars (= 42 bytes UTF-8 in
+      # the column). 41 or 43 bytes would fail the adapter's Zod
+      # regex anyway, but the predicate refuses up-front so the
+      # worker never selects the crypto path with bad input.
+      {:ok, d} =
+        Delegations.grant("sa_short_signer", "0xa1b2c3d4", %{
+          permission_blob: @blob_b64,
+          permission_id: @perm_id,
+          validation_id: @validation_id,
+          kernel_version: "0.3.1",
+          permission_package_version: "5.6.3",
+          session_signer_address: "0x" <> String.duplicate("11", 19)
+        })
+
+      refute Bank.Delegations.Delegation.cryptographically_revocable?(d)
+    end
+
+    test "permission_dispatch_block/1 returns nil when the predicate returns false" do
+      # Integration test for the predicate ↔ wire encoder contract:
+      # any row that fails `cryptographically_revocable?/1` MUST
+      # NOT produce a dispatch block, otherwise the adapter would
+      # receive a malformed `permission` payload (Zod would
+      # reject, but Phoenix should fail locally first with a
+      # deterministic absent-block).
+      {:ok, partial} =
+        Delegations.grant("sa_partial_disp", "0xa1b2c3d4", %{
+          permission_blob: @blob_b64,
+          permission_id: @perm_id,
+          validation_id: @validation_id,
+          kernel_version: "0.3.1",
+          permission_package_version: "5.6.3"
+          # session_signer_address intentionally omitted
+        })
+
+      refute Bank.Delegations.Delegation.cryptographically_revocable?(partial)
+      assert is_nil(Delegations.permission_dispatch_block(partial))
+    end
+
     test "permission_dispatch_block/1 emits hex-encoded ids, the blob, and the session signer address" do
       {:ok, d} =
         Delegations.grant("sa_disp", "0xa1b2c3d4", %{
