@@ -71,6 +71,20 @@ describe("parseEnv", () => {
       /84532 \(Sepolia\) or 8453/,
     );
   });
+
+  it("rejects BASE_CHAIN_ID with trailing junk", () => {
+    // Mirror of the provision-kernel.ts test — `parseInt` is
+    // lenient and would accept "84532abc" as 84532.
+    expect(() => parseEnv(env({ BASE_CHAIN_ID: "84532abc" }))).toThrow(
+      /positive integer with no extra characters/,
+    );
+  });
+
+  it("rejects BASE_CHAIN_ID with leading whitespace", () => {
+    expect(() => parseEnv(env({ BASE_CHAIN_ID: " 84532" }))).toThrow(
+      /positive integer with no extra characters/,
+    );
+  });
 });
 
 describe("getPinnedExpectations", () => {

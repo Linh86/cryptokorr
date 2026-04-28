@@ -69,6 +69,7 @@ import {
 import { getKernelV3Nonce } from "@zerodev/sdk";
 import { getEntryPoint, KERNEL_V3_1, KernelVersionToAddressesMap } from "@zerodev/sdk/constants";
 import { getValidatorAddress } from "@zerodev/ecdsa-validator";
+import { redactErrorMessage } from "./redact.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -126,6 +127,16 @@ export interface VerifyReceipt {
 
 function readChainId(env: NodeJS.ProcessEnv): AllowedChainId {
   const raw = env.BASE_CHAIN_ID ?? "84532";
+  // Strict integer parse — `Number.parseInt("84532abc", 10)`
+  // returns 84532 silently, which would let "looks-like-Sepolia"
+  // junk values through. Insist on pure decimal digits with no
+  // leading/trailing whitespace.
+  if (!/^\d+$/.test(raw)) {
+    throw new VerifyEnvError(
+      `BASE_CHAIN_ID must be a positive integer with no extra characters; got ${JSON.stringify(raw)}`,
+      "BASE_CHAIN_ID",
+    );
+  }
   const parsed = Number.parseInt(raw, 10);
   if (!ALLOWED_CHAIN_IDS.includes(parsed as AllowedChainId)) {
     throw new VerifyEnvError(
@@ -436,10 +447,18 @@ const invokedDirectly =
 if (invokedDirectly) {
   main().catch((err: unknown) => {
     if (err instanceof VerifyEnvError) {
+      // Env-shape errors are operator-typed strings we constructed
+      // ourselves; they never carry an RPC URL or a private key.
+      // Print as-is so the operator sees exactly which env var to
+      // fix.
       process.stderr.write(`verify-installed-validator: ${err.message}\n`);
     } else {
-      const msg = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`verify-installed-validator: ${msg}\n`);
+      // Any other thrown value may carry RPC URLs in its message
+      // (viem's HttpRequestError chain in particular). Run through
+      // the URL redactor before printing.
+      process.stderr.write(
+        `verify-installed-validator: ${redactErrorMessage(err)}\n`,
+      );
     }
     process.exit(1);
   });

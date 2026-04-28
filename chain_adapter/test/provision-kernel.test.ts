@@ -81,6 +81,20 @@ describe("parseDryRunEnv", () => {
     );
   });
 
+  it("rejects BASE_CHAIN_ID with trailing junk (parseInt-leniency guard)", () => {
+    // `Number.parseInt("84532abc", 10)` returns 84532; without the
+    // strict-digits gate that would silently pass. Pin it.
+    expect(() =>
+      parseDryRunEnv(dryRunEnv({ BASE_CHAIN_ID: "84532abc" })),
+    ).toThrow(/positive integer with no extra characters/);
+  });
+
+  it("rejects BASE_CHAIN_ID with leading whitespace", () => {
+    expect(() =>
+      parseDryRunEnv(dryRunEnv({ BASE_CHAIN_ID: " 84532" })),
+    ).toThrow(/positive integer with no extra characters/);
+  });
+
   it("defaults KERNEL_ACCOUNT_INDEX to 0", () => {
     const env = parseDryRunEnv(dryRunEnv());
     expect(env.kernelAccountIndex).toBe(0n);
@@ -94,6 +108,28 @@ describe("parseDryRunEnv", () => {
   it("rejects non-integer KERNEL_ACCOUNT_INDEX", () => {
     expect(() =>
       parseDryRunEnv(dryRunEnv({ KERNEL_ACCOUNT_INDEX: "deadbeef" })),
+    ).toThrow(/non-negative integer/);
+  });
+
+  it("rejects negative KERNEL_ACCOUNT_INDEX (BigInt-leniency guard)", () => {
+    // `BigInt("-1")` succeeds and produces -1n; the SDK's CREATE2
+    // derivation expects an unsigned 256-bit salt and we lose the
+    // ability to reproduce the address from a positive index later.
+    // Pin the rejection.
+    expect(() =>
+      parseDryRunEnv(dryRunEnv({ KERNEL_ACCOUNT_INDEX: "-1" })),
+    ).toThrow(/non-negative integer/);
+  });
+
+  it("rejects KERNEL_ACCOUNT_INDEX with trailing whitespace", () => {
+    expect(() =>
+      parseDryRunEnv(dryRunEnv({ KERNEL_ACCOUNT_INDEX: "5 " })),
+    ).toThrow(/non-negative integer/);
+  });
+
+  it("rejects KERNEL_ACCOUNT_INDEX with a decimal point", () => {
+    expect(() =>
+      parseDryRunEnv(dryRunEnv({ KERNEL_ACCOUNT_INDEX: "3.14" })),
     ).toThrow(/non-negative integer/);
   });
 });

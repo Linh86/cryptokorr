@@ -75,6 +75,7 @@ import {
   getValidatorAddress,
   signerToEcdsaValidator,
 } from "@zerodev/ecdsa-validator";
+import { redactErrorMessage } from "./redact.js";
 
 // ---------------------------------------------------------------------------
 // Pure types + constants — testable, no side effects.
@@ -127,6 +128,16 @@ export class ProvisionEnvError extends Error {
 
 function readChainId(env: NodeJS.ProcessEnv): AllowedChainId {
   const raw = env.BASE_CHAIN_ID ?? "84532";
+  // Strict integer parse — `Number.parseInt("84532abc", 10)`
+  // returns 84532 silently, which would let "looks-like-Sepolia"
+  // junk values through. Insist on pure decimal digits with no
+  // leading/trailing whitespace.
+  if (!/^\d+$/.test(raw)) {
+    throw new ProvisionEnvError(
+      `BASE_CHAIN_ID must be a positive integer with no extra characters; got ${JSON.stringify(raw)}`,
+      "BASE_CHAIN_ID",
+    );
+  }
   const parsed = Number.parseInt(raw, 10);
   if (!ALLOWED_CHAIN_IDS.includes(parsed as AllowedChainId)) {
     throw new ProvisionEnvError(
@@ -158,14 +169,18 @@ function readAddress(value: string | undefined, key: string): Address {
 
 function readIndex(env: NodeJS.ProcessEnv): bigint {
   const raw = env.KERNEL_ACCOUNT_INDEX ?? "0";
-  try {
-    return BigInt(raw);
-  } catch {
+  // `BigInt("-1")` succeeds and produces `-1n`; CREATE2 derivation
+  // would happily run with a negative index, but the ZeroDev SDK
+  // expects an unsigned 256-bit salt and a "salt = -1" account is
+  // not something we can reproduce after the fact. Reject negatives
+  // and any non-decimal-digit input loudly.
+  if (!/^\d+$/.test(raw)) {
     throw new ProvisionEnvError(
-      `KERNEL_ACCOUNT_INDEX must be a non-negative integer; got ${raw}`,
+      `KERNEL_ACCOUNT_INDEX must be a non-negative integer; got ${JSON.stringify(raw)}`,
       "KERNEL_ACCOUNT_INDEX",
     );
   }
+  return BigInt(raw);
 }
 
 function readUrl(value: string | undefined, key: string): string {
@@ -535,10 +550,18 @@ const invokedDirectly =
 if (invokedDirectly) {
   main().catch((err: unknown) => {
     if (err instanceof ProvisionEnvError) {
+      // Env-shape errors are operator-typed strings we constructed
+      // ourselves; they never carry an RPC URL or a private key.
+      // Print them as-is without redaction so the operator sees
+      // exactly which env var to fix.
       process.stderr.write(`provision-kernel: ${err.message}\n`);
     } else {
-      const msg = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`provision-kernel: ${msg}\n`);
+      // Any other thrown value may carry RPC/bundler URLs in its
+      // message (viem's HttpRequestError chain in particular).
+      // Run it through the URL redactor before printing.
+      process.stderr.write(
+        `provision-kernel: ${redactErrorMessage(err)}\n`,
+      );
     }
     process.exit(1);
   });
