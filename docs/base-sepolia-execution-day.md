@@ -78,36 +78,73 @@ delegation signer) from a faucet; target 0.01 ETH.
 **If not:** Faucet rate-limit or wrong chain — check Sepolia
 Basescan for the balance.
 
-## Step 4 — Deploy Kernel v3 smart account `[chain]`
+## Step 4a — Derive expected smart-account address (no chain)
 
-The previous `chain_adapter/scripts/provision-kernel.ts` template
-is currently a **deferred stub** — see
-[`docs/zerodev-permissions-integration.md`](zerodev-permissions-integration.md)
-for why and the hard-blocker list.
+Pure-local CREATE2 derivation. No RPC, no secrets, no broadcast.
+Run before funding so you know what address to fund.
 
-Operators who want a Kernel v3 account on Base Sepolia today
-construct one in a separate workspace using `@zerodev/sdk`
-directly (the runtime adapter does not depend on the SDK), and
-record:
+```sh
+cd chain_adapter
+OPERATOR_ADDRESS=0x...your-eoa npx tsx scripts/provision-kernel.ts
+```
 
-- the resulting smart account address (for `SMART_ACCOUNT_ADDRESS`);
-- the factory address used (for `KERNEL_FACTORY_ADDRESS`);
-- the deployment transaction hash + chain id;
-- the kernel implementation address.
+**Expect:** JSON receipt on stdout with
+`expected_smart_account_address`. Same input → same output, every
+run.
 
-**Expect:** Stable address you can re-derive from the same salt.
+**If not:** `provision-kernel.ts` errors are env-shape problems
+(missing/placeholder/malformed `OPERATOR_ADDRESS`).
 
-**If not:** The SDK error names the cause (zero balance, wrong
-chain, malformed factory).
+## Step 4b — Deploy Kernel v3 smart account `[chain]`
 
-## Step 5 — Install permissions on the account `[chain]` — DEFERRED
+```sh
+cd chain_adapter
+OPERATOR_ADDRESS=0x...your-eoa \
+OPERATOR_PRIVATE_KEY=0x...32-byte-hex \
+BASE_RPC_URL=https://sepolia.base.org \
+BUNDLER_RPC_URL=https://your-bundler.example/base-sepolia \
+npx tsx scripts/provision-kernel.ts --broadcast
+```
 
-Per-permission install requires the ZeroDev SDK integration in the
-runtime — see the integration doc. Today the smart account stays
-in its base configuration; the adapter's revoke path is sentinel-
-only and does not exercise per-permission install.
+**Expect:** Same JSON receipt with `mode: "broadcast"`,
+augmented with `user_op_hash`, `transaction_hash`, `block_number`.
 
-## Step 6 — Bind addresses + restart adapter
+**If not:** Common causes: insufficient balance on the operator
+EOA (faucet not landed); wrong chain id; bundler URL invalid;
+`OPERATOR_PRIVATE_KEY` doesn't derive to `OPERATOR_ADDRESS` (the
+script refuses to broadcast in that case). Re-derive with `4a` to
+confirm the expected address.
+
+## Step 5 — Verify the deployment `[chain]`
+
+Read-only check that the deployed kernel matches pinned values.
+No secrets.
+
+```sh
+cd chain_adapter
+SMART_ACCOUNT_ADDRESS=0x...from-step-4a \
+BASE_RPC_URL=https://sepolia.base.org \
+npx tsx scripts/verify-installed-validator.ts
+```
+
+**Expect:** JSON receipt with `overall_ok: true` and exit `0`.
+Each `findings[]` entry confirms one pinned expectation
+(`is_deployed`, `implementation_address`, `kernel_version`,
+`root_validator_address`).
+
+**If not:** Exit `1` and `overall_ok: false` mean the on-chain
+state doesn't match the pinned Kernel v3.1 deployment. Do NOT
+bind the address to the adapter; investigate (different version,
+different owner, wrong chain).
+
+## Step 6 — Install permissions on the account `[chain]` — DEFERRED
+
+Per-permission install requires the ZeroDev SDK integration tracked
+in the integration doc. Today the smart account stays in its base
+configuration; the adapter's revoke path is sentinel-only and does
+not exercise per-permission install.
+
+## Step 7 — Bind addresses + restart adapter
 
 **Do:** Set `SMART_ACCOUNT_ADDRESS`, `KERNEL_FACTORY_ADDRESS`,
 `DELEGATION_SIGNER_KEY` on the adapter host (Fly secrets, AWS
@@ -120,7 +157,7 @@ integration)`.
 **If not:** No-network check, so any `FAIL` is an env problem on
 the host.
 
-## Step 7 — Smokes `[chain]`
+## Step 8 — Smokes `[chain]`
 
 Runbook: `smoke-tests.md`.
 

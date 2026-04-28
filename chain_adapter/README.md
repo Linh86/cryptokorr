@@ -212,11 +212,11 @@ requires. The expectation is that an operator copies a template
 into a separate provisioning workspace, installs the SDK there,
 fills in the env placeholders, and runs it once.
 
-| Script | Purpose | Status |
+| Script | Purpose | Modes |
 | --- | --- | --- |
-| [`scripts/provision-kernel.ts`](scripts/provision-kernel.ts) | (deferred) Was a Kernel v3 + single-validator install template. | **DEFERRED** — refuses to run; see [`docs/zerodev-permissions-integration.md`](../docs/zerodev-permissions-integration.md). |
-| [`scripts/verify-installed-validator.ts`](scripts/verify-installed-validator.ts) | (deferred) Was a single-validator bytecode verification template. | **DEFERRED** — refuses to run; same doc. |
-| [`scripts/check-env.sh`](scripts/check-env.sh) | Runtime env hygiene check: confirms every required adapter env is set, non-placeholder, well-shaped (addresses are 0x+20 bytes, no trailing whitespace). No network calls. | live; reports `mode: sentinel-era (awaiting ZeroDev SDK integration)`. |
+| [`scripts/provision-kernel.ts`](scripts/provision-kernel.ts) | Derives the deterministic Kernel v3.1 smart-account address for `(OPERATOR_ADDRESS, KERNEL_ACCOUNT_INDEX)`. With `--broadcast`, signs + submits the deploy UserOp through the bundler. Per-permission install is NOT in scope here; see the integration doc. | dry-run (default) / `--broadcast` |
+| [`scripts/verify-installed-validator.ts`](scripts/verify-installed-validator.ts) | Read-only RPC checks against the configured `SMART_ACCOUNT_ADDRESS`: deployed bytecode, kernel implementation, kernel version, root validator, current nonce. | always read-only |
+| [`scripts/check-env.sh`](scripts/check-env.sh) | Runtime env hygiene check: confirms every required adapter env is set, non-placeholder, well-shaped. No network calls. | always offline |
 
 The expected end-to-end flow today (sentinel-era; the corrected
 ZeroDev SDK integration is tracked in
