@@ -143,56 +143,71 @@ to per-permission revoke.
 
 ## Hard blockers (for #58 / #83 / #84 to actually close)
 
-1. **Add `@zerodev/sdk` and `@zerodev/permissions` runtime deps in
-   `chain_adapter/package.json`.** Currently absent. Without them,
-   there is no way to construct a `KernelAccountClient` or call
-   `uninstallPlugin`.
-2. **Per-account sudo signer the adapter can revoke from.** The
-   current sentinel-revoke path uses a single delegation signer EOA.
-   Kernel revoke needs the master/root signer of that specific
-   kernel account, OR a permission with a sudo policy installed at
-   account-creation time. Either way, the adapter needs a
-   per-account secret it doesn't currently have.
-3. **Bundler RPC + paymaster (or native gas) for the revoke
-   UserOp.** The adapter already talks to a bundler for transfers;
-   confirm the same one supports `Kernel.uninstallValidation` on
-   the chosen kernel version.
-4. **Persistence in Phoenix of the serialized plugin blob (or
-   equivalent reconstruction params) at grant-time** so the adapter
-   can rebuild the plugin at revoke-time. Currently Phoenix stores
-   only `delegation_id` as a free-form string; it does NOT store
-   policy/signer reconstruction params.
-5. **Redesign of the `KernelPermissionPin` interface in
-   `chain_adapter/src/chains/base/permission_validator.ts` once the
-   exact set of accepted signer/policy modules + kernel version is
-   chosen.** The current shape is provisional.
-6. **Decision on the on-the-wire shape of `delegation_id`.**
+The list below has been narrowed: blockers (1) and the
+smart-account-deploy half of (2) were resolved by the kernel
+provisioning skeleton landing in
+`chain_adapter/scripts/provision-kernel.ts` + dev-deps on
+`@zerodev/sdk@5.5.10` and `@zerodev/ecdsa-validator@5.4.9`. The
+remaining items still gate the cryptographic revoke (#58).
+
+1. ✅ **`@zerodev/sdk` + `@zerodev/ecdsa-validator` deps installed.**
+   Both are pinned in `chain_adapter/package.json` `devDependencies`
+   so the production runtime image can omit them via
+   `npm ci --omit=dev`. `@zerodev/permissions` is NOT yet a dep —
+   it gets added when per-permission install lands as part of #58.
+2. ⏳ **Per-account sudo signer for revoke.** `provision-kernel.ts`
+   `--broadcast` mode signs the deploy UserOp with the operator EOA
+   bound to `OPERATOR_ADDRESS`; that same EOA is the kernel's root
+   ECDSA validator. The adapter runtime currently does NOT hold
+   that key (`DELEGATION_SIGNER_KEY` is the runtime signer, not the
+   root). Per-account sudo signer storage + secrets-management
+   policy is still open.
+3. ⏳ **Bundler RPC + paymaster (or native gas) for the revoke
+   UserOp.** `provision-kernel.ts --broadcast` already routes the
+   deploy through a bundler; the revoke path will reuse the same
+   bundler config. No new infrastructure once the operator is
+   provisioned.
+4. ⏳ **Persistence of the serialized plugin blob (or raw policy +
+   signer reconstruction params) at grant-time** so the adapter
+   can rebuild the plugin at revoke-time. Phoenix's
+   `delegations.delegation_id` is still opaque-string-only.
+5. ⏳ **Populate `KernelPermissionPin`** with the chosen signer +
+   policy module addresses + accepted `@zerodev/permissions` package
+   version range. Only meaningful once #58 is being implemented;
+   the slot stays `null` until then.
+6. ⏳ **Decision on the on-the-wire shape of `delegation_id`.**
    Phoenix's column is opaque; either side has to commit to one of:
    4-byte `permissionId` hex (10 chars), 21-byte `validationId` hex
    (44 chars), or a serialized plugin blob (kilobytes per
    delegation). Storing both `permissionId` and the blob is also
    reasonable.
-7. **Decision on whether per-permission revoke is the right design,
-   or whether session-key rotation / `invalidateNonce` is a better
-   fit for our threat model.** Per-permission revoke is more
+7. ⏳ **Decision on whether per-permission revoke is the right
+   design, or whether session-key rotation / `invalidateNonce` is a
+   better fit for our threat model.** Per-permission revoke is
    surgical but requires plugin-blob persistence; rotation is
    coarser but simpler.
 
 ## Issue impact (current state)
 
-- **#83** — was "verify validator ABI". Re-scoped to "design and
-  populate the `KernelPermissionPin` slot" once #84 + the SDK
-  integration land. Pin slot is exported and `null`.
-- **#84** — was "Kernel v3 provisioning runbook + templates". The
-  templates (`scripts/provision-kernel.ts`,
-  `scripts/verify-installed-validator.ts`) have been replaced with
-  deferred-stubs because they pinned the wrong model. The runbook
-  (`docs/provisioning-kernel-v3.md`) has been updated to point at
-  this doc; the runnable templates will return when the SDK
-  integration is in place.
-- **#58** — "swap sentinel for cryptographic revoke". Threading
-  for `delegation_id` and `config` is in place from earlier
-  commits; the swap itself depends on the hard blockers above.
+- **#83** — re-scoped to "populate the `KernelPermissionPin` slot
+  with the verified signer + policy module addresses + version
+  range". Slot is exported and `null` in
+  `chain_adapter/src/chains/base/permission_validator.ts`. Blocked
+  on the per-permission install design landing in #58.
+- **#84** — **partially complete.**
+  `chain_adapter/scripts/provision-kernel.ts` is now a real
+  no-secret-safe Kernel v3.1 provisioning template (dry-run by
+  default, `--broadcast` for chain interaction).
+  `chain_adapter/scripts/verify-installed-validator.ts` is a
+  real read-only verification template. **#84 stays OPEN until an
+  operator runs `provision-kernel.ts --broadcast` end-to-end on
+  Base Sepolia and records the resulting smart-account address in
+  the deployment journal.** No on-chain provisioning has been
+  performed from this repo.
+- **#58** — "swap sentinel for cryptographic revoke". Plumbing
+  (`delegation_id` + `config` threading) was landed under earlier
+  commits. The swap depends on hard blockers (4)–(7) above. Blocker
+  (1) is now resolved.
 - **#31** — umbrella for "true cryptographic revoke". Still open;
   closes when #58 closes.
 
