@@ -23,9 +23,8 @@
  * substitute a mock bundler without mocking an HTTP transport.
  */
 
-import { http } from "viem";
+import { http, type Chain } from "viem";
 import { createBundlerClient } from "viem/account-abstraction";
-import { base } from "viem/chains";
 
 /**
  * Full typed bundler client as returned by viem. Kept as a
@@ -34,14 +33,17 @@ import { base } from "viem/chains";
  */
 export type BundlerClient = ReturnType<typeof createBaseBundlerClient>;
 
-function createBaseBundlerClient(bundlerRpcUrl: string) {
+function createBaseBundlerClient(bundlerRpcUrl: string, chain: Chain) {
   return createBundlerClient({
-    chain: base,
+    chain,
     transport: http(bundlerRpcUrl),
   });
 }
 
 /** Creates a Base bundler client from a raw JSON-RPC URL. */
-export function createBaseBundler(bundlerRpcUrl: string): BundlerClient {
-  return createBaseBundlerClient(bundlerRpcUrl);
+export function createBaseBundler(
+  bundlerRpcUrl: string,
+  chain: Chain,
+): BundlerClient {
+  return createBaseBundlerClient(bundlerRpcUrl, chain);
 }

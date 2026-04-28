@@ -221,6 +221,14 @@ defmodule Bank.Delegations do
   retrying, so the row returns to `:revoking` and the adapter will
   submit a fresh tx.
 
+  Duplicate `:revoking` acknowledgements are idempotent. Phoenix
+  records `:revoking` before dispatching the adapter worker; the
+  adapter may also emit a `state=revoking` callback before touching
+  chain. Treating that second acknowledgement as success keeps the
+  callback path quiet while preserving the stricter rule that
+  `:revoked` and `:revoke_failed` still require a prior `:revoking`
+  state.
+
   Returns `{:ok, delegation}` or `{:error, :not_found}`.
   """
   @spec record_revoke_requested(smart_account_id(), map()) ::
@@ -235,6 +243,9 @@ defmodule Bank.Delegations do
         delegation
         |> Delegation.revoke_requested_changeset(attrs)
         |> Repo.update()
+
+      %Delegation{state: :revoking} = delegation ->
+        {:ok, delegation}
 
       %Delegation{} ->
         {:error, :invalid_transition}

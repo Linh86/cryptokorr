@@ -88,6 +88,23 @@ defmodule Bank.DelegationsTest do
                Delegations.record_revoked("sa_1")
     end
 
+    test "duplicate revoke_requested callback is idempotent while already revoking" do
+      {:ok, _} = Delegations.grant("sa_idempotent_revoke", "del_1")
+
+      assert {:ok, %{state: :revoking} = first} =
+               Delegations.record_revoke_requested("sa_idempotent_revoke", %{
+                 last_reason: "operator_requested"
+               })
+
+      assert {:ok, %{state: :revoking} = second} =
+               Delegations.record_revoke_requested("sa_idempotent_revoke", %{
+                 last_reason: "adapter_ack"
+               })
+
+      assert second.id == first.id
+      assert second.last_reason == "operator_requested"
+    end
+
     test "record_revoked refuses to bypass :revoking (no fast-fail path)" do
       # Confirmed revoke means the chain said the revoke succeeded, so
       # :revoking must always be the prior state. Any failure of the

@@ -19,7 +19,10 @@
 
 import { describe, it, expect } from "vitest";
 import { privateKeyToAccount } from "viem/accounts";
-import { assertBaseChainIdentity } from "../src/chains/base/client.js";
+import {
+  assertBaseChainIdentity,
+  selectBaseChain,
+} from "../src/chains/base/client.js";
 import type { BaseClients } from "../src/chains/base/client.js";
 
 const SMART_ACCOUNT =
@@ -30,15 +33,17 @@ const SIGNER_KEY = ("0x" + "ab".repeat(32)) as `0x${string}`;
 interface ChainIds {
   publicChainId: number;
   bundlerChainId: number;
+  metadataChainId?: number;
 }
 
 function clientsWithChainIds({
   publicChainId,
   bundlerChainId,
+  metadataChainId = publicChainId,
 }: ChainIds): BaseClients {
   return {
     publicClient: {
-      chain: { id: publicChainId },
+      chain: { id: metadataChainId },
       getChainId: async () => publicChainId,
     },
     walletClient: {},
@@ -50,6 +55,22 @@ function clientsWithChainIds({
     entryPointAddress: ENTRY_POINT,
   } as unknown as BaseClients;
 }
+
+describe("selectBaseChain", () => {
+  it("selects Base mainnet metadata for chain id 8453", () => {
+    expect(selectBaseChain(8453).id).toBe(8453);
+    expect(selectBaseChain(8453).name).toBe("Base");
+  });
+
+  it("selects Base Sepolia metadata for chain id 84532", () => {
+    expect(selectBaseChain(84532).id).toBe(84532);
+    expect(selectBaseChain(84532).name).toBe("Base Sepolia");
+  });
+
+  it("rejects unsupported chain ids before any client is built", () => {
+    expect(() => selectBaseChain(1)).toThrow(/Unsupported Base chain id 1/);
+  });
+});
 
 describe("assertBaseChainIdentity", () => {
   const BASE_CHAIN_ID = 8453;
@@ -72,6 +93,7 @@ describe("assertBaseChainIdentity", () => {
     const clients = clientsWithChainIds({
       publicChainId: 84532,
       bundlerChainId: BASE_CHAIN_ID,
+      metadataChainId: BASE_CHAIN_ID,
     });
 
     await expect(
@@ -100,10 +122,28 @@ describe("assertBaseChainIdentity", () => {
     const clients = clientsWithChainIds({
       publicChainId: 84532,
       bundlerChainId: 1,
+      metadataChainId: BASE_CHAIN_ID,
     });
 
     await expect(
       assertBaseChainIdentity(clients, BASE_CHAIN_ID),
     ).rejects.toThrow(/chain/);
+  });
+
+  it("throws when viem chain metadata is for mainnet but endpoints are Base Sepolia", async () => {
+    // Regression for the Base Sepolia grant path: RPC and bundler can
+    // correctly report 84532 while the local viem chain object is still
+    // hard-coded to Base mainnet (8453). That produces chain-bound
+    // signatures for the wrong domain and ZeroDev rejects permission
+    // installation with EnableNotApproved().
+    const clients = clientsWithChainIds({
+      publicChainId: 84532,
+      bundlerChainId: 84532,
+      metadataChainId: 8453,
+    });
+
+    await expect(assertBaseChainIdentity(clients, 84532)).rejects.toThrow(
+      /Adapter chain metadata mismatch/,
+    );
   });
 });

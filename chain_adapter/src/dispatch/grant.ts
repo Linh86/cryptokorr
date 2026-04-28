@@ -89,6 +89,19 @@ export async function handleGrantDispatch(
   }
 
   inFlight.add(dispatch.smart_account_id);
+  void runGrant(dispatch, deps);
+
+  return {
+    accepted: true,
+    smart_account_id: dispatch.smart_account_id,
+    status: "installing",
+  };
+}
+
+async function runGrant(
+  dispatch: DispatchGrantDelegation,
+  deps: GrantDeps,
+): Promise<void> {
   try {
     await executeGrant({
       smartAccountId: dispatch.smart_account_id,
@@ -111,10 +124,4 @@ export async function handleGrantDispatch(
   } finally {
     inFlight.delete(dispatch.smart_account_id);
   }
-
-  return {
-    accepted: true,
-    smart_account_id: dispatch.smart_account_id,
-    status: "installing",
-  };
 }

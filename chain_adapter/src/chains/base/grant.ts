@@ -3,9 +3,8 @@
  *
  * Builds a real ZeroDev `PermissionPlugin` via
  * `toPermissionValidator(...)`, installs it on the kernel account
- * by sending a no-op first UserOp under `{ sudo, regular }` plugin
- * slots (the SDK lazily writes the validator's enable signature
- * into the first call's signature blob), then calls
+ * by sending a regular-validator UserOp whose signature carries the
+ * sudo-signed enable data for that permission validator, then calls
  * `serializePermissionAccount(account, undefined)` to produce a
  * KEYLESS plugin blob and emits a
  * `delegation.state_changed{state: "granted"}` callback whose
@@ -55,6 +54,7 @@ import {
   concatHex,
   http,
   pad,
+  zeroAddress,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 
@@ -87,6 +87,19 @@ export interface GrantResult {
   installBlockNumber: bigint;
   blob: string;
 }
+
+// Permission install gas is small, but estimating it through a bundler
+// can fail because viem/ZeroDev prepares the estimate with the regular
+// validator's dummy stub signature. Kernel v3 validates the enable path
+// strictly enough that some bundlers reject the stub before the final
+// sudo-signed enable signature is attached. Supplying conservative
+// limits skips that fragile estimate while still letting the bundler
+// simulate + submit the final signed UserOp.
+const PERMISSION_INSTALL_GAS_LIMITS = {
+  callGasLimit: 500_000n,
+  verificationGasLimit: 1_000_000n,
+  preVerificationGas: 100_000n,
+} as const;
 
 /**
  * Execute the on-chain grant: build a permission plugin, install
@@ -206,10 +219,13 @@ export async function executeGrant(args: {
       pad(permissionId, { size: 20, dir: "right" }),
     ]);
 
-    // Build the kernel account against the pre-deployed address.
-    // The address override is required: without it `createKernelAccount`
-    // derives a fresh CREATE2 address from the sudo validator alone,
-    // which would not match the kernel deployed under #84.
+    // Build the account with both slots: the deployed ECDSA root
+    // validator signs the enable typed-data, while the permission
+    // validator is the active regular validator for the UserOp.
+    // ZeroDev permissions are virtual (the plugin address is
+    // zeroAddress), so do NOT try to install them through
+    // `pluginMigrations` / `installModule`; the install happens through
+    // the enable signature carried in the UserOp signature.
     const kernelAccount = await sdk.createKernelAccount(
       clients.publicClient as never,
       {
@@ -227,12 +243,11 @@ export async function executeGrant(args: {
       client: clients.publicClient as never,
     });
 
-    // Install: a no-op self-call works because the SDK splices the
-    // EIP-712 enable signature into the first UserOp's signature
-    // blob (see Subagent B's audit of `getPluginEnableSignature` in
-    // `toKernelPluginManager.ts`). Calling the smart account itself
-    // with empty calldata + zero value triggers the install side-
-    // effect without executing any state-changing logic.
+    // Install: Kernel's permission state change happens in validation
+    // when the enable signature is accepted. The execution phase still
+    // needs a syntactically real call for ZeroDev's encoder, so use an
+    // inert zero-value call to address(0). There is no user-level
+    // target side effect.
     let userOpHash: Hash;
     let receiptTxHash: Hash;
     let receiptBlockNumber: bigint;
@@ -240,11 +255,12 @@ export async function executeGrant(args: {
       userOpHash = (await kernelClient.sendUserOperation({
         callData: await kernelAccount.encodeCalls([
           {
-            to: clients.smartAccountAddress,
+            to: zeroAddress,
             value: 0n,
             data: "0x",
           },
         ]),
+        ...PERMISSION_INSTALL_GAS_LIMITS,
       })) as Hash;
 
       const receipt = await kernelClient.waitForUserOperationReceipt({
@@ -264,6 +280,7 @@ export async function executeGrant(args: {
       receiptTxHash = receipt.receipt.transactionHash as Hash;
       receiptBlockNumber = receipt.receipt.blockNumber as bigint;
     } catch (err) {
+      if (err instanceof ExecutionError) throw err;
       const message = redactGrantError(err);
       return await emitGrantFailure({
         smartAccountId,

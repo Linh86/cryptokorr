@@ -11,9 +11,10 @@ import {
   createPublicClient,
   createWalletClient,
   http,
+  type Chain,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { base } from "viem/chains";
+import { base, baseSepolia } from "viem/chains";
 import type { AdapterConfig } from "../../config/index.js";
 import { createBaseBundler, type BundlerClient } from "./bundler.js";
 
@@ -36,9 +37,19 @@ export interface BaseClients {
   entryPointAddress: `0x${string}`;
 }
 
-function createBasePublicClient(rpcUrl: string) {
+export function selectBaseChain(chainId: number): Chain {
+  if (chainId === base.id) return base;
+  if (chainId === baseSepolia.id) return baseSepolia;
+
+  throw new Error(
+    `Unsupported Base chain id ${chainId}. Expected ${base.id} (Base) ` +
+      `or ${baseSepolia.id} (Base Sepolia).`,
+  );
+}
+
+function createBasePublicClient(rpcUrl: string, chain: Chain) {
   return createPublicClient({
-    chain: base,
+    chain,
     transport: http(rpcUrl),
   });
 }
@@ -46,9 +57,10 @@ function createBasePublicClient(rpcUrl: string) {
 function createBaseWalletClient(
   rpcUrl: string,
   account: ReturnType<typeof privateKeyToAccount>,
+  chain: Chain,
 ) {
   return createWalletClient({
-    chain: base,
+    chain,
     transport: http(rpcUrl),
     account,
   });
@@ -59,9 +71,10 @@ export function createBaseClients(config: AdapterConfig): BaseClients {
     config.delegationSignerKey as `0x${string}`,
   );
 
-  const publicClient = createBasePublicClient(config.baseRpcUrl);
-  const walletClient = createBaseWalletClient(config.baseRpcUrl, account);
-  const bundlerClient = createBaseBundler(config.bundlerRpcUrl);
+  const chain = selectBaseChain(config.baseChainId);
+  const publicClient = createBasePublicClient(config.baseRpcUrl, chain);
+  const walletClient = createBaseWalletClient(config.baseRpcUrl, account, chain);
+  const bundlerClient = createBaseBundler(config.bundlerRpcUrl, chain);
 
   return {
     publicClient,
@@ -92,6 +105,15 @@ export async function assertBaseChainIdentity(
   clients: BaseClients,
   expectedChainId: number,
 ): Promise<void> {
+  const configuredChainId = clients.publicClient.chain?.id;
+
+  if (configuredChainId !== expectedChainId) {
+    throw new Error(
+      `Adapter chain metadata mismatch: viem chain id is ${configuredChainId}, ` +
+        `expected ${expectedChainId}. Refusing to start.`,
+    );
+  }
+
   const [publicChainId, bundlerChainId] = await Promise.all([
     clients.publicClient.getChainId(),
     clients.bundlerClient.getChainId(),
