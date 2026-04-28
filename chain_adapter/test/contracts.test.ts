@@ -165,6 +165,50 @@ describe("Contract: schemas reject malformed payloads", () => {
     expect(DispatchRevokeDelegationSchema.safeParse(bad).success).toBe(false);
   });
 
+  it("accepts revoke_delegation with a well-formed optional permission block (#58)", () => {
+    const ok = {
+      ...dispatchRevokeDelegation,
+      permission: {
+        blob: "eyJzZXJpYWxpemVkUGVybWlzc2lvbkFjY291bnQiOiJ0ZXN0In0=",
+        permission_id: "0xa1b2c3d4",
+        validation_id: "0x02a1b2c3d400000000000000000000000000000000",
+        kernel_version: "0.3.1",
+        package_version: "5.6.3",
+      },
+    };
+    const result = DispatchRevokeDelegationSchema.safeParse(ok);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.permission?.blob).toBe(ok.permission.blob);
+    }
+  });
+
+  it("rejects revoke_delegation with a permission block whose permission_id has wrong byte length", () => {
+    const bad = {
+      ...dispatchRevokeDelegation,
+      permission: {
+        blob: "abc",
+        permission_id: "0xa1b2", // 2 bytes, not 4
+        validation_id: "0x02a1b200000000000000000000000000000000000000",
+        kernel_version: "0.3.1",
+        package_version: "5.6.3",
+      },
+    };
+    expect(DispatchRevokeDelegationSchema.safeParse(bad).success).toBe(false);
+  });
+
+  it("rejects revoke_delegation with a permission block missing required fields", () => {
+    const bad = {
+      ...dispatchRevokeDelegation,
+      permission: {
+        blob: "abc",
+        permission_id: "0xa1b2c3d4",
+        // Missing validation_id, kernel_version, package_version.
+      },
+    };
+    expect(DispatchRevokeDelegationSchema.safeParse(bad).success).toBe(false);
+  });
+
   it("rejects callback with invalid kind", () => {
     const bad = { ...callbackExecutionBroadcast, kind: "unknown.event" };
     expect(CallbackExecutionBroadcastSchema.safeParse(bad).success).toBe(false);

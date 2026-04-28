@@ -70,6 +70,50 @@ export const DispatchSwapSchema = z.object({
 });
 export type DispatchSwap = z.infer<typeof DispatchSwapSchema>;
 
+/**
+ * Permission block (#58). Optional sibling field on the revoke
+ * dispatch carrying the data the cryptographic revoke needs to
+ * reconstruct the ZeroDev plugin and build the
+ * `Kernel.uninstallValidation(...)` UserOp.
+ *
+ * Shape:
+ *   * `blob` — `serializePermissionAccount(...)` output (base64
+ *     string). Adapter feeds it back to
+ *     `deserializePermissionAccount(...)` to rebuild the same plugin
+ *     the grant flow installed. Stored verbatim by Phoenix; opaque to
+ *     the wire.
+ *   * `permission_id` — 0x-prefixed 4-byte hex (10 chars). The 4-byte
+ *     ZeroDev permissionId; denormalized for audit / diagnostics.
+ *   * `validation_id` — 0x-prefixed 21-byte hex (44 chars). The
+ *     `bytes21 vId` value `Kernel.uninstallValidation(...)` consumes:
+ *     `0x02 ‖ rightPad(permissionId, 20)`. Adapter validates this
+ *     matches the permissionId before broadcasting.
+ *   * `kernel_version` — kernel implementation version (e.g.
+ *     `"0.3.1"`). Pinned at grant-time so a future kernel upgrade is
+ *     not silently reconciled against an old blob.
+ *   * `package_version` — `@zerodev/permissions` package version the
+ *     blob was produced under. Adapter refuses if it differs from
+ *     `KERNEL_PERMISSION_PIN.zeroDevPermissionsPackageVersion` —
+ *     fail-closed posture against package drift.
+ *
+ * Absent → adapter takes the sentinel path. Present → adapter
+ * attempts cryptographic revoke and fails closed
+ * (`state=revoke_failed`) if it cannot honor the block; never
+ * silently downgrades to sentinel.
+ */
+export const PermissionBlockSchema = z.object({
+  blob: z.string().min(1),
+  permission_id: z
+    .string()
+    .regex(/^0x[0-9a-fA-F]{8}$/, "permission_id must be 0x + 8 hex chars (4 bytes)"),
+  validation_id: z
+    .string()
+    .regex(/^0x[0-9a-fA-F]{42}$/, "validation_id must be 0x + 42 hex chars (21 bytes)"),
+  kernel_version: z.string().min(1),
+  package_version: z.string().min(1),
+});
+export type PermissionBlock = z.infer<typeof PermissionBlockSchema>;
+
 /** POST /dispatch/revoke_delegation */
 export const DispatchRevokeDelegationSchema = z.object({
   contract_version: z.literal(1),
@@ -77,14 +121,16 @@ export const DispatchRevokeDelegationSchema = z.object({
   smart_account_id: z.string().min(1),
   // Opaque identifier that Phoenix has already stored against the
   // delegation row. The adapter echoes it into callbacks today and
-  // does not parse it. The eventual cryptographic revoke (#58) will
-  // need to commit to a concrete shape — 4-byte ZeroDev
-  // `permissionId`, 21-byte Kernel `validationId`, or a serialized
-  // plugin blob — alongside the SDK integration in
-  // `docs/zerodev-permissions-integration.md`. Until then any
-  // non-empty string is accepted on the wire.
+  // does not parse it. New rows under #58 carry the 4-byte
+  // permissionId hex (10 chars) here for human readability; the
+  // adapter's actual revoke driver consumes `permission.validation_id`
+  // instead.
   delegation_id: z.string().min(1),
   reason: z.string().min(1),
+  // Optional `permission` block carrying the cryptographic revoke
+  // payload (#58). Backwards-compatible: absent on legacy sentinel
+  // rows whose grant flow predates this field.
+  permission: PermissionBlockSchema.optional(),
   correlation_id: z.string().nullable(),
   emitted_at: rfc3339,
 });

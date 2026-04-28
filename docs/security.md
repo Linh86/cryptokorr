@@ -221,12 +221,57 @@ human review.
 | `TELEGRAM_WEBHOOK_SECRET`    | env var (Phoenix)          | milestone end, staff change   |
 | `TELEGRAM_OPERATORS`         | env var (Phoenix)          | staff change, role change     |
 | `SECRET_KEY_BASE`            | env var (Phoenix)          | milestone end                 |
+| `DELEGATION_SIGNER_KEY`      | env var (adapter)          | per-account, on key compromise |
+| `OPERATOR_PRIVATE_KEY` (#58) | env var (adapter)          | per-account, on key compromise |
 | Adapter TLS server key       | mounted file (adapter)     | certificate expiry (optional) |
 | Bundler RPC key (Base)       | adapter env var            | vendor-driven                 |
 
 Secrets are never committed to the repo. See `.env.example` (if
 present) for the development defaults that the tests and local dev
 rely on.
+
+### Adapter signing keys (`DELEGATION_SIGNER_KEY` / `OPERATOR_PRIVATE_KEY`)
+
+The adapter holds two distinct EVM private keys with disjoint
+authority. Conflating them would let a leak of the runtime session
+key escalate to root authority over the smart account, so
+`chain_adapter/src/config/index.ts` refuses any configuration where
+both env vars derive to the same EOA.
+
+- **`DELEGATION_SIGNER_KEY`** — runtime session key. Signs
+  UserOperation hashes for transfers. Bound to whatever validation
+  the smart account installs at the `regular` slot (a ZeroDev
+  permission plugin in production); its on-chain authority is
+  scoped by the policies attached to that permission. Treated as a
+  hot key — present in adapter memory whenever a UserOp is
+  dispatched.
+- **`OPERATOR_PRIVATE_KEY` (#58)** — kernel root validator (sudo)
+  EOA. The same EOA `provision-kernel.ts --broadcast` deploys the
+  kernel against; pinned by the kernel's `rootValidator` slot at
+  initialization. Signs `Kernel.uninstallValidation(...)` UserOps
+  because the kernel's `onlyEntryPointOrSelfOrRoot` guard rejects
+  any other signer. Required for the cryptographic revoke path
+  (#58) — when absent, the adapter refuses any dispatch carrying a
+  `permission` block (emits `state=revoke_failed,
+  reason=operator_key_missing`) rather than silently downgrade to
+  the legacy sentinel revoke. Should live behind tighter
+  controls than the runtime session key (HSM / KMS / cold-signing
+  sidecar — tracked as a follow-up hardening track per Subagent
+  D's review).
+
+Both keys are validated at startup:
+
+  * `0x` + 64 hex chars (32 bytes), `isHex` test passes.
+  * Must NOT match `/placeholder|0x_/i`.
+  * For `OPERATOR_PRIVATE_KEY` only: derived address MUST equal
+    `OPERATOR_ADDRESS` (paste-mismatch guard) and MUST differ from
+    the EOA derived from `DELEGATION_SIGNER_KEY` (role-conflation
+    guard).
+
+The pair `(OPERATOR_PRIVATE_KEY, OPERATOR_ADDRESS)` is optional in
+v0.1 — leaving both unset keeps the adapter on the sentinel revoke
+path. Setting only one of them is refused at startup so a
+half-configured deploy fails fast.
 
 ## Incident response
 

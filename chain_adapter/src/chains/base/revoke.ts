@@ -81,7 +81,7 @@
  * `revoke_failed` as non-terminal, non-executable, and retryable.
  */
 
-import type { Hash } from "viem";
+import type { Chain, Hash } from "viem";
 import type { BaseClients } from "./client.js";
 import { BASE_CHAIN } from "../../config/chains.js";
 import type { AdapterConfig } from "../../config/index.js";
@@ -89,12 +89,18 @@ import type { CallbackClient } from "../../callbacks/client.js";
 import { nextCallbackId } from "../../callbacks/client.js";
 import { ExecutionError } from "../../lib/errors.js";
 import { logger } from "../../lib/logger.js";
+import type { PermissionBlock } from "../../contracts/schemas.js";
 import {
   buildAndSignUserOp,
   buildSentinelRevokeCallData,
   formatNonceHex,
   userOpHashesEqual,
 } from "./userop.js";
+import {
+  CryptographicRevokeError,
+  assertValidationIdConsistent,
+  assertPackageVersionPinned,
+} from "./uninstall_validation.js";
 
 export interface RevokeResult {
   userOpHash: Hash;
@@ -104,15 +110,36 @@ export interface RevokeResult {
 }
 
 /**
- * Execute the sentinel revoke UserOp for a smart account.
+ * Execute a delegation revoke for a smart account.
+ *
+ * Routes between two paths based on `permissionBlock`:
+ *
+ *   - **Cryptographic path (#58).** When the dispatch carries a
+ *     `permission` block, the adapter MUST attempt
+ *     `Kernel.uninstallValidation(bytes21,bytes,bytes)` against the
+ *     smart account itself, signed by the kernel's ROOT validator
+ *     EOA (`config.operatorPrivateKey`). The block is validated
+ *     against `KERNEL_PERMISSION_PIN` before any chain interaction.
+ *     The path FAILS CLOSED — if the operator key is missing, the
+ *     blob will not deserialize, the validation_id is inconsistent,
+ *     or the package version pin does not match, the adapter emits
+ *     `revoke_failed` with a precise reason and never silently
+ *     downgrades to sentinel.
+ *
+ *   - **Sentinel path (legacy).** Without a `permission` block the
+ *     adapter falls back to the no-op `SimpleAccount.execute(self,
+ *     0, 0x)` self-call. This still anchors the revoke attempt on
+ *     chain but does NOT cryptographically disable the delegation.
+ *     Phoenix continues to enforce fail-closed posture for the
+ *     entire window. Used by legacy rows that predate the grant-
+ *     time blob persistence (#58 hard blocker (4)) and during
+ *     pre-cryptographic-grant rollout.
  *
  * `delegationId` is Phoenix's identifier for the authority record
  * being revoked — opaque to this function (just echoed into
- * callbacks). The eventual cryptographic revoke (see TODO(#58)
- * below) will be a `Kernel.uninstallValidation(...)` call ON the
- * smart account itself, NOT on a separate Permission Validator
- * contract; an earlier version of this file pretended such a
- * contract existed.
+ * callbacks). For cryptographic revokes the actual on-chain target
+ * is determined by `permissionBlock.validation_id`, not
+ * `delegationId`.
  *
  * Emits callbacks on every terminal transition; throws
  * `ExecutionError` on failure after emitting the terminal
@@ -125,54 +152,62 @@ export async function executeRevoke(
   config: AdapterConfig,
   clients: BaseClients,
   callbackClient: CallbackClient,
+  permissionBlock?: PermissionBlock,
 ): Promise<RevokeResult> {
-  // TODO(#58): Replace the sentinel call below with a real
-  // ZeroDev kernel permission revoke. An earlier version of this
-  // block described the swap as "wrap the validator's
-  // disablePermission(bytes32) in the ERC-7579 envelope" — that
-  // model was wrong. The actual on-chain entry point is
-  // `Kernel.uninstallValidation(bytes21 vId, bytes deinitData,
-  // bytes hookDeinitData)` called ON the smart account itself, not
-  // on a separate "Permission Validator" contract.
+  if (permissionBlock) {
+    return executeCryptographicRevoke(
+      smartAccountId,
+      delegationId,
+      reason,
+      config,
+      clients,
+      callbackClient,
+      permissionBlock,
+    );
+  }
+
+  return executeSentinelRevoke(
+    smartAccountId,
+    delegationId,
+    reason,
+    config,
+    clients,
+    callbackClient,
+  );
+}
+
+async function executeSentinelRevoke(
+  smartAccountId: string,
+  delegationId: string,
+  reason: string,
+  config: AdapterConfig,
+  clients: BaseClients,
+  callbackClient: CallbackClient,
+): Promise<RevokeResult> {
+  // Sentinel revoke body. Anchors the revoke attempt on chain via a
+  // no-op `SimpleAccount.execute(self, 0, 0x)` self-call but does
+  // NOT cryptographically disable the delegation. Used as the
+  // legacy fallback when the dispatch carries no `permission` block
+  // (i.e. the delegation row was granted before #58's grant-time
+  // blob persistence). The cryptographic path lives in
+  // `executeCryptographicRevoke` below; routing happens in
+  // `executeRevoke`.
   //
-  // What still survives from earlier work:
-  //   - `delegationId` is a parameter sourced from the Phoenix
-  //     dispatch payload (`DispatchRevokeDelegationSchema`). Its
-  //     opaque-string semantics are stable; only the FORMAT (4-byte
-  //     `permissionId` vs 21-byte `validationId` vs serialized
-  //     plugin blob) is part of the redesign.
-  //   - `config` is threaded via `RevokeDeps` and is here for the
-  //     eventual SDK + sudo-signer wiring.
-  //   - The ERC-7579 outer-execute envelope pin in `./erc7579.ts`
-  //     is independent of the permission model and still applies.
+  // What still needs to land before this fallback can be retired
+  // (see `docs/zerodev-permissions-integration.md` for the verified
+  // ZeroDev model and the full hard-blocker list):
   //
-  // What still needs to land before #58 closes (see
-  // `docs/zerodev-permissions-integration.md` for the full,
-  // verified ZeroDev model and the hard blockers list):
+  //   1. Persist the serialized plugin blob (or raw policy + signer
+  //      reconstruction params) at grant-time so Phoenix can
+  //      include a `permission` block in the revoke dispatch and
+  //      the adapter takes the cryptographic path.
+  //   2. Provision a per-account sudo signer (#58 hard blocker (2))
+  //      and supply it via `config.operatorPrivateKey`.
   //
-  //   1. Add `@zerodev/sdk` + `@zerodev/permissions` as runtime
-  //      deps in `chain_adapter/package.json`. Currently absent.
-  //   2. Establish a per-kernel-account sudo signer the adapter
-  //      can use to sign `uninstallValidation` UserOps. The
-  //      sentinel-era delegation signer is NOT sufficient.
-  //   3. Wire a bundler RPC + paymaster (or native funding) for
-  //      the revoke UserOp.
-  //   4. Persist the serialized plugin blob (or raw policy + signer
-  //      reconstruction params) at grant-time so the adapter can
-  //      rebuild the plugin and produce the multi-policy
-  //      `deinitData` payload at revoke-time.
-  //   5. Pin the canonical `@zerodev/permissions` package version +
-  //      signer/policy module addresses (#83 — re-scoped on top
-  //      of the new `KernelPermissionPin` slot in
-  //      `./permission_validator.ts`).
-  //   6. Decide the on-the-wire shape of `delegation_id`
-  //      (4-byte permissionId vs 21-byte validationId vs blob).
-  //      Phoenix's column is opaque, but the adapter and Phoenix
-  //      must agree.
-  //
-  // Until those land, this function stays on the sentinel body
-  // below. That body anchors the revoke attempt on chain but does
-  // NOT cryptographically disable the delegation (#31 stays open).
+  // Both gates are real today: the schema migration for (1) is in
+  // this PR, and (2) is plumbed through `AdapterConfig`. Cryptographic
+  // revoke runs the moment a `granted` callback populates the
+  // artifact columns AND a real operator key is provisioned.
 
   const sentinelCallData = buildSentinelRevokeCallData(
     clients.smartAccountAddress,
@@ -412,4 +447,327 @@ export async function executeRevoke(
 
 function bundlerLabel(): string {
   return "base-v07-bundler";
+}
+
+/**
+ * Cryptographic revoke (#58). Reconstructs the ZeroDev permission
+ * plugin from `permissionBlock.blob`, builds a sudo-only kernel
+ * account at `clients.smartAccountAddress` signed by
+ * `config.operatorPrivateKey`, and dispatches
+ * `Kernel.uninstallValidation(...)` through the SDK's
+ * `uninstallPlugin` action. The SDK handles the kernel-v3 nonce-key
+ * encoding (sudo bit), the ERC-7579 outer execute envelope, and
+ * UserOp signing under the operator EOA — that orchestration is the
+ * audited contract surface we lean on rather than re-deriving it
+ * locally.
+ *
+ * Pre-broadcast guards (in order):
+ *
+ *   1. `operatorPrivateKey` MUST be set. Without it the kernel's
+ *      `onlyEntryPointOrSelfOrRoot` guard rejects the call; failing
+ *      closed at this boundary is the contract this branch enforces.
+ *   2. `permissionBlock.validation_id` MUST equal
+ *      `0x02 ‖ rightPad(permissionBlock.permission_id, 20)`.
+ *      Caught by `assertValidationIdConsistent`.
+ *   3. `permissionBlock.package_version` MUST match
+ *      `KERNEL_PERMISSION_PIN.zeroDevPermissionsPackageVersion`.
+ *      Caught by `assertPackageVersionPinned`.
+ *
+ * Failures of any guard, the deserialization round-trip, or the
+ * UserOp submission emit a terminal `state=revoke_failed` callback
+ * with a precise reason code and throw `ExecutionError`. There is
+ * NO silent fallback to the sentinel path: if the dispatch carries
+ * a `permission` block, Phoenix has decided the revoke must be
+ * cryptographic, and we either honor that or fail loudly.
+ *
+ * Test coverage today exercises every fail-closed branch via mocks
+ * (operator-key-missing, validation_id mismatch, package version
+ * pin mismatch, blob deserialization failure). The successful
+ * broadcast path is reachable only against a real bundler with a
+ * real operator key — that path is verified end-to-end in operator
+ * runbooks, not in unit tests.
+ */
+async function executeCryptographicRevoke(
+  smartAccountId: string,
+  delegationId: string,
+  reason: string,
+  config: AdapterConfig,
+  clients: BaseClients,
+  callbackClient: CallbackClient,
+  permissionBlock: PermissionBlock,
+): Promise<RevokeResult> {
+  // Guard 1: operator key must be configured. Without it the kernel's
+  // `onlyEntryPointOrSelfOrRoot` guard would reject any UserOp built
+  // from a sudo signer we do not control. We refuse BEFORE touching
+  // the chain so an operator who forgot to provision the key in
+  // staging gets a clear callback rather than an opaque
+  // `bundler_rejected: AA24 signature error`.
+  if (!config.operatorPrivateKey || !config.operatorAddress) {
+    const message =
+      "Cryptographic revoke requested (permission block present) but OPERATOR_PRIVATE_KEY / OPERATOR_ADDRESS is not configured; refusing to fall back to sentinel.";
+    logger.error(message, {
+      smart_account_id: smartAccountId,
+      delegation_id: delegationId,
+    });
+
+    await callbackClient.send({
+      contract_version: 1,
+      callback_id: nextCallbackId(),
+      kind: "delegation.state_changed",
+      smart_account_id: smartAccountId,
+      delegation_id: delegationId,
+      state: "revoke_failed",
+      reason: "operator_key_missing",
+      emitted_at: new Date().toISOString(),
+    });
+
+    throw new ExecutionError("operator_key_missing", message);
+  }
+
+  // Guards 2 + 3: pin checks. Throw `CryptographicRevokeError` with
+  // a specific code; we map that onto the callback `reason` below.
+  try {
+    assertValidationIdConsistent(permissionBlock);
+    assertPackageVersionPinned(permissionBlock);
+  } catch (err) {
+    const code =
+      err instanceof CryptographicRevokeError
+        ? err.code
+        : "permission_deserialization_failed";
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error("Cryptographic revoke pin guard failed", {
+      smart_account_id: smartAccountId,
+      delegation_id: delegationId,
+      code,
+      error: message,
+    });
+
+    await callbackClient.send({
+      contract_version: 1,
+      callback_id: nextCallbackId(),
+      kind: "delegation.state_changed",
+      smart_account_id: smartAccountId,
+      delegation_id: delegationId,
+      state: "revoke_failed",
+      reason: code,
+      emitted_at: new Date().toISOString(),
+    });
+
+    throw new ExecutionError(code, message);
+  }
+
+  logger.info("Executing Base delegation revoke (cryptographic UserOp)", {
+    smart_account_id: smartAccountId,
+    delegation_id: delegationId,
+    permission_id: permissionBlock.permission_id,
+    validation_id: permissionBlock.validation_id,
+    chain_id: config.baseChainId,
+    smart_account: clients.smartAccountAddress,
+  });
+
+  // Lazy import: keeps the heavier account-client orchestration out
+  // of the sentinel hot path. These are runtime dependencies because
+  // the cryptographic path imports them in production when a dispatch
+  // carries a `permission` block.
+  let userOpHash: Hash;
+  let txHash: Hash;
+  let blockNumber: bigint;
+  try {
+    const sdk = await import("@zerodev/sdk");
+    const sdkConstants = await import("@zerodev/sdk/constants");
+    const ecdsaValidator = await import("@zerodev/ecdsa-validator");
+    const sdkActions = await import("@zerodev/sdk/actions");
+    const permissions = await import("@zerodev/permissions");
+    const viemAccounts = await import("viem/accounts");
+    const viem = await import("viem");
+
+    const entryPoint = sdkConstants.getEntryPoint("0.7");
+    const kernelVersion = sdkConstants.KERNEL_V3_1;
+
+    // SECRET: the kernel root EOA. Used to sign the UserOp; never
+    // logged or written into errors. Operator-key validation in
+    // `loadConfig` already refused placeholders + role conflation.
+    const operatorAccount = viemAccounts.privateKeyToAccount(
+      config.operatorPrivateKey,
+    );
+
+    // Build the sudo ECDSA validator from the operator EOA. This is
+    // the same validator type `provision-kernel.ts` deploys with —
+    // the kernel's `rootValidator` slot pins the corresponding
+    // address at provisioning time, so this binding is stable.
+    const sudoValidator = await ecdsaValidator.signerToEcdsaValidator(
+      // viem's PublicClient and ZeroDev's expected Client diverged
+      // across viem minor versions; the SDK only invokes JSON-RPC
+      // methods both share. Cast at the boundary.
+      clients.publicClient as never,
+      {
+        signer: operatorAccount,
+        entryPoint,
+        kernelVersion,
+      },
+    );
+
+    // Reconstruct the regular permission plugin from the persisted
+    // blob. `deserializePermissionAccount` builds a kernel account
+    // whose `kernelPluginManager.regularValidator` IS the original
+    // permission plugin. We extract that handle to feed into
+    // `uninstallPlugin`; the account itself is discarded because
+    // `uninstallPlugin` requires a sudo-context kernel client.
+    const permissionAccount = await permissions.deserializePermissionAccount(
+      clients.publicClient as never,
+      entryPoint,
+      kernelVersion,
+      permissionBlock.blob,
+    );
+    const permissionPlugin = (
+      permissionAccount as unknown as {
+        kernelPluginManager: {
+          regularValidator?: {
+            validatorType?: string;
+          };
+        };
+      }
+    ).kernelPluginManager.regularValidator;
+    if (!permissionPlugin) {
+      throw new CryptographicRevokeError(
+        "permission_deserialization_failed",
+        "deserialized account does not carry a regular permission validator",
+      );
+    }
+
+    // Build the SUDO-only kernel account at the same address. The
+    // SDK's `uninstallPlugin` requires the active validator be sudo
+    // because the kernel's `onlyEntryPointOrSelfOrRoot` guard on
+    // `uninstallValidation` only accepts root authority. We
+    // explicitly omit `regular` so `getNonceKey` returns the SUDO
+    // encoding (see `toKernelPluginManager.ts` `activeValidatorMode:
+    // sudo && !regular ? "sudo" : "regular"`).
+    const sudoAccount = await sdk.createKernelAccount(
+      clients.publicClient as never,
+      {
+        entryPoint,
+        kernelVersion,
+        plugins: { sudo: sudoValidator },
+        address: clients.smartAccountAddress,
+      },
+    );
+
+    const kernelClient = sdk.createKernelAccountClient({
+      account: sudoAccount,
+      // The SDK accepts viem's `Chain` here. Reuse the public
+      // client's chain so a chain-id mismatch surfaces as a clean
+      // viem error rather than a bundler `wrong_chain` rejection.
+      chain: (clients.publicClient as { chain?: Chain }).chain,
+      bundlerTransport: viem.http(config.bundlerRpcUrl),
+      client: clients.publicClient as never,
+    });
+
+    // Submit. Returns the canonical user-op hash; receipt polling
+    // happens after.
+    userOpHash = (await sdkActions.uninstallPlugin(kernelClient as never, {
+      plugin: permissionPlugin as never,
+    })) as Hash;
+
+    const receipt = await kernelClient.waitForUserOperationReceipt({
+      hash: userOpHash,
+    });
+
+    if (!receipt.success) {
+      const revertReason = receipt.reason ?? "uninstall_validation_reverted";
+
+      logger.warn("Cryptographic revoke UserOp reverted", {
+        smart_account_id: smartAccountId,
+        userOpHash,
+        reason: revertReason,
+      });
+
+      await callbackClient.send({
+        contract_version: 1,
+        callback_id: nextCallbackId(),
+        kind: "delegation.state_changed",
+        smart_account_id: smartAccountId,
+        delegation_id: delegationId,
+        state: "revoke_failed",
+        reason: revertReason,
+        tx_refs: [
+          {
+            chain: BASE_CHAIN.name,
+            userop_hash: userOpHash,
+            hash: receipt.receipt.transactionHash as Hash,
+            block_number: Number(receipt.receipt.blockNumber as bigint),
+            bundler: bundlerLabel(),
+            status: "reverted",
+          },
+        ],
+        emitted_at: new Date().toISOString(),
+      });
+
+      throw new ExecutionError(
+        "uninstall_validation_reverted",
+        `uninstallValidation reverted in UserOp ${userOpHash}: ${revertReason}`,
+      );
+    }
+
+    txHash = receipt.receipt.transactionHash as Hash;
+    blockNumber = receipt.receipt.blockNumber as bigint;
+  } catch (err) {
+    if (err instanceof ExecutionError) throw err;
+
+    const message = err instanceof Error ? err.message : String(err);
+    const code =
+      err instanceof CryptographicRevokeError
+        ? err.code
+        : "cryptographic_revoke_failed";
+
+    logger.error("Cryptographic revoke failed", {
+      smart_account_id: smartAccountId,
+      delegation_id: delegationId,
+      code,
+      error: message,
+    });
+
+    await callbackClient.send({
+      contract_version: 1,
+      callback_id: nextCallbackId(),
+      kind: "delegation.state_changed",
+      smart_account_id: smartAccountId,
+      delegation_id: delegationId,
+      state: "revoke_failed",
+      reason: code,
+      emitted_at: new Date().toISOString(),
+    });
+
+    throw new ExecutionError(code, message);
+  }
+
+  await callbackClient.send({
+    contract_version: 1,
+    callback_id: nextCallbackId(),
+    kind: "delegation.state_changed",
+    smart_account_id: smartAccountId,
+    delegation_id: delegationId,
+    state: "revoked",
+    reason,
+    tx_refs: [
+      {
+        chain: BASE_CHAIN.name,
+        userop_hash: userOpHash,
+        hash: txHash,
+        bundler: bundlerLabel(),
+        block_number: Number(blockNumber),
+        status: "success",
+      },
+    ],
+    emitted_at: new Date().toISOString(),
+  });
+
+  logger.info("Cryptographic revoke confirmed on-chain", {
+    smart_account_id: smartAccountId,
+    delegation_id: delegationId,
+    userOpHash,
+    txHash,
+    blockNumber: Number(blockNumber),
+  });
+
+  return { userOpHash, txHash, blockNumber, status: "success" };
 }

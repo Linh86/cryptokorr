@@ -474,4 +474,183 @@ defmodule Bank.DelegationsTest do
       refute Delegations.executable?("sa_aa_pend")
     end
   end
+
+  describe "permission artifacts (issue #58)" do
+    # ZeroDev permissionId is bytes4; validationId is bytes21
+    # (`0x02 ‖ rightPad(permissionId, 20)`). The fixtures below match
+    # the on-chain shape exactly so the changeset's byte-size
+    # validation has something concrete to check.
+    @perm_id <<0xA1, 0xB2, 0xC3, 0xD4>>
+    @validation_id <<0x02>> <> @perm_id <> :binary.copy(<<0x00>>, 16)
+    @blob_b64 "eyJzZXJpYWxpemVkUGVybWlzc2lvbkFjY291bnQiOiJ0ZXN0In0="
+
+    test "grant accepts permission artifact attrs and persists them verbatim" do
+      assert {:ok, d} =
+               Delegations.grant("sa_crypto", "0xa1b2c3d4", %{
+                 permission_blob: @blob_b64,
+                 permission_id: @perm_id,
+                 validation_id: @validation_id,
+                 kernel_version: "0.3.1",
+                 permission_package_version: "5.6.3",
+                 installed_at_block: 12_345_678,
+                 install_tx_hash: "0xdeadbeef"
+               })
+
+      assert d.permission_blob == @blob_b64
+      assert d.permission_id == @perm_id
+      assert d.validation_id == @validation_id
+      assert d.kernel_version == "0.3.1"
+      assert d.permission_package_version == "5.6.3"
+      assert d.installed_at_block == 12_345_678
+      assert d.install_tx_hash == "0xdeadbeef"
+    end
+
+    test "grant rejects a permission_id that is not exactly 4 bytes" do
+      assert {:error, %Ecto.Changeset{errors: errors}} =
+               Delegations.grant("sa_bad_pid", "0xa1b2c3", %{
+                 permission_id: <<0xA1, 0xB2, 0xC3>>,
+                 validation_id: @validation_id
+               })
+
+      assert {:permission_id, {"must be exactly 4 bytes", _}} =
+               List.keyfind(errors, :permission_id, 0)
+    end
+
+    test "grant rejects a validation_id that is not exactly 21 bytes" do
+      # The kernel's `uninstallValidation` takes a `bytes21` argument.
+      # A row carrying a 20-byte or 22-byte value would build malformed
+      # calldata, so we refuse at the changeset boundary.
+      assert {:error, %Ecto.Changeset{errors: errors}} =
+               Delegations.grant("sa_bad_vid", "0xa1b2c3d4", %{
+                 permission_id: @perm_id,
+                 validation_id: :binary.copy(<<0x00>>, 22)
+               })
+
+      assert {:validation_id, {"must be exactly 21 bytes", _}} =
+               List.keyfind(errors, :validation_id, 0)
+    end
+
+    test "cryptographically_revocable?/1 returns true when the complete wire-shape is present" do
+      {:ok, d} =
+        Delegations.grant("sa_yes", "0xa1b2c3d4", %{
+          permission_blob: @blob_b64,
+          permission_id: @perm_id,
+          validation_id: @validation_id,
+          kernel_version: "0.3.1",
+          permission_package_version: "5.6.3"
+        })
+
+      assert Bank.Delegations.Delegation.cryptographically_revocable?(d)
+    end
+
+    test "cryptographically_revocable?/1 returns false on legacy sentinel rows" do
+      {:ok, d} = Delegations.grant("sa_legacy", "del_legacy")
+      refute Bank.Delegations.Delegation.cryptographically_revocable?(d)
+    end
+
+    test "cryptographically_revocable?/1 returns false when blob is missing" do
+      {:ok, d} =
+        Delegations.grant("sa_partial_blob", "0xa1b2c3d4", %{
+          permission_id: @perm_id,
+          validation_id: @validation_id,
+          kernel_version: "0.3.1",
+          permission_package_version: "5.6.3"
+        })
+
+      refute Bank.Delegations.Delegation.cryptographically_revocable?(d)
+    end
+
+    test "cryptographically_revocable?/1 returns false when permission_id is missing" do
+      {:ok, d} =
+        Delegations.grant("sa_partial_pid", "0xa1b2c3d4", %{
+          permission_blob: @blob_b64,
+          validation_id: @validation_id,
+          kernel_version: "0.3.1",
+          permission_package_version: "5.6.3"
+        })
+
+      refute Bank.Delegations.Delegation.cryptographically_revocable?(d)
+    end
+
+    test "cryptographically_revocable?/1 returns false when package version is missing" do
+      {:ok, d} =
+        Delegations.grant("sa_partial_pkg", "0xa1b2c3d4", %{
+          permission_blob: @blob_b64,
+          permission_id: @perm_id,
+          validation_id: @validation_id,
+          kernel_version: "0.3.1"
+        })
+
+      refute Bank.Delegations.Delegation.cryptographically_revocable?(d)
+    end
+
+    test "permission_dispatch_block/1 emits hex-encoded ids and the verbatim blob" do
+      {:ok, d} =
+        Delegations.grant("sa_disp", "0xa1b2c3d4", %{
+          permission_blob: @blob_b64,
+          permission_id: @perm_id,
+          validation_id: @validation_id,
+          kernel_version: "0.3.1",
+          permission_package_version: "5.6.3"
+        })
+
+      block = Delegations.permission_dispatch_block(d)
+
+      assert block.blob == @blob_b64
+      assert block.permission_id == "0xa1b2c3d4"
+      # 0x02 ++ permissionId ++ 16 zero bytes → 21 bytes / 42 hex chars.
+      assert block.validation_id ==
+               "0x02a1b2c3d400000000000000000000000000000000"
+
+      assert block.kernel_version == "0.3.1"
+      assert block.package_version == "5.6.3"
+    end
+
+    test "permission_dispatch_block/1 returns nil for legacy rows" do
+      {:ok, d} = Delegations.grant("sa_legacy_disp", "del_legacy")
+      assert is_nil(Delegations.permission_dispatch_block(d))
+    end
+
+    test "apply_callback granted with permission block stores artifacts decoded from hex" do
+      assert {:ok, d} =
+               Delegations.apply_callback(%{
+                 "smart_account_id" => "sa_cb",
+                 "delegation_id" => "0xa1b2c3d4",
+                 "state" => "granted",
+                 "reason" => "wallet_connect",
+                 "permission" => %{
+                   "blob" => @blob_b64,
+                   "permission_id" => "0xa1b2c3d4",
+                   "validation_id" => "0x02a1b2c3d400000000000000000000000000000000",
+                   "kernel_version" => "0.3.1",
+                   "package_version" => "5.6.3"
+                 }
+               })
+
+      assert d.state == :active
+      assert d.permission_blob == @blob_b64
+      assert d.permission_id == @perm_id
+      assert d.validation_id == @validation_id
+      assert d.kernel_version == "0.3.1"
+      assert d.permission_package_version == "5.6.3"
+      assert Bank.Delegations.Delegation.cryptographically_revocable?(d)
+    end
+
+    test "apply_callback granted without permission block keeps row legacy-shaped" do
+      # Backward compat: pre-#58 callback fixtures (and the smoke task
+      # in v0.1) still send no `permission` key. The row stays on the
+      # sentinel revoke path until a future `granted` callback
+      # populates the artifacts.
+      assert {:ok, d} =
+               Delegations.apply_callback(%{
+                 "smart_account_id" => "sa_cb_legacy",
+                 "delegation_id" => "del_legacy",
+                 "state" => "granted",
+                 "reason" => "smoke"
+               })
+
+      assert d.state == :active
+      refute Bank.Delegations.Delegation.cryptographically_revocable?(d)
+    end
+  end
 end

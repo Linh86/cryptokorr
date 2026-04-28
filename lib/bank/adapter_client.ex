@@ -119,14 +119,29 @@ defmodule Bank.AdapterClient do
   `docs/zerodev-permissions-integration.md` and is one of: a 4-byte
   ZeroDev `permissionId`, a 21-byte Kernel `validationId`, or a
   serialized plugin blob. Pre-integration sentinel accounts continue
-  to send the legacy `del_…` placeholder), and `:reason` (optional;
-  defaults to `"unspecified"`).
+  to send the legacy `del_…` placeholder), `:reason` (optional;
+  defaults to `"unspecified"`), and an optional `:permission` map
+  carrying the serialized ZeroDev plugin and denormalized id fields
+  for the cryptographic revoke path (#58).
 
-  The adapter receives `delegation_id` opaquely today and echoes it
-  into `delegation.state_changed` callbacks. The eventual
-  cryptographic revoke (#58) will consume it to identify which
-  authority record to disable against; until that integration ships
-  the value flows through unchanged.
+  The `:permission` block is additive and non-breaking. When absent
+  the adapter takes the sentinel path. When present the adapter
+  attempts the real `Kernel.uninstallValidation(...)` UserOp and
+  fails closed (`state=revoke_failed`) if it cannot honor the block
+  — it never silently downgrades to sentinel.
+
+  The wire shape, when set, is:
+
+      %{
+        blob: "<base64>",
+        permission_id: "0x<8 hex>",
+        validation_id: "0x<42 hex>",
+        kernel_version: "0.3.1",
+        package_version: "5.6.3"
+      }
+
+  See `Bank.Delegations.permission_dispatch_block/1` for the
+  caller-side helper that produces this map from a delegation row.
   """
   @spec dispatch_revoke_delegation(map(), keyword()) ::
           {:ok, revoke_ok()} | {:error, revoke_error()}
@@ -135,7 +150,7 @@ defmodule Bank.AdapterClient do
         opts \\ []
       )
       when is_binary(smart_account_id) and is_binary(delegation_id) do
-    payload = %{
+    base = %{
       contract_version: @contract_version,
       action: "revoke_delegation",
       smart_account_id: smart_account_id,
@@ -144,6 +159,12 @@ defmodule Bank.AdapterClient do
       correlation_id: nil,
       emitted_at: DateTime.utc_now() |> DateTime.to_iso8601()
     }
+
+    payload =
+      case Map.get(args, :permission) do
+        %{} = block -> Map.put(base, :permission, block)
+        _ -> base
+      end
 
     post("/dispatch/revoke_delegation", payload, :revoke, opts)
   end

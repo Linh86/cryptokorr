@@ -12,7 +12,7 @@
  * claims to come from:
  *
  *   - signer + policy module addresses are imported from
- *     `@zerodev/permissions` (the adapter's devDependency, audited
+ *     `@zerodev/permissions` (the adapter's runtime dependency, audited
  *     at install time via the package-lock.json), and asserted
  *     equal to the literal addresses in the pin.
  *   - The `uninstallValidation` ABI fragment is found inside

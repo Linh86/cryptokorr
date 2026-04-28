@@ -72,7 +72,7 @@ import type { AbiFunction, Hex } from "viem";
 
 /**
  * Shape of `KERNEL_PERMISSION_PIN` below. The pin is the
- * runtime's allowlist of ZeroDev signer + policy modules plus the
+ * runtime's declared ZeroDev signer + policy module set plus the
  * kernel-account method that performs revoke.
  *
  * NOTE: this interface deliberately does NOT include a single
@@ -134,7 +134,7 @@ export interface KernelPermissionPin {
  * Pinned ZeroDev kernel permission configuration.
  *
  * Populated under #83 against `@zerodev/permissions@5.6.3` (the
- * adapter's devDependency, audited at install time via
+ * adapter's runtime dependency, audited at install time via
  * `npm ci`'s lockfile resolution). Every address below is sourced
  * from that package's `constants.ts` export and is verified
  * byte-for-byte by `test/permission-validator-pin.test.ts`. The

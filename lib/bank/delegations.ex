@@ -80,6 +80,21 @@ defmodule Bank.Delegations do
       get_by_id(id)
       executable?(smart_account_id)
       apply_callback(callback_params)
+      permission_dispatch_block(delegation)
+
+  ## Permission artifacts (#58)
+
+  Rows that have a serialized ZeroDev permission plugin attached
+  participate in the cryptographic revoke path. `grant/3` accepts
+  the optional artifact attrs (`:permission_blob`, `:permission_id`,
+  `:validation_id`, `:kernel_version`,
+  `:permission_package_version`, `:installed_at_block`,
+  `:install_tx_hash`); `apply_callback/1` extracts them from a
+  `params["permission"]` map on the `granted` branch and decodes
+  the hex-typed fields. `permission_dispatch_block/1` produces the
+  wire-shaped block that the revoke dispatch carries so the
+  adapter can reconstruct the plugin without any further round-
+  trip into Phoenix.
   """
 
   import Ecto.Query
@@ -310,16 +325,24 @@ defmodule Bank.Delegations do
 
     case callback_state do
       "granted" ->
+        artifact_attrs = decode_permission_artifacts(Map.get(params, "permission"))
+
         case get(smart_account_id) do
           nil ->
-            grant(smart_account_id, delegation_id, %{
-              last_reason: reason,
-              scope: Map.get(params, "scope", %{})
-            })
+            grant(
+              smart_account_id,
+              delegation_id,
+              Map.merge(artifact_attrs, %{
+                last_reason: reason,
+                scope: Map.get(params, "scope", %{})
+              })
+            )
 
           %Delegation{state: :pending} = delegation ->
             delegation
-            |> Delegation.grant_changeset(%{last_reason: reason})
+            |> Delegation.changeset(Map.merge(artifact_attrs, %{last_reason: reason}))
+            |> Ecto.Changeset.put_change(:state, :active)
+            |> Ecto.Changeset.put_change(:granted_at, DateTime.utc_now())
             |> Repo.update()
 
           %Delegation{state: :active} = delegation ->
@@ -408,6 +431,41 @@ defmodule Bank.Delegations do
     })
   end
 
+  @doc """
+  Build the wire-shaped `permission` block for a revoke dispatch, or
+  return `nil` if this row is not cryptographically revocable.
+
+  When non-nil the result is a JSON-encodable map with hex-encoded
+  ids and the base64 blob carried verbatim. The shape matches
+  `priv/adapter/contract.md` v2:
+
+      %{
+        blob: "<base64>",            # serializePermissionAccount output
+        permission_id: "0x...",      # 4-byte permissionId, 10 hex chars
+        validation_id: "0x...",      # 21-byte validationId, 44 hex chars
+        kernel_version: "0.3.1",
+        package_version: "5.6.3"
+      }
+
+  The adapter feeds `validation_id` to
+  `Kernel.uninstallValidation(...)` as `vId`, and rebuilds the
+  permission plugin from `blob` via
+  `deserializePermissionAccount(...)`. Phoenix never opens the
+  blob.
+  """
+  @spec permission_dispatch_block(Delegation.t()) :: map() | nil
+  def permission_dispatch_block(%Delegation{} = d) do
+    if Delegation.cryptographically_revocable?(d) do
+      %{
+        blob: blob_to_string(d.permission_blob),
+        permission_id: encode_hex(d.permission_id),
+        validation_id: encode_hex(d.validation_id),
+        kernel_version: d.kernel_version,
+        package_version: d.permission_package_version
+      }
+    end
+  end
+
   # --- Private helpers ----------------------------------------------------
 
   # Prefer the on-chain transaction hash (`hash`) when present; fall back to
@@ -425,4 +483,58 @@ defmodule Bank.Delegations do
   end
 
   defp extract_tx_hash(_), do: nil
+
+  # Decode a `params["permission"]` map from a `granted` callback into
+  # a map of attrs that can be passed straight to `grant/3` or
+  # `Delegation.changeset/2`. Missing fields stay missing — the
+  # changeset accepts NULLs so an adapter that hasn't been upgraded
+  # yet still produces a usable row (it just won't be
+  # cryptographically revocable).
+  #
+  # Hex strings (`permission_id`, `validation_id`) are decoded to
+  # binary at the boundary so the changeset's byte-size validation
+  # has something to check. The blob is stored verbatim as bytes —
+  # Phoenix never opens it. Block number is coerced from the JSON
+  # number to integer so a hand-written fixture sending a string
+  # falls into the changeset's normal cast path.
+  defp decode_permission_artifacts(nil), do: %{}
+
+  defp decode_permission_artifacts(%{} = perm) do
+    %{}
+    |> maybe_put(:permission_blob, Map.get(perm, "blob"))
+    |> maybe_put(:permission_id, decode_hex(Map.get(perm, "permission_id")))
+    |> maybe_put(:validation_id, decode_hex(Map.get(perm, "validation_id")))
+    |> maybe_put(:kernel_version, Map.get(perm, "kernel_version"))
+    |> maybe_put(:permission_package_version, Map.get(perm, "package_version"))
+    |> maybe_put(:installed_at_block, Map.get(perm, "installed_at_block"))
+    |> maybe_put(:install_tx_hash, Map.get(perm, "install_tx_hash"))
+  end
+
+  defp decode_permission_artifacts(_), do: %{}
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp decode_hex(nil), do: nil
+
+  defp decode_hex("0x" <> rest) do
+    case Base.decode16(rest, case: :mixed) do
+      {:ok, bin} -> bin
+      :error -> nil
+    end
+  end
+
+  defp decode_hex(_), do: nil
+
+  defp encode_hex(nil), do: nil
+  defp encode_hex(bin) when is_binary(bin), do: "0x" <> Base.encode16(bin, case: :lower)
+
+  # The blob arrives over the wire as a base64 string. We stored it as
+  # bytes (the UTF-8 bytes of that ASCII base64 string) and write it
+  # back out verbatim. If a caller passes nil or a non-binary, we
+  # deliberately return nil so JSON encoding sees a missing key
+  # rather than a malformed value.
+  defp blob_to_string(nil), do: nil
+  defp blob_to_string(bin) when is_binary(bin), do: bin
+  defp blob_to_string(_), do: nil
 end

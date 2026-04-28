@@ -112,6 +112,88 @@ defmodule Bank.Runtime.Workers.RevokeDelegationTest do
 
       assert_received {:dispatch_body, %{"delegation_id" => ^opaque_id}}
     end
+
+    test "threads the permission block when the delegation row is cryptographically revocable (#58)" do
+      # When the row carries permission artifacts the worker MUST
+      # include them in the dispatch payload so the adapter can build
+      # the cryptographic uninstallValidation UserOp. Without this,
+      # the adapter would silently take the sentinel path even though
+      # Phoenix has the data needed for the real revoke.
+      perm_id = <<0xA1, 0xB2, 0xC3, 0xD4>>
+      validation_id = <<0x02>> <> perm_id <> :binary.copy(<<0x00>>, 16)
+      blob = "eyJzZXJpYWxpemVkUGVybWlzc2lvbkFjY291bnQiOiJ0ZXN0In0="
+
+      {:ok, _} =
+        Delegations.grant("sa-crypto", "0xa1b2c3d4", %{
+          permission_blob: blob,
+          permission_id: perm_id,
+          validation_id: validation_id,
+          kernel_version: "0.3.1",
+          permission_package_version: "5.6.3"
+        })
+
+      test_pid = self()
+
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:dispatch_body, Jason.decode!(body)})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(
+          202,
+          Jason.encode!(%{"accepted" => true, "smart_account_id" => "sa-crypto"})
+        )
+      end)
+
+      assert :ok =
+               perform_job(RevokeDelegation, %{
+                 "smart_account_id" => "sa-crypto",
+                 "reason" => "operator_requested"
+               })
+
+      assert_received {:dispatch_body, body}
+      assert body["delegation_id"] == "0xa1b2c3d4"
+      assert body["permission"]["blob"] == blob
+      assert body["permission"]["permission_id"] == "0xa1b2c3d4"
+
+      assert body["permission"]["validation_id"] ==
+               "0x02a1b2c3d400000000000000000000000000000000"
+
+      assert body["permission"]["kernel_version"] == "0.3.1"
+      assert body["permission"]["package_version"] == "5.6.3"
+    end
+
+    test "omits the permission key for legacy sentinel rows" do
+      # Sentinel-era rows produce a dispatch payload without any
+      # `permission` key — the adapter takes the sentinel path
+      # exactly as before. Crucial for backwards-compatibility while
+      # the grant flow doesn't yet populate artifacts.
+      grant_delegation!(smart_account_id: "sa-legacy", delegation_id: "del_legacy")
+
+      test_pid = self()
+
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:dispatch_body, Jason.decode!(body)})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(
+          202,
+          Jason.encode!(%{"accepted" => true, "smart_account_id" => "sa-legacy"})
+        )
+      end)
+
+      assert :ok =
+               perform_job(RevokeDelegation, %{
+                 "smart_account_id" => "sa-legacy",
+                 "reason" => "operator_requested"
+               })
+
+      assert_received {:dispatch_body, body}
+      refute Map.has_key?(body, "permission")
+    end
   end
 
   describe "transient adapter failures" do

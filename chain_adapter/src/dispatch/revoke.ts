@@ -123,6 +123,7 @@ export async function handleRevokeDispatch(
       deps.config,
       deps.baseClients,
       deps.callbackClient,
+      dispatch.permission,
     );
   } catch (err) {
     logger.error("Revoke execution ended with error", {
