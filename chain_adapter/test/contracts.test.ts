@@ -11,6 +11,7 @@ import {
   DispatchTransferSchema,
   DispatchSwapSchema,
   DispatchRevokeDelegationSchema,
+  DispatchGrantDelegationSchema,
   CallbackExecutionBroadcastSchema,
   CallbackExecutionConfirmedSchema,
   CallbackExecutionRevertedSchema,
@@ -21,11 +22,13 @@ import {
   dispatchTransfer,
   dispatchSwap,
   dispatchRevokeDelegation,
+  dispatchGrantDelegation,
   callbackExecutionBroadcast,
   callbackExecutionConfirmed,
   callbackExecutionReverted,
   callbackExecutionAborted,
   callbackDelegationStateChanged,
+  callbackDelegationGranted,
 } from "./fixtures/index.js";
 
 describe("Contract: dispatch schemas match Phoenix fixtures", () => {
@@ -67,6 +70,23 @@ describe("Contract: dispatch schemas match Phoenix fixtures", () => {
       // `delegation_id` is required on the wire — Phoenix sources it
       // from the `delegations` projection row at dispatch time.
       expect(result.data.delegation_id).toBe("del_primary");
+    }
+  });
+
+  it("dispatch_grant_delegation.json validates against DispatchGrantDelegationSchema (#58)", () => {
+    const result = DispatchGrantDelegationSchema.safeParse(
+      dispatchGrantDelegation,
+    );
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.action).toBe("grant_delegation");
+      expect(result.data.contract_version).toBe(1);
+      expect(result.data.smart_account_id).toBe("sa_demo_01");
+      expect(result.data.chain_id).toBe(84532);
+      expect(result.data.account).toBe(
+        "0xabc000000000000000000000000000000000dead",
+      );
+      expect(result.data.scope).toEqual({ asset: "USDC" });
     }
   });
 });
@@ -132,6 +152,38 @@ describe("Contract: callback schemas match Phoenix fixtures", () => {
       expect(result.data.kind).toBe("delegation.state_changed");
       expect(result.data.state).toBe("revoked");
       expect(result.data.delegation_id).toBe("del_primary");
+    }
+  });
+
+  it("callback_delegation_granted.json validates and carries the full permission block (#58)", () => {
+    const result = CallbackDelegationStateChangedSchema.safeParse(
+      callbackDelegationGranted,
+    );
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.kind).toBe("delegation.state_changed");
+      expect(result.data.state).toBe("granted");
+      // `delegation_id` MUST equal `permission.permission_id` for
+      // cryptographic grants. Phoenix's worker chooses the
+      // dispatch path on this id; pinning the equality keeps the
+      // operator-visible identifier consistent across the row,
+      // the audit trail, and future Etherscan / RPC lookups.
+      expect(result.data.delegation_id).toBe(
+        result.data.permission?.permission_id,
+      );
+      expect(result.data.permission).toBeDefined();
+      expect(result.data.permission?.blob.length).toBeGreaterThan(0);
+      expect(result.data.permission?.permission_id).toMatch(
+        /^0x[0-9a-fA-F]{8}$/,
+      );
+      expect(result.data.permission?.validation_id).toMatch(
+        /^0x[0-9a-fA-F]{42}$/,
+      );
+      expect(result.data.permission?.session_signer_address).toMatch(
+        /^0x[0-9a-fA-F]{40}$/,
+      );
+      expect(result.data.permission?.kernel_version).toBe("0.3.1");
+      expect(result.data.permission?.package_version).toBe("5.6.3");
     }
   });
 });
@@ -207,6 +259,32 @@ describe("Contract: schemas reject malformed payloads", () => {
       },
     };
     expect(DispatchRevokeDelegationSchema.safeParse(bad).success).toBe(false);
+  });
+
+  it("rejects grant_delegation with missing chain_id (#58)", () => {
+    const { chain_id: _drop, ...bad } =
+      dispatchGrantDelegation as typeof dispatchGrantDelegation & {
+        chain_id: number;
+      };
+    expect(DispatchGrantDelegationSchema.safeParse(bad).success).toBe(false);
+  });
+
+  it("rejects grant_delegation with non-integer chain_id (#58)", () => {
+    const bad = { ...dispatchGrantDelegation, chain_id: "84532" };
+    expect(DispatchGrantDelegationSchema.safeParse(bad).success).toBe(false);
+  });
+
+  it("rejects callback granted with permission block whose session_signer_address is malformed (#58)", () => {
+    const ok = callbackDelegationGranted as {
+      permission: { session_signer_address: string };
+    };
+    const bad = {
+      ...callbackDelegationGranted,
+      permission: { ...ok.permission, session_signer_address: "0xnope" },
+    };
+    expect(
+      CallbackDelegationStateChangedSchema.safeParse(bad).success,
+    ).toBe(false);
   });
 
   it("rejects callback with invalid kind", () => {

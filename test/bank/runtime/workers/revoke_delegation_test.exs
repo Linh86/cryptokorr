@@ -122,6 +122,7 @@ defmodule Bank.Runtime.Workers.RevokeDelegationTest do
       perm_id = <<0xA1, 0xB2, 0xC3, 0xD4>>
       validation_id = <<0x02>> <> perm_id <> :binary.copy(<<0x00>>, 16)
       blob = "eyJzZXJpYWxpemVkUGVybWlzc2lvbkFjY291bnQiOiJ0ZXN0In0="
+      session_signer = "0x" <> String.duplicate("11", 20)
 
       {:ok, _} =
         Delegations.grant("sa-crypto", "0xa1b2c3d4", %{
@@ -129,7 +130,8 @@ defmodule Bank.Runtime.Workers.RevokeDelegationTest do
           permission_id: perm_id,
           validation_id: validation_id,
           kernel_version: "0.3.1",
-          permission_package_version: "5.6.3"
+          permission_package_version: "5.6.3",
+          session_signer_address: session_signer
         })
 
       test_pid = self()
@@ -162,6 +164,7 @@ defmodule Bank.Runtime.Workers.RevokeDelegationTest do
 
       assert body["permission"]["kernel_version"] == "0.3.1"
       assert body["permission"]["package_version"] == "5.6.3"
+      assert body["permission"]["session_signer_address"] == session_signer
     end
 
     test "omits the permission key for legacy sentinel rows" do

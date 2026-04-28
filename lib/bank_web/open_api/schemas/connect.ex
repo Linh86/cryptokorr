@@ -76,11 +76,14 @@ defmodule BankWeb.OpenApi.Schemas.ConnectSmartAccountResponse do
   OpenApiSpex.schema(%{
     title: "ConnectSmartAccountResponse",
     description: """
-    Synchronous receipt for the connect request. Until the adapter's
-    `POST /dispatch/grant_delegation` route lands, the runtime
-    persists the connect intent and emits an audit event but does
-    NOT actually grant a delegation on-chain. The `note` field
-    states this truthfully.
+    Synchronous receipt for the connect request. The runtime
+    audits the request and enqueues
+    `Bank.Runtime.Workers.GrantDelegation` to dispatch the grant
+    to the adapter (#58 grant flow). The actual delegation row is
+    created asynchronously via the
+    `delegation.state_changed{state: "granted"}` callback path,
+    so a 202 here does NOT yet imply an active row — observe the
+    callback to confirm. The `note` field states this truthfully.
     """,
     type: :object,
     required: [:status, :smart_account_id, :note],
@@ -93,7 +96,8 @@ defmodule BankWeb.OpenApi.Schemas.ConnectSmartAccountResponse do
       smart_account_id: %Schema{type: :string, example: "sa_primary"},
       note: %Schema{
         type: :string,
-        example: "Adapter dispatch is stubbed in v1.1 — see docs/wallet-connect.md."
+        example:
+          "Grant request audited and enqueued. Observe the delegation.state_changed callback path for the granted artifact."
       }
     }
   })

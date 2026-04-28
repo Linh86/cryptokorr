@@ -483,6 +483,8 @@ defmodule Bank.DelegationsTest do
     @perm_id <<0xA1, 0xB2, 0xC3, 0xD4>>
     @validation_id <<0x02>> <> @perm_id <> :binary.copy(<<0x00>>, 16)
     @blob_b64 "eyJzZXJpYWxpemVkUGVybWlzc2lvbkFjY291bnQiOiJ0ZXN0In0="
+    # 20-byte session-signer EOA hex (0x + 40 hex chars).
+    @session_signer "0x" <> String.duplicate("11", 20)
 
     test "grant accepts permission artifact attrs and persists them verbatim" do
       assert {:ok, d} =
@@ -493,7 +495,8 @@ defmodule Bank.DelegationsTest do
                  kernel_version: "0.3.1",
                  permission_package_version: "5.6.3",
                  installed_at_block: 12_345_678,
-                 install_tx_hash: "0xdeadbeef"
+                 install_tx_hash: "0xdeadbeef",
+                 session_signer_address: @session_signer
                })
 
       assert d.permission_blob == @blob_b64
@@ -503,6 +506,7 @@ defmodule Bank.DelegationsTest do
       assert d.permission_package_version == "5.6.3"
       assert d.installed_at_block == 12_345_678
       assert d.install_tx_hash == "0xdeadbeef"
+      assert d.session_signer_address == @session_signer
     end
 
     test "grant rejects a permission_id that is not exactly 4 bytes" do
@@ -537,10 +541,28 @@ defmodule Bank.DelegationsTest do
           permission_id: @perm_id,
           validation_id: @validation_id,
           kernel_version: "0.3.1",
-          permission_package_version: "5.6.3"
+          permission_package_version: "5.6.3",
+          session_signer_address: @session_signer
         })
 
       assert Bank.Delegations.Delegation.cryptographically_revocable?(d)
+    end
+
+    test "cryptographically_revocable?/1 returns false when session_signer_address is missing" do
+      # Subagent D's security review forces a keyless blob, which
+      # means the session-signer EOA must travel separately. Without
+      # it the adapter cannot rebuild the stub ModularSigner at
+      # revoke-time, so the row is NOT cryptographically revocable.
+      {:ok, d} =
+        Delegations.grant("sa_partial_signer", "0xa1b2c3d4", %{
+          permission_blob: @blob_b64,
+          permission_id: @perm_id,
+          validation_id: @validation_id,
+          kernel_version: "0.3.1",
+          permission_package_version: "5.6.3"
+        })
+
+      refute Bank.Delegations.Delegation.cryptographically_revocable?(d)
     end
 
     test "cryptographically_revocable?/1 returns false on legacy sentinel rows" do
@@ -584,14 +606,15 @@ defmodule Bank.DelegationsTest do
       refute Bank.Delegations.Delegation.cryptographically_revocable?(d)
     end
 
-    test "permission_dispatch_block/1 emits hex-encoded ids and the verbatim blob" do
+    test "permission_dispatch_block/1 emits hex-encoded ids, the blob, and the session signer address" do
       {:ok, d} =
         Delegations.grant("sa_disp", "0xa1b2c3d4", %{
           permission_blob: @blob_b64,
           permission_id: @perm_id,
           validation_id: @validation_id,
           kernel_version: "0.3.1",
-          permission_package_version: "5.6.3"
+          permission_package_version: "5.6.3",
+          session_signer_address: @session_signer
         })
 
       block = Delegations.permission_dispatch_block(d)
@@ -604,6 +627,7 @@ defmodule Bank.DelegationsTest do
 
       assert block.kernel_version == "0.3.1"
       assert block.package_version == "5.6.3"
+      assert block.session_signer_address == @session_signer
     end
 
     test "permission_dispatch_block/1 returns nil for legacy rows" do
@@ -611,10 +635,47 @@ defmodule Bank.DelegationsTest do
       assert is_nil(Delegations.permission_dispatch_block(d))
     end
 
-    test "apply_callback granted with permission block stores artifacts decoded from hex" do
+    test "apply_callback granted with full permission block stores all artifacts decoded from hex" do
       assert {:ok, d} =
                Delegations.apply_callback(%{
                  "smart_account_id" => "sa_cb",
+                 "delegation_id" => "0xa1b2c3d4",
+                 "state" => "granted",
+                 "reason" => "wallet_connect",
+                 "permission" => %{
+                   "blob" => @blob_b64,
+                   "permission_id" => "0xa1b2c3d4",
+                   "validation_id" => "0x02a1b2c3d400000000000000000000000000000000",
+                   "kernel_version" => "0.3.1",
+                   "package_version" => "5.6.3",
+                   "session_signer_address" => @session_signer,
+                   "installed_at_block" => 12_345_678,
+                   "install_tx_hash" => "0xdeadbeef"
+                 }
+               })
+
+      assert d.state == :active
+      assert d.permission_blob == @blob_b64
+      assert d.permission_id == @perm_id
+      assert d.validation_id == @validation_id
+      assert d.kernel_version == "0.3.1"
+      assert d.permission_package_version == "5.6.3"
+      assert d.session_signer_address == @session_signer
+      assert d.installed_at_block == 12_345_678
+      assert d.install_tx_hash == "0xdeadbeef"
+      assert Bank.Delegations.Delegation.cryptographically_revocable?(d)
+    end
+
+    test "apply_callback granted without session_signer_address produces a non-revocable row" do
+      # Backwards-compat: an adapter that has not been upgraded to
+      # emit `session_signer_address` still creates a Phoenix row,
+      # but the row is NOT cryptographically revocable. The worker's
+      # branch in `permission_dispatch_block/1` keeps such a row on
+      # the sentinel revoke path until a future grant repopulates
+      # the field.
+      assert {:ok, d} =
+               Delegations.apply_callback(%{
+                 "smart_account_id" => "sa_partial_cb",
                  "delegation_id" => "0xa1b2c3d4",
                  "state" => "granted",
                  "reason" => "wallet_connect",
@@ -628,12 +689,8 @@ defmodule Bank.DelegationsTest do
                })
 
       assert d.state == :active
-      assert d.permission_blob == @blob_b64
-      assert d.permission_id == @perm_id
-      assert d.validation_id == @validation_id
-      assert d.kernel_version == "0.3.1"
-      assert d.permission_package_version == "5.6.3"
-      assert Bank.Delegations.Delegation.cryptographically_revocable?(d)
+      refute Bank.Delegations.Delegation.cryptographically_revocable?(d)
+      assert is_nil(d.session_signer_address)
     end
 
     test "apply_callback granted without permission block keeps row legacy-shaped" do

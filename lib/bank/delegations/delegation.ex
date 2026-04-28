@@ -64,8 +64,17 @@ defmodule Bank.Delegations.Delegation do
       `KERNEL_PERMISSION_PIN`.
     * `installed_at_block` / `install_tx_hash` — install UserOp
       anchors for operator triage.
+    * `session_signer_address` — 20-byte EOA bound to the
+      permission's ECDSA signer module. Persisted because the
+      `serializePermissionAccount(...)` blob is KEYLESS (no
+      embedded `privateKey`); at revoke-time the adapter
+      reconstructs a stub `ModularSigner` whose `account.address`
+      equals this value, which is sufficient because
+      `getEnableData(...)` does not sign — it just reads the
+      address to recompute the kernel-stored deinitData. Storing
+      the address keeps Phoenix free of any signing material.
 
-  All seven columns are nullable. Legacy sentinel-era rows have
+  All eight columns are nullable. Legacy sentinel-era rows have
   them all NULL and stay on the sentinel revoke path. New rows
   populate them at grant-time; `cryptographically_revocable?/1`
   returns true iff the row has the complete wire-shape the adapter
@@ -102,6 +111,10 @@ defmodule Bank.Delegations.Delegation do
     field :permission_package_version, :string
     field :installed_at_block, :integer
     field :install_tx_hash, :string
+    # The session-signer EOA. Stored separately because the
+    # serialized blob is keyless (no privateKey embedded) — see
+    # the moduledoc above for why.
+    field :session_signer_address, :string
 
     timestamps()
   end
@@ -113,7 +126,8 @@ defmodule Bank.Delegations.Delegation do
     :kernel_version,
     :permission_package_version,
     :installed_at_block,
-    :install_tx_hash
+    :install_tx_hash,
+    :session_signer_address
   ]
 
   def changeset(delegation, attrs) do
@@ -199,8 +213,10 @@ defmodule Bank.Delegations.Delegation do
   artifact set required for a cryptographic revoke dispatch (#58).
 
   The adapter schema requires a serialized plugin blob, 4-byte
-  `permission_id`, 21-byte `validation_id`, `kernel_version`, and
-  `permission_package_version`. Treating a partial row as
+  `permission_id`, 21-byte `validation_id`, `kernel_version`,
+  `permission_package_version`, and `session_signer_address` (the
+  20-byte EOA used to rebuild the keyless plugin's stub
+  `ModularSigner` at revoke-time). Treating a partial row as
   cryptographically revocable would send malformed JSON and make the
   adapter reject the request after the worker has already selected the
   crypto path. We therefore require the complete wire-shape here.
@@ -215,13 +231,15 @@ defmodule Bank.Delegations.Delegation do
         permission_id: pid,
         validation_id: vid,
         kernel_version: kernel_version,
-        permission_package_version: package_version
+        permission_package_version: package_version,
+        session_signer_address: signer
       })
       when is_binary(blob) and byte_size(blob) > 0 and
              is_binary(pid) and byte_size(pid) == 4 and
              is_binary(vid) and byte_size(vid) == 21 and
              is_binary(kernel_version) and byte_size(kernel_version) > 0 and
-             is_binary(package_version) and byte_size(package_version) > 0,
+             is_binary(package_version) and byte_size(package_version) > 0 and
+             is_binary(signer) and byte_size(signer) == 42,
       do: true
 
   def cryptographically_revocable?(%__MODULE__{}), do: false

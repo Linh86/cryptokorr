@@ -300,7 +300,8 @@ defmodule Bank.AdapterClientTest do
         permission_id: "0xa1b2c3d4",
         validation_id: "0x02a1b2c3d400000000000000000000000000000000",
         kernel_version: "0.3.1",
-        package_version: "5.6.3"
+        package_version: "5.6.3",
+        session_signer_address: "0x" <> String.duplicate("11", 20)
       }
 
       assert {:ok, _} =
@@ -317,6 +318,104 @@ defmodule Bank.AdapterClientTest do
       assert payload["permission"]["validation_id"] == perm_block.validation_id
       assert payload["permission"]["kernel_version"] == "0.3.1"
       assert payload["permission"]["package_version"] == "5.6.3"
+
+      assert payload["permission"]["session_signer_address"] ==
+               perm_block.session_signer_address
+    end
+  end
+
+  describe "dispatch_grant_delegation/2 — payload shape (#58 grant flow)" do
+    test "threads smart_account_id, chain_id, account, scope, and delegation_payload into the adapter body" do
+      test_pid = self()
+
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        payload = Jason.decode!(body)
+
+        send(test_pid, {:dispatch, payload, conn.method, conn.request_path, conn.req_headers})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(
+          202,
+          Jason.encode!(%{"accepted" => true, "smart_account_id" => "sa_grant"})
+        )
+      end)
+
+      assert {:ok, result} =
+               AdapterClient.dispatch_grant_delegation(%{
+                 smart_account_id: "sa_grant",
+                 chain_id: 84_532,
+                 account: "0xabc000000000000000000000000000000000dead",
+                 scope: %{"asset" => "USDC"},
+                 delegation_payload: %{"sig" => "0xdeadbeef"}
+               })
+
+      assert result.accepted == true
+      assert result.smart_account_id == "sa_grant"
+
+      assert_received {:dispatch, payload, "POST", "/dispatch/grant_delegation", headers}
+
+      assert {"authorization", "Bearer test-adapter-dispatch-secret"} in headers
+
+      assert payload["contract_version"] == 1
+      assert payload["action"] == "grant_delegation"
+      assert payload["smart_account_id"] == "sa_grant"
+      assert payload["chain_id"] == 84_532
+      assert payload["account"] == "0xabc000000000000000000000000000000000dead"
+      assert payload["scope"] == %{"asset" => "USDC"}
+      assert payload["delegation_payload"] == %{"sig" => "0xdeadbeef"}
+      assert payload["correlation_id"] == nil
+      assert is_binary(payload["emitted_at"])
+    end
+
+    test "raises FunctionClauseError when smart_account_id is missing" do
+      assert_raise FunctionClauseError, fn ->
+        AdapterClient.dispatch_grant_delegation(%{
+          chain_id: 84_532,
+          account: "0xabc"
+        })
+      end
+    end
+
+    test "raises FunctionClauseError when chain_id is not an integer" do
+      assert_raise FunctionClauseError, fn ->
+        AdapterClient.dispatch_grant_delegation(%{
+          smart_account_id: "sa",
+          chain_id: "84532",
+          account: "0xabc"
+        })
+      end
+    end
+
+    test "maps adapter 4xx onto :adapter_rejected" do
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(422, Jason.encode!(%{"error" => "unsupported_chain"}))
+      end)
+
+      assert {:error, {:adapter_rejected, 422, _}} =
+               AdapterClient.dispatch_grant_delegation(%{
+                 smart_account_id: "sa",
+                 chain_id: 1,
+                 account: "0xabc"
+               })
+    end
+
+    test "maps adapter 5xx onto :adapter_error" do
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(503, Jason.encode!(%{"error" => "upstream"}))
+      end)
+
+      assert {:error, {:adapter_error, 503, _}} =
+               AdapterClient.dispatch_grant_delegation(%{
+                 smart_account_id: "sa",
+                 chain_id: 84_532,
+                 account: "0xabc"
+               })
     end
   end
 end

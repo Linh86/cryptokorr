@@ -249,15 +249,50 @@ both env vars derive to the same EOA.
   EOA. The same EOA `provision-kernel.ts --broadcast` deploys the
   kernel against; pinned by the kernel's `rootValidator` slot at
   initialization. Signs `Kernel.uninstallValidation(...)` UserOps
-  because the kernel's `onlyEntryPointOrSelfOrRoot` guard rejects
-  any other signer. Required for the cryptographic revoke path
-  (#58) — when absent, the adapter refuses any dispatch carrying a
-  `permission` block (emits `state=revoke_failed,
-  reason=operator_key_missing`) rather than silently downgrade to
-  the legacy sentinel revoke. Should live behind tighter
-  controls than the runtime session key (HSM / KMS / cold-signing
-  sidecar — tracked as a follow-up hardening track per Subagent
-  D's review).
+  AND the EIP-712 enable signature on every grant install
+  (`executeGrant`'s first UserOp). Required for both the
+  cryptographic revoke path (#58 part 1) AND the cryptographic
+  grant path (#58 part 2). When absent, the adapter:
+   * Refuses any revoke dispatch carrying a `permission` block
+     (`state=revoke_failed, reason=operator_key_missing`).
+   * Refuses any grant dispatch (`state=granted, reason=operator_key_missing`,
+     no `permission` block — Phoenix records the row but
+     `cryptographically_revocable?/1` returns false so revoke
+     takes the sentinel path).
+  Should live behind tighter controls than the runtime session
+  key (HSM / KMS / cold-signing sidecar — tracked as a follow-up
+  hardening track per Subagent D's review).
+
+### Session-key secrecy (#58 grant flow)
+
+The grant flow generates a fresh ECDSA session key per
+permission inside the adapter (`generatePrivateKey()` in
+`src/chains/base/grant.ts`). The key is held in adapter memory
+ONLY for the duration of the install UserOp's enable-signature
+flow, then discarded.
+
+The serialized blob persisted in Phoenix is **KEYLESS**:
+`serializePermissionAccount(account, undefined)` — the optional
+`privateKey` parameter is deliberately omitted. Subagent D's
+security review (PR #129 grant-flow follow-up) verified that
+ZeroDev's serializer embeds the privateKey VERBATIM if passed,
+so persisting the blob with the key would make Phoenix an
+unintended hot wallet.
+
+The session signer's EOA address rides on the wire as
+`permission.session_signer_address` and is stored in
+`delegations.session_signer_address`. At revoke time the adapter
+rebuilds a stub `ModularSigner` whose `account.address` equals
+that value; `getEnableData(...)` reads only the address (no
+signing), so the keyless blob round-trips cleanly without
+holding any signing authority outside the adapter's grant-time
+window.
+
+**Operator implication**: a leak of the Phoenix database does
+NOT compromise any session signing key. The session keys live
+ephemerally in adapter memory; the only persistent signing
+material is `OPERATOR_PRIVATE_KEY`, which an attacker would also
+need to leverage Phoenix data into actual on-chain action.
 
 Both keys are validated at startup:
 

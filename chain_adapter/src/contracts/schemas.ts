@@ -72,16 +72,20 @@ export type DispatchSwap = z.infer<typeof DispatchSwapSchema>;
 
 /**
  * Permission block (#58). Optional sibling field on the revoke
- * dispatch carrying the data the cryptographic revoke needs to
- * reconstruct the ZeroDev plugin and build the
- * `Kernel.uninstallValidation(...)` UserOp.
+ * dispatch AND on the granted callback. Carries the data the
+ * cryptographic revoke needs to reconstruct the ZeroDev plugin and
+ * build the `Kernel.uninstallValidation(...)` UserOp.
  *
  * Shape:
- *   * `blob` — `serializePermissionAccount(...)` output (base64
- *     string). Adapter feeds it back to
- *     `deserializePermissionAccount(...)` to rebuild the same plugin
- *     the grant flow installed. Stored verbatim by Phoenix; opaque to
- *     the wire.
+ *   * `blob` — `serializePermissionAccount(account, undefined)`
+ *     output (base64 string). The privateKey parameter is
+ *     deliberately omitted at grant time so the blob is KEYLESS:
+ *     Phoenix never holds session-signer secrets. See Subagent D's
+ *     security review (PR #129 grant-flow follow-up) and
+ *     `docs/security.md`. Adapter feeds the blob back to
+ *     `deserializePermissionAccount(...)` to rebuild the same
+ *     policies + signer-contract identity the grant flow
+ *     installed.
  *   * `permission_id` — 0x-prefixed 4-byte hex (10 chars). The 4-byte
  *     ZeroDev permissionId; denormalized for audit / diagnostics.
  *   * `validation_id` — 0x-prefixed 21-byte hex (44 chars). The
@@ -95,6 +99,21 @@ export type DispatchSwap = z.infer<typeof DispatchSwapSchema>;
  *     blob was produced under. Adapter refuses if it differs from
  *     `KERNEL_PERMISSION_PIN.zeroDevPermissionsPackageVersion` —
  *     fail-closed posture against package drift.
+ *   * `session_signer_address` — 0x-prefixed 20-byte hex (42 chars).
+ *     The session ECDSA EOA bound to the permission. Required
+ *     because the blob is keyless: at revoke-time the adapter
+ *     rebuilds a stub `ModularSigner` whose `account.address`
+ *     equals this value. `getEnableData(...)` only reads the
+ *     address; no signing happens during revoke. Without this
+ *     field the deserializer would throw "No signer or serialized
+ *     sessionKey provided". Optional only for backwards-compat
+ *     with rows that predate the keyless-blob design; Phoenix's
+ *     `cryptographically_revocable?/1` refuses to dispatch a
+ *     `permission` block without it.
+ *   * `installed_at_block` — install UserOp's chain-level block
+ *     anchor for operator triage. Optional.
+ *   * `install_tx_hash` — install UserOp's chain-level tx hash for
+ *     operator triage. Optional.
  *
  * Absent → adapter takes the sentinel path. Present → adapter
  * attempts cryptographic revoke and fails closed
@@ -111,6 +130,15 @@ export const PermissionBlockSchema = z.object({
     .regex(/^0x[0-9a-fA-F]{42}$/, "validation_id must be 0x + 42 hex chars (21 bytes)"),
   kernel_version: z.string().min(1),
   package_version: z.string().min(1),
+  session_signer_address: z
+    .string()
+    .regex(
+      /^0x[0-9a-fA-F]{40}$/,
+      "session_signer_address must be 0x + 40 hex chars (20 bytes)",
+    )
+    .optional(),
+  installed_at_block: z.number().int().nonnegative().optional(),
+  install_tx_hash: z.string().min(1).optional(),
 });
 export type PermissionBlock = z.infer<typeof PermissionBlockSchema>;
 
@@ -135,6 +163,56 @@ export const DispatchRevokeDelegationSchema = z.object({
   emitted_at: rfc3339,
 });
 export type DispatchRevokeDelegation = z.infer<typeof DispatchRevokeDelegationSchema>;
+
+/**
+ * POST /dispatch/grant_delegation (#58 grant flow).
+ *
+ * Phoenix-initiated request to install a fresh ZeroDev permission
+ * plugin on the kernel account. The adapter:
+ *
+ *   1. Builds a `PermissionPlugin` via
+ *      `toPermissionValidator(...)` using a session signer derived
+ *      from the runtime `delegationSignerKey`.
+ *   2. Installs it via `createKernelAccount({ plugins: { sudo,
+ *      regular } })` + a no-op first UserOp signed by the operator
+ *      (sudo) EOA — that triggers the EIP-712 enable signature
+ *      flow which writes the validator to the kernel's storage.
+ *   3. Calls `serializePermissionAccount(account, undefined)` —
+ *      KEYLESS — and emits a `delegation.state_changed{state:
+ *      "granted"}` callback whose `permission` block carries the
+ *      keyless blob plus the `session_signer_address` Phoenix
+ *      needs to rebuild the stub `ModularSigner` at revoke-time.
+ *
+ * The synchronous response is `202 accepted`; chain progress is
+ * reported via the callback path. The grant fails closed with a
+ * `delegation.state_changed{state: "revoke_failed"}` is NOT used
+ * here — granted/install_failed semantics ride on the granted
+ * callback's `reason` field plus a missing `permission` block.
+ */
+export const DispatchGrantDelegationSchema = z.object({
+  contract_version: z.literal(1),
+  action: z.literal("grant_delegation"),
+  smart_account_id: z.string().min(1),
+  // 8453 (Base) or 84532 (Base Sepolia). The adapter cross-checks
+  // this against `config.baseChainId` and refuses on mismatch.
+  chain_id: z.number().int(),
+  // The wallet-side EOA the user signed from. Threaded through for
+  // audit + future signature verification; the adapter does not
+  // currently parse it.
+  account: z.string().min(1),
+  // Caller-supplied policy hints. Adapter's grant path picks the
+  // initial policy set; eventual richer policies will be derived
+  // from this map. Empty object is a valid sudo-policy install.
+  scope: z.record(z.unknown()),
+  // Optional opaque blob the JS hook built (signed delegation
+  // parameters); the adapter does not parse it today, but the
+  // dispatch contract carries it through so a future signature-
+  // verifying adapter is wire-compatible.
+  delegation_payload: z.unknown().nullable().optional(),
+  correlation_id: z.string().nullable().optional(),
+  emitted_at: rfc3339,
+});
+export type DispatchGrantDelegation = z.infer<typeof DispatchGrantDelegationSchema>;
 
 // -------------------------------------------------------------------------
 // Callbacks: Adapter → Phoenix
@@ -214,6 +292,12 @@ export const CallbackDelegationStateChangedSchema = z.object({
   state: z.enum(["granted", "revoking", "revoke_failed", "revoked", "expired"]),
   reason: z.string().min(1),
   tx_refs: z.array(TxRefSchema).optional(),
+  // Optional permission artifact block, populated when the adapter
+  // emits a `granted` callback after a real ZeroDev permission
+  // install (#58 grant flow). Phoenix's `apply_callback/1`
+  // already decodes this shape; absence keeps the pre-#58
+  // sentinel-era flow unchanged.
+  permission: PermissionBlockSchema.optional(),
   emitted_at: rfc3339,
 });
 export type CallbackDelegationStateChanged = z.infer<

@@ -604,10 +604,10 @@
         "type": "object"
       },
       "ConnectSmartAccountResponse": {
-        "description": "Synchronous receipt for the connect request. Until the adapter's\n`POST /dispatch/grant_delegation` route lands, the runtime\npersists the connect intent and emits an audit event but does\nNOT actually grant a delegation on-chain. The `note` field\nstates this truthfully.\n",
+        "description": "Synchronous receipt for the connect request. The runtime\naudits the request and enqueues\n`Bank.Runtime.Workers.GrantDelegation` to dispatch the grant\nto the adapter (#58 grant flow). The actual delegation row is\ncreated asynchronously via the\n`delegation.state_changed{state: \"granted\"}` callback path,\nso a 202 here does NOT yet imply an active row — observe the\ncallback to confirm. The `note` field states this truthfully.\n",
         "properties": {
           "note": {
-            "example": "Adapter dispatch is stubbed in v1.1 — see docs/wallet-connect.md.",
+            "example": "Grant request audited and enqueued. Observe the delegation.state_changed callback path for the granted artifact.",
             "type": "string"
           },
           "smart_account_id": {
@@ -2313,7 +2313,7 @@
     "/v1/connect/smart_account": {
       "post": {
         "callbacks": {},
-        "description": "v1.1 scaffolding for the browser-native connect flow (see\n`docs/wallet-connect.md`). The synchronous response is\n`202 accepted` with a `note` stating that adapter dispatch is\nstubbed: the runtime persists the connect intent and emits an\naudit event, but `Bank.Delegations.request_connect/1` does NOT\nyet grant a delegation on-chain. Chain ids other than `8453`\n(Base) and `84532` (Base Sepolia) return `422\nunsupported_chain`.\n",
+        "description": "v1.1 entry for the browser-native connect flow (see\n`docs/wallet-connect.md`). The synchronous response is\n`202 accepted` after the runtime audits the request and\nenqueues `Bank.Runtime.Workers.GrantDelegation`. The worker\ndispatches to the adapter; the on-chain grant + permission\nartifact persistence happens via the\n`delegation.state_changed{state: \"granted\"}` callback path.\nChain ids other than `8453` (Base) and `84532` (Base Sepolia)\nreturn `422 unsupported_chain`.\n",
         "operationId": "BankWeb.API.V1.ConnectController.request",
         "parameters": [
           {

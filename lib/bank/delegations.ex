@@ -380,13 +380,21 @@ defmodule Bank.Delegations do
   def apply_callback(_), do: {:error, :invalid_callback}
 
   @doc """
-  Record a browser-initiated connect request (v1.1 scaffolding).
+  Record a browser-initiated connect request and enqueue the grant
+  worker (v1.1 wired under #58).
 
   Writes an `intent-to-connect` audit event capturing the signed
-  payload the JS hook built. The actual adapter call
-  (`dispatch_grant_delegation`) is stubbed until the adapter repo
-  exposes the endpoint — see `docs/wallet-connect.md` for the full
-  plan.
+  payload the JS hook built, then enqueues
+  `Bank.Runtime.Workers.GrantDelegation` to dispatch the grant to
+  the adapter. The actual on-chain install (build a ZeroDev
+  permission plugin, install via sudo-signed UserOp, emit
+  `granted` callback) lives in the adapter; the worker just
+  forwards the request and threads outcomes onto Oban retry
+  semantics.
+
+  The eventual `delegation.state_changed{state: "granted"}`
+  callback flows back through `apply_callback/1` and creates the
+  delegation row with the artifact columns populated.
 
   Accepts a map with:
     * `:smart_account_id` — string
@@ -395,17 +403,23 @@ defmodule Bank.Delegations do
     * `:delegation_payload` — map (signed payload, optional during
       the v1.1 stub phase)
 
-  Returns `{:ok, :accepted}` after the audit event is written.
+  Returns `{:ok, :accepted}` once the audit event is written and
+  the worker is enqueued. The synchronous response is acceptance
+  of the request, not confirmation of an active delegation —
+  observe the callback path for that.
   """
   @spec request_connect(map()) :: {:ok, :accepted} | {:error, term()}
-  def request_connect(%{
-        "smart_account_id" => sa_id,
-        "chain_id" => chain_id,
-        "account" => account
-      })
+  def request_connect(
+        %{
+          "smart_account_id" => sa_id,
+          "chain_id" => chain_id,
+          "account" => account
+        } = params
+      )
       when is_binary(sa_id) and is_integer(chain_id) and is_binary(account) do
     with :ok <- validate_chain(chain_id),
-         {:ok, _event} <- write_intent_audit(sa_id, chain_id, account) do
+         {:ok, _event} <- write_intent_audit(sa_id, chain_id, account),
+         {:ok, _job} <- enqueue_grant_worker(sa_id, chain_id, account, params) do
       {:ok, :accepted}
     end
   end
@@ -429,6 +443,20 @@ defmodule Bank.Delegations do
         "source" => "browser_wallet"
       }
     })
+  end
+
+  defp enqueue_grant_worker(sa_id, chain_id, account, params) do
+    args = %{
+      "smart_account_id" => sa_id,
+      "chain_id" => chain_id,
+      "account" => account,
+      "delegation_payload" => Map.get(params, "delegation_payload"),
+      "scope" => Map.get(params, "scope", %{})
+    }
+
+    args
+    |> Bank.Runtime.Workers.GrantDelegation.new()
+    |> Oban.insert()
   end
 
   @doc """
@@ -461,7 +489,8 @@ defmodule Bank.Delegations do
         permission_id: encode_hex(d.permission_id),
         validation_id: encode_hex(d.validation_id),
         kernel_version: d.kernel_version,
-        package_version: d.permission_package_version
+        package_version: d.permission_package_version,
+        session_signer_address: d.session_signer_address
       }
     end
   end
@@ -508,6 +537,7 @@ defmodule Bank.Delegations do
     |> maybe_put(:permission_package_version, Map.get(perm, "package_version"))
     |> maybe_put(:installed_at_block, Map.get(perm, "installed_at_block"))
     |> maybe_put(:install_tx_hash, Map.get(perm, "install_tx_hash"))
+    |> maybe_put(:session_signer_address, Map.get(perm, "session_signer_address"))
   end
 
   defp decode_permission_artifacts(_), do: %{}

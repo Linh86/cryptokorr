@@ -17,6 +17,7 @@ import type { BaseClients } from "./chains/base/client.js";
 import { handleTransferDispatch } from "./dispatch/transfer.js";
 import { handleSwapDispatch } from "./dispatch/swap.js";
 import { handleRevokeDispatch } from "./dispatch/revoke.js";
+import { handleGrantDispatch } from "./dispatch/grant.js";
 import { AdapterError, ValidationError } from "./lib/errors.js";
 import { logger } from "./lib/logger.js";
 
@@ -148,6 +149,24 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     { preHandler: verifyDispatchAuth },
     async (request: FastifyRequest, reply) => {
       const result = await handleRevokeDispatch(request.body, {
+        config,
+        callbackClient,
+        baseClients: baseClients!,
+      });
+
+      return reply.status(202).send(result);
+    },
+  );
+
+  // -----------------------------------------------------------------------
+  // POST /dispatch/grant_delegation (#58 grant flow)
+  // -----------------------------------------------------------------------
+
+  app.post(
+    "/dispatch/grant_delegation",
+    { preHandler: verifyDispatchAuth },
+    async (request: FastifyRequest, reply) => {
+      const result = await handleGrantDispatch(request.body, {
         config,
         callbackClient,
         baseClients: baseClients!,

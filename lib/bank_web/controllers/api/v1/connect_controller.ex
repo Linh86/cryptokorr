@@ -3,17 +3,22 @@ defmodule BankWeb.API.V1.ConnectController do
   `/v1/connect` — browser-initiated smart-account connect flow.
 
   The v0.1 delegation path flows through the adapter callback. This
-  controller is the v1.1 scaffolding for the browser-native flow
-  described in `docs/wallet-connect.md`: the JS hook at
+  controller is the v1.1 entry for the browser-native flow described
+  in `docs/wallet-connect.md`: the JS hook at
   `assets/js/hooks/wallet_connect.js` builds a signed delegation
   payload and POSTs it here. The controller writes an audit event
-  and hands off to `Bank.Delegations.request_connect/1`, which is a
-  stub until the adapter exposes `POST /dispatch/grant_delegation`.
+  and hands off to `Bank.Delegations.request_connect/1`, which now
+  enqueues `Bank.Runtime.Workers.GrantDelegation` (under #58 grant
+  flow). The worker dispatches to the adapter's
+  `POST /dispatch/grant_delegation` endpoint; the actual delegation
+  row gets created when the adapter posts back the
+  `delegation.state_changed{state: "granted"}` callback with a
+  populated `permission` block.
 
-  The endpoint is intentionally lenient on payload shape during the
-  stub phase; it requires the three fields that identify the smart
-  account + signer + chain, and carries everything else through on
-  the audit trail.
+  The endpoint requires the three fields that identify the smart
+  account + signer + chain, and carries everything else (including
+  the optional signed `delegation_payload`) through on the audit
+  trail.
   """
 
   use BankWeb, :controller
@@ -31,14 +36,15 @@ defmodule BankWeb.API.V1.ConnectController do
   operation(:request,
     summary: "Request a browser-initiated smart-account connect",
     description: """
-    v1.1 scaffolding for the browser-native connect flow (see
+    v1.1 entry for the browser-native connect flow (see
     `docs/wallet-connect.md`). The synchronous response is
-    `202 accepted` with a `note` stating that adapter dispatch is
-    stubbed: the runtime persists the connect intent and emits an
-    audit event, but `Bank.Delegations.request_connect/1` does NOT
-    yet grant a delegation on-chain. Chain ids other than `8453`
-    (Base) and `84532` (Base Sepolia) return `422
-    unsupported_chain`.
+    `202 accepted` after the runtime audits the request and
+    enqueues `Bank.Runtime.Workers.GrantDelegation`. The worker
+    dispatches to the adapter; the on-chain grant + permission
+    artifact persistence happens via the
+    `delegation.state_changed{state: "granted"}` callback path.
+    Chain ids other than `8453` (Base) and `84532` (Base Sepolia)
+    return `422 unsupported_chain`.
     """,
     tags: ["Connect"],
     parameters: [@idempotency_key_ref, @request_id_in_ref],
@@ -61,7 +67,8 @@ defmodule BankWeb.API.V1.ConnectController do
       |> json(%{
         status: "accepted",
         smart_account_id: payload["smart_account_id"],
-        note: "Adapter dispatch is stubbed in v1.1 — see docs/wallet-connect.md."
+        note:
+          "Grant request audited and enqueued. Observe the delegation.state_changed callback path for the granted artifact."
       })
     else
       {:error, {:missing, field}} ->

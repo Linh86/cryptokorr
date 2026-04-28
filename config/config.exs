@@ -78,7 +78,8 @@ config :bank, Oban,
     approvals_expire: 5,
     executions_run: 5,
     executions_confirm: 10,
-    security_revoke: 3
+    security_revoke: 3,
+    delegations_grant: 3
   ],
   plugins: [
     {Oban.Plugins.Pruner, max_age: 60 * 60 * 24 * 7}

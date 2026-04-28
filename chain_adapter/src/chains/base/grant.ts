@@ -1,0 +1,423 @@
+/**
+ * Cryptographic GRANT executor (#58 grant flow).
+ *
+ * Builds a real ZeroDev `PermissionPlugin` via
+ * `toPermissionValidator(...)`, installs it on the kernel account
+ * by sending a no-op first UserOp under `{ sudo, regular }` plugin
+ * slots (the SDK lazily writes the validator's enable signature
+ * into the first call's signature blob), then calls
+ * `serializePermissionAccount(account, undefined)` to produce a
+ * KEYLESS plugin blob and emits a
+ * `delegation.state_changed{state: "granted"}` callback whose
+ * `permission` block carries everything Phoenix needs to drive a
+ * later cryptographic revoke.
+ *
+ * ## Why keyless
+ *
+ * Subagent D's security review of PR #129's grant-flow follow-up
+ * confirmed that `serializePermissionAccount(account,
+ * sessionPrivateKey)` embeds the key VERBATIM in the base64 blob.
+ * Persisting that in Phoenix would make the control plane hold a
+ * signing key — a hard violation of CryptoBank's threat model
+ * (adapter-only signers). We therefore call
+ * `serializePermissionAccount(account, undefined)` and ship the
+ * `session_signer_address` as a separate field. At revoke-time
+ * `deserializePermissionAccount` accepts an external
+ * `modularSigner` whose `account.address` equals that value;
+ * `getEnableData(...)` only reads the address (no signing during
+ * revoke), so no private key ever needs to leave the adapter.
+ *
+ * ## Why the operator (sudo) key MUST be configured
+ *
+ * The kernel account at `config.smartAccountAddress` was
+ * provisioned with the operator EOA as its root validator
+ * (`provision-kernel.ts`). Any plugin install requires the sudo
+ * EIP-712 signature on the enable typed data — only that EOA's
+ * key produces a valid one. If `config.operatorPrivateKey` is
+ * missing the grant fails closed: it emits
+ * `delegation.state_changed{state: "granted", reason:
+ * "operator_key_missing"}` with NO `permission` block, so
+ * Phoenix's `cryptographically_revocable?/1` returns false and
+ * the operator triages the missing key.
+ *
+ * Errors at every other step (deserialization-shape failures,
+ * RPC errors, bundler rejections, install reversion) emit a
+ * `granted` callback with no `permission` block and a precise
+ * `reason` so Phoenix records the request audit-trail without
+ * marking the row as cryptographic. The dispatch handler is
+ * still 202 — failures are reported via callback shape, not
+ * HTTP status, matching the rest of the adapter contract.
+ */
+
+import {
+  type Address,
+  type Chain,
+  type Hash,
+  type Hex,
+  concatHex,
+  http,
+  pad,
+} from "viem";
+import { privateKeyToAccount, generatePrivateKey } from "viem/accounts";
+
+import type { AdapterConfig } from "../../config/index.js";
+import type { CallbackClient } from "../../callbacks/client.js";
+import { nextCallbackId } from "../../callbacks/client.js";
+import type { BaseClients } from "./client.js";
+import { logger } from "../../lib/logger.js";
+import { ExecutionError } from "../../lib/errors.js";
+import { KERNEL_PERMISSION_PIN } from "./permission_validator.js";
+
+/**
+ * Specific failure codes emitted via `delegation.state_changed`
+ * `reason` on the granted-but-without-permission-block path.
+ * Mapping each to a stable code lets a future operator runbook
+ * match remediation steps to specific failure modes.
+ */
+export type GrantFailureCode =
+  | "operator_key_missing"
+  | "permission_install_failed"
+  | "permission_serialization_failed"
+  | "chain_id_mismatch";
+
+/** Result of a successful grant. Returned for tests + logging. */
+export interface GrantResult {
+  permissionId: Hex;
+  validationId: Hex;
+  sessionSignerAddress: Address;
+  installTxHash: Hash;
+  installBlockNumber: bigint;
+  blob: string;
+}
+
+/**
+ * Execute the on-chain grant: build a permission plugin, install
+ * it on the kernel account, serialize the resulting account
+ * (KEYLESS), emit the granted callback. Throws `ExecutionError`
+ * on any step that fails AFTER emitting a precise failure
+ * callback.
+ */
+export async function executeGrant(args: {
+  smartAccountId: string;
+  chainId: number;
+  account: string;
+  scope: Record<string, unknown>;
+  config: AdapterConfig;
+  clients: BaseClients;
+  callbackClient: CallbackClient;
+}): Promise<GrantResult> {
+  const { smartAccountId, chainId, scope, config, clients, callbackClient } =
+    args;
+
+  // Guard 1: operator key must be configured. Without it the
+  // sudo-signed EIP-712 enable signature cannot be produced and
+  // the kernel will refuse the install. Refuse BEFORE any RPC.
+  if (!config.operatorPrivateKey || !config.operatorAddress) {
+    return await emitGrantFailure({
+      smartAccountId,
+      callbackClient,
+      reason: "operator_key_missing",
+      message:
+        "Cryptographic grant requested but OPERATOR_PRIVATE_KEY / OPERATOR_ADDRESS is not configured.",
+    });
+  }
+
+  // Guard 2: refuse a chain mismatch up-front. The dispatch carries
+  // the chain id so Phoenix can target either Base or Base Sepolia
+  // independently; the adapter is configured for exactly one.
+  if (chainId !== config.baseChainId) {
+    return await emitGrantFailure({
+      smartAccountId,
+      callbackClient,
+      reason: "chain_id_mismatch",
+      message: `Dispatch chain_id=${chainId} does not match adapter baseChainId=${config.baseChainId}`,
+    });
+  }
+
+  logger.info("Executing Base delegation grant (cryptographic install)", {
+    smart_account_id: smartAccountId,
+    chain_id: chainId,
+    smart_account: clients.smartAccountAddress,
+    scope_keys: Object.keys(scope),
+  });
+
+  // Lazy import: keeps the SDK out of the cold path for adapters
+  // that never grant cryptographically. The packages are already
+  // devDependencies for the encoder + revoke path; the runtime
+  // image needs them under the grant flow specifically. Same
+  // pattern `executeCryptographicRevoke` uses.
+  let result: GrantResult;
+  try {
+    const sdk = await import("@zerodev/sdk");
+    const sdkConstants = await import("@zerodev/sdk/constants");
+    const ecdsaValidator = await import("@zerodev/ecdsa-validator");
+    const permissions = await import("@zerodev/permissions");
+    const permissionsSigners = await import("@zerodev/permissions/signers");
+    const permissionsPolicies = await import("@zerodev/permissions/policies");
+
+    const entryPoint = sdkConstants.getEntryPoint("0.7");
+    const kernelVersion = sdkConstants.KERNEL_V3_1;
+
+    // SECRET: operator EOA. Used to sign the install UserOp's
+    // enable typed-data. Never logged.
+    const operatorAccount = privateKeyToAccount(config.operatorPrivateKey);
+    const sudoValidator = await ecdsaValidator.signerToEcdsaValidator(
+      clients.publicClient as never,
+      {
+        signer: operatorAccount,
+        entryPoint,
+        kernelVersion,
+      },
+    );
+
+    // SECRET: fresh session-key EOA. Generated per grant so each
+    // permission has its own signer. The privateKey is held in
+    // memory only for the duration of the install UserOp signature
+    // and the serialized account (which we deliberately serialize
+    // WITHOUT it). After this function returns the local binding
+    // goes out of scope; the GC reclaims it when no other
+    // reference holds it. The runtime never persists it and it
+    // never crosses the wire to Phoenix.
+    const sessionPrivateKey = generatePrivateKey();
+    const sessionAccount = privateKeyToAccount(sessionPrivateKey);
+    const sessionSigner = await permissionsSigners.toECDSASigner({
+      signer: sessionAccount,
+    });
+
+    // Build the permission plugin with a minimal sudo policy. v0.1
+    // grants do not yet thread the wallet-connect `scope` into
+    // ZeroDev policy parameters; that is a follow-up. The sudo
+    // policy is acceptable for v0.1 because Phoenix's outer
+    // policy gate (decision flow + risk checks) still enforces
+    // every transfer's authorization independently of the
+    // on-chain permission's scope.
+    const permissionPlugin = await permissions.toPermissionValidator(
+      clients.publicClient as never,
+      {
+        signer: sessionSigner,
+        policies: [permissionsPolicies.toSudoPolicy({})],
+        entryPoint,
+        kernelVersion,
+      },
+    );
+
+    // permissionId is bytes4 (4-byte hex, 10 chars including 0x).
+    const permissionId = permissionPlugin.getIdentifier() as Hex;
+    const validationId = concatHex([
+      // VALIDATOR_TYPE.PERMISSION; same value `executeCryptographicRevoke`
+      // pads against. Pinned in `uninstall_validation.ts`.
+      "0x02",
+      pad(permissionId, { size: 20, dir: "right" }),
+    ]);
+
+    // Build the kernel account against the pre-deployed address.
+    // The address override is required: without it `createKernelAccount`
+    // derives a fresh CREATE2 address from the sudo validator alone,
+    // which would not match the kernel deployed under #84.
+    const kernelAccount = await sdk.createKernelAccount(
+      clients.publicClient as never,
+      {
+        entryPoint,
+        kernelVersion,
+        plugins: { sudo: sudoValidator, regular: permissionPlugin },
+        address: clients.smartAccountAddress,
+      },
+    );
+
+    const kernelClient = sdk.createKernelAccountClient({
+      account: kernelAccount,
+      chain: (clients.publicClient as { chain?: Chain }).chain,
+      bundlerTransport: http(config.bundlerRpcUrl),
+      client: clients.publicClient as never,
+    });
+
+    // Install: a no-op self-call works because the SDK splices the
+    // EIP-712 enable signature into the first UserOp's signature
+    // blob (see Subagent B's audit of `getPluginEnableSignature` in
+    // `toKernelPluginManager.ts`). Calling the smart account itself
+    // with empty calldata + zero value triggers the install side-
+    // effect without executing any state-changing logic.
+    let userOpHash: Hash;
+    let receiptTxHash: Hash;
+    let receiptBlockNumber: bigint;
+    try {
+      userOpHash = (await kernelClient.sendUserOperation({
+        callData: await kernelAccount.encodeCalls([
+          {
+            to: clients.smartAccountAddress,
+            value: 0n,
+            data: "0x",
+          },
+        ]),
+      })) as Hash;
+
+      const receipt = await kernelClient.waitForUserOperationReceipt({
+        hash: userOpHash,
+      });
+
+      if (!receipt.success) {
+        const reason = receipt.reason ?? "permission_install_reverted";
+        return await emitGrantFailure({
+          smartAccountId,
+          callbackClient,
+          reason: "permission_install_failed",
+          message: `Install UserOp reverted: ${reason}`,
+        });
+      }
+
+      receiptTxHash = receipt.receipt.transactionHash as Hash;
+      receiptBlockNumber = receipt.receipt.blockNumber as bigint;
+    } catch (err) {
+      const message = redactGrantError(err);
+      return await emitGrantFailure({
+        smartAccountId,
+        callbackClient,
+        reason: "permission_install_failed",
+        message: `Install UserOp failed: ${message}`,
+      });
+    }
+
+    // KEYLESS serialization. Pass `undefined` for privateKey so the
+    // session signer never crosses the wire. See Subagent D's review.
+    let blob: string;
+    try {
+      blob = await permissions.serializePermissionAccount(
+        kernelAccount as never,
+        undefined,
+      );
+    } catch (err) {
+      const message = redactGrantError(err);
+      return await emitGrantFailure({
+        smartAccountId,
+        callbackClient,
+        reason: "permission_serialization_failed",
+        message: `serializePermissionAccount failed: ${message}`,
+      });
+    }
+
+    result = {
+      permissionId,
+      validationId,
+      sessionSignerAddress: sessionAccount.address,
+      installTxHash: receiptTxHash,
+      installBlockNumber: receiptBlockNumber,
+      blob,
+    };
+  } catch (err) {
+    if (err instanceof ExecutionError) throw err;
+    const message = redactGrantError(err);
+    return await emitGrantFailure({
+      smartAccountId,
+      callbackClient,
+      reason: "permission_install_failed",
+      message: `Grant flow failed: ${message}`,
+    });
+  }
+
+  // Successful grant: emit the granted callback with the full
+  // permission block. Phoenix decodes the block in
+  // `Bank.Delegations.apply_callback/1`'s "granted" branch.
+  await callbackClient.send({
+    contract_version: 1,
+    callback_id: nextCallbackId(),
+    kind: "delegation.state_changed",
+    smart_account_id: smartAccountId,
+    delegation_id: result.permissionId,
+    state: "granted",
+    reason: "wallet_connect_install",
+    permission: {
+      blob: result.blob,
+      permission_id: result.permissionId,
+      validation_id: result.validationId,
+      kernel_version: KERNEL_VERSION_STRING,
+      package_version:
+        KERNEL_PERMISSION_PIN.zeroDevPermissionsPackageVersion,
+      session_signer_address: result.sessionSignerAddress,
+      installed_at_block: Number(result.installBlockNumber),
+      install_tx_hash: result.installTxHash,
+    },
+    emitted_at: new Date().toISOString(),
+  });
+
+  logger.info("Cryptographic grant confirmed on-chain", {
+    smart_account_id: smartAccountId,
+    permission_id: result.permissionId,
+    validation_id: result.validationId,
+    install_tx_hash: result.installTxHash,
+    install_block: Number(result.installBlockNumber),
+  });
+
+  return result;
+}
+
+/**
+ * Emit a failure-shaped granted callback (no `permission` block,
+ * specific `reason`) and throw `ExecutionError`. The dispatch
+ * handler unwraps the error so the outer 202 is preserved — the
+ * granted-without-permission-block shape is how Phoenix learns
+ * that the grant failed without losing the audit anchor.
+ *
+ * Phoenix's `Bank.Delegations.apply_callback/1` decodes a granted
+ * callback without a permission block as a legacy-shape grant
+ * (the row is :active but `cryptographically_revocable?/1` returns
+ * false). That is the right shape for "we attempted but the row is
+ * not yet cryptographic" — the operator can re-trigger via the
+ * connect endpoint.
+ */
+async function emitGrantFailure(args: {
+  smartAccountId: string;
+  callbackClient: CallbackClient;
+  reason: GrantFailureCode;
+  message: string;
+}): Promise<never> {
+  logger.error("Cryptographic grant failed", {
+    smart_account_id: args.smartAccountId,
+    code: args.reason,
+    error: args.message,
+  });
+
+  await args.callbackClient.send({
+    contract_version: 1,
+    callback_id: nextCallbackId(),
+    kind: "delegation.state_changed",
+    smart_account_id: args.smartAccountId,
+    // The wire-level `delegation_id` for failed grants is a
+    // synthetic placeholder — the row stays opaque on Phoenix.
+    // Real grants set it to the 4-byte permissionId hex.
+    delegation_id: `grant_failed_${Date.now()}`,
+    state: "granted",
+    reason: args.reason,
+    emitted_at: new Date().toISOString(),
+  });
+
+  throw new ExecutionError(args.reason, args.message);
+}
+
+/**
+ * Kernel implementation version pinned for this adapter. Stays in
+ * lockstep with `provision-kernel.ts`'s `PINNED_KERNEL_VERSION`.
+ * Exposed as a constant string here (not the SDK enum) so the
+ * granted callback's `kernel_version` field is wire-friendly.
+ */
+const KERNEL_VERSION_STRING = "0.3.1";
+
+/**
+ * Strip URLs from grant-flow error messages before logging /
+ * emitting them. The bundler RPC URL contains an API key in many
+ * provider configurations (Pimlico, Alchemy AA), and viem's HTTP
+ * errors include the request URL by default. This helper is a
+ * narrower copy of `scripts/redact.ts`'s `redactErrorMessage` so
+ * the `src/` tree does not depend on `scripts/` (TypeScript's
+ * `rootDir` excludes the latter).
+ *
+ * The replacement keeps the protocol + host so an operator
+ * triaging a callback can still recognise the destination
+ * provider, but drops everything after the host.
+ */
+function redactGrantError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  return raw.replace(
+    /(https?:)\/\/([^/\s"]+)\/[^\s"]*/g,
+    "$1//$2/<redacted>",
+  );
+}

@@ -77,6 +77,7 @@ defmodule Bank.AdapterClient do
 
   @type transfer_ok :: %{accepted: true, execution_plan_id: String.t()}
   @type revoke_ok :: %{accepted: true, smart_account_id: String.t()}
+  @type grant_ok :: %{accepted: true, smart_account_id: String.t()}
   @type transfer_error ::
           :adapter_unavailable
           | :invalid_response
@@ -84,6 +85,11 @@ defmodule Bank.AdapterClient do
           | {:adapter_error, pos_integer(), map() | String.t()}
           | {:target_not_resolvable, atom()}
   @type revoke_error ::
+          :adapter_unavailable
+          | :invalid_response
+          | {:adapter_rejected, pos_integer(), map() | String.t()}
+          | {:adapter_error, pos_integer(), map() | String.t()}
+  @type grant_error ::
           :adapter_unavailable
           | :invalid_response
           | {:adapter_rejected, pos_integer(), map() | String.t()}
@@ -167,6 +173,67 @@ defmodule Bank.AdapterClient do
       end
 
     post("/dispatch/revoke_delegation", payload, :revoke, opts)
+  end
+
+  @doc """
+  Dispatch a delegation GRANT to the adapter (#58 grant flow).
+
+  The adapter is expected to (1) build a real ZeroDev permission
+  plugin via `toPermissionValidator(...)`, (2) install it on the
+  Kernel account through a sudo-signed UserOp, (3) call
+  `serializePermissionAccount(account, undefined)` (KEYLESS — no
+  privateKey embedded; see `docs/security.md`'s session-signer
+  rationale), and (4) emit a `delegation.state_changed{state:
+  "granted"}` callback whose `permission` block carries the
+  artifact set Phoenix's `apply_callback/1` already decodes.
+
+  Accepts a map with:
+    * `:smart_account_id` (required) — Phoenix's smart-account id.
+    * `:chain_id` (required) — 8453 (Base) or 84532 (Base Sepolia).
+    * `:account` (required) — the EOA the browser session signed
+      from, threaded through for audit.
+    * `:scope` (optional) — caller-supplied policy hints. The
+      adapter is free to attach its own policy interpretation; the
+      raw map is echoed back on the callback.
+    * `:delegation_payload` (optional) — opaque blob the JS hook
+      built (signed delegation parameters); the adapter persists it
+      in audit trails but does not parse it.
+    * `:correlation_id` (optional) — null-able UUID; the
+      synchronous response carries it back.
+
+  Returns `{:ok, %{accepted: true, smart_account_id: id}}` on
+  HTTP 202, mapped error tuples otherwise.
+
+  The actual delegation row in Phoenix is created later, when the
+  adapter posts the `delegation.state_changed{state: "granted"}`
+  callback through `BankWeb.Internal.AdapterCallbackController`.
+  This dispatch is fire-and-forget for the row; callers that need
+  the persisted record must observe the callback path.
+  """
+  @spec dispatch_grant_delegation(map(), keyword()) ::
+          {:ok, grant_ok()} | {:error, grant_error()}
+  def dispatch_grant_delegation(
+        %{
+          smart_account_id: smart_account_id,
+          chain_id: chain_id,
+          account: account
+        } = args,
+        opts \\ []
+      )
+      when is_binary(smart_account_id) and is_integer(chain_id) and is_binary(account) do
+    payload = %{
+      contract_version: @contract_version,
+      action: "grant_delegation",
+      smart_account_id: smart_account_id,
+      chain_id: chain_id,
+      account: account,
+      scope: Map.get(args, :scope, %{}),
+      delegation_payload: Map.get(args, :delegation_payload),
+      correlation_id: Map.get(args, :correlation_id),
+      emitted_at: DateTime.utc_now() |> DateTime.to_iso8601()
+    }
+
+    post("/dispatch/grant_delegation", payload, :grant, opts)
   end
 
   # --- Payload shaping ---------------------------------------------------
@@ -296,6 +363,11 @@ defmodule Bank.AdapterClient do
   end
 
   defp parse_accepted(:revoke, %{"accepted" => true, "smart_account_id" => id})
+       when is_binary(id) do
+    {:ok, %{accepted: true, smart_account_id: id}}
+  end
+
+  defp parse_accepted(:grant, %{"accepted" => true, "smart_account_id" => id})
        when is_binary(id) do
     {:ok, %{accepted: true, smart_account_id: id}}
   end

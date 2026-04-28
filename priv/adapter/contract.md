@@ -407,6 +407,59 @@ Corresponds to `%Bank.Intents.AgentIntent{kind: :transfer}` after a
 Whitelisted swap, same skeleton plus `expected_output` and
 `slippage_bps` — see `fixtures/dispatch_swap.json`.
 
+### `grant_delegation` (#58 grant flow)
+
+Phoenix dispatches this to install a fresh ZeroDev permission
+plugin on the kernel account. Mirrors the
+`Bank.Runtime.Workers.GrantDelegation` job that runs after a
+browser-initiated `POST /v1/connect/smart_account`. See
+`fixtures/dispatch_grant_delegation.json`.
+
+```jsonc
+{
+  "action": "grant_delegation",
+  "smart_account_id": "sa_...",
+  "chain_id": 84532,                     // 8453 (Base) or 84532 (Sepolia)
+  "account": "0x...",                    // wallet-side EOA (audit anchor)
+  "scope": { "asset": "USDC" },          // caller-supplied policy hints
+  "delegation_payload": null,            // optional opaque signed blob
+  "correlation_id": null,
+  "emitted_at": "..."
+}
+```
+
+The adapter:
+
+1. Builds a `PermissionPlugin` via `toPermissionValidator(...)`.
+   v0.1 grants attach a single `toSudoPolicy()` — the wider
+   wallet-connect `scope` is reserved for future policy
+   parameterisation; Phoenix's outer policy gate continues to
+   enforce per-transfer authorisation independently.
+2. Installs the plugin via `createKernelAccount({ plugins: { sudo,
+   regular } })` plus a no-op first UserOp signed by the operator
+   (sudo) EOA. The SDK splices the EIP-712 enable signature into
+   that UserOp's signature blob; the kernel writes the validator
+   to storage as a side-effect.
+3. Calls `serializePermissionAccount(account, undefined)` —
+   **KEYLESS**: the session privateKey is deliberately NOT
+   embedded so Phoenix never holds signing material.
+4. Emits `delegation.state_changed{state: "granted", reason:
+   "wallet_connect_install"}` with a populated `permission`
+   block (see callback section). `delegation_id` MUST equal
+   `permission.permission_id` for cryptographic grants.
+
+The synchronous response is `202 accepted` regardless of on-chain
+outcome — failure verdicts ride on the callback shape, not HTTP
+status. On any fail-closed branch (operator key missing, chain
+mismatch, install reverted, serialization failed) the adapter
+emits a `granted` callback **without** a `permission` block and
+with a precise `reason` (`operator_key_missing`,
+`chain_id_mismatch`, `permission_install_failed`,
+`permission_serialization_failed`). Phoenix records the row as
+`:active` but `cryptographically_revocable?/1` returns false —
+the row stays on the sentinel revoke path and the operator
+triages the missing artifacts.
+
 ### `revoke_delegation`
 
 Matches the `Bank.Runtime.Workers.RevokeDelegation` job.
@@ -428,7 +481,10 @@ See `fixtures/dispatch_revoke_delegation.json`.
     "permission_id": "0x<8 hex>",
     "validation_id": "0x<42 hex>",
     "kernel_version": "0.3.1",
-    "package_version": "5.6.3"
+    "package_version": "5.6.3",
+    "session_signer_address": "0x<40 hex>",
+    "installed_at_block": 12345678,      // optional, install anchor
+    "install_tx_hash": "0x<64 hex>"      // optional, install anchor
   },
   "correlation_id": null                 // runtime-scoped
 }
@@ -475,14 +531,27 @@ Field semantics:
   (mismatch surfaces as `revoke_failed,
   reason=package_version_mismatch`). Defense against silent package
   drift on either side of the wire.
+- `session_signer_address` — 0x-prefixed 20-byte session-signer
+  EOA (42 hex chars). Required for cryptographic revoke because
+  the blob is KEYLESS by design (Subagent D's review: persisting
+  the session privateKey in Phoenix would make the control plane
+  hold a signing key, which violates the threat model). At revoke
+  time the adapter rebuilds a stub `ModularSigner` whose
+  `account.address` equals this value;
+  `deserializePermissionAccount` accepts the stub because
+  `getEnableData(...)` only reads the address (no signing during
+  revoke). A `permission` block missing this field surfaces as
+  `revoke_failed, reason=session_signer_missing`.
+- `installed_at_block` / `install_tx_hash` — optional install
+  UserOp anchors for operator triage.
 
 Phoenix populates the block via
 `Bank.Delegations.permission_dispatch_block/1` at dispatch time
-when the row is `cryptographically_revocable?/1` (i.e.
-`permission_blob` and a 21-byte `validation_id` are both stored).
-Sentinel-era rows have neither and continue to take the legacy
-path. There is no plan to backfill artifacts onto legacy rows; new
-grants populate them as they land.
+when the row is `cryptographically_revocable?/1` (i.e. the full
+artifact set is present, including `session_signer_address`).
+Sentinel-era rows continue to take the legacy path. There is no
+plan to backfill artifacts onto legacy rows; new grants under
+`grant_delegation` populate them as they land.
 
 ## Callbacks (Adapter → Phoenix)
 
@@ -533,7 +602,30 @@ Semantics of the failure state:
 
 The adapter MUST NOT emit `revoked` on a failure path.
 
-Fixture: `fixtures/callback_delegation_state_changed.json`.
+#### `granted` callback shapes (#58 grant flow)
+
+For `state: "granted"` the optional `permission` block is the
+verdict carrier:
+
+- `granted` **WITH** a populated `permission` block → cryptographic
+  install confirmed on chain. Phoenix decodes the artifacts via
+  `Bank.Delegations.apply_callback/1` and `cryptographically_revocable?/1`
+  returns true on the resulting row. `delegation_id` MUST equal
+  `permission.permission_id`.
+- `granted` **WITHOUT** a `permission` block → grant attempted but
+  failed (operator key missing, install reverted, serialization
+  error, chain mismatch). The `reason` field carries the precise
+  code (`operator_key_missing`, `permission_install_failed`,
+  `permission_serialization_failed`, `chain_id_mismatch`).
+  Phoenix still creates a row in `:active`, but
+  `cryptographically_revocable?/1` returns false — the row is
+  legacy-shaped and revoke takes the sentinel path.
+
+Fixtures:
+- `fixtures/callback_delegation_state_changed.json` — revoked
+  shape (legacy).
+- `fixtures/callback_delegation_granted.json` — granted shape
+  with full permission block.
 
 ## Failure-safe posture
 
