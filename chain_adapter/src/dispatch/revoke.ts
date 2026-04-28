@@ -115,6 +115,19 @@ export async function handleRevokeDispatch(
   }
 
   inFlight.add(dispatch.smart_account_id);
+  void runRevoke(dispatch, deps);
+
+  return {
+    accepted: true,
+    smart_account_id: dispatch.smart_account_id,
+    status: "revoking",
+  };
+}
+
+async function runRevoke(
+  dispatch: DispatchRevokeDelegation,
+  deps: RevokeDeps,
+): Promise<void> {
   try {
     await executeRevoke(
       dispatch.smart_account_id,
@@ -133,10 +146,4 @@ export async function handleRevokeDispatch(
   } finally {
     inFlight.delete(dispatch.smart_account_id);
   }
-
-  return {
-    accepted: true,
-    smart_account_id: dispatch.smart_account_id,
-    status: "revoking",
-  };
 }

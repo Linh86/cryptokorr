@@ -100,6 +100,9 @@ import {
   CryptographicRevokeError,
   assertValidationIdConsistent,
   assertPackageVersionPinned,
+  assertSignerModuleAllowed,
+  assertPolicyModulesAllowed,
+  extractPolicyContractAddresses,
 } from "./uninstall_validation.js";
 
 export interface RevokeResult {
@@ -683,6 +686,21 @@ async function executeCryptographicRevoke(
         permissionBlock.session_signer_address as `0x${string}`,
       ),
     });
+
+    // Allowlist guard #1: refuse if the stub's signerContractAddress
+    // (effectively whatever the deserializer will use as the
+    // signer module — the keyless blob has no privateKey, so the
+    // SDK uses our stub) is not in
+    // `KERNEL_PERMISSION_PIN.acceptedSignerContracts`. For the
+    // current codebase this is a tautology (toECDSASigner defaults
+    // to `ECDSA_SIGNER_CONTRACT`, which IS pinned), but it
+    // catches the future case where someone overrides
+    // `signerContractAddress` on the stub or extends the adapter to
+    // honor non-ECDSA signers without first adding their addresses
+    // to the pin. The address itself is a public contract address;
+    // no secrets transit this path.
+    assertSignerModuleAllowed(stubSigner.signerContractAddress);
+
     const permissionAccount = await permissions.deserializePermissionAccount(
       clients.publicClient as never,
       entryPoint,
@@ -695,6 +713,11 @@ async function executeCryptographicRevoke(
         kernelPluginManager: {
           regularValidator?: {
             validatorType?: string;
+            getPluginSerializationParams?: () => {
+              policies?: ReadonlyArray<{
+                policyParams?: { policyAddress?: string };
+              }>;
+            };
           };
         };
       }
@@ -703,6 +726,33 @@ async function executeCryptographicRevoke(
       throw new CryptographicRevokeError(
         "permission_deserialization_failed",
         "deserialized account does not carry a regular permission validator",
+      );
+    }
+
+    // Allowlist guard #2: every policy module reconstructed from
+    // the blob MUST be in
+    // `KERNEL_PERMISSION_PIN.acceptedPolicyContracts`. Unlike the
+    // signer-side check above, the policy addresses are CARRIED IN
+    // THE BLOB (extracted from
+    // `plugin.getPluginSerializationParams().policies[].policyParams.policyAddress`,
+    // see Subagent C's blob-shape research), so this is the
+    // meaningful runtime defense against a blob produced by a
+    // grant flow we have not audited. Empty list is a refusal.
+    if (
+      typeof permissionPlugin.getPluginSerializationParams === "function"
+    ) {
+      const policyAddrs = extractPolicyContractAddresses(
+        permissionPlugin as Parameters<typeof extractPolicyContractAddresses>[0],
+      );
+      assertPolicyModulesAllowed(policyAddrs);
+    } else {
+      // The plugin object MUST expose getPluginSerializationParams
+      // — every PermissionPlugin built by `toPermissionValidator`
+      // does. Missing it means the deserializer returned an
+      // unexpected shape; refuse rather than skip the allowlist.
+      throw new CryptographicRevokeError(
+        "permission_deserialization_failed",
+        "deserialized plugin missing getPluginSerializationParams; cannot enforce policy allowlist",
       );
     }
 

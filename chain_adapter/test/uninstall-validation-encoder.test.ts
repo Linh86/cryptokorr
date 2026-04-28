@@ -33,6 +33,9 @@ import {
   deriveValidationId,
   assertValidationIdConsistent,
   assertPackageVersionPinned,
+  assertSignerModuleAllowed,
+  assertPolicyModulesAllowed,
+  extractPolicyContractAddresses,
   CryptographicRevokeError,
   VALIDATOR_TYPE_PERMISSION_PREFIX,
 } from "../src/chains/base/uninstall_validation.js";
@@ -194,5 +197,187 @@ describe("assertPackageVersionPinned", () => {
         validBlock({ package_version: "5.5.0" }),
       ),
     ).toThrow(CryptographicRevokeError);
+  });
+});
+
+describe("assertSignerModuleAllowed", () => {
+  // Allowlist-enforcement tests for the cryptographic revoke path
+  // (Finding #3 of the post-PR-130 review). Until these landed, the
+  // pin's `acceptedSignerContracts` was declarative-only — its
+  // tripwire test verified the addresses against the package, but
+  // no production code rejected a blob whose signer module was
+  // outside the pin. This block + the policy block below close
+  // that gap.
+
+  it("accepts an address that is in KERNEL_PERMISSION_PIN.acceptedSignerContracts", () => {
+    expect(() =>
+      assertSignerModuleAllowed(KERNEL_PERMISSION_PIN.acceptedSignerContracts[0]),
+    ).not.toThrow();
+  });
+
+  it("is case-insensitive on hex characters", () => {
+    const upper =
+      KERNEL_PERMISSION_PIN.acceptedSignerContracts[0]!.toUpperCase().replace(
+        "0X",
+        "0x",
+      );
+    expect(() => assertSignerModuleAllowed(upper)).not.toThrow();
+  });
+
+  it("rejects an address that is not in the pin with unaccepted_signer_module", () => {
+    const arbitrary = ("0x" + "ab".repeat(20)) as Hex;
+    expect(() => assertSignerModuleAllowed(arbitrary)).toThrow(
+      CryptographicRevokeError,
+    );
+    try {
+      assertSignerModuleAllowed(arbitrary);
+    } catch (err) {
+      expect(err).toBeInstanceOf(CryptographicRevokeError);
+      expect((err as CryptographicRevokeError).code).toBe(
+        "unaccepted_signer_module",
+      );
+    }
+  });
+
+  it("rejects undefined (missing signerContractAddress)", () => {
+    // A deserialized plugin that exposes no signerContractAddress
+    // is structurally invalid; refuse rather than fall through.
+    expect(() => assertSignerModuleAllowed(undefined)).toThrow(
+      CryptographicRevokeError,
+    );
+  });
+
+  it("accepts an explicit allowlist override (for tests / future overrides)", () => {
+    // The optional second arg lets callers narrow the allowlist
+    // without re-importing the pin. Useful in tests that want to
+    // exercise the rejection path against a curated subset.
+    const onlyOne = [KERNEL_PERMISSION_PIN.acceptedSignerContracts[0]!];
+    expect(() =>
+      assertSignerModuleAllowed(onlyOne[0], onlyOne),
+    ).not.toThrow();
+  });
+});
+
+describe("assertPolicyModulesAllowed", () => {
+  it("accepts a list of pinned policy addresses", () => {
+    expect(() =>
+      assertPolicyModulesAllowed(KERNEL_PERMISSION_PIN.acceptedPolicyContracts),
+    ).not.toThrow();
+  });
+
+  it("is case-insensitive", () => {
+    const lower = KERNEL_PERMISSION_PIN.acceptedPolicyContracts.map((a) =>
+      a.toLowerCase(),
+    );
+    expect(() => assertPolicyModulesAllowed(lower)).not.toThrow();
+  });
+
+  it("rejects an empty list with unaccepted_policy_module", () => {
+    // Empty policies = no on-chain restrictions. We refuse to
+    // operate on a permission with zero policies rather than treat
+    // it as "no restrictions" — that posture would let an
+    // attacker who somehow produces an empty-policies blob slip
+    // through the cryptographic revoke pipeline.
+    expect(() => assertPolicyModulesAllowed([])).toThrow(
+      CryptographicRevokeError,
+    );
+    try {
+      assertPolicyModulesAllowed([]);
+    } catch (err) {
+      expect((err as CryptographicRevokeError).code).toBe(
+        "unaccepted_policy_module",
+      );
+    }
+  });
+
+  it("rejects a list containing one unpinned address", () => {
+    const sneaky = [
+      KERNEL_PERMISSION_PIN.acceptedPolicyContracts[0]!,
+      ("0x" + "cc".repeat(20)) as Hex,
+    ];
+    expect(() => assertPolicyModulesAllowed(sneaky)).toThrow(
+      CryptographicRevokeError,
+    );
+  });
+
+  it("rejects undefined entries (malformed plugin missing policyAddress)", () => {
+    expect(() =>
+      assertPolicyModulesAllowed([
+        KERNEL_PERMISSION_PIN.acceptedPolicyContracts[0]!,
+        undefined,
+      ]),
+    ).toThrow(CryptographicRevokeError);
+  });
+});
+
+describe("extractPolicyContractAddresses", () => {
+  it("reads policyParams.policyAddress from each policy", () => {
+    const fakePlugin = {
+      getPluginSerializationParams: () => ({
+        policies: [
+          {
+            policyParams: {
+              policyAddress: KERNEL_PERMISSION_PIN.acceptedPolicyContracts[0]!,
+            },
+          },
+          {
+            policyParams: {
+              policyAddress: KERNEL_PERMISSION_PIN.acceptedPolicyContracts[1]!,
+            },
+          },
+        ],
+      }),
+    };
+    expect(extractPolicyContractAddresses(fakePlugin)).toEqual([
+      KERNEL_PERMISSION_PIN.acceptedPolicyContracts[0],
+      KERNEL_PERMISSION_PIN.acceptedPolicyContracts[1],
+    ]);
+  });
+
+  it("returns undefined for a policy missing policyParams", () => {
+    // The downstream `assertPolicyModulesAllowed` converts
+    // undefined into a precise `unaccepted_policy_module` refusal.
+    const fakePlugin = {
+      getPluginSerializationParams: () => ({
+        policies: [{}],
+      }),
+    };
+    expect(extractPolicyContractAddresses(fakePlugin)).toEqual([undefined]);
+  });
+
+  it("returns an empty list when policies are absent", () => {
+    const fakePlugin = {
+      getPluginSerializationParams: () => ({}),
+    };
+    expect(extractPolicyContractAddresses(fakePlugin)).toEqual([]);
+  });
+
+  it("end-to-end: extract + assert allowed = pass; mixed = fail", () => {
+    const allowedPlugin = {
+      getPluginSerializationParams: () => ({
+        policies: KERNEL_PERMISSION_PIN.acceptedPolicyContracts.map(
+          (a) => ({ policyParams: { policyAddress: a } }),
+        ),
+      }),
+    };
+    const addrs = extractPolicyContractAddresses(allowedPlugin);
+    expect(() => assertPolicyModulesAllowed(addrs)).not.toThrow();
+
+    const mixedPlugin = {
+      getPluginSerializationParams: () => ({
+        policies: [
+          {
+            policyParams: {
+              policyAddress: KERNEL_PERMISSION_PIN.acceptedPolicyContracts[0]!,
+            },
+          },
+          { policyParams: { policyAddress: ("0x" + "ee".repeat(20)) } },
+        ],
+      }),
+    };
+    const mixedAddrs = extractPolicyContractAddresses(mixedPlugin);
+    expect(() => assertPolicyModulesAllowed(mixedAddrs)).toThrow(
+      CryptographicRevokeError,
+    );
   });
 });

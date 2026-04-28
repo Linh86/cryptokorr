@@ -20,6 +20,8 @@ import { privateKeyToAccount } from "viem/accounts";
 import { buildApp, type AppDeps } from "../src/app.js";
 import { testConfig } from "../src/config/index.js";
 import {
+  type CallbackClient,
+  type CallbackPayload,
   createTestCallbackClient,
   resetCallbackSeq,
 } from "../src/callbacks/client.js";
@@ -32,6 +34,11 @@ import type { FastifyInstance } from "fastify";
 const SMART_ACCOUNT = "0x000000000000000000000000000000000000a11c" as const;
 const ENTRY_POINT = "0x0000000071727de22e5e9d8baf0edac6f37da032" as const;
 const SIGNER_KEY = ("0x" + "ef".repeat(32)) as `0x${string}`;
+
+type TestCallbackClient = CallbackClient & {
+  payloads: CallbackPayload[];
+  clear?: () => void;
+};
 
 function mockClients(): BaseClients {
   return {
@@ -46,9 +53,48 @@ function mockClients(): BaseClients {
   } as unknown as BaseClients;
 }
 
+async function eventually(assertion: () => void): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  let lastError: unknown;
+
+  while (Date.now() < deadline) {
+    try {
+      assertion();
+      return;
+    } catch (err) {
+      lastError = err;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  throw lastError;
+}
+
+function createBlockingCallbackClient(): TestCallbackClient & {
+  release(): void;
+} {
+  const base = createTestCallbackClient();
+  let release: (() => void) | undefined;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  return {
+    payloads: base.payloads,
+    clear: base.clear,
+    release() {
+      release?.();
+    },
+    async send(payload: CallbackPayload): Promise<void> {
+      await base.send(payload);
+      await blocked;
+    },
+  };
+}
+
 describe("POST /dispatch/grant_delegation", () => {
   let app: FastifyInstance;
-  let callbackClient: ReturnType<typeof createTestCallbackClient>;
+  let callbackClient: TestCallbackClient;
 
   beforeEach(async () => {
     resetCallbackSeq();
@@ -137,7 +183,9 @@ describe("POST /dispatch/grant_delegation", () => {
       expect(response.statusCode).toBe(202);
       expect(response.json().status).toBe("installing");
 
-      expect(callbackClient.payloads).toHaveLength(1);
+      await eventually(() => {
+        expect(callbackClient.payloads).toHaveLength(1);
+      });
 
       const cb = callbackClient.payloads[0]!;
       if (cb.kind !== "delegation.state_changed")
@@ -160,7 +208,9 @@ describe("POST /dispatch/grant_delegation", () => {
       });
 
       expect(response.statusCode).toBe(202);
-      expect(callbackClient.payloads).toHaveLength(1);
+      await eventually(() => {
+        expect(callbackClient.payloads).toHaveLength(1);
+      });
 
       const cb = callbackClient.payloads[0]!;
       if (cb.kind !== "delegation.state_changed")
@@ -173,18 +223,16 @@ describe("POST /dispatch/grant_delegation", () => {
 
   describe("idempotency", () => {
     it("suppresses a duplicate on-chain install while one is in flight", async () => {
-      // Both calls go to the operator-key-missing branch (no
-      // operator key set in this config) so neither actually
-      // touches the chain. The idempotency guard still applies:
-      // the second call short-circuits without emitting a
-      // duplicate failure callback.
+      // Hold the first background grant in its callback send so
+      // the in-flight set is still populated when the second
+      // dispatch arrives.
+      const blockingClient = createBlockingCallbackClient();
+      callbackClient = blockingClient;
       app = await buildWithConfig({
         operatorPrivateKey: undefined,
         operatorAddress: undefined,
       });
 
-      // Issue both calls back-to-back; the in-flight set guards
-      // against the duplicate.
       const first = await app.inject({
         method: "POST",
         url: "/dispatch/grant_delegation",
@@ -200,15 +248,12 @@ describe("POST /dispatch/grant_delegation", () => {
 
       expect(first.statusCode).toBe(202);
       expect(second.statusCode).toBe(202);
-      // First call emits its operator_key_missing callback;
-      // second call is supposed to short-circuit if it sees
-      // in-flight, but because the first call is awaited fully
-      // before the second starts, the in-flight set is empty
-      // again. We still expect 2 callbacks here — the idempotency
-      // guard is a microtask-tick race; the test pins the simple
-      // case for the in-flight-set existence rather than the
-      // exact race semantics. Tightening this is a follow-up.
-      expect(callbackClient.payloads.length).toBeGreaterThanOrEqual(1);
+
+      await eventually(() => {
+        expect(callbackClient.payloads).toHaveLength(1);
+      });
+
+      blockingClient.release();
     });
   });
 
