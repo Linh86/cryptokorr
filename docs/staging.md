@@ -132,9 +132,12 @@ The in-repo artifacts are ready. What's left is:
    `mix bank.smoke.revoke` from the operator host; see
    [docs/smoke-tests.md](smoke-tests.md). Run
    `chain_adapter/scripts/check-env.sh` on the adapter host
-   first to confirm whether the deploy is in `SENTINEL-ERA` or
-   `KERNEL-PROVISIONED` mode — the smoke result must be interpreted
-   in light of that mode.
+   first; it reports `mode: sentinel-era (awaiting ZeroDev SDK
+   integration)` and the smoke `state: revoked` must be read as
+   "on-chain anchored, trust downgraded" rather than
+   cryptographically disabled until the integration in
+   [docs/zerodev-permissions-integration.md](zerodev-permissions-integration.md)
+   ships.
 
 ## Blocker note for issue #35
 

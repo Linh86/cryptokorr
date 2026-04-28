@@ -130,12 +130,20 @@ export function encodeErc7579SingleCall(
  * Build the full outer `execute(bytes32 mode, bytes executionCalldata)`
  * calldata for an ERC-7579 account, single-call mode.
  *
- * This is the function #58 will use to wrap the (still-to-be-pinned)
- * Permission Validator disable body once the smart account is
- * migrated to Kernel v3 / an ERC-7579 implementation. Until then it
- * is unused on the live revoke path — `executeRevoke` keeps calling
- * `buildSentinelRevokeCallData`, which uses the SimpleAccount
- * envelope appropriate for the v0.1 deployment.
+ * This is the function #58 will use as the OUTER envelope once the
+ * smart account is migrated to Kernel v3 and the ZeroDev SDK
+ * integration described in
+ * `docs/zerodev-permissions-integration.md` lands. The inner body
+ * it wraps is `Kernel.uninstallValidation(bytes21,bytes,bytes)`
+ * called against the smart account itself — there is no separate
+ * Permission Validator address to target. The exact integration
+ * shape (signer + policies, deinit data reconstruction, plugin
+ * blob persistence) is deferred to that doc.
+ *
+ * Until then this builder is unused on the live revoke path —
+ * `executeRevoke` keeps calling `buildSentinelRevokeCallData`,
+ * which uses the SimpleAccount envelope appropriate for the v0.1
+ * deployment.
  */
 export function buildErc7579ExecuteCallData(
   target: Address,

@@ -111,14 +111,15 @@ Exit code 0.
 > anchor** of the revoke intent. Phoenix transitions the delegation
 > row to `:revoked` to reflect the trust downgrade — it does NOT
 > imply the delegation key is cryptographically unable to sign. A
-> `revoked` smoke PASS in sentinel-era mode means "the AA pipeline
-> went end-to-end and the anchor landed", not "the authority record
-> on chain has been disabled". Run `chain_adapter/scripts/check-env.sh`
-> on the adapter host to see which mode it is in; if the `mode:`
-> line is `sentinel-era` or `straddle`, the above caveat applies.
-> Once #58 lands against a `kernel-provisioned` host, the same
-> `state: revoked` additionally means the Permission Validator
-> cryptographically rejected the delegation's `permissionId`.
+> `revoked` smoke PASS in sentinel-era means "the AA pipeline went
+> end-to-end and the anchor landed", not "the authority record on
+> chain has been disabled". `chain_adapter/scripts/check-env.sh`
+> reports `mode: sentinel-era (awaiting ZeroDev SDK integration)`
+> on every host today. Once #58 lands the cryptographic revoke (a
+> `Kernel.uninstallValidation` call on the smart account itself —
+> see [docs/zerodev-permissions-integration.md](zerodev-permissions-integration.md)),
+> the same `state: revoked` additionally means the kernel rejected
+> further user-ops from the disabled permission.
 
 ### Typical FAIL modes
 

@@ -54,11 +54,13 @@
  *     reverted) are already exercised end-to-end. When #31 lands,
  *     the AA pipeline outside `callData` (build, sign, submit, wait,
  *     callback emission) is unchanged; only the `callData` itself
- *     swaps — from the SimpleAccount-shaped sentinel envelope to the
- *     ERC-7579 envelope wrapping a verified Permission Validator
- *     disable body. Both the outer execute selector AND the inner
- *     body change in that swap; see the `TODO(#58)` block below for
- *     the exact replacement.
+ *     swaps — from the SimpleAccount-shaped sentinel envelope to
+ *     the ERC-7579 envelope wrapping a kernel-account
+ *     `uninstallValidation(bytes21,bytes,bytes)` call. There is no
+ *     separate validator address to target. Both the outer execute
+ *     selector AND the inner body change in that swap; see the
+ *     `TODO(#58)` block below + the integration doc for the exact
+ *     replacement.
  *
  * What it does NOT buy us:
  *

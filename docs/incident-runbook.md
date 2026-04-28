@@ -314,31 +314,34 @@ audit, not a window of unguarded execution.
   adapter submits a fresh sentinel tx. Retry as many times as
   needed; each attempt appends a fresh audit trail.
 - **This sentinel does not cryptographically revoke the delegation
-  key at the smart-account level** — that enforcement is tracked in
-  #31 and is currently sequenced through three concrete pieces of
-  work:
-  - **#56 (DECIDED)** — chose Kernel v3 (ERC-7579 modular account)
-    with a Permission Validator module installed against it. See
+  key at the smart-account level** — that enforcement is tracked
+  in #31 and is currently sequenced through:
+  - **#56 (DECIDED)** — chose Kernel v3 (ERC-7579 modular
+    account). See
     [docs/smart-account-and-revoke-design.md](smart-account-and-revoke-design.md).
   - **#57 (LANDED, narrowed)** — EIP-7579 outer execute envelope
-    pin in the adapter. The earlier `delegation_id ↔ permissionId`
-    mapping helpers and `PERMISSION_VALIDATOR_ADDRESS` env (with
-    its strict accessor) were removed when the corrected ZeroDev
-    model in
-    [docs/zerodev-permissions-integration.md](zerodev-permissions-integration.md)
-    invalidated the wrong-shape enforcement.
-  - **#84 (provisioning)** — deploy a Kernel v3 smart account on
-    Base + install a Permission Validator against it. Operator
-    runbook: [docs/provisioning-kernel-v3.md](provisioning-kernel-v3.md);
-    templates under `chain_adapter/scripts/`.
-  - **#83 (verification)** — pin the validator's disable ABI
-    against a verified deployment (audit / source / on-chain
-    bytecode hash). The verify script
-    `chain_adapter/scripts/verify-installed-validator.ts`
-    emits the bytecode keccak hash that #83 binds as a tripwire
-    fixture.
-  - **#58 (wiring)** — swap the sentinel inner call for the real
-    disable call in `executeRevoke`. Blocked on #84 + #83.
+    pin in the adapter. Earlier scaffolding (`delegation_id ↔
+    bytes32 permissionId` mapping helpers, a
+    `PERMISSION_VALIDATOR_ADDRESS` env with a strict accessor,
+    a fixture pinning the 66-char convention) was removed as an
+    artefact of a wrong-model assumption — see
+    [docs/zerodev-permissions-integration.md](zerodev-permissions-integration.md).
+  - **#84 (provisioning)** — partial. Smart-account-deploy
+    portion of the operator runbook is documented in
+    [docs/provisioning-kernel-v3.md](provisioning-kernel-v3.md).
+    The earlier "install a single Permission Validator" + "verify
+    its bytecode hash" steps are removed; the corresponding
+    templates under `chain_adapter/scripts/` are deferred stubs.
+  - **#83 (pin)** — re-scoped from "pin a single validator's
+    disable ABI" to "design and populate `KernelPermissionPin`
+    against ZeroDev's actual primitives". The slot is exported
+    as `KERNEL_PERMISSION_PIN: KernelPermissionPin | null = null`
+    in the adapter's `permission_validator.ts`.
+  - **#58 (wiring)** — swap the sentinel inner call for a real
+    `Kernel.uninstallValidation` call on the smart account
+    itself, signed by a sudo signer the adapter does not yet
+    hold. Blocked on the SDK integration plus the hard-blocker
+    list in the integration doc above.
 
   Until #58 closes, Phoenix's fail-closed posture (delegations
   marked `:revoking`/`:revoke_failed`/`:revoked` are non-executable

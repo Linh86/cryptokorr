@@ -98,14 +98,14 @@ permission-module surface is wired in.
 The architectural decision is recorded in
 [`docs/smart-account-and-revoke-design.md`](../docs/smart-account-and-revoke-design.md)
 (GitHub #56): a **Kernel v3 (ERC-7579)** modular account on Base.
-The earlier framing of "delegation authority registered as a
-per-delegation permission on a single Permission Validator module"
-turned out to be wrong against `@zerodev/permissions@5.6.3` —
-ZeroDev's permissions compose from CREATE2 signer + policy
-modules and a 4-byte `permissionId`, not from a single
-deployable validator contract. See
+ZeroDev's permissions compose from CREATE2-deployed signer + policy
+modules and a 4-byte `permissionId`; revoke is a kernel-account
+method, not a call into a separate validator contract. See
 [`docs/zerodev-permissions-integration.md`](../docs/zerodev-permissions-integration.md)
-for the corrected on-chain model and the hard blockers.
+for the corrected on-chain model and the hard blockers. (An
+earlier revision of this README described a single Permission
+Validator module bound to one address — that framing was wrong
+and has been removed.)
 
 Status of the implementation:
 
@@ -195,28 +195,28 @@ See `.env.example` for defaults and optional vars.
 
 ## Provisioning a Kernel v3 smart account (issue #84)
 
-The adapter is a chain execution specialist; it does NOT provision its
-own smart account. Standing up the on-chain target the adapter binds
-to (a Kernel v3 modular account on Base, with a Permission Validator
-module installed against it) is a one-shot operator procedure.
+The adapter is a chain execution specialist; it does NOT provision
+its own smart account. Standing up the on-chain target the adapter
+binds to (a Kernel v3 modular account on Base) is a one-shot
+operator procedure.
 
-The full step-by-step runbook lives in the Phoenix repo at
+The full step-by-step runbook lives at
 [`docs/provisioning-kernel-v3.md`](../docs/provisioning-kernel-v3.md).
 Read it first.
 
-Operator-side templates ship under [`scripts/`](scripts/). They are
-NOT part of the adapter runtime — `tsconfig.json` excludes them and
-`vitest` does not pick them up — and the runtime container does NOT
-ship the ZeroDev (or Biconomy) SDK that real provisioning requires.
-The expectation is that an operator copies a template into a separate
-provisioning workspace, installs the SDK there, fills in the env
-placeholders, and runs it once.
+Operator-side templates ship under [`scripts/`](scripts/). They
+are NOT part of the adapter runtime — `tsconfig.json` excludes
+them and `vitest` does not pick them up — and the runtime
+container does NOT ship the ZeroDev SDK that real provisioning
+requires. The expectation is that an operator copies a template
+into a separate provisioning workspace, installs the SDK there,
+fills in the env placeholders, and runs it once.
 
-| Script                                            | Purpose                                                              |
-| ------------------------------------------------- | -------------------------------------------------------------------- |
-| [`scripts/provision-kernel.ts`](scripts/provision-kernel.ts) | Deploy a Kernel v3 smart account + install Permission Validator. Two phases gated on `INSTALL_VALIDATOR=true`. |
-| [`scripts/verify-installed-validator.ts`](scripts/verify-installed-validator.ts) | Read-only ERC-7579 install check. Outputs a Phoenix-ready receipt with the validator bytecode keccak hash, Kernel factory, Basescan URL, and vendor artifact source for #83. |
-| [`scripts/check-env.sh`](scripts/check-env.sh)    | Runtime env hygiene check: confirms every required adapter env is set and reports `SENTINEL-ERA` vs `KERNEL-PROVISIONED` mode. |
+| Script | Purpose | Status |
+| --- | --- | --- |
+| [`scripts/provision-kernel.ts`](scripts/provision-kernel.ts) | (deferred) Was a Kernel v3 + single-validator install template. | **DEFERRED** — refuses to run; see [`docs/zerodev-permissions-integration.md`](../docs/zerodev-permissions-integration.md). |
+| [`scripts/verify-installed-validator.ts`](scripts/verify-installed-validator.ts) | (deferred) Was a single-validator bytecode verification template. | **DEFERRED** — refuses to run; same doc. |
+| [`scripts/check-env.sh`](scripts/check-env.sh) | Runtime env hygiene check: confirms every required adapter env is set, non-placeholder, well-shaped (addresses are 0x+20 bytes, no trailing whitespace). No network calls. | live; reports `mode: sentinel-era (awaiting ZeroDev SDK integration)`. |
 
 The expected end-to-end flow today (sentinel-era; the corrected
 ZeroDev SDK integration is tracked in

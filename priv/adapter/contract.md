@@ -108,67 +108,57 @@ What landed under #31:
 
 Cryptographic revocation at the smart-account level. The sentinel
 user-op does not prevent the delegation key from signing another
-user-op. The architectural decision behind a real revoke now lives in
-[`docs/smart-account-and-revoke-design.md`](../../docs/smart-account-and-revoke-design.md)
-(GitHub #56) — Kernel v3 (ERC-7579) modular account on Base, with
-per-delegation permissions registered on a Permission Validator
-module; the on-chain authority record is the validator's `bytes32
-permissionId`, and `delegation_id` maps to the hex-encoded form of
-that id.
+user-op. The architectural decision behind a real revoke is captured
+in [`docs/smart-account-and-revoke-design.md`](../../docs/smart-account-and-revoke-design.md)
+(GitHub #56): a **Kernel v3 (ERC-7579) modular account on Base**.
+The shape of the cryptographic revoke (which signer + policy
+modules, what `delegation_id` carries on the wire, whether revoke
+is per-permission via `Kernel.uninstallValidation` or coarser via
+`Kernel.invalidateNonce`) is deferred to the ZeroDev SDK
+integration tracked in
+[`docs/zerodev-permissions-integration.md`](../../docs/zerodev-permissions-integration.md).
 
-The remaining work is split across three concrete follow-up issues:
+What is verifiable today:
 
-1. **#56 — chosen.** Smart-account + permission-model decision.
-   Captured in the ADR above.
-2. **#57 — landed (narrowed scope).** Adapter-side scaffolding for
-   the parts that are verifiable independently of any specific
-   Permission Validator deployment:
-   - `delegation_id` ↔ `permissionId` mapping helpers
-     (`cryptobank-ts-adapter/src/chains/base/permission_validator.ts`)
-     with the lowercase 0x-prefixed hex form of `bytes32` as the
-     canonical convention, plus rejection of the v0.1 `del_…`
-     placeholder shape;
-   - the verifiable ERC-7579 outer envelope
-     (`cryptobank-ts-adapter/src/chains/base/erc7579.ts`) — pinned
-     against EIP-7579's normative `execute(bytes32, bytes)`
-     signature (selector `0xe9ae5c53`), the all-zeros single-call
-     ModeCode, and the packed body layout.
+- **#56 — DECIDED.** Kernel v3 smart-account host. Independent of
+  the permission-system layer above it.
+- **#57 — narrowed.** The ERC-7579 outer envelope is pinned in
+  [`cryptobank-ts-adapter/src/chains/base/erc7579.ts`](../../chain_adapter/src/chains/base/erc7579.ts)
+  against EIP-7579's normative `execute(bytes32, bytes)` signature
+  (selector `0xe9ae5c53`), all-zeros single-call ModeCode, packed
+  body layout. Earlier scaffolding (a `delegation_id ↔ bytes32
+  permissionId` mapping, a `PERMISSION_VALIDATOR_ADDRESS` env, a
+  `requirePermissionValidatorAddress` accessor, a fixture pinning
+  the 66-char convention) was removed as an artefact of a
+  wrong-model assumption — see the integration doc.
+- **#84 — partial.** Smart-account-deploy portion of the runbook
+  is documented in
+  [`docs/provisioning-kernel-v3.md`](../../docs/provisioning-kernel-v3.md).
+  The earlier "install a single Permission Validator" + "verify
+  its bytecode hash" steps are removed; the corresponding script
+  templates (`scripts/provision-kernel.ts`,
+  `scripts/verify-installed-validator.ts`) are deferred stubs.
+- **#83 — re-scoped.** Was "pin the validator's disable ABI
+  fragment". Now "design and populate `KernelPermissionPin`
+  against ZeroDev's actual primitives" — the slot is exported as
+  `KERNEL_PERMISSION_PIN: KernelPermissionPin | null = null` in
+  [`permission_validator.ts`](../../chain_adapter/src/chains/base/permission_validator.ts).
+- **#58 — open.** The swap target is `Kernel.uninstallValidation`
+  ON the smart account itself, signed by a sudo signer the adapter
+  does not yet hold. There is no separate validator address to
+  call into. Hard-blocker list (SDK runtime deps, per-account sudo
+  signer, bundler/paymaster, plugin-blob persistence, pin shape,
+  on-the-wire `delegation_id` encoding) is documented in the
+  integration doc.
 
-   The earlier `PERMISSION_VALIDATOR_ADDRESS` env + strict
-   `requirePermissionValidatorAddress` accessor have been removed
-   as artefacts of a wrong-model assumption — see
-   [`docs/zerodev-permissions-integration.md`](../../docs/zerodev-permissions-integration.md)
-   for the corrected model. Phoenix-side, no schema change is
-   needed because `delegations.delegation_id` is a free-form
-   string column.
-3. **#58 — pending. NOT a one-liner.** Three sub-prereqs in order,
-   each tracked separately so the prerequisites do not silently bundle:
-   (a) provision a Kernel v3 / ERC-7579 deployment on Base and install
-   a Permission Validator against it — **tracked in #84** (runbook +
-   templates landed; on-chain action operator-side); (b) verify the
-   Permission Validator deployment artifact and pin its disable ABI
-   fragment + selector against a concrete artifact (verified contract
-   / canonical audited package / vendor-published deployment manifest),
-   add a tripwire test pinning that fragment alongside
-   `permission_validator.ts` — **tracked in #83** (pin contract
-   documented in
-   `cryptobank-ts-adapter/src/chains/base/permission_validator.ts`
-   under "What #83 must populate"; blocker is the chain-side artifact
-   from #84); (c) wire `executeRevoke` to call
-   `buildErc7579ExecuteCallData(validatorAddress, 0n, <verified
-   inner disable body>)` and update the sentinel-pin tripwire —
-   **tracked in #58 itself**. The swap point is marked inline in
-   `cryptobank-ts-adapter/src/chains/base/revoke.ts` with a
-   `TODO(#58)` block enumerating those three sub-prereqs.
-
-When #58 lands, the change is to the `callData` only — both the
-OUTER envelope (SimpleAccount → ERC-7579) AND the inner body (no-op
-self-call → verified Permission Validator disable) swap. Phoenix's
-callback contract and state machine do NOT need to change. The
-adapter's tripwire test (`test/base-revoke-sentinel-pin.test.ts`)
-will fail loudly the moment the inner call shape changes, forcing
-whoever makes the change to also update this contract, the runbook,
-and close #31.
+When #58 lands, the change is to the revoke `callData` only — both
+the OUTER envelope (SimpleAccount → ERC-7579) AND the INNER body
+(no-op self-call → kernel-account `uninstallValidation` call)
+swap. Phoenix's callback contract and state machine do NOT need
+to change. The adapter's tripwire test
+(`test/base-revoke-sentinel-pin.test.ts`) will fail loudly the
+moment the inner call shape changes, forcing whoever makes the
+change to also update this contract, the runbook, and close #31.
 
 ### `delegation_id` semantics
 
