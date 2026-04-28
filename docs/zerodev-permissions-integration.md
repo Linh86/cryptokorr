@@ -143,25 +143,26 @@ to per-permission revoke.
 
 ## Hard blockers (for #58 / #83 / #84 to actually close)
 
-The list below has been narrowed: blockers (1) and the
-smart-account-deploy half of (2) were resolved by the kernel
-provisioning skeleton landing in
-`chain_adapter/scripts/provision-kernel.ts` + dev-deps on
-`@zerodev/sdk@5.5.10` and `@zerodev/ecdsa-validator@5.4.9`. The
-remaining items still gate the cryptographic revoke (#58).
+Blockers (1), (5), and the smart-account-deploy half of (2) are
+now resolved. Blocker (1) was resolved when the provisioning
+skeleton + dev-deps landed (#84). Blocker (5) is resolved by this
+PR (#83) — `KERNEL_PERMISSION_PIN` is populated against
+`@zerodev/permissions@5.6.3` and verified by a tripwire test.
+The remaining items gate the cryptographic revoke (#58).
 
 1. ✅ **`@zerodev/sdk` + `@zerodev/ecdsa-validator` deps installed.**
    Both are pinned in `chain_adapter/package.json` `devDependencies`
    so the production runtime image can omit them via
-   `npm ci --omit=dev`. `@zerodev/permissions` is NOT yet a dep —
-   it gets added when per-permission install lands as part of #58.
+   `npm ci --omit=dev`. `@zerodev/permissions@5.6.3` is now also
+   installed as a devDependency (used by the #83 tripwire test);
+   the runtime image still omits it.
 2. ⏳ **Per-account sudo signer for revoke.** `provision-kernel.ts`
-   `--broadcast` mode signs the deploy UserOp with the operator EOA
-   bound to `OPERATOR_ADDRESS`; that same EOA is the kernel's root
-   ECDSA validator. The adapter runtime currently does NOT hold
-   that key (`DELEGATION_SIGNER_KEY` is the runtime signer, not the
-   root). Per-account sudo signer storage + secrets-management
-   policy is still open.
+   `--broadcast` mode signs the deploy UserOp with the operator
+   EOA bound to `OPERATOR_ADDRESS`; that same EOA is the kernel's
+   root ECDSA validator. The adapter runtime currently does NOT
+   hold that key (`DELEGATION_SIGNER_KEY` is the runtime signer,
+   not the root). Per-account sudo signer storage +
+   secrets-management policy is still open.
 3. ⏳ **Bundler RPC + paymaster (or native gas) for the revoke
    UserOp.** `provision-kernel.ts --broadcast` already routes the
    deploy through a bundler; the revoke path will reuse the same
@@ -171,10 +172,15 @@ remaining items still gate the cryptographic revoke (#58).
    signer reconstruction params) at grant-time** so the adapter
    can rebuild the plugin at revoke-time. Phoenix's
    `delegations.delegation_id` is still opaque-string-only.
-5. ⏳ **Populate `KernelPermissionPin`** with the chosen signer +
-   policy module addresses + accepted `@zerodev/permissions` package
-   version range. Only meaningful once #58 is being implemented;
-   the slot stays `null` until then.
+5. ✅ **`KernelPermissionPin` populated.**
+   `chain_adapter/src/chains/base/permission_validator.ts` exports
+   `KERNEL_PERMISSION_PIN` with the canonical signer + policy
+   module addresses sourced from `@zerodev/permissions@5.6.3` and
+   the kernel-account `uninstallValidation(bytes21,bytes,bytes)`
+   ABI fragment sourced from `KernelV3_1AccountAbi` in
+   `@zerodev/sdk@5.5.10`. Both halves are verified by
+   `test/permission-validator-pin.test.ts` so a future package bump
+   that drifts cannot land silently.
 6. ⏳ **Decision on the on-the-wire shape of `delegation_id`.**
    Phoenix's column is opaque; either side has to commit to one of:
    4-byte `permissionId` hex (10 chars), 21-byte `validationId` hex
@@ -189,25 +195,23 @@ remaining items still gate the cryptographic revoke (#58).
 
 ## Issue impact (current state)
 
-- **#83** — re-scoped to "populate the `KernelPermissionPin` slot
-  with the verified signer + policy module addresses + version
-  range". Slot is exported and `null` in
-  `chain_adapter/src/chains/base/permission_validator.ts`. Blocked
-  on the per-permission install design landing in #58.
-- **#84** — **partially complete.**
-  `chain_adapter/scripts/provision-kernel.ts` is now a real
-  no-secret-safe Kernel v3.1 provisioning template (dry-run by
-  default, `--broadcast` for chain interaction).
-  `chain_adapter/scripts/verify-installed-validator.ts` is a
-  real read-only verification template. **#84 stays OPEN until an
-  operator runs `provision-kernel.ts --broadcast` end-to-end on
-  Base Sepolia and records the resulting smart-account address in
-  the deployment journal.** No on-chain provisioning has been
-  performed from this repo.
+- **#83** — **closeable after this PR merges.** Re-scoped from
+  "verify validator ABI" to "populate the `KernelPermissionPin`
+  slot with the verified signer + policy module addresses +
+  uninstallValidation ABI fragment + version range". The slot is
+  populated; the tripwire test guards against package drift.
+  Wiring the pin into `executeRevoke` is #58's scope, not #83's.
+- **#84** — **CLOSED** on Base Sepolia. The smart account at
+  `0xacb3390BF0E13eB0755317Fbb2C73Ed185F4142C` was deployed and
+  verified against the same Kernel v3.1 deployment values
+  `provision-kernel.ts` pins (factory
+  `0xaac5D4240AF87249B3f71BC8E4A2cae074A3E419`, implementation
+  `0xBAC849bB641841b44E965fB01A4Bf5F074f84b4D`, root validator
+  `0x845ADb2C711129d4f3966735eD98a9F09fC4cE57`); deploy tx
+  `0xe6ad5263ed7023ee6b5f7dd2c529efda27ccb4cebce449c52a58a882c9fe4724`.
 - **#58** — "swap sentinel for cryptographic revoke". Plumbing
-  (`delegation_id` + `config` threading) was landed under earlier
-  commits. The swap depends on hard blockers (4)–(7) above. Blocker
-  (1) is now resolved.
+  + #83 pin are in place. Still depends on hard blockers (2),
+  (3), (4), (6), (7) above.
 - **#31** — umbrella for "true cryptographic revoke". Still open;
   closes when #58 closes.
 

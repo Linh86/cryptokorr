@@ -121,23 +121,25 @@ Status of the implementation:
    `execute(address,uint256,bytes)` envelope (selector
    `0xb61d27f6`) the sentinel still uses. Independent of the
    permission system above it; survives the model correction.
-3. **Permission pin shape — RE-SCOPED on #83.** The earlier
-   `VerifiedPermissionValidator` interface tried to pin a single
-   deployable validator address + a single
-   `disablePermission(bytes32)` ABI fragment. The corrected
-   `KernelPermissionPin` interface in
+3. **Permission pin — LANDED in #83.**
    [`src/chains/base/permission_validator.ts`](src/chains/base/permission_validator.ts)
-   reserves a slot for ZeroDev's actual primitives (CREATE2
-   signer + policy module addresses, kernel `uninstallValidation`
-   ABI, package version). The slot is `null` today; populating it
-   is part of #83 alongside the SDK integration described in the
-   tracking doc.
-4. **Provisioning template — RE-SCOPED on #84.** The
-   provisioning + verification scripts in
-   [`scripts/`](scripts/) are currently deferred stubs. The
-   smart-account deploy portion of the runbook is still
-   operationally meaningful — see
+   exports `KERNEL_PERMISSION_PIN` populated with the canonical
+   ECDSA signer + six modern policy modules from
+   `@zerodev/permissions@5.6.3` (CALL v0.0.5, GAS, RATE_LIMIT,
+   SIGNATURE, SUDO, TIMESTAMP) and the
+   `uninstallValidation(bytes21,bytes,bytes)` ABI fragment from
+   `KernelV3_1AccountAbi` in `@zerodev/sdk@5.5.10`. Both halves
+   are verified byte-for-byte by
+   [`test/permission-validator-pin.test.ts`](test/permission-validator-pin.test.ts)
+   so a future package bump that drifts cannot land silently.
+4. **Provisioning + verification templates — LANDED in #84.**
+   [`scripts/provision-kernel.ts`](scripts/provision-kernel.ts) and
+   [`scripts/verify-installed-validator.ts`](scripts/verify-installed-validator.ts)
+   are real, no-secret-safe templates targeting Kernel v3.1.
+   Operator runbook:
    [`docs/provisioning-kernel-v3.md`](../docs/provisioning-kernel-v3.md).
+   A real Kernel v3.1 smart account was deployed on Base Sepolia
+   at `0xacb3390BF0E13eB0755317Fbb2C73Ed185F4142C`.
 5. **Sentinel → real revoke swap — RE-SCOPED on #58.** The earlier
    plan ("wrap a `disableFunction(bytes32)` selector in the
    ERC-7579 envelope") was based on the wrong-model assumption.
@@ -281,9 +283,12 @@ Test suites:
   nonce, bundler label), and that every failure path emits
   `state: revoke_failed` (never `revoked`).
 - **Permission pin tripwire** (`test/permission-validator-pin.test.ts`) —
-  pins that `KERNEL_PERMISSION_PIN` is `null` until #83 populates
-  it, and asserts the structural shape of the `KernelPermissionPin`
-  interface so the eventual pin's type can't drift silently.
+  imports the canonical signer + policy module addresses from
+  `@zerodev/permissions@5.6.3` and the `uninstallValidation` ABI
+  fragment from `KernelV3_1AccountAbi` in `@zerodev/sdk@5.5.10`,
+  asserts each matches `KERNEL_PERMISSION_PIN` byte-for-byte, and
+  pins the structural shape so a future package bump that drifts
+  surfaces immediately.
 - **ERC-7579 outer wrap** (`test/erc7579.test.ts`) — pins the
   EIP-7579 normative `execute(bytes32 mode, bytes executionCalldata)`
   ABI shape, the selector `0xe9ae5c53`, the all-zeros single-call

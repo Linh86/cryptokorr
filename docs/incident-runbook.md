@@ -332,11 +332,12 @@ audit, not a window of unguarded execution.
     The earlier "install a single Permission Validator" + "verify
     its bytecode hash" steps are removed; the corresponding
     templates under `chain_adapter/scripts/` are deferred stubs.
-  - **#83 (pin)** — re-scoped from "pin a single validator's
-    disable ABI" to "design and populate `KernelPermissionPin`
-    against ZeroDev's actual primitives". The slot is exported
-    as `KERNEL_PERMISSION_PIN: KernelPermissionPin | null = null`
-    in the adapter's `permission_validator.ts`.
+  - **#83 (pin)** — landed. Was "pin a single validator's
+    disable ABI"; re-scoped and populated as
+    `KERNEL_PERMISSION_PIN` in the adapter's
+    `permission_validator.ts` from `@zerodev/permissions@5.6.3`
+    + `KernelV3_1AccountAbi`. Verified by the
+    `permission-validator-pin.test.ts` tripwire.
   - **#58 (wiring)** — swap the sentinel inner call for a real
     `Kernel.uninstallValidation` call on the smart account
     itself, signed by a sudo signer the adapter does not yet

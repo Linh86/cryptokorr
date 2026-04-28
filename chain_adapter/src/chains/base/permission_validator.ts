@@ -133,13 +133,94 @@ export interface KernelPermissionPin {
 }
 
 /**
- * Pinned ZeroDev kernel permission configuration. `null` until the
- * SDK integration described in
- * `docs/zerodev-permissions-integration.md` lands. The sentinel
- * revoke path is the only state where this is null and remains the
- * runtime behaviour today.
+ * Pinned ZeroDev kernel permission configuration.
+ *
+ * Populated under #83 against `@zerodev/permissions@5.6.3` (the
+ * adapter's devDependency, audited at install time via
+ * `npm ci`'s lockfile resolution). Every address below is sourced
+ * from that package's `constants.ts` export and is verified
+ * byte-for-byte by `test/permission-validator-pin.test.ts`. The
+ * `uninstallValidationFunction` ABI fragment is verified the same
+ * way against `KernelV3_1AccountAbi` from `@zerodev/sdk@5.5.10`.
+ *
+ * The pin is purely declarative today. The runtime revoke path is
+ * still sentinel; #58 is the change that wires this pin into
+ * `executeRevoke` (alongside the remaining hard blockers in
+ * `docs/zerodev-permissions-integration.md`: per-account sudo
+ * signer, plugin-blob persistence, on-the-wire `delegation_id`
+ * encoding, per-permission vs `invalidateNonce` design call).
+ *
+ * Editing this constant in any way must:
+ *
+ *   1. Re-run `test/permission-validator-pin.test.ts` to confirm
+ *      the new values still match the package the lockfile pulls.
+ *   2. Update `docs/zerodev-permissions-integration.md` and
+ *      `docs/smart-account-and-revoke-design.md` if the change
+ *      reflects a change in which signer / policy modules the
+ *      runtime is willing to drive.
  */
-export const KERNEL_PERMISSION_PIN: KernelPermissionPin | null = null;
+export const KERNEL_PERMISSION_PIN: KernelPermissionPin = {
+  // The signer modules the runtime is willing to accept on a
+  // permission. Addresses are CREATE2-deployed by ZeroDev and are
+  // therefore the same on Base mainnet (8453) and Base Sepolia
+  // (84532). Currently ECDSA only — WebAuthn signers are not
+  // wired, and adding them would require a separate product
+  // decision plus additional adapter integration.
+  acceptedSignerContracts: [
+    "0x6A6F069E2a08c2468e7724Ab3250CdBFBA14D4FF", // ECDSA_SIGNER_CONTRACT
+  ],
+
+  // The policy modules the runtime is willing to accept on a
+  // permission. Same CREATE2 same-address-every-chain posture as
+  // signers above. Earlier `CALL_POLICY_CONTRACT_V0_0_1`–`V0_0_4`
+  // versions and `WEBAUTHN_SIGNER_CONTRACT_V0_0_1`–`V0_0_3` are
+  // intentionally excluded — the latest version of each module is
+  // listed here, and a future migration that needs an older
+  // version must add it explicitly with reviewer attention.
+  acceptedPolicyContracts: [
+    "0x85770b902D1e503D5f5141d9eaC16d0d08eEaDd2", // CALL_POLICY_CONTRACT_V0_0_5
+    "0xaeFC5AbC67FfD258abD0A3E54f65E70326F84b23", // GAS_POLICY_CONTRACT
+    "0xf63d4139B25c836334edD76641356c6b74C86873", // RATE_LIMIT_POLICY_CONTRACT
+    "0xF6A936c88D97E6fad13b98d2FD731Ff17eeD591d", // SIGNATURE_POLICY_CONTRACT
+    "0x67b436caD8a6D025DF6C82C5BB43fbF11fC5B9B7", // SUDO_POLICY_CONTRACT
+    "0xB9f8f524bE6EcD8C945b1b87f9ae5C192FdCE20F", // TIMESTAMP_POLICY_CONTRACT
+  ],
+
+  // Pinned npm version of `@zerodev/permissions` whose exported
+  // constants the addresses above were verified against. The
+  // lockfile + the tripwire test together enforce that the
+  // resolved package version stays compatible.
+  zeroDevPermissionsPackageVersion: "5.6.3",
+
+  artifactSource: {
+    kind: "vendor_audited_package",
+    url: "https://www.npmjs.com/package/@zerodev/permissions/v/5.6.3",
+    note:
+      "Addresses sourced from `constants.ts` in the `@zerodev/permissions@5.6.3` " +
+      "tarball. Confirmed CREATE2 same-on-every-chain via contractscan.xyz for " +
+      "ECDSA_SIGNER_CONTRACT and CALL_POLICY_CONTRACT_V0_0_5; the rest of the " +
+      "modules are deployed by the same factory pattern per the package README.",
+  },
+
+  // `Kernel.uninstallValidation(bytes21,bytes,bytes)` is the
+  // on-chain entry point for per-permission revoke under the
+  // corrected ZeroDev model. Verified byte-for-byte against
+  // `KernelV3_1AccountAbi.uninstallValidation` in the
+  // `@zerodev/sdk@5.5.10` tarball by the tripwire test. The method
+  // is on the smart account itself, not on a separate validator
+  // contract.
+  uninstallValidationFunction: {
+    type: "function",
+    name: "uninstallValidation",
+    inputs: [
+      { name: "vId", type: "bytes21" },
+      { name: "deinitData", type: "bytes" },
+      { name: "hookDeinitData", type: "bytes" },
+    ],
+    outputs: [],
+    stateMutability: "payable",
+  },
+};
 
 // `Hex` is re-exported so consumers that previously imported it via
 // this module continue to compile during the transition. Remove
