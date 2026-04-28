@@ -170,26 +170,22 @@ will fail loudly the moment the inner call shape changes, forcing
 whoever makes the change to also update this contract, the runbook,
 and close #31.
 
-### `delegation_id` semantics post-Kernel provisioning
+### `delegation_id` semantics
 
-Phoenix stores `delegations.delegation_id` as an opaque string column.
-The mapping convention #57 pins is independent of any specific
-validator deployment: after #58 ships, fresh grants against a
-Kernel-provisioned smart account emit `delegation_id` values that
-are the lowercase hex form of the Permission Validator's `bytes32
-permissionId` (`0x` + 64 lowercase hex digits, 66 chars total). The
-convention is documented in `docs/smart-account-and-revoke-design.md`
-and pinned by fixture in
-`priv/adapter/fixtures/permission_id_mapping.json`. The convention
-holds regardless of which Permission Validator function name #58
-ultimately verifies.
+Phoenix stores `delegations.delegation_id` as an opaque string
+column. The on-the-wire encoding is deferred to the ZeroDev SDK
+integration described in
+[`docs/zerodev-permissions-integration.md`](../../docs/zerodev-permissions-integration.md);
+the eventual value is one of: a 4-byte ZeroDev `permissionId`
+(10 hex chars), a 21-byte Kernel `validationId` (44 hex chars),
+or a serialized plugin blob. An earlier revision of this section
+claimed the value was a 66-char `bytes32 permissionId` derived
+from a single Permission Validator contract — that was a
+wrong-model assumption (see the integration doc).
 
-Pre-Kernel grants continue to use the v0.1 `del_…` placeholder shape;
-the adapter's mapping helpers explicitly reject those, so a Kernel
-revoke against a pre-Kernel id surfaces as a `userop_build_failed`
-rather than silently degrading to a sentinel write. This is
-intentional — see the "fail-closed for #58" rationale in the
-adapter's `permission_validator.ts`.
+Pre-integration sentinel-era grants continue to use legacy
+`del_…` placeholder ids. The adapter accepts and echoes any
+non-empty string; no format-validation helpers run today.
 
 Phoenix continues to treat `revoked` (via the sentinel path) as
 "on-chain anchored, trust downgraded", NOT as "cryptographically
@@ -425,10 +421,12 @@ See `fixtures/dispatch_revoke_delegation.json`.
 {
   "action": "revoke_delegation",
   "smart_account_id": "sa_...",
-  "delegation_id": "del_...",            // opaque to Phoenix; hex
-                                         // form of bytes32 permissionId
-                                         // once #58 ships against a
-                                         // Kernel v3 account
+  "delegation_id": "del_...",            // opaque on the wire; final
+                                         // encoding (4-byte ZeroDev
+                                         // permissionId, 21-byte Kernel
+                                         // validationId, or serialized
+                                         // plugin blob) is deferred to
+                                         // docs/zerodev-permissions-integration.md
   "reason": "operator_requested",
   "correlation_id": null                 // runtime-scoped
 }

@@ -36,6 +36,13 @@ npm-debug.log
 /assets/node_modules/
 /chain_adapter/node_modules/
 
+# npm cache + logs that land at the repo root when sandboxes
+# reroute HOME (e.g. when tools point npm at the project tree).
+/.npm/
+
+# macOS Finder metadata.
+.DS_Store
+
 # Local env files (never commit secrets). The *.example files are tracked.
 .env
 .env.*

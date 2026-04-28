@@ -161,22 +161,22 @@ describe("executeRevoke — Base sentinel (AA v0.7)", () => {
     expect(cb.tx_refs![0]!.nonce).toBe("0x7");
   });
 
-  it("threads any opaque delegation_id (incl. ZeroDev-shaped permissionIds) through to the callback", async () => {
-    // The dispatch schema accepts any non-empty delegation_id; the
-    // sentinel path echoes whatever Phoenix sent into the
-    // `delegation.state_changed` callback unchanged. Once the
-    // ZeroDev SDK integration in
-    // `docs/zerodev-permissions-integration.md` lands, the real
-    // value will be a 4-byte ZeroDev permissionId or a 21-byte
-    // Kernel validationId — but the wire shape stays an opaque
-    // string and the sentinel must not choke on either form.
-    const permissionHex = ("0x" + "ab".repeat(32)) as `0x${string}`;
+  it("threads any opaque delegation_id through to the callback unchanged", async () => {
+    // `delegation_id` is opaque on the wire — the dispatch schema
+    // accepts any non-empty string and the sentinel path echoes it
+    // into the `delegation.state_changed` callback unchanged. The
+    // final on-the-wire encoding (4-byte ZeroDev permissionId,
+    // 21-byte Kernel validationId, or a serialized plugin blob) is
+    // deferred to the SDK integration in
+    // `docs/zerodev-permissions-integration.md`; the sentinel path
+    // must not choke on whichever shape lands.
+    const opaqueId = "del-zerodev-pending-7f3c";
     const callbackClient = createTestCallbackClient();
     const clients = mockClients();
 
     await executeRevoke(
       "sa_test",
-      permissionHex,
+      opaqueId,
       "operator_requested",
       testConfig(),
       clients,
@@ -185,7 +185,7 @@ describe("executeRevoke — Base sentinel (AA v0.7)", () => {
 
     const cb = callbackClient.payloads[0]!;
     if (cb.kind !== "delegation.state_changed") throw new Error("unreachable");
-    expect(cb.delegation_id).toBe(permissionHex);
+    expect(cb.delegation_id).toBe(opaqueId);
     expect(cb.state).toBe("revoked");
   });
 

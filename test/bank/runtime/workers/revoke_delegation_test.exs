@@ -76,14 +76,19 @@ defmodule Bank.Runtime.Workers.RevokeDelegationTest do
                Repo.all(AuditEvent)
     end
 
-    test "threads a Kernel-shaped permissionId-hex delegation_id end-to-end" do
-      # Once #58 swaps the adapter's inner call, fresh grants against a
-      # Kernel-provisioned account emit `0x`+64-hex `bytes32 permissionId`
-      # values. The dispatch contract is already ready to carry them.
-      permission_hex =
-        "0x" <> String.duplicate("ab", 32)
+    test "threads any opaque delegation_id end-to-end" do
+      # `delegation_id` is opaque on the wire — Phoenix and the
+      # adapter must agree on its encoding eventually (4-byte
+      # ZeroDev permissionId, 21-byte Kernel validationId, or a
+      # serialized plugin blob — see
+      # docs/zerodev-permissions-integration.md), but the dispatch
+      # path itself does not parse it. This test pins that any
+      # non-empty string flows through unchanged so the encoding
+      # decision can land later without changing the dispatch
+      # contract again.
+      opaque_id = "del-zerodev-pending-" <> Ecto.UUID.generate()
 
-      grant_delegation!(delegation_id: permission_hex)
+      grant_delegation!(delegation_id: opaque_id)
 
       test_pid = self()
 
@@ -105,7 +110,7 @@ defmodule Bank.Runtime.Workers.RevokeDelegationTest do
                  "reason" => "operator_requested"
                })
 
-      assert_received {:dispatch_body, %{"delegation_id" => ^permission_hex}}
+      assert_received {:dispatch_body, %{"delegation_id" => ^opaque_id}}
     end
   end
 
