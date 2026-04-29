@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="csrf-token" content={get_csrf_token()} />
+    <title>{assigns[:page_title] || "Sign in"} — CryptoBank</title>
+    <link rel="stylesheet" href={~p"/assets/app.css"} />
+  </head>
+  <body class="min-h-screen bg-base-100 text-base-content">
+    <main id="login-main" class="flex min-h-screen items-center justify-center p-6">
+      <div class="w-full max-w-md space-y-8">
+        <header class="text-center">
+          <h1 class="text-2xl font-semibold tracking-tight">CryptoBank</h1>
+          <p class="text-sm text-base-content/70">
+            Private alpha — invite required.
+          </p>
+        </header>
+
+        <%= if Phoenix.Flash.get(@flash, :error) do %>
+          <div
+            id="flash-error"
+            class="rounded-lg border border-error/40 bg-error/10 p-3 text-sm text-error"
+          >
+            {Phoenix.Flash.get(@flash, :error)}
+          </div>
+        <% end %>
+
+        <%= if Phoenix.Flash.get(@flash, :info) do %>
+          <div id="flash-info" class="rounded-lg border border-info/40 bg-info/10 p-3 text-sm">
+            {Phoenix.Flash.get(@flash, :info)}
+          </div>
+        <% end %>
+
+        <section class="space-y-4">
+          <a
+            id="google-signin-button"
+            href={~p"/auth/google"}
+            class="flex w-full items-center justify-center gap-3 rounded-lg border border-base-300 bg-base-200 px-4 py-3 text-sm font-medium hover:bg-base-300 transition-colors"
+          >
+            <span aria-hidden="true">🔐</span>
+            <span>Continue with Google</span>
+          </a>
+
+          <p class="text-xs text-base-content/60 text-center">
+            Google sign-in identifies you only. Workspace access is
+            granted by an operator after invite review.
+          </p>
+        </section>
+      </div>
+    </main>
+  </body>
+</html>

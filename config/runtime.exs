@@ -176,6 +176,55 @@ case config_env() do
     :ok
 end
 
+# Bank.Accounts.OAuthProvider.Google: Google OAuth client for the
+# private-alpha identity flow (epic #153, issue #154).
+#
+#   * GOOGLE_OAUTH_CLIENT_ID — OAuth 2.0 web-application client id
+#     issued in Google Cloud console.
+#   * GOOGLE_OAUTH_CLIENT_SECRET — paired client secret. Rotate on
+#     staff change or credential leak.
+#   * GOOGLE_OAUTH_REDIRECT_URI — must match the redirect URI
+#     registered with the Google client and resolves to
+#     `<PHX_HOST>/auth/google/callback`.
+#
+# In :prod all three env vars are required; the boot fails closed
+# without them so we never silently fall back to a half-configured
+# provider. In :dev / :test the test config wires the in-process
+# `Bank.Accounts.OAuthProvider.Stub` instead, so this block is a no-op.
+case config_env() do
+  :prod ->
+    google_client_id =
+      System.get_env("GOOGLE_OAUTH_CLIENT_ID") ||
+        raise """
+        environment variable GOOGLE_OAUTH_CLIENT_ID is missing.
+        Issue an OAuth 2.0 client id in Google Cloud console for the
+        web application that hosts the operator console.
+        """
+
+    google_client_secret =
+      System.get_env("GOOGLE_OAUTH_CLIENT_SECRET") ||
+        raise """
+        environment variable GOOGLE_OAUTH_CLIENT_SECRET is missing.
+        Paired with GOOGLE_OAUTH_CLIENT_ID — rotate on staff change.
+        """
+
+    google_redirect_uri =
+      System.get_env("GOOGLE_OAUTH_REDIRECT_URI") ||
+        raise """
+        environment variable GOOGLE_OAUTH_REDIRECT_URI is missing.
+        Must match the redirect URI registered with the Google client.
+        For example: https://<PHX_HOST>/auth/google/callback
+        """
+
+    config :bank, Bank.Accounts.OAuthProvider.Google,
+      client_id: google_client_id,
+      client_secret: google_client_secret,
+      redirect_uri: google_redirect_uri
+
+  _ ->
+    :ok
+end
+
 if config_env() == :prod do
   database_url =
     System.get_env("DATABASE_URL") ||

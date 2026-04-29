@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="csrf-token" content={get_csrf_token()} />
+    <title>{assigns[:page_title] || "Pending access"} — CryptoBank</title>
+    <link rel="stylesheet" href={~p"/assets/app.css"} />
+  </head>
+  <body class="min-h-screen bg-base-100 text-base-content">
+    <main id="pending-main" class="flex min-h-screen items-center justify-center p-6">
+      <div class="w-full max-w-md space-y-6 rounded-xl border border-base-300 bg-base-200 p-8">
+        <header class="space-y-2">
+          <p class="text-xs uppercase tracking-widest text-base-content/50">
+            Private alpha
+          </p>
+          <h1 id="pending-heading" class="text-2xl font-semibold tracking-tight">
+            Access pending
+          </h1>
+        </header>
+
+        <p class="text-sm leading-relaxed">
+          We received your sign-in. CryptoBank is invite-only during
+          private alpha — an operator will review your account and
+          grant workspace access.
+        </p>
+
+        <p class="text-xs text-base-content/60">
+          You'll see the app once an admin approves your access. No
+          chain actions, intent submissions, or workspace data are
+          available before then.
+        </p>
+
+        <%= if @current_user do %>
+          <div class="rounded-md bg-base-100 p-3 text-xs">
+            Signed in as <span class="font-medium">{@current_user.email}</span>
+          </div>
+        <% end %>
+
+        <form action={~p"/logout"} method="post" id="logout-form">
+          <input type="hidden" name="_method" value="delete" />
+          <input type="hidden" name="_csrf_token" value={get_csrf_token()} />
+          <button type="submit" id="logout-button" class="text-sm underline hover:no-underline">
+            Sign out
+          </button>
+        </form>
+      </div>
+    </main>
+  </body>
+</html>
