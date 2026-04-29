@@ -1,6 +1,6 @@
 defmodule Bank.Demo do
   @moduledoc """
-  Seeded demo dataset and reset helpers.
+  Seeded demo dataset and reset helpers for the local sandbox mode.
 
   The alpha and design-partner sessions reuse a curated set of
   counterparties, policies, delegations, and historical intents so
@@ -8,16 +8,37 @@ defmodule Bank.Demo do
   module owns both halves of that workflow:
 
     * `seed/0` — idempotent population. Safe to run repeatedly; the
-      upsert keys are `(Counterparty.name)`, `(chain, address)` for
+      upsert keys are `Counterparty.name`, `(chain, address)` for
       labels, `(agent_id, idempotency_key)` for intents, and the
-      `:rule_type, :priority` combo for policy rules.
-    * `reset/1` — destructive truncation of every demo-owned table
-      followed by `seed/0`. Guarded behind a hard-coded env allowlist
-      plus an explicit `confirm: true` flag so it can never fire
-      against a real prod database.
+      `(rule_type, priority)` combo for policy rules.
+    * `reset/1` — scoped delete of every row this module created
+      (matched by stable demo identifiers — `[Sandbox]` counterparty
+      names, `sandbox-demo-*` agent ids, `sa_demo_01` smart account,
+      and the exact policy-rule specs the seeder produces) followed
+      by `seed/0`. Guarded behind a hard-coded env allowlist plus an
+      explicit `confirm: true` flag. Non-demo rows in the same tables
+      are not touched.
 
   The corresponding Mix tasks (`mix bank.demo.seed`,
   `mix bank.demo.reset`) live in `lib/mix/tasks/`.
+
+  ## Visibly fake / test-only
+
+  All counterparty names carry a `[Sandbox]` prefix, addresses use
+  the obvious `0x111…1` / `0x222…2` test pattern, and the smart
+  account / delegation / agent identifiers are explicit `*_demo_*` /
+  `sandbox-demo-*` strings. There are no real private keys, API
+  keys, bearer tokens, or environment-sourced URLs anywhere in the
+  seeded data — the test suite asserts that on every row the seeder
+  produces.
+
+  ## Workspace placeholder (#155)
+
+  Until issue #155 lands the `workspaces` / `memberships` tables,
+  every seeded row is implicitly scoped to `workspace_slug/0` —
+  `"sandbox-demo"`. Each `seed_*` / `upsert_*` helper carries a
+  `# TODO #155` marker pointing at the exact line where
+  `workspace_id:` will need to be set on the changeset.
 
   See `docs/demo.md` for the operator-facing instructions.
   """
@@ -28,21 +49,43 @@ defmodule Bank.Demo do
 
   alias Bank.Audit.AuditEvent
   alias Bank.Counterparties.{AddressLabel, Counterparty}
-  alias Bank.Decisions.{DecisionEnvelope, ExecutionPlan}
+  alias Bank.Decisions.{DecisionEnvelope, ExecutionPlan, SimulationReport, TrustAssessment}
   alias Bank.Delegations.Delegation
   alias Bank.Intents.AgentIntent
   alias Bank.Policies.PolicyRule
   alias Bank.Repo
 
+  @demo_workspace_slug "sandbox-demo"
+  @sandbox_prefix "[Sandbox] "
   @smart_account_id "sa_demo_01"
   @delegation_id "del_demo_01"
+  @demo_agent_id "sandbox-demo-agent"
+  # Carried so a reset can clean rows from earlier seed versions that
+  # used the unprefixed `demo-agent` / bare counterparty names. New
+  # writes always use the [Sandbox]-prefixed form.
+  @legacy_demo_agent_id "demo-agent"
+  @legacy_counterparty_names [
+    "Payroll Provider",
+    "Treasury Ops",
+    "New Partner X",
+    "Unverified Recipient"
+  ]
   @chain "base"
   @asset "USDC"
 
-  # Environments where `reset/1` is allowed to truncate. Prod is never
+  # Environments where `reset/1` is allowed to delete. Prod is never
   # on this list — resetting a demo dataset should never be something
   # an operator can do against production data.
   @reset_envs [:dev, :test, :staging]
+
+  @doc """
+  The placeholder workspace slug every seeded row is implicitly scoped
+  to until issue #155 ships the `workspaces` table. Human-readable so
+  operator dashboards, audit trails, and `mix bank.demo.reset` output
+  can refer to the same handle.
+  """
+  @spec workspace_slug() :: String.t()
+  def workspace_slug, do: @demo_workspace_slug
 
   @doc """
   Populate the demo dataset. Idempotent: running it twice leaves the
@@ -50,7 +93,7 @@ defmodule Bank.Demo do
   """
   @spec seed() :: :ok
   def seed do
-    Logger.info("Bank.Demo: seeding demo dataset")
+    Logger.info("Bank.Demo: seeding demo dataset (workspace=#{@demo_workspace_slug})")
 
     Repo.transaction(fn ->
       counterparties = seed_counterparties()
@@ -65,8 +108,10 @@ defmodule Bank.Demo do
   end
 
   @doc """
-  Truncate every demo-owned table, then re-seed. Guarded by env +
-  confirm flag.
+  Delete every row this module created and re-seed. Guarded by env +
+  confirm flag. Unlike a `TRUNCATE`, this only removes rows matching
+  the demo identifiers — non-demo rows in the same tables (staging
+  fixtures, partner test data) are preserved.
 
   ## Example
 
@@ -86,15 +131,17 @@ defmodule Bank.Demo do
 
       true ->
         Logger.warning("Bank.Demo: resetting demo dataset in #{inspect(env)}")
-        truncate_all()
+        delete_demo_owned()
         seed()
         :ok
     end
   end
 
   @doc """
-  The list of tables this module owns. Exposed so the reset Mix task
-  can print the list in its dry-run output.
+  The list of tables this module touches. Exposed so the reset Mix
+  task can print the list in its dry-run output. Reset only deletes
+  rows matching the demo identifiers — non-demo rows in the same
+  tables are not touched.
   """
   @spec owned_tables() :: [String.t()]
   def owned_tables do
@@ -105,8 +152,6 @@ defmodule Bank.Demo do
       trust_assessments
       simulation_reports
       agent_intents
-      trust_assertions
-      evidence_artifacts
       address_labels
       counterparties
       policy_rules
@@ -114,34 +159,73 @@ defmodule Bank.Demo do
     )
   end
 
+  @doc """
+  Returns the canonical demo identifiers (workspace slug, agent ids,
+  smart-account / delegation ids, counterparty names) so tests and
+  operator tooling can assert on the exact set this module owns.
+  Includes both the current `[Sandbox]`-prefixed counterparty names
+  and the legacy unprefixed ones the reset path is expected to clean
+  up.
+  """
+  @spec identifiers() :: %{
+          required(:workspace_slug) => String.t(),
+          required(:agent_ids) => [String.t()],
+          required(:smart_account_id) => String.t(),
+          required(:delegation_id) => String.t(),
+          required(:counterparty_names) => [String.t()],
+          required(:legacy_counterparty_names) => [String.t()]
+        }
+  def identifiers do
+    %{
+      workspace_slug: @demo_workspace_slug,
+      agent_ids: [@demo_agent_id, @legacy_demo_agent_id],
+      smart_account_id: @smart_account_id,
+      delegation_id: @delegation_id,
+      counterparty_names: Enum.map(counterparty_specs(), & &1.name),
+      legacy_counterparty_names: @legacy_counterparty_names
+    }
+  end
+
   # --- Counterparties ----------------------------------------------------
 
-  defp seed_counterparties do
+  defp counterparty_specs do
     [
       %{
-        name: "Payroll Provider",
+        key: "payroll",
+        name: @sandbox_prefix <> "Payroll Provider",
         trust: :trusted,
-        note: "Monthly payroll rails — pre-approved recurring transfers."
+        note: sandbox_note("Monthly payroll rails — pre-approved recurring transfers.")
       },
       %{
-        name: "Treasury Ops",
+        key: "treasury",
+        name: @sandbox_prefix <> "Treasury Ops",
         trust: :trusted,
-        note: "Internal treasury movement account."
+        note: sandbox_note("Internal treasury movement account.")
       },
       %{
-        name: "New Partner X",
+        key: "partner_x",
+        name: @sandbox_prefix <> "New Partner X",
         trust: :sensitive,
-        note: "Recent onboarding — elevated review for first 30 days."
+        note: sandbox_note("Recent onboarding — elevated review for first 30 days.")
       },
       %{
-        name: "Unverified Recipient",
+        key: "unverified",
+        name: @sandbox_prefix <> "Unverified Recipient",
         trust: :unknown,
-        note: "Address encountered without counterparty match."
+        note: sandbox_note("Address encountered without counterparty match.")
       }
     ]
-    |> Enum.map(fn attrs ->
-      {:ok, cp} = upsert_counterparty(attrs)
-      {attrs.name, cp}
+  end
+
+  defp sandbox_note(detail) do
+    "[#{@demo_workspace_slug}] #{detail} Test-only — do not transact against this record."
+  end
+
+  defp seed_counterparties do
+    counterparty_specs()
+    |> Enum.map(fn spec ->
+      {:ok, cp} = upsert_counterparty(spec)
+      {spec.key, cp}
     end)
     |> Map.new()
   end
@@ -152,6 +236,7 @@ defmodule Bank.Demo do
         {:ok, cp}
 
       nil ->
+        # TODO #155: set workspace_id once the `workspaces` schema lands.
         %Counterparty{}
         |> Counterparty.changeset(%{
           name: name,
@@ -167,13 +252,13 @@ defmodule Bank.Demo do
 
   defp seed_address_labels(counterparties) do
     [
-      {"Payroll Provider", "0x1111111111111111111111111111111111111111", :payout, true},
-      {"Treasury Ops", "0x2222222222222222222222222222222222222222", :funding, true},
-      {"New Partner X", "0x3333333333333333333333333333333333333333", :payout, false},
-      {"Unverified Recipient", "0x4444444444444444444444444444444444444444", :other, false}
+      {"payroll", "0x1111111111111111111111111111111111111111", :payout, true},
+      {"treasury", "0x2222222222222222222222222222222222222222", :funding, true},
+      {"partner_x", "0x3333333333333333333333333333333333333333", :payout, false},
+      {"unverified", "0x4444444444444444444444444444444444444444", :other, false}
     ]
-    |> Enum.map(fn {name, address, role, verified} ->
-      counterparty = Map.fetch!(counterparties, name)
+    |> Enum.map(fn {key, address, role, verified} ->
+      counterparty = Map.fetch!(counterparties, key)
       upsert_address_label(counterparty, address, role, verified)
     end)
   end
@@ -195,6 +280,7 @@ defmodule Bank.Demo do
         {:ok, label}
 
       nil ->
+        # TODO #155: scope to the demo workspace.
         %AddressLabel{}
         |> AddressLabel.changeset(%{
           counterparty_id: counterparty.id,
@@ -209,7 +295,7 @@ defmodule Bank.Demo do
 
   # --- Policy rules ------------------------------------------------------
 
-  defp seed_policy_rules do
+  defp policy_rule_specs do
     [
       %{
         rule_type: :amount_limit,
@@ -236,7 +322,10 @@ defmodule Bank.Demo do
         params: %{"tier" => "guarded"}
       }
     ]
-    |> Enum.map(&upsert_policy_rule/1)
+  end
+
+  defp seed_policy_rules do
+    Enum.map(policy_rule_specs(), &upsert_policy_rule/1)
   end
 
   defp upsert_policy_rule(%{rule_type: rt, priority: prio} = attrs) do
@@ -252,6 +341,8 @@ defmodule Bank.Demo do
         {:ok, rule}
 
       nil ->
+        # TODO #155: scope to the demo workspace once policy rules
+        # gain a `workspace_id` column.
         %PolicyRule{}
         |> PolicyRule.changeset(
           attrs
@@ -270,6 +361,7 @@ defmodule Bank.Demo do
         {:ok, d}
 
       nil ->
+        # TODO #155: attach to the demo workspace.
         %Delegation{}
         |> Delegation.changeset(%{
           smart_account_id: @smart_account_id,
@@ -285,73 +377,139 @@ defmodule Bank.Demo do
   # --- Intents + decisions + plans + audit ------------------------------
 
   defp seed_intents(counterparties) do
-    # A representative spread:
-    #   * a completed auto_exec (Payroll Provider, trusted, small amount)
-    #   * a completed approval_required → approved (New Partner X, sensitive)
-    #   * a blocked unknown-recipient intent (Unverified Recipient)
-    #   * an in-flight executing intent (Treasury Ops)
-    scenarios = [
+    # Covers every intent state the runtime produces: submitted,
+    # decided (auto_exec / approval_required / hold), executing,
+    # executed, blocked, cancelled. Each scenario's `phase` selects
+    # which rows get created — only `:planned` scenarios produce an
+    # `ExecutionPlan`.
+    Enum.map(intent_scenarios(), &build_scenario(&1, counterparties))
+  end
+
+  defp intent_scenarios do
+    [
+      %{
+        name: "submitted-fresh",
+        counterparty: "payroll",
+        amount: Decimal.new("75"),
+        phase: :submitted,
+        intent_state: :submitted
+      },
+      %{
+        name: "decided-pending-exec",
+        counterparty: "payroll",
+        amount: Decimal.new("125"),
+        phase: :decided,
+        decision_outcome: :auto_exec,
+        intent_state: :decided
+      },
       %{
         name: "payroll-confirmed",
-        counterparty: "Payroll Provider",
+        counterparty: "payroll",
         amount: Decimal.new("250"),
-        outcome: :auto_exec,
-        final_status: :confirmed,
+        phase: :planned,
+        decision_outcome: :auto_exec,
         intent_state: :executed,
-        tx_hash: "0xabc111...demo-payroll"
+        execution_status: :confirmed,
+        final_status: :confirmed,
+        tx_hash: "0xabc111...sandbox-payroll"
+      },
+      %{
+        name: "partner-x-pending-approval",
+        counterparty: "partner_x",
+        amount: Decimal.new("1500"),
+        phase: :decided,
+        decision_outcome: :approval_required,
+        intent_state: :decided
       },
       %{
         name: "partner-x-approved",
-        counterparty: "New Partner X",
+        counterparty: "partner_x",
         amount: Decimal.new("1000"),
-        outcome: :approval_required,
-        final_status: :confirmed,
+        phase: :planned,
+        decision_outcome: :approval_required,
         intent_state: :executed,
-        tx_hash: "0xabc222...demo-partner"
+        execution_status: :confirmed,
+        final_status: :confirmed,
+        tx_hash: "0xabc222...sandbox-partner"
       },
       %{
-        name: "unknown-blocked",
-        counterparty: "Unverified Recipient",
-        amount: Decimal.new("500"),
-        outcome: :block,
-        final_status: nil,
-        intent_state: :blocked,
-        tx_hash: nil
+        name: "treasury-held",
+        counterparty: "treasury",
+        amount: Decimal.new("400"),
+        phase: :decided,
+        decision_outcome: :hold,
+        intent_state: :decided
       },
       %{
         name: "treasury-executing",
-        counterparty: "Treasury Ops",
+        counterparty: "treasury",
         amount: Decimal.new("100"),
-        outcome: :auto_exec,
-        final_status: nil,
+        phase: :planned,
+        decision_outcome: :auto_exec,
         intent_state: :executing,
+        execution_status: :broadcasting,
+        final_status: nil,
         tx_hash: nil
+      },
+      %{
+        name: "unknown-blocked",
+        counterparty: "unverified",
+        amount: Decimal.new("500"),
+        phase: :blocked,
+        intent_state: :blocked
+      },
+      %{
+        name: "cancelled-pre-decision",
+        counterparty: "payroll",
+        amount: Decimal.new("60"),
+        phase: :cancelled,
+        intent_state: :cancelled
       }
     ]
-
-    Enum.map(scenarios, &build_scenario(&1, counterparties))
   end
 
   defp build_scenario(scenario, counterparties) do
     counterparty = Map.fetch!(counterparties, scenario.counterparty)
     label = primary_label(counterparty)
 
-    idempotency = "demo-" <> scenario.name
+    idempotency = "sandbox-" <> scenario.name
 
     {:ok, intent} = upsert_intent(scenario, counterparty, label, idempotency)
 
-    case scenario.outcome do
-      :block ->
+    case scenario.phase do
+      :submitted ->
+        emit_submitted_audit(intent)
+        %{intent: intent, decision: nil, plan: nil}
+
+      :cancelled ->
+        emit_cancelled_audit(intent)
+        %{intent: intent, decision: nil, plan: nil}
+
+      :blocked ->
         {:ok, decision} = upsert_decision(intent, :block, :severe)
         emit_audit(intent, decision, scenario)
         %{intent: intent, decision: decision, plan: nil}
 
-      outcome ->
-        {:ok, decision} = upsert_decision(intent, outcome, decision_risk(outcome))
+      :decided ->
+        {:ok, decision} =
+          upsert_decision(
+            intent,
+            scenario.decision_outcome,
+            decision_risk(scenario.decision_outcome)
+          )
 
-        {:ok, plan} =
-          upsert_plan(decision, intent, execution_status(scenario), scenario)
+        emit_audit(intent, decision, scenario)
+        %{intent: intent, decision: decision, plan: nil}
 
+      :planned ->
+        {:ok, decision} =
+          upsert_decision(
+            intent,
+            scenario.decision_outcome,
+            decision_risk(scenario.decision_outcome)
+          )
+
+        {:ok, plan} = upsert_plan(decision, intent, scenario.execution_status, scenario)
         emit_audit(intent, decision, scenario, plan)
         %{intent: intent, decision: decision, plan: plan}
     end
@@ -366,14 +524,15 @@ defmodule Bank.Demo do
   end
 
   defp upsert_intent(scenario, counterparty, label, idempotency) do
-    case Repo.get_by(AgentIntent, idempotency_key: idempotency) do
+    case Repo.get_by(AgentIntent, agent_id: @demo_agent_id, idempotency_key: idempotency) do
       %AgentIntent{} = intent ->
         {:ok, intent}
 
       nil ->
+        # TODO #155: scope to the demo workspace.
         %AgentIntent{}
         |> AgentIntent.changeset(%{
-          agent_id: "demo-agent",
+          agent_id: @demo_agent_id,
           source: :agent,
           idempotency_key: idempotency,
           payload_hash: :crypto.hash(:sha256, idempotency) |> Base.encode16(case: :lower),
@@ -392,6 +551,7 @@ defmodule Bank.Demo do
 
   defp decision_risk(:auto_exec), do: :low
   defp decision_risk(:approval_required), do: :elevated
+  defp decision_risk(:hold), do: :moderate
   defp decision_risk(_), do: :moderate
 
   defp upsert_decision(intent, outcome, risk_tier) do
@@ -400,6 +560,7 @@ defmodule Bank.Demo do
         {:ok, d}
 
       nil ->
+        # TODO #155: scope to the demo workspace.
         %DecisionEnvelope{}
         |> DecisionEnvelope.changeset(%{
           intent_id: intent.id,
@@ -419,10 +580,6 @@ defmodule Bank.Demo do
     end
   end
 
-  defp execution_status(%{final_status: :confirmed}), do: :confirmed
-  defp execution_status(%{intent_state: :executing}), do: :broadcasting
-  defp execution_status(_), do: :prepared
-
   defp upsert_plan(decision, intent, status, scenario) do
     case Repo.one(
            from p in ExecutionPlan,
@@ -433,6 +590,7 @@ defmodule Bank.Demo do
         {:ok, plan}
 
       nil ->
+        # TODO #155: scope to the demo workspace.
         %ExecutionPlan{}
         |> ExecutionPlan.changeset(%{
           decision_id: decision.id,
@@ -444,16 +602,43 @@ defmodule Bank.Demo do
           signing_requirements: %{"delegation_id" => @delegation_id, "scope" => %{}},
           tx_refs: if(scenario.tx_hash, do: [scenario.tx_hash], else: []),
           final_outcome: scenario.final_status,
-          final_reason: if(scenario.final_status == :confirmed, do: "demo_seed", else: nil)
+          final_reason: if(scenario.final_status == :confirmed, do: "sandbox_seed", else: nil)
         })
         |> Repo.insert()
     end
   end
 
+  defp emit_submitted_audit(intent) do
+    insert_audit_event(%{
+      correlation_id: intent.id,
+      ts: DateTime.utc_now(),
+      actor: :agent,
+      actor_id: intent.agent_id,
+      subject_type: "agent_intent",
+      subject_id: intent.id,
+      schema_version: "1",
+      event_type: "intent.submitted",
+      payload_hash: intent.payload_hash
+    })
+  end
+
+  defp emit_cancelled_audit(intent) do
+    emit_submitted_audit(intent)
+
+    insert_audit_event(%{
+      correlation_id: intent.id,
+      ts: DateTime.utc_now(),
+      actor: :user,
+      actor_id: intent.agent_id,
+      subject_type: "agent_intent",
+      subject_id: intent.id,
+      schema_version: "1",
+      event_type: "intent.cancelled",
+      payload_hash: :crypto.hash(:sha256, "cancel:" <> intent.id) |> Base.encode16(case: :lower)
+    })
+  end
+
   defp emit_audit(intent, decision, scenario, plan \\ nil) do
-    # Two minimal events per scenario: submission + decision. Plus one
-    # more if there is a plan. Covers the happy path of an intent's
-    # life so the replay page has something to render.
     base = %{
       correlation_id: intent.id,
       ts: DateTime.utc_now(),
@@ -499,33 +684,133 @@ defmodule Bank.Demo do
         events
       end
 
-    Enum.each(events, fn attrs ->
-      # Skip if an event with the same (correlation_id, subject_id,
-      # event_type) already exists — keeps seed idempotent.
-      existing =
-        Repo.one(
-          from e in AuditEvent,
-            where:
-              e.correlation_id == ^attrs.correlation_id and
-                e.subject_id == ^attrs.subject_id and
-                e.event_type == ^attrs.event_type,
-            limit: 1
-        )
+    Enum.each(events, &insert_audit_event/1)
+  end
 
-      if is_nil(existing) do
-        %AuditEvent{}
-        |> AuditEvent.changeset(attrs)
-        |> Repo.insert!()
-      end
+  defp insert_audit_event(attrs) do
+    existing =
+      Repo.one(
+        from e in AuditEvent,
+          where:
+            e.correlation_id == ^attrs.correlation_id and
+              e.subject_id == ^attrs.subject_id and
+              e.event_type == ^attrs.event_type,
+          limit: 1
+      )
+
+    if is_nil(existing) do
+      %AuditEvent{}
+      |> AuditEvent.changeset(attrs)
+      |> Repo.insert!()
+    end
+  end
+
+  # --- Scoped reset ------------------------------------------------------
+
+  # Targeted delete that only removes rows matching the demo
+  # identifiers — not a TRUNCATE. Non-demo rows in the same tables
+  # (staging fixtures, partner test data, etc.) are preserved.
+  #
+  # `audit_events` is intentionally NOT touched here. The table is
+  # append-only at the DB layer (a `BEFORE DELETE` trigger raises
+  # `read_only_sql_transaction`, see migration #170600), and the
+  # whole point of audit is that history isn't rewriteable. Demo
+  # audit rows tied to deleted intents become orphans (correlation
+  # ids that no longer resolve) — harmless because replay queries
+  # the live `agent_intents` table; the next `seed/0` writes fresh
+  # audit rows for the new intent uuids.
+  #
+  # Order matters because most FKs use the default `:restrict`
+  # behaviour: leaves first, then roots.
+  defp delete_demo_owned do
+    Repo.transaction(fn ->
+      delete_demo_intent_subgraph()
+      delete_demo_counterparties()
+      delete_demo_delegation()
+      delete_demo_policy_rules()
+    end)
+
+    :ok
+  end
+
+  defp delete_demo_intent_subgraph do
+    intent_ids_query =
+      from i in AgentIntent,
+        where: i.agent_id in ^all_demo_agent_ids(),
+        select: i.id
+
+    # Execution plans, decisions, simulations and trust assessments
+    # referencing demo intents (the live runtime may have written
+    # extra simulation/trust rows during a previous demo session).
+    Repo.delete_all(
+      from p in ExecutionPlan,
+        where: p.intent_id in subquery(intent_ids_query)
+    )
+
+    Repo.delete_all(
+      from d in DecisionEnvelope,
+        where: d.intent_id in subquery(intent_ids_query)
+    )
+
+    Repo.delete_all(
+      from s in SimulationReport,
+        where: s.intent_id in subquery(intent_ids_query)
+    )
+
+    Repo.delete_all(
+      from t in TrustAssessment,
+        where: t.intent_id in subquery(intent_ids_query)
+    )
+
+    Repo.delete_all(
+      from i in AgentIntent,
+        where: i.agent_id in ^all_demo_agent_ids()
+    )
+  end
+
+  defp delete_demo_counterparties do
+    names = all_demo_counterparty_names()
+
+    counterparty_ids_query =
+      from c in Counterparty,
+        where: c.name in ^names,
+        select: c.id
+
+    Repo.delete_all(
+      from l in AddressLabel,
+        where: l.counterparty_id in subquery(counterparty_ids_query)
+    )
+
+    Repo.delete_all(from c in Counterparty, where: c.name in ^names)
+  end
+
+  defp delete_demo_delegation do
+    Repo.delete_all(
+      from d in Delegation,
+        where: d.smart_account_id == ^@smart_account_id
+    )
+  end
+
+  defp delete_demo_policy_rules do
+    # Match each seeded rule by `(rule_type, priority, params)` so
+    # operator-authored rules with the same `(rule_type, priority)`
+    # but different params survive the reset.
+    Enum.each(policy_rule_specs(), fn %{
+                                        rule_type: rt,
+                                        priority: prio,
+                                        params: params
+                                      } ->
+      Repo.delete_all(
+        from r in PolicyRule,
+          where: r.rule_type == ^rt and r.priority == ^prio and r.params == ^params
+      )
     end)
   end
 
-  # --- Reset -------------------------------------------------------------
+  defp all_demo_agent_ids, do: [@demo_agent_id, @legacy_demo_agent_id]
 
-  defp truncate_all do
-    Enum.each(owned_tables(), fn table ->
-      Repo.query!("TRUNCATE TABLE #{table} RESTART IDENTITY CASCADE")
-    end)
+  defp all_demo_counterparty_names do
+    Enum.map(counterparty_specs(), & &1.name) ++ @legacy_counterparty_names
   end
 
   defp runtime_env do
