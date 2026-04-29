@@ -94,9 +94,9 @@ Every transition above writes an `AuditEvent` with `correlation_id = intent_id`.
    - `block` — policy fails, trust is `unknown` or `conflicted` without an operator override, or simulation predicts guaranteed revert or out-of-policy outcome.
 
 7. **Post-decision routing.**
-   - `auto_exec`: Phoenix prepares an `ExecutionPlan` skeleton and enqueues it on `executions.run`.
+   - `auto_exec`: Phoenix tries to auto-dispatch via `Bank.Decisions.dispatch_auto_exec/3`. The dispatch resolves a `smart_account_id` through `Bank.Decisions.resolve_executable_account/0` (single-active-delegation fallback; explicit `:smart_account_id` opt also supported). When a single executable delegation exists and every dispatch gate passes (envelope current + `:auto_exec`, no active plan for this decision OR for this intent, runtime not paused, delegation `:active`, stablecoin adapter ready), an `ExecutionPlan` is created and `RunExecution` is enqueued in the same call. Otherwise the runtime emits an `intent.auto_exec_held` audit row carrying a machine-readable `held_reason` (`no_executable_account`, `ambiguous_executable_account`, `runtime_paused`, etc.); the envelope is preserved as `:auto_exec` and current, and the operator can resolve the gate and call `POST /v1/decisions/{id}/execute` manually.
    - `hold`: a hold timer arms. The intent stays in `decided`. Resolution happens on operator release, policy/trust change, or fresh simulation. Resolution writes a superseder envelope.
-   - `approval_required`: the envelope appears in the operator approval queue. `approve` writes a successor envelope with outcome `auto_exec`; `reject` writes a successor with outcome `block`; TTL expiry writes a successor with outcome `block` and reason `approval_expired`.
+   - `approval_required`: the envelope appears in the operator approval queue and `Bank.Runtime.Workers.ExpireApproval` is enqueued at `approval_expires_at`. `approve` writes a successor envelope with outcome `auto_exec` AND attempts the same auto-dispatch path (`dispatched` / `held` / `no_dispatch`); `reject` writes a successor with outcome `block` and never dispatches; TTL expiry writes a successor with outcome `block` and reason `approval_expired`.
    - `block`: terminal for this envelope. A new intent is required to retry.
 
 8. **Execution planning.** Phoenix writes the `ExecutionPlan` skeleton (chain, asset, smart_account_id, signing_requirements, ordered steps, nonce target). The adapter fills in calldata-level details while respecting `signing_requirements`.
@@ -338,12 +338,24 @@ All endpoints live under `/v1/`. Auth is not specified here — assume session +
 
 #### `POST /v1/approvals/{decision_id}/approve`
 
-**Purpose.** Approve a queued decision.
+**Purpose.** Approve a queued `:approval_required` decision and (when possible) auto-dispatch the resulting `:auto_exec` successor.
 **Caller.** Operator.
-**Request.** `{ "note": "..." }`
-**Response.** The successor envelope (outcome `auto_exec`) and the intent's updated state. Execution is automatically scheduled unless the runtime is paused or a tiered-autonomy rule additionally requires `POST /v1/decisions/{id}/execute`.
-**Validation.** Decision must currently be `approval_required` and not yet resolved. `Idempotency-Key` prevents double-approve.
-**Failure modes.** `409` if already resolved. `403` on scope.
+**Request.** `{ "actor_id": "...", "reason"?: "..." }` (`actor_id` is required and is stamped on the successor envelope and every audit row.)
+**Response.** `200 OK`. Body shape:
+```
+{
+  "decision": { id, intent_id, outcome: "auto_exec", risk_tier, reasons, ... },
+  "dispatch": "dispatched" | "held" | "no_dispatch",
+  "execution_plan"?: { id, smart_account_id, execution_status },     // "dispatched" only
+  "held_reason"?: "no_executable_account" | "ambiguous_executable_account"
+                | "runtime_paused" | "delegation_not_active"
+                | "active_plan_exists" | "stablecoin_adapter_not_wired", // "held" only
+  "next_step"?: { endpoint, message }                                // "held" only
+}
+```
+The successor envelope is written first (`:auto_exec`, `:decided`, `current: true`) and is preserved regardless of the dispatch branch. If a single delegation is currently executable (single-tenant v0.1 fallback), the runtime materialises an `ExecutionPlan` and enqueues `RunExecution` in the same call (`dispatch: "dispatched"`). If no/two-or-more delegations are executable, or the runtime is paused, or a delegation is revoking/expired, the runtime emits an `intent.auto_exec_held` audit row and returns `dispatch: "held"`; the operator can resolve the gate and call `POST /v1/decisions/{id}/execute` with an explicit `smart_account_id`.
+**Validation.** Decision must currently be `approval_required` and not yet resolved.
+**Failure modes.** `409 already_superseded` for double-approve / TTL-expired envelopes. `409 wrong_outcome` if the envelope is not `:approval_required`. `404` for missing decision. `422 invalid_request` when `actor_id` is absent.
 
 ---
 
@@ -351,9 +363,9 @@ All endpoints live under `/v1/`. Auth is not specified here — assume session +
 
 **Purpose.** Reject a queued decision.
 **Caller.** Operator.
-**Request.** `{ "reason": "..." }`
-**Response.** Successor envelope with outcome `block` and resolved intent state.
-**Failure modes.** `409` if already resolved.
+**Request.** `{ "actor_id": "...", "reason"?: "..." }`
+**Response.** `200 OK` with `{ decision: <successor:block>, dispatch: "no_dispatch" }`. The intent transitions to `:blocked`. Reject never dispatches even when an executable delegation is present.
+**Failure modes.** `409 already_superseded` if already resolved.
 
 ---
 
@@ -423,6 +435,30 @@ Policy edits never mutate in place. Every change is a new version. This is how r
 - `POST /v1/security/revoke_delegation` — `{ smart_account_id, reason }`. Submits the revocation transaction via the adapter. Returns a handle; the final state change is delivered via `security:events` and audit.
 
 **Failure modes.** `409` if already in the requested state. Adapter-side failures return structured errors; nothing is silently swallowed, and nothing retries into autonomy without an explicit operator action.
+
+---
+
+## Audit event vocabulary
+
+Every state-affecting transition emits an `AuditEvent`. Event types are dotted, lowercase, `<object>.<verb>` and past-tense where it fits. The full intent-correlated set used by the live runtime:
+
+| event_type | when | actor (default) |
+| --- | --- | --- |
+| `intent.submitted` | `Bank.Intents.submit/2` accepted the body | `:agent` |
+| `intent.cancelled` | `Bank.Intents.cancel/2` ran successfully | `:user` |
+| `intent.state_changed` | Intent state transition (`:submitted` → `:decided` → `:executing` → `:executed`, etc.) | `:runtime` |
+| `intent.auto_exec_held` | An `:auto_exec` decision was reached but dispatch was withheld by a safety gate (`held_reason` in `after_ref`) | `:runtime` |
+| `trust.assessed` | New current `TrustAssessment` written | `:runtime` |
+| `simulation.produced` | New current `SimulationReport` written (evaluation pipeline OR `simulate` with `reason: "refresh"`) | `:runtime` |
+| `simulation.requested` | `POST /v1/intents/{id}/simulate` called for any reason; `after_ref.reason` carries the trigger | `:agent` |
+| `decision.decided` | New current `DecisionEnvelope` written; `before_ref` carries the prior envelope when this one supersedes another | `:runtime` |
+| `approval.granted` | Operator approved an envelope | `:user` |
+| `approval.rejected` | Operator rejected an envelope | `:user` |
+| `execution.auto_dispatched` | Runtime materialised a plan + enqueued `RunExecution` for an `:auto_exec` envelope (evaluation- or approval-driven) | `:runtime` |
+| `execution.manually_requested` | Operator triggered manual execution via `POST /v1/decisions/{id}/execute` | `:user` |
+| `execution.broadcast` / `.pending_confirmation` / `.confirmed` / `.reverted` / `.aborted` | Adapter callback advanced the execution plan's status | `:adapter` |
+
+Counterparty / policy / delegation / security events follow the same dotted convention but are correlated by their own subject id (counterparty id, rule id, smart-account id, or nil for runtime-global pauses). Extending this vocabulary is a doc change, not a schema change — `event_type` is a plain string.
 
 ---
 
