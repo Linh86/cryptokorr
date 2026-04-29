@@ -304,6 +304,45 @@ defmodule BankWeb.OpenApi.Schemas.CancelRequest do
   })
 end
 
+defmodule BankWeb.OpenApi.Schemas.IntentCancelResponse do
+  @moduledoc """
+  Body for `POST /v1/intents/{id}/cancel` (`200 OK`).
+  """
+
+  require OpenApiSpex
+  alias OpenApiSpex.{Reference, Schema}
+
+  OpenApiSpex.schema(%{
+    title: "IntentCancelResponse",
+    description: """
+    Response body for a successful intent cancellation. Returned
+    with `200 OK`. `idempotent` is `true` when the call re-cancels
+    an already-`cancelled` intent — no new state transition or
+    audit event was written, but the response shape is identical
+    to the first-time cancel for caller convenience.
+    """,
+    type: :object,
+    required: [:intent_id, :state, :idempotent, :reason, :links, :intent],
+    properties: %{
+      intent_id: %Reference{"$ref": "#/components/schemas/Id"},
+      state: %Reference{"$ref": "#/components/schemas/IntentState"},
+      idempotent: %Schema{
+        type: :boolean,
+        description:
+          "True when the request re-cancelled an already-`cancelled` intent; " <>
+            "no new state transition or audit event was written."
+      },
+      reason: %Schema{
+        type: :string,
+        description: "The cancellation reason echoed back from the request body.",
+        example: "superseded by updated intent"
+      },
+      links: %Reference{"$ref": "#/components/schemas/Links"},
+      intent: %Reference{"$ref": "#/components/schemas/IntentEntity"}
+    }
+  })
+end
+
 defmodule BankWeb.OpenApi.Schemas.IntentReplayResponse do
   @moduledoc """
   Response body for `GET /v1/intents/{id}/replay`.

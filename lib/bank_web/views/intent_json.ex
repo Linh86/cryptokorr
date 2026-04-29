@@ -1,11 +1,11 @@
 defmodule BankWeb.API.V1.IntentJSON do
   @moduledoc """
-  JSON renderers for `/v1/intents` create / show responses.
+  JSON renderers for `/v1/intents` create / show / cancel responses.
 
   Replay rendering for `GET /v1/intents/:id/replay` lives in
   `BankWeb.API.V1.AuditJSON.replay/1` — keeping this module narrow to
-  the create + show shape avoids duplicate intent renderers across
-  the audit and intent surfaces.
+  the create + show + cancel shape avoids duplicate intent renderers
+  across the audit and intent surfaces.
   """
 
   alias Bank.Intents.AgentIntent
@@ -34,6 +34,23 @@ defmodule BankWeb.API.V1.IntentJSON do
     %{
       intent_id: intent.id,
       state: intent.state,
+      links: links(intent),
+      intent: intent_payload(intent)
+    }
+  end
+
+  @doc """
+  `POST /v1/intents/:id/cancel` payload. Returns the now-`cancelled`
+  intent, the cancellation `reason` echoed back to the caller, and
+  an `idempotent` flag that is `true` when the call was a re-cancel
+  of an already-`cancelled` intent.
+  """
+  def cancelled(%{intent: %AgentIntent{} = intent, idempotent?: idempotent?, reason: reason}) do
+    %{
+      intent_id: intent.id,
+      state: intent.state,
+      idempotent: idempotent?,
+      reason: reason,
       links: links(intent),
       intent: intent_payload(intent)
     }

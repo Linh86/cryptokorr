@@ -1302,6 +1302,42 @@
         "title": "Id",
         "type": "string"
       },
+      "IntentCancelResponse": {
+        "description": "Response body for a successful intent cancellation. Returned\nwith `200 OK`. `idempotent` is `true` when the call re-cancels\nan already-`cancelled` intent — no new state transition or\naudit event was written, but the response shape is identical\nto the first-time cancel for caller convenience.\n",
+        "properties": {
+          "idempotent": {
+            "description": "True when the request re-cancelled an already-`cancelled` intent; no new state transition or audit event was written.",
+            "type": "boolean"
+          },
+          "intent": {
+            "$ref": "#/components/schemas/IntentEntity"
+          },
+          "intent_id": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "links": {
+            "$ref": "#/components/schemas/Links"
+          },
+          "reason": {
+            "description": "The cancellation reason echoed back from the request body.",
+            "example": "superseded by updated intent",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/IntentState"
+          }
+        },
+        "required": [
+          "intent_id",
+          "state",
+          "idempotent",
+          "reason",
+          "links",
+          "intent"
+        ],
+        "title": "IntentCancelResponse",
+        "type": "object"
+      },
       "IntentEntity": {
         "description": "The persisted intent record. Round-trips the submitted body\nplus the lifecycle state, the runtime-assigned id and\n`submitted_at`, the deterministic `payload_hash` used for\nidempotency, and the cached current-pointer ids. The current\npointer fields are `null` until the corresponding engine writes\na row (decision / simulation / trust assessment / execution\nplan), so callers must not assume they are populated for a\nfreshly-submitted intent.\n",
         "properties": {
@@ -3031,7 +3067,7 @@
     "/v1/intents/{id}/cancel": {
       "post": {
         "callbacks": {},
-        "description": "Operator cancellation prior to execution. Allowed while the\nintent is `submitted`, `evaluating`, or `decided`; once\n`executing`, operators must use security controls instead.\n\n**Current runtime behavior: returns `501 Not Implemented`.**\n",
+        "description": "Operator cancellation prior to execution. Allowed while the\nintent is `submitted`, `evaluating`, or `decided`; once\n`executing`, operators must use security controls instead.\nRe-cancelling an already-`cancelled` intent is idempotent and\nreturns `200` with `idempotent: true`.\n\nOn success the intent transitions to `:cancelled`, an\n`intent.cancelled` audit event is written carrying the supplied\n`reason`, and the event is fanned out on `audit:stream`.\n",
         "operationId": "BankWeb.API.V1.IntentController.cancel",
         "parameters": [
           {
@@ -3060,8 +3096,22 @@
           "required": false
         },
         "responses": {
-          "501": {
-            "$ref": "#/components/responses/NotImplemented"
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.IntentCancelResponse"
+              }
+            },
+            "description": "Intent cancelled"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
           }
         },
         "summary": "Cancel an intent before execution",
