@@ -1,37 +1,54 @@
 defmodule BankWeb.Plugs.FetchCurrentUser do
   @moduledoc """
-  Loads the session-bound user into `conn.assigns.current_scope` for
-  every browser request (epic #153, issue #154).
+  Loads the session-bound user and resolves their workspace scope
+  into `conn.assigns` for every browser request (epic #153, issues
+  #154, #155).
 
   ## What this plug puts on the conn
 
       conn.assigns.current_user = %Bank.Accounts.User{} | nil
-      conn.assigns.current_scope = %{user: %User{} | nil}
+      conn.assigns.current_scope =
+        nil
+        | %{
+            user: %User{},
+            workspace: %Workspace{} | nil,
+            membership: %Membership{} | nil,
+            role: :owner | :admin | :operator | :viewer | nil
+          }
 
-  `current_scope` is the opaque shape later issues (workspace +
-  membership + role) extend. v0.1 keeps the shape minimal — just
-  `:user` — so LiveViews and controllers pattern-matching on it
-  don't break when #155 lands.
+  `current_scope` is `nil` for anonymous requests. For an
+  authenticated user it always has all four keys; `workspace` is
+  populated only when `Bank.Workspaces.resolve_scope/1` returns
+  `{:single, _}`.
 
   ## Disabled-user behaviour
 
   If a session points at a `:disabled` user we drop the session
-  entirely and clear assigns. That keeps the disabled rule from
-  becoming "session expires after disable" — a disabled user is
-  immediately logged out on the next request.
+  entirely and clear assigns. A disabled user is immediately logged
+  out on the next request.
+
+  ## Workspace ambiguity
+
+  When a user has more than one active membership, this plug does
+  NOT auto-pick. `current_scope.workspace` stays `nil` and the
+  controller / LiveView can read the available memberships via
+  `Bank.Workspaces.list_active_memberships/1` to render a picker
+  (#157). Until the picker exists the auth controller redirects
+  ambiguous users to `/pending`.
 
   ## Layering
 
   This plug runs in the `:browser` pipeline AFTER `:fetch_session`
   and BEFORE any role-gated plug (issue #159). It does not enforce
   authentication itself — the controller / LiveView decides what
-  to do with `current_user == nil`.
+  to do with `current_user == nil` or `current_scope.workspace == nil`.
   """
 
   import Plug.Conn
 
   alias Bank.Accounts
   alias Bank.Accounts.User
+  alias Bank.Workspaces
 
   @session_key :user_id
 
@@ -81,7 +98,24 @@ defmodule BankWeb.Plugs.FetchCurrentUser do
   end
 
   defp build_scope(nil), do: nil
-  defp build_scope(%User{} = user), do: %{user: user}
+
+  defp build_scope(%User{} = user) do
+    case Workspaces.resolve_scope(user) do
+      {:single, membership} ->
+        %{
+          user: user,
+          workspace: membership.workspace,
+          membership: membership,
+          role: membership.role
+        }
+
+      _ ->
+        # `:no_membership` and `{:ambiguous, _}` both leave workspace
+        # unset; downstream code redirects to `/pending` instead of
+        # silently landing the user in some workspace.
+        %{user: user, workspace: nil, membership: nil, role: nil}
+    end
+  end
 
   @doc "Session key for the user id; exposed so the auth controller can mutate it."
   def session_key, do: @session_key

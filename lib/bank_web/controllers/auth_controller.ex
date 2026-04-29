@@ -39,6 +39,7 @@ defmodule BankWeb.AuthController do
 
   alias Bank.Accounts
   alias Bank.Accounts.OAuthProvider
+  alias Bank.Workspaces
   alias BankWeb.Plugs.FetchCurrentUser
 
   require Logger
@@ -120,11 +121,13 @@ defmodule BankWeb.AuthController do
     case Accounts.find_or_create_from_oauth(claims) do
       {:ok, user} ->
         if Accounts.session_allowed?(user) do
+          resolution = Workspaces.resolve_scope(user)
+
           conn
           |> renew_session()
           |> put_session(FetchCurrentUser.session_key(), user.id)
-          |> put_flash(:info, login_flash(user))
-          |> redirect(to: post_login_path(user))
+          |> put_flash(:info, login_flash(user, resolution))
+          |> redirect(to: post_login_path(user, resolution))
         else
           Logger.warning("AuthController: refused session for disabled user")
 
@@ -168,18 +171,28 @@ defmodule BankWeb.AuthController do
     24 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
   end
 
-  defp post_login_path(%Bank.Accounts.User{status: :active}), do: ~p"/"
-  defp post_login_path(%Bank.Accounts.User{}), do: ~p"/pending"
+  # Workspace state — not `User.status` — decides whether the user
+  # enters the app. `:active` from `Accounts` only means "not
+  # disabled". A user with no active membership (or with an
+  # ambiguous set of memberships, until the picker in #157) lands on
+  # `/pending` instead of silently entering some workspace.
+  defp post_login_path(_user, {:single, _membership}), do: ~p"/"
+  defp post_login_path(_user, :no_membership), do: ~p"/pending"
+  defp post_login_path(_user, {:ambiguous, _memberships}), do: ~p"/pending"
 
-  defp login_flash(%Bank.Accounts.User{status: :active, name: name})
+  defp login_flash(%Bank.Accounts.User{name: name}, {:single, _})
        when is_binary(name) and name != "" do
     "Welcome back, #{name}."
   end
 
-  defp login_flash(%Bank.Accounts.User{status: :active}), do: "Welcome back."
+  defp login_flash(_user, {:single, _}), do: "Welcome back."
 
-  defp login_flash(%Bank.Accounts.User{}) do
-    "Signed in. Your access is pending operator approval."
+  defp login_flash(_user, :no_membership) do
+    "Signed in. Your workspace access is pending operator approval."
+  end
+
+  defp login_flash(_user, {:ambiguous, _}) do
+    "Signed in. You belong to multiple workspaces — an operator will help you select one."
   end
 
   defp callback_error_message(:invalid_state),

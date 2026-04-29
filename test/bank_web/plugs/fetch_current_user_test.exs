@@ -1,12 +1,16 @@
 defmodule BankWeb.Plugs.FetchCurrentUserTest do
   @moduledoc """
   Pins the contract `BankWeb.Plugs.FetchCurrentUser` exposes to
-  controllers and LiveViews:
+  controllers and LiveViews (epic #153, issues #154 + #155):
 
     * anonymous request → assigns `current_user: nil` and
       `current_scope: nil`
-    * valid session → assigns the loaded user and a minimal
-      `%{user: user}` scope
+    * authenticated, no active membership → scope has user and
+      `workspace: nil` (no silent entry into a workspace)
+    * authenticated, single active membership → scope is fully
+      populated (user, workspace, membership, role)
+    * authenticated, ambiguous (multiple active) memberships → scope
+      keeps `workspace: nil`; downstream code redirects to /pending
     * disabled user in the session → drops the session entirely
       (logs out on next request)
   """
@@ -14,6 +18,7 @@ defmodule BankWeb.Plugs.FetchCurrentUserTest do
   use BankWeb.ConnCase, async: true
 
   alias Bank.Accounts
+  alias Bank.Workspaces
   alias BankWeb.Plugs.FetchCurrentUser
 
   @session_opts Plug.Session.init(
@@ -57,7 +62,7 @@ defmodule BankWeb.Plugs.FetchCurrentUserTest do
     assert conn.assigns.current_scope == nil
   end
 
-  test "valid session loads the user and builds a scope", %{conn: conn} do
+  test "valid session with no membership leaves workspace unset", %{conn: conn} do
     user = create_user()
 
     conn =
@@ -68,7 +73,86 @@ defmodule BankWeb.Plugs.FetchCurrentUserTest do
 
     assert %Bank.Accounts.User{id: user_id} = conn.assigns.current_user
     assert user_id == user.id
-    assert conn.assigns.current_scope == %{user: conn.assigns.current_user}
+
+    assert conn.assigns.current_scope == %{
+             user: conn.assigns.current_user,
+             workspace: nil,
+             membership: nil,
+             role: nil
+           }
+  end
+
+  test "valid session with a single active membership auto-selects the workspace", %{conn: conn} do
+    user = create_user()
+    {:ok, ws} = Workspaces.create_workspace(%{slug: "alpha", name: "Alpha"})
+
+    {:ok, membership} =
+      Workspaces.create_membership(%{
+        user_id: user.id,
+        workspace_id: ws.id,
+        role: :operator
+      })
+
+    conn =
+      conn
+      |> with_session()
+      |> Plug.Conn.put_session(:user_id, user.id)
+      |> FetchCurrentUser.call([])
+
+    scope = conn.assigns.current_scope
+    assert scope.user.id == user.id
+    assert scope.workspace.id == ws.id
+    assert scope.membership.id == membership.id
+    assert scope.role == :operator
+  end
+
+  test "valid session with multiple active memberships leaves workspace nil (ambiguous)", %{
+    conn: conn
+  } do
+    user = create_user()
+    {:ok, ws1} = Workspaces.create_workspace(%{slug: "alpha", name: "Alpha"})
+    {:ok, ws2} = Workspaces.create_workspace(%{slug: "bravo", name: "Bravo"})
+
+    {:ok, _} =
+      Workspaces.create_membership(%{user_id: user.id, workspace_id: ws1.id, role: :operator})
+
+    {:ok, _} =
+      Workspaces.create_membership(%{user_id: user.id, workspace_id: ws2.id, role: :viewer})
+
+    conn =
+      conn
+      |> with_session()
+      |> Plug.Conn.put_session(:user_id, user.id)
+      |> FetchCurrentUser.call([])
+
+    scope = conn.assigns.current_scope
+    assert scope.user.id == user.id
+    assert scope.workspace == nil
+    assert scope.membership == nil
+    assert scope.role == nil
+  end
+
+  test "inactive memberships do not contribute to the scope", %{conn: conn} do
+    user = create_user()
+    {:ok, ws} = Workspaces.create_workspace(%{slug: "alpha", name: "Alpha"})
+
+    {:ok, m} =
+      Workspaces.create_membership(%{
+        user_id: user.id,
+        workspace_id: ws.id,
+        role: :operator
+      })
+
+    {:ok, _} = Workspaces.set_status(m, :inactive)
+
+    conn =
+      conn
+      |> with_session()
+      |> Plug.Conn.put_session(:user_id, user.id)
+      |> FetchCurrentUser.call([])
+
+    assert conn.assigns.current_scope.workspace == nil
+    assert conn.assigns.current_scope.role == nil
   end
 
   test "session pointing at a disabled user is dropped", %{conn: conn} do
