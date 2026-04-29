@@ -20,6 +20,7 @@ defmodule BankWeb.AuthControllerTest do
 
   alias Bank.Accounts
   alias Bank.Accounts.User
+  alias Bank.Workspaces
 
   @stub Bank.Accounts.OAuthProvider.Stub
 
@@ -107,30 +108,75 @@ defmodule BankWeb.AuthControllerTest do
       assert Bank.Repo.aggregate(User, :count) == 1
     end
 
-    test "active user redirects to /, pending user redirects to /pending", %{conn: conn} do
-      sub = "active-target"
-      put_stub(%{claims: claims_for(sub, "active@example.com")})
+    test "user with no active membership lands on /pending", %{conn: conn} do
+      put_stub(%{claims: claims_for("no-membership", "no-membership@example.com")})
 
-      # First login lands the user as :pending_access.
+      conn = get(conn, ~p"/auth/google")
+      state = get_session(conn, :oauth_state)
+      conn = get(conn, ~p"/auth/google/callback?code=stub-code&state=#{state}")
+
+      assert redirected_to(conn) == ~p"/pending"
+      assert Phoenix.Flash.get(conn.assigns.flash, :info) =~ "pending operator approval"
+    end
+
+    test "user with a single active membership lands on /", %{conn: conn} do
+      sub = "single-membership"
+      put_stub(%{claims: claims_for(sub, "single@example.com", "Single")})
+
+      # First login creates the user.
       conn1 = get(conn, ~p"/auth/google")
       state1 = get_session(conn1, :oauth_state)
       conn1 = get(conn1, ~p"/auth/google/callback?code=stub-code&state=#{state1}")
-
       assert redirected_to(conn1) == ~p"/pending"
 
-      # Operator promotes to :active (workspace approval is later, but
-      # we simulate the end-state directly).
+      # Operator-driven workspace + membership setup (the operator
+      # console / invite flow is #156-#157; we simulate it).
       user = Accounts.get_user(get_session(conn1, :user_id))
-      Bank.Repo.update!(Ecto.Changeset.change(user, status: :active))
+      {:ok, ws} = Workspaces.create_workspace(%{slug: "alpha", name: "Alpha"})
 
-      # Repeat login — now redirects into the app.
-      put_stub(%{claims: claims_for(sub, "active@example.com")})
+      {:ok, _} =
+        Workspaces.create_membership(%{
+          user_id: user.id,
+          workspace_id: ws.id,
+          role: :operator
+        })
+
+      put_stub(%{claims: claims_for(sub, "single@example.com", "Single")})
 
       conn2 = get(build_conn(), ~p"/auth/google")
       state2 = get_session(conn2, :oauth_state)
       conn2 = get(conn2, ~p"/auth/google/callback?code=stub-code&state=#{state2}")
 
       assert redirected_to(conn2) == ~p"/"
+      assert Phoenix.Flash.get(conn2.assigns.flash, :info) =~ "Welcome"
+    end
+
+    test "user with multiple active memberships lands on /pending (ambiguous)", %{conn: conn} do
+      sub = "multi-membership"
+      put_stub(%{claims: claims_for(sub, "multi@example.com")})
+
+      conn1 = get(conn, ~p"/auth/google")
+      state1 = get_session(conn1, :oauth_state)
+      conn1 = get(conn1, ~p"/auth/google/callback?code=stub-code&state=#{state1}")
+      user = Accounts.get_user(get_session(conn1, :user_id))
+
+      {:ok, ws1} = Workspaces.create_workspace(%{slug: "alpha", name: "Alpha"})
+      {:ok, ws2} = Workspaces.create_workspace(%{slug: "bravo", name: "Bravo"})
+
+      {:ok, _} =
+        Workspaces.create_membership(%{user_id: user.id, workspace_id: ws1.id, role: :operator})
+
+      {:ok, _} =
+        Workspaces.create_membership(%{user_id: user.id, workspace_id: ws2.id, role: :viewer})
+
+      put_stub(%{claims: claims_for(sub, "multi@example.com")})
+
+      conn2 = get(build_conn(), ~p"/auth/google")
+      state2 = get_session(conn2, :oauth_state)
+      conn2 = get(conn2, ~p"/auth/google/callback?code=stub-code&state=#{state2}")
+
+      assert redirected_to(conn2) == ~p"/pending"
+      assert Phoenix.Flash.get(conn2.assigns.flash, :info) =~ "multiple workspaces"
     end
   end
 
