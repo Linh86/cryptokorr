@@ -97,8 +97,6 @@ defmodule BankWeb.OpenApiCoreEndpointsTest do
 
   describe "intent stubs are documented as 501 Not Implemented" do
     for {path, method} <- [
-          {"/v1/intents", :post},
-          {"/v1/intents/{id}", :get},
           {"/v1/intents/{id}/simulate", :post},
           {"/v1/intents/{id}/cancel", :post}
         ] do
@@ -114,6 +112,39 @@ defmodule BankWeb.OpenApiCoreEndpointsTest do
         assert %OpenApiSpex.Reference{"$ref": "#/components/responses/NotImplemented"} =
                  responses[501]
       end
+    end
+  end
+
+  describe "intent create / show are documented live (issue #135)" do
+    test "POST /v1/intents documents 202 + IntentSubmitResponse, plus 409 / 422" do
+      op = get_in(paths(), ["/v1/intents", Access.key(:post)])
+      assert op
+
+      responses = op.responses
+      refute Map.has_key?(responses, 501), "POST /v1/intents must no longer document 501"
+
+      %{content: content} = responses[202]
+      assert %{"application/json" => media} = content
+      assert media.schema == BankWeb.OpenApi.Schemas.IntentSubmitResponse
+
+      assert %OpenApiSpex.Reference{"$ref": "#/components/responses/Conflict"} = responses[409]
+
+      assert %OpenApiSpex.Reference{"$ref": "#/components/responses/UnprocessableEntity"} =
+               responses[422]
+    end
+
+    test "GET /v1/intents/{id} documents 200 + IntentShowResponse and 404" do
+      op = get_in(paths(), ["/v1/intents/{id}", Access.key(:get)])
+      assert op
+
+      responses = op.responses
+      refute Map.has_key?(responses, 501), "GET /v1/intents/{id} must no longer document 501"
+
+      %{content: content} = responses[200]
+      assert %{"application/json" => media} = content
+      assert media.schema == BankWeb.OpenApi.Schemas.IntentShowResponse
+
+      assert %OpenApiSpex.Reference{"$ref": "#/components/responses/NotFound"} = responses[404]
     end
   end
 
@@ -283,7 +314,7 @@ defmodule BankWeb.OpenApiCoreEndpointsTest do
       assert Map.has_key?(decoded, "paths")
       assert Map.has_key?(decoded["paths"], "/v1/intents/{id}/replay")
 
-      assert decoded["paths"]["/v1/intents"]["post"]["responses"]["501"]["$ref"] =~
+      assert decoded["paths"]["/v1/intents/{id}/simulate"]["post"]["responses"]["501"]["$ref"] =~
                "NotImplemented"
     end
   end

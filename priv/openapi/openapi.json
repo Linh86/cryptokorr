@@ -1302,6 +1302,110 @@
         "title": "Id",
         "type": "string"
       },
+      "IntentEntity": {
+        "description": "The persisted intent record. Round-trips the submitted body\nplus the lifecycle state, the runtime-assigned id and\n`submitted_at`, the deterministic `payload_hash` used for\nidempotency, and the cached current-pointer ids. The current\npointer fields are `null` until the corresponding engine writes\na row (decision / simulation / trust assessment / execution\nplan), so callers must not assume they are populated for a\nfreshly-submitted intent.\n",
+        "properties": {
+          "agent_id": {
+            "example": "agent-alice",
+            "type": "string"
+          },
+          "amount": {
+            "$ref": "#/components/schemas/AmountString"
+          },
+          "asset": {
+            "$ref": "#/components/schemas/Asset"
+          },
+          "chain": {
+            "$ref": "#/components/schemas/Chain"
+          },
+          "current_decision_id": {
+            "description": "Cached pointer to the active decision envelope, if any.",
+            "format": "uuid",
+            "nullable": true,
+            "type": "string"
+          },
+          "current_execution_plan_id": {
+            "description": "Cached pointer to the active execution plan, if any.",
+            "format": "uuid",
+            "nullable": true,
+            "type": "string"
+          },
+          "current_simulation_id": {
+            "description": "Cached pointer to the active simulation report, if any.",
+            "format": "uuid",
+            "nullable": true,
+            "type": "string"
+          },
+          "current_trust_assessment_id": {
+            "description": "Cached pointer to the active trust assessment, if any.",
+            "format": "uuid",
+            "nullable": true,
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "idempotency_key": {
+            "example": "8f0b3c82-2e6e-4f80-bb35-4a0f02d9d5d9",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "transfer",
+              "swap",
+              "scheduled_transfer"
+            ],
+            "example": "transfer",
+            "type": "string"
+          },
+          "notes": {
+            "nullable": true,
+            "type": "string"
+          },
+          "payload_hash": {
+            "description": "SHA-256 of the canonical JSON encoding of the submitted body.",
+            "example": "a8f7...",
+            "type": "string"
+          },
+          "schema_version": {
+            "example": "1",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "agent",
+              "user",
+              "runtime"
+            ],
+            "example": "agent",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/IntentState"
+          },
+          "submitted_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "target": {
+            "$ref": "#/components/schemas/IntentTarget"
+          }
+        },
+        "required": [
+          "id",
+          "agent_id",
+          "source",
+          "idempotency_key",
+          "payload_hash",
+          "kind",
+          "asset",
+          "chain",
+          "amount",
+          "state",
+          "submitted_at"
+        ],
+        "title": "IntentEntity",
+        "type": "object"
+      },
       "IntentReplayResponse": {
         "description": "Full replay bundle for an intent: the original intent record,\nthe policy snapshot each decision referenced, the trust\nassessment chain, the simulation chain, the decision envelope\nchain, the execution plan chain, and the audit events. Rendered\nby `BankWeb.API.V1.AuditJSON.replay/1`.\n\nIndividual item shapes (intent, policy_rule, trust_assessment,\nsimulation, decision, plan, audit_event) are left as permissive\nobjects in this foundation-level spec; per-entity sub-schemas\nare a follow-up once the dedicated entity schemas are needed\nelsewhere.\n",
         "properties": {
@@ -1376,6 +1480,31 @@
         "title": "IntentReplayResponse",
         "type": "object"
       },
+      "IntentShowResponse": {
+        "description": "Response body for an intent lookup. Returns the persisted\nintent record with `links` to `self` and `replay`. Decision /\nsimulation / plan summaries are not inlined here in v0.1 — the\ncached `current_*_id` fields on `IntentEntity` point at the\nactive rows once the engines populate them, and full history is\navailable via `GET /v1/intents/{id}/replay`.\n",
+        "properties": {
+          "intent": {
+            "$ref": "#/components/schemas/IntentEntity"
+          },
+          "intent_id": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "links": {
+            "$ref": "#/components/schemas/Links"
+          },
+          "state": {
+            "$ref": "#/components/schemas/IntentState"
+          }
+        },
+        "required": [
+          "intent_id",
+          "state",
+          "links",
+          "intent"
+        ],
+        "title": "IntentShowResponse",
+        "type": "object"
+      },
       "IntentState": {
         "description": "Lifecycle state of an `AgentIntent`. The flow is\n`submitted → evaluating → decided → executing → executed`\non the happy path, with `blocked` and `cancelled` as\nterminal side branches.\n",
         "enum": [
@@ -1443,6 +1572,36 @@
           "target"
         ],
         "title": "IntentSubmissionRequest",
+        "type": "object"
+      },
+      "IntentSubmitResponse": {
+        "description": "Response body for a successful intent submission. Returned with\n`202 Accepted`. `idempotent_replay` is `true` when the\n`(agent_id, idempotency_key)` pair already existed and the\nsubmitted body matched the original — the runtime does not write\na new intent, audit event, or evaluation job in that case.\n",
+        "properties": {
+          "idempotent_replay": {
+            "description": "True when the submission was deduped against an existing intent with the same `(agent_id, idempotency_key)` and a matching payload.",
+            "type": "boolean"
+          },
+          "intent": {
+            "$ref": "#/components/schemas/IntentEntity"
+          },
+          "intent_id": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "links": {
+            "$ref": "#/components/schemas/Links"
+          },
+          "state": {
+            "$ref": "#/components/schemas/IntentState"
+          }
+        },
+        "required": [
+          "intent_id",
+          "state",
+          "idempotent_replay",
+          "links",
+          "intent"
+        ],
+        "title": "IntentSubmitResponse",
         "type": "object"
       },
       "IntentTarget": {
@@ -2790,7 +2949,7 @@
     "/v1/intents": {
       "post": {
         "callbacks": {},
-        "description": "Agent-facing entry point for submitting a structured\n`AgentIntent` for evaluation. Request body fields match the\npinned contract in `docs/bank-v0.1-runtime-flow-and-api.md`.\n\n**Current runtime behavior: returns `501 Not Implemented` —\nintent engine work is still pending.** The operation spec\ndocuments the target contract so SDK tooling can be generated\nahead of the engine landing.\n",
+        "description": "Agent-facing entry point for submitting a structured\n`AgentIntent` for evaluation. Request body fields match the\npinned contract in `docs/bank-v0.1-runtime-flow-and-api.md`.\n\nPersists the intent in `:submitted`, audits `intent.submitted`,\nand enqueues `Bank.Runtime.Workers.EvaluateIntent`. Decision /\nsimulation / approval engines have not yet landed, so the\nenqueued job currently cancels with `:engines_pending` —\nexpected and visible in the Oban dashboard. Returns\n`202 Accepted`.\n\nIdempotency: a duplicate `(agent_id, idempotency_key)` with a\nmatching body returns the existing intent and sets\n`idempotent_replay: true`; a duplicate with a mismatched body\nreturns `409`.\n",
         "operationId": "BankWeb.API.V1.IntentController.create",
         "parameters": [
           {
@@ -2810,8 +2969,19 @@
           "required": false
         },
         "responses": {
-          "501": {
-            "$ref": "#/components/responses/NotImplemented"
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.IntentSubmitResponse"
+              }
+            },
+            "description": "Intent accepted"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
           }
         },
         "summary": "Submit an intent for evaluation",
@@ -2823,7 +2993,7 @@
     "/v1/intents/{id}": {
       "get": {
         "callbacks": {},
-        "description": "Returns the current state of an intent together with linked\ndecision / simulation / plan summaries.\n\n**Current runtime behavior: returns `501 Not Implemented`.**\n",
+        "description": "Returns the current state of an intent together with the\ncached current-pointer ids for decision / simulation / trust\nassessment / execution plan.\n\nDecision / simulation / plan summaries are not inlined here in\nv0.1 — those engines have not landed yet. Callers that need\nthe historical chain should use `GET /v1/intents/:id/replay`.\n",
         "operationId": "BankWeb.API.V1.IntentController.show",
         "parameters": [
           {
@@ -2840,8 +3010,16 @@
           }
         ],
         "responses": {
-          "501": {
-            "$ref": "#/components/responses/NotImplemented"
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.IntentShowResponse"
+              }
+            },
+            "description": "Intent detail"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
           }
         },
         "summary": "Get an intent by id",
@@ -2895,7 +3073,7 @@
     "/v1/intents/{id}/replay": {
       "get": {
         "callbacks": {},
-        "description": "Returns a deterministic replay bundle: the original intent, the\npolicy snapshot each decision referenced, the trust assessment\nchain, simulation chain, decision chain, execution plan chain,\nand audit events. Rendered by\n`BankWeb.API.V1.AuditJSON.replay/1`.\n\nThis endpoint is live today — unlike the other `/v1/intents`\nactions, it is not routed through the `not_implemented`\nfallback.\n",
+        "description": "Returns a deterministic replay bundle: the original intent, the\npolicy snapshot each decision referenced, the trust assessment\nchain, simulation chain, decision chain, execution plan chain,\nand audit events. Rendered by\n`BankWeb.API.V1.AuditJSON.replay/1`.\n\nThis endpoint is live today.\n",
         "operationId": "BankWeb.API.V1.IntentController.replay",
         "parameters": [
           {

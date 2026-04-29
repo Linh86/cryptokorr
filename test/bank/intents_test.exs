@@ -1,19 +1,28 @@
 defmodule Bank.IntentsTest do
   @moduledoc """
-  Context-level tests for `Bank.Intents.counts_by_state/1`.
+  Context-level tests for `Bank.Intents`.
 
-  Pins the semantics chosen for issue #53: counts respect `:kind` and
-  `:search`, but not `:state` — the breakdown groups by state itself
-  so applying a state filter would be useless. The intents page
-  relies on this to show a meaningful distribution inside the
-  operator's current kind/search scope.
+  Two surfaces are pinned here:
+
+    * `counts_by_state/1` (issue #53) — the chip-bar count breakdown
+      that the intents page renders. The semantics: counts respect
+      `:kind` and `:search`, but not `:state`. The breakdown groups
+      by state itself, so applying a state filter would be useless.
+
+    * `submit/2` (issue #135) — the public agent-facing facade
+      `POST /v1/intents` calls. Tests cover the happy paths,
+      idempotent replay, hash mismatch conflict, and boundary
+      validation (chain / asset / amount / target shape).
   """
 
   use Bank.DataCase, async: false
+  use Oban.Testing, repo: Bank.Repo
 
   import Bank.Fixtures
 
   alias Bank.Intents
+  alias Bank.Intents.AgentIntent
+  alias Bank.Runtime.Workers.EvaluateIntent
 
   describe "counts_by_state/1 with no filters" do
     test "returns all known states with zero when the table is empty" do
@@ -139,5 +148,161 @@ defmodule Bank.IntentsTest do
 
       _ = t1
     end
+  end
+
+  describe "submit/2 — happy paths" do
+    test "persists, audits, and enqueues evaluation for a counterparty target" do
+      cp = counterparty()
+
+      assert {:ok, %{intent: %AgentIntent{} = intent, replay?: false}} =
+               Intents.submit(
+                 valid_body(%{
+                   "agent_id" => "agent-submit-cp",
+                   "idempotency_key" => "k-submit-cp",
+                   "target" => %{"counterparty_id" => cp.id}
+                 })
+               )
+
+      assert intent.state == :submitted
+      assert intent.target_counterparty_id == cp.id
+      assert intent.target_raw_address == nil
+      assert intent.kind == :transfer
+      assert intent.asset == "USDC"
+      assert intent.chain == "base"
+      assert is_binary(intent.payload_hash)
+
+      assert_enqueued(
+        worker: EvaluateIntent,
+        queue: :intents_evaluate,
+        args: %{"intent_id" => intent.id}
+      )
+    end
+
+    test "accepts a raw-address target" do
+      assert {:ok, %{intent: intent, replay?: false}} =
+               Intents.submit(
+                 valid_body(%{
+                   "agent_id" => "agent-submit-raw",
+                   "idempotency_key" => "k-submit-raw",
+                   "target" => %{
+                     "raw_address" => "0x1234567890abcdef1234567890abcdef12345678"
+                   }
+                 })
+               )
+
+      assert intent.target_raw_address == "0x1234567890abcdef1234567890abcdef12345678"
+      assert intent.target_counterparty_id == nil
+    end
+  end
+
+  describe "submit/2 — idempotency" do
+    test "same body with same key returns the existing intent and skips work" do
+      cp = counterparty()
+
+      body =
+        valid_body(%{
+          "agent_id" => "agent-replay",
+          "idempotency_key" => "k-replay",
+          "target" => %{"counterparty_id" => cp.id}
+        })
+
+      assert {:ok, %{intent: first, replay?: false}} = Intents.submit(body)
+      assert {:ok, %{intent: second, replay?: true}} = Intents.submit(body)
+
+      assert first.id == second.id
+
+      # Only the first call enqueues the evaluation worker.
+      assert all_enqueued(worker: EvaluateIntent, args: %{"intent_id" => first.id})
+             |> length() == 1
+    end
+
+    test "same key with a different body returns idempotency_conflict" do
+      cp = counterparty()
+
+      body =
+        valid_body(%{
+          "agent_id" => "agent-mismatch",
+          "idempotency_key" => "k-mismatch",
+          "target" => %{"counterparty_id" => cp.id}
+        })
+
+      assert {:ok, %{intent: first}} = Intents.submit(body)
+
+      mismatched = Map.put(body, "amount", "9.99")
+
+      assert {:error, {:idempotency_conflict, prior}} = Intents.submit(mismatched)
+      assert prior.id == first.id
+    end
+  end
+
+  describe "submit/2 — boundary validation" do
+    test "rejects a non-base chain with :unsupported_chain" do
+      cp = counterparty()
+
+      body =
+        valid_body(%{
+          "chain" => "ethereum",
+          "target" => %{"counterparty_id" => cp.id}
+        })
+
+      assert {:error, {:unsupported_chain, "ethereum"}} = Intents.submit(body)
+    end
+
+    test "rejects a non-USDC asset with :unsupported_asset" do
+      cp = counterparty()
+
+      body =
+        valid_body(%{
+          "asset" => "DAI",
+          "target" => %{"counterparty_id" => cp.id}
+        })
+
+      assert {:error, {:unsupported_asset, "DAI"}} = Intents.submit(body)
+    end
+
+    test "rejects a missing target shape" do
+      assert {:error, {:invalid, :target_missing}} =
+               Intents.submit(valid_body(%{"target" => %{}}))
+    end
+
+    test "rejects a target with both counterparty and raw address" do
+      cp = counterparty()
+
+      body =
+        valid_body(%{
+          "target" => %{
+            "counterparty_id" => cp.id,
+            "raw_address" => "0xabcdef1234567890abcdef1234567890abcdef12"
+          }
+        })
+
+      assert {:error, {:invalid, :target_ambiguous}} = Intents.submit(body)
+    end
+
+    test "rejects a non-positive amount" do
+      cp = counterparty()
+
+      body =
+        valid_body(%{
+          "amount" => "0",
+          "target" => %{"counterparty_id" => cp.id}
+        })
+
+      assert {:error, {:invalid, :amount}} = Intents.submit(body)
+    end
+  end
+
+  defp valid_body(overrides) when is_map(overrides) do
+    %{
+      "idempotency_key" => "k-#{System.unique_integer([:positive])}",
+      "source" => "agent",
+      "agent_id" => "agent-#{System.unique_integer([:positive])}",
+      "kind" => "transfer",
+      "asset" => "USDC",
+      "chain" => "base",
+      "amount" => "12.50",
+      "target" => %{"raw_address" => "0xabcdef0000000000000000000000000000000001"}
+    }
+    |> Map.merge(overrides)
   end
 end

@@ -103,6 +103,158 @@ defmodule BankWeb.OpenApi.Schemas.IntentSubmissionRequest do
   })
 end
 
+defmodule BankWeb.OpenApi.Schemas.IntentEntity do
+  @moduledoc """
+  Persisted `AgentIntent` projection used in `IntentSubmitResponse`
+  and `IntentShowResponse`. Mirrors the body the runtime accepted
+  plus the `state`, `submitted_at`, and cached current-pointer
+  fields.
+  """
+
+  require OpenApiSpex
+  alias OpenApiSpex.{Reference, Schema}
+
+  OpenApiSpex.schema(%{
+    title: "IntentEntity",
+    description: """
+    The persisted intent record. Round-trips the submitted body
+    plus the lifecycle state, the runtime-assigned id and
+    `submitted_at`, the deterministic `payload_hash` used for
+    idempotency, and the cached current-pointer ids. The current
+    pointer fields are `null` until the corresponding engine writes
+    a row (decision / simulation / trust assessment / execution
+    plan), so callers must not assume they are populated for a
+    freshly-submitted intent.
+    """,
+    type: :object,
+    required: [
+      :id,
+      :agent_id,
+      :source,
+      :idempotency_key,
+      :payload_hash,
+      :kind,
+      :asset,
+      :chain,
+      :amount,
+      :state,
+      :submitted_at
+    ],
+    properties: %{
+      id: %Reference{"$ref": "#/components/schemas/Id"},
+      agent_id: %Schema{type: :string, example: "agent-alice"},
+      source: %Schema{type: :string, enum: ~w(agent user runtime), example: "agent"},
+      idempotency_key: %Schema{type: :string, example: "8f0b3c82-2e6e-4f80-bb35-4a0f02d9d5d9"},
+      payload_hash: %Schema{
+        type: :string,
+        description: "SHA-256 of the canonical JSON encoding of the submitted body.",
+        example: "a8f7..."
+      },
+      schema_version: %Schema{type: :string, example: "1"},
+      kind: %Schema{
+        type: :string,
+        enum: ["transfer", "swap", "scheduled_transfer"],
+        example: "transfer"
+      },
+      asset: %Reference{"$ref": "#/components/schemas/Asset"},
+      chain: %Reference{"$ref": "#/components/schemas/Chain"},
+      amount: %Reference{"$ref": "#/components/schemas/AmountString"},
+      target: %Reference{"$ref": "#/components/schemas/IntentTarget"},
+      notes: %Schema{type: :string, nullable: true},
+      state: %Reference{"$ref": "#/components/schemas/IntentState"},
+      submitted_at: %Reference{"$ref": "#/components/schemas/Timestamp"},
+      current_decision_id: %Schema{
+        type: :string,
+        format: :uuid,
+        nullable: true,
+        description: "Cached pointer to the active decision envelope, if any."
+      },
+      current_simulation_id: %Schema{
+        type: :string,
+        format: :uuid,
+        nullable: true,
+        description: "Cached pointer to the active simulation report, if any."
+      },
+      current_trust_assessment_id: %Schema{
+        type: :string,
+        format: :uuid,
+        nullable: true,
+        description: "Cached pointer to the active trust assessment, if any."
+      },
+      current_execution_plan_id: %Schema{
+        type: :string,
+        format: :uuid,
+        nullable: true,
+        description: "Cached pointer to the active execution plan, if any."
+      }
+    }
+  })
+end
+
+defmodule BankWeb.OpenApi.Schemas.IntentSubmitResponse do
+  @moduledoc """
+  Body for `POST /v1/intents` (`202 Accepted`).
+  """
+
+  require OpenApiSpex
+  alias OpenApiSpex.{Reference, Schema}
+
+  OpenApiSpex.schema(%{
+    title: "IntentSubmitResponse",
+    description: """
+    Response body for a successful intent submission. Returned with
+    `202 Accepted`. `idempotent_replay` is `true` when the
+    `(agent_id, idempotency_key)` pair already existed and the
+    submitted body matched the original — the runtime does not write
+    a new intent, audit event, or evaluation job in that case.
+    """,
+    type: :object,
+    required: [:intent_id, :state, :idempotent_replay, :links, :intent],
+    properties: %{
+      intent_id: %Reference{"$ref": "#/components/schemas/Id"},
+      state: %Reference{"$ref": "#/components/schemas/IntentState"},
+      idempotent_replay: %Schema{
+        type: :boolean,
+        description:
+          "True when the submission was deduped against an existing " <>
+            "intent with the same `(agent_id, idempotency_key)` and a " <>
+            "matching payload."
+      },
+      links: %Reference{"$ref": "#/components/schemas/Links"},
+      intent: %Reference{"$ref": "#/components/schemas/IntentEntity"}
+    }
+  })
+end
+
+defmodule BankWeb.OpenApi.Schemas.IntentShowResponse do
+  @moduledoc """
+  Body for `GET /v1/intents/{id}`.
+  """
+
+  require OpenApiSpex
+  alias OpenApiSpex.Reference
+
+  OpenApiSpex.schema(%{
+    title: "IntentShowResponse",
+    description: """
+    Response body for an intent lookup. Returns the persisted
+    intent record with `links` to `self` and `replay`. Decision /
+    simulation / plan summaries are not inlined here in v0.1 — the
+    cached `current_*_id` fields on `IntentEntity` point at the
+    active rows once the engines populate them, and full history is
+    available via `GET /v1/intents/{id}/replay`.
+    """,
+    type: :object,
+    required: [:intent_id, :state, :links, :intent],
+    properties: %{
+      intent_id: %Reference{"$ref": "#/components/schemas/Id"},
+      state: %Reference{"$ref": "#/components/schemas/IntentState"},
+      links: %Reference{"$ref": "#/components/schemas/Links"},
+      intent: %Reference{"$ref": "#/components/schemas/IntentEntity"}
+    }
+  })
+end
+
 defmodule BankWeb.OpenApi.Schemas.SimulationRequest do
   @moduledoc """
   Body for `POST /v1/intents/{id}/simulate`.
