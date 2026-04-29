@@ -751,43 +751,64 @@ defmodule Bank.Decisions do
 
   ## Execution handoff (v0.1)
 
-  Approval *only records the decision*. It does not create an
-  `ExecutionPlan` and does not enqueue the `RunExecution` worker. The
-  reason is structural: `ExecutionPlan` requires a `smart_account_id`,
-  which is bound at execution time by the operator (see
-  `request_manual_execution/3`), not at intent or decision time.
+  Approval writes the successor `:auto_exec` envelope and then runs
+  the same auto-dispatch path the runtime uses on
+  `evaluate_intent/2` (see `dispatch_auto_exec/3`). The two outcomes:
 
-  The follow-up flow is therefore explicit: an approved envelope sits
-  in `:auto_exec` / `:decided` until the operator triggers
-  `POST /v1/decisions/{id}/execute` with the chosen smart account. That
-  endpoint runs all the gates (current envelope, no active plan,
-  runtime not paused, delegation active) and creates the active plan
-  before enqueueing the worker.
+    * `{:ok, successor, {:dispatched, plan}}` — an executable smart
+      account resolved (single active delegation, or an explicit
+      `:smart_account_id` opt), the runtime was not paused, and an
+      `ExecutionPlan` was created and enqueued for `RunExecution`.
+    * `{:ok, successor, {:held, reason}}` — the approval was
+      recorded but dispatch did not proceed because a safety gate
+      held it (`:no_executable_account`,
+      `:ambiguous_executable_account`, `:runtime_paused`,
+      `:active_plan_exists`, `:delegation_not_active`,
+      `:stablecoin_adapter_not_wired`). The successor envelope is
+      preserved as `:auto_exec` and current; the operator can call
+      `POST /v1/decisions/{id}/execute` with an explicit
+      `smart_account_id` once the gate is resolved.
 
-  Pause state is irrelevant to approval — there is nothing to dispatch.
-  The pause check lives on the manual-execution path and inside the
-  `RunExecution` worker (see `Bank.Runtime.Workers.RunExecution`), so
-  the invariant "nothing enters `:executing` while paused" stays
-  intact.
+  Approval itself is unaffected by pause state — operators can
+  approve while the runtime is paused; the dispatch step is the
+  one that observes pause. This preserves the "nothing enters
+  `:executing` while paused" invariant.
 
   ## Options
 
     * `:actor_id` — required, identifies the operator (used for audit).
     * `:reason`   — optional string stored on the successor's reasons
       list.
-
-  Returns `{:ok, successor, :recorded}` on success, or
-  `{:error, reason}`. The third tuple element is intentionally an atom
-  rather than a boolean so future tiered-autonomy modes can extend the
-  vocabulary without breaking call sites.
+    * `:smart_account_id` — optional explicit smart-account override
+      for dispatch. Defaults to `Bank.Decisions.resolve_executable_account/0`.
   """
   @spec approve(String.t(), keyword()) ::
-          {:ok, DecisionEnvelope.t(), :recorded} | {:error, term()}
+          {:ok, DecisionEnvelope.t(), {:dispatched, ExecutionPlan.t()} | {:held, atom()}}
+          | {:error, term()}
   def approve(envelope_id, opts) when is_binary(envelope_id) and is_list(opts) do
     actor_id = Keyword.fetch!(opts, :actor_id)
     reason = Keyword.get(opts, :reason, "operator_approved")
 
-    apply_approval_decision(envelope_id, :auto_exec, reason, actor_id)
+    case apply_approval_decision(envelope_id, :auto_exec, reason, actor_id) do
+      {:ok, successor, _legacy_disposition} ->
+        {:ok, successor, dispatch_after_approval(successor, opts)}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp dispatch_after_approval(%DecisionEnvelope{} = successor, opts) do
+    case resolve_dispatch_account(opts) do
+      {:ok, smart_account_id} ->
+        case dispatch_auto_exec(successor.id, smart_account_id, opts) do
+          {:ok, plan} -> {:dispatched, plan}
+          {:error, reason} -> {:held, reason}
+        end
+
+      {:error, reason} ->
+        {:held, reason}
+    end
   end
 
   @doc """

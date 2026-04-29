@@ -303,17 +303,25 @@
         "type": "object"
       },
       "ApprovalActionResponse": {
-        "description": "Unified approve / reject response. `decision` carries the\nsuccessor envelope; `dispatch` discriminates the branch:\n\n  * `\"recorded\"` — approve path, emitted with a `next_step`\n    hint pointing at the execute endpoint. v0.1 does not\n    auto-dispatch after approval — the operator must follow\n    up with `POST /v1/decisions/{id}/execute`.\n  * `\"no_dispatch\"` — reject path; the successor is a `block`\n    envelope and nothing is scheduled.\n",
+        "description": "Unified approve / reject response. `decision` carries the\nsuccessor envelope; `dispatch` discriminates the branch:\n\n  * `\"dispatched\"` — approve path; an `ExecutionPlan` was\n    created and `RunExecution` was enqueued. The response\n    includes `execution_plan` with the plan id and\n    `smart_account_id`.\n  * `\"held\"` — approve path; the successor envelope was\n    written but a safety gate withheld dispatch\n    (`no_executable_account`, `runtime_paused`, etc.). The\n    response includes `held_reason` and a `next_step` hint\n    pointing at `POST /v1/decisions/{id}/execute`.\n  * `\"no_dispatch\"` — reject path; the successor is a `block`\n    envelope and nothing is scheduled.\n",
         "properties": {
           "decision": {
             "$ref": "#/components/schemas/ApprovalDecisionSummary"
           },
           "dispatch": {
             "enum": [
-              "recorded",
+              "dispatched",
+              "held",
               "no_dispatch"
             ],
-            "example": "recorded",
+            "example": "dispatched",
+            "type": "string"
+          },
+          "execution_plan": {
+            "$ref": "#/components/schemas/ApprovalDispatchedPlan"
+          },
+          "held_reason": {
+            "description": "Set when `dispatch == \"held\"`. The atom-string vocabulary mirrors the `{:held, reason}` tuple from `Bank.Decisions.approve/2` and matches the auto-exec dispatch reasons (`no_executable_account`, `runtime_paused`, …).",
             "type": "string"
           },
           "next_step": {
@@ -378,15 +386,47 @@
         "title": "ApprovalDecisionSummary",
         "type": "object"
       },
+      "ApprovalDispatchedPlan": {
+        "description": "Compact summary of the `ExecutionPlan` materialised by the\nruntime on the `\"dispatched\"` dispatch branch. Carries enough\nfields to confirm what was scheduled; the full plan record is\navailable through `GET /v1/decisions/{id}` and replay.\n",
+        "properties": {
+          "execution_status": {
+            "enum": [
+              "prepared",
+              "signing",
+              "broadcasting",
+              "pending_confirmation",
+              "confirmed",
+              "reverted",
+              "aborted"
+            ],
+            "example": "prepared",
+            "type": "string"
+          },
+          "id": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "smart_account_id": {
+            "example": "sa-primary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "smart_account_id",
+          "execution_status"
+        ],
+        "title": "ApprovalDispatchedPlan",
+        "type": "object"
+      },
       "ApprovalNextStep": {
-        "description": "Operator-facing hint returned on the `\"recorded\"` dispatch\nbranch. Points at `POST /v1/decisions/{id}/execute` since v0.1\ndoes not auto-dispatch after approval.\n",
+        "description": "Operator-facing hint returned on the `\"held\"` dispatch branch.\nPoints at `POST /v1/decisions/{id}/execute` so the operator can\nresolve the gate that withheld dispatch and execute manually\nwith an explicit `smart_account_id`.\n",
         "properties": {
           "endpoint": {
             "example": "POST /v1/decisions/b6a10f53-8c6e-4d79-9bb9-3e1e5b1f1a11/execute",
             "type": "string"
           },
           "message": {
-            "example": "approval recorded; execute manually with smart_account_id when ready",
+            "example": "approval recorded but dispatch held (no_executable_account); resolve the gate and execute manually with smart_account_id",
             "type": "string"
           }
         },

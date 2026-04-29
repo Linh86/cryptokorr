@@ -249,7 +249,10 @@ defmodule Bank.Telegram.CallbacksTest do
       envelope = pending_approval_envelope()
       token = CallbackToken.sign(@approver, :approve, envelope.id)
 
-      {:ok, _, :recorded} = Decisions.approve(envelope.id, actor_id: "someone-else")
+      # No delegation seeded -> dispatch is held; the successor envelope
+      # is still written, which is what this test cares about. The
+      # `{:held, _}` shape is the new (#140) approve return value.
+      {:ok, _, {:held, _}} = Decisions.approve(envelope.id, actor_id: "someone-else")
 
       assert {:error, :already_resolved, "Decision already resolved."} =
                Callbacks.handle(@approver, callback_for(@approver, token))

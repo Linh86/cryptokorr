@@ -114,7 +114,7 @@ end
 
 defmodule BankWeb.OpenApi.Schemas.ApprovalNextStep do
   @moduledoc """
-  Operator hint carried on `recorded` approval responses.
+  Operator hint carried on `held` approval responses.
   """
 
   require OpenApiSpex
@@ -123,9 +123,10 @@ defmodule BankWeb.OpenApi.Schemas.ApprovalNextStep do
   OpenApiSpex.schema(%{
     title: "ApprovalNextStep",
     description: """
-    Operator-facing hint returned on the `"recorded"` dispatch
-    branch. Points at `POST /v1/decisions/{id}/execute` since v0.1
-    does not auto-dispatch after approval.
+    Operator-facing hint returned on the `"held"` dispatch branch.
+    Points at `POST /v1/decisions/{id}/execute` so the operator can
+    resolve the gate that withheld dispatch and execute manually
+    with an explicit `smart_account_id`.
     """,
     type: :object,
     required: [:endpoint, :message],
@@ -136,7 +137,40 @@ defmodule BankWeb.OpenApi.Schemas.ApprovalNextStep do
       },
       message: %Schema{
         type: :string,
-        example: "approval recorded; execute manually with smart_account_id when ready"
+        example:
+          "approval recorded but dispatch held (no_executable_account); resolve " <>
+            "the gate and execute manually with smart_account_id"
+      }
+    }
+  })
+end
+
+defmodule BankWeb.OpenApi.Schemas.ApprovalDispatchedPlan do
+  @moduledoc """
+  `execution_plan` summary attached to `dispatched` approval
+  responses.
+  """
+
+  require OpenApiSpex
+  alias OpenApiSpex.{Reference, Schema}
+
+  OpenApiSpex.schema(%{
+    title: "ApprovalDispatchedPlan",
+    description: """
+    Compact summary of the `ExecutionPlan` materialised by the
+    runtime on the `"dispatched"` dispatch branch. Carries enough
+    fields to confirm what was scheduled; the full plan record is
+    available through `GET /v1/decisions/{id}` and replay.
+    """,
+    type: :object,
+    required: [:id, :smart_account_id, :execution_status],
+    properties: %{
+      id: %Reference{"$ref": "#/components/schemas/Id"},
+      smart_account_id: %Schema{type: :string, example: "sa-primary"},
+      execution_status: %Schema{
+        type: :string,
+        enum: ~w(prepared signing broadcasting pending_confirmation confirmed reverted aborted),
+        example: "prepared"
       }
     }
   })
@@ -156,10 +190,15 @@ defmodule BankWeb.OpenApi.Schemas.ApprovalActionResponse do
     Unified approve / reject response. `decision` carries the
     successor envelope; `dispatch` discriminates the branch:
 
-      * `"recorded"` — approve path, emitted with a `next_step`
-        hint pointing at the execute endpoint. v0.1 does not
-        auto-dispatch after approval — the operator must follow
-        up with `POST /v1/decisions/{id}/execute`.
+      * `"dispatched"` — approve path; an `ExecutionPlan` was
+        created and `RunExecution` was enqueued. The response
+        includes `execution_plan` with the plan id and
+        `smart_account_id`.
+      * `"held"` — approve path; the successor envelope was
+        written but a safety gate withheld dispatch
+        (`no_executable_account`, `runtime_paused`, etc.). The
+        response includes `held_reason` and a `next_step` hint
+        pointing at `POST /v1/decisions/{id}/execute`.
       * `"no_dispatch"` — reject path; the successor is a `block`
         envelope and nothing is scheduled.
     """,
@@ -169,8 +208,16 @@ defmodule BankWeb.OpenApi.Schemas.ApprovalActionResponse do
       decision: %Reference{"$ref": "#/components/schemas/ApprovalDecisionSummary"},
       dispatch: %Schema{
         type: :string,
-        enum: ["recorded", "no_dispatch"],
-        example: "recorded"
+        enum: ["dispatched", "held", "no_dispatch"],
+        example: "dispatched"
+      },
+      execution_plan: %Reference{"$ref": "#/components/schemas/ApprovalDispatchedPlan"},
+      held_reason: %Schema{
+        type: :string,
+        description:
+          "Set when `dispatch == \"held\"`. The atom-string vocabulary mirrors the " <>
+            "`{:held, reason}` tuple from `Bank.Decisions.approve/2` and matches the " <>
+            "auto-exec dispatch reasons (`no_executable_account`, `runtime_paused`, …)."
       },
       next_step: %Reference{"$ref": "#/components/schemas/ApprovalNextStep"}
     }

@@ -54,13 +54,24 @@ defmodule BankWeb.QueueLive do
     opts = approval_opts(socket, params)
 
     case Decisions.approve(id, opts) do
-      {:ok, _successor, :recorded} ->
+      {:ok, _successor, {:dispatched, plan}} ->
         {:noreply,
          socket
          |> load_state()
          |> put_flash(
            :info,
-           "Approval recorded. Trigger execution from the decision page when ready."
+           "Approval recorded and dispatched (plan #{short_id(plan.id)}, " <>
+             "smart_account=#{plan.smart_account_id})."
+         )}
+
+      {:ok, _successor, {:held, reason}} ->
+        {:noreply,
+         socket
+         |> load_state()
+         |> put_flash(
+           :info,
+           "Approval recorded; dispatch held (#{reason}). " <>
+             "Resolve the gate and execute manually from the decision page."
          )}
 
       {:error, reason} ->
