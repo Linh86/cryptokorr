@@ -215,9 +215,10 @@ provisioning runu:
 > `@zerodev/permissions` nemá jediný nasazený Permission Validator
 > kontrakt, takže do něj není co zapsat. Korekci modelu popisuje
 > [`docs/zerodev-permissions-integration.md`](zerodev-permissions-integration.md).
-> Runtime zůstává v sentinel-era režimu do doby, než tato
-> integrace dorazí; operátor dnes žádnou validátor adresu
-> nepotřebuje.
+> Kryptografický grant + revoke jsou živé na Base Sepolia od PR
+> #132 (#58 / #31 uzavřeny); operátor i nadále žádnou validátor
+> adresu nepotřebuje (runtime skládá signer + policy moduly
+> mimo řetězec přes SDK).
 
 ## Bezpečnostní pravidla
 

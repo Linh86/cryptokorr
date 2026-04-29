@@ -8,11 +8,11 @@ Operator runbook for Kernel v3 smart-account provisioning on Base.
 > env var. That model was wrong: ZeroDev's `@zerodev/permissions`
 > does not have a single deployable Permission Validator contract.
 > See [`docs/zerodev-permissions-integration.md`](zerodev-permissions-integration.md)
-> for what the corrected ZeroDev model actually looks like and the
-> hard blockers that have to be resolved before per-permission
-> cryptographic revoke can ship. Until those land, the runtime is
-> sentinel-era; operators do **not** capture or set any
-> `PERMISSION_VALIDATOR_ADDRESS`.
+> for the corrected ZeroDev model. Cryptographic grant + revoke
+> shipped live on Base Sepolia under PR #132 (#58 / #31 closed);
+> operators still do **not** capture or set any
+> `PERMISSION_VALIDATOR_ADDRESS`. The day-of smoke runbook is in
+> [`docs/mvp-smoke-runbook.md`](mvp-smoke-runbook.md).
 
 Pairs with:
 
@@ -22,45 +22,52 @@ Pairs with:
 - [docs/operator-secrets-checklist.md](operator-secrets-checklist.md) — secrets the operator still needs to prepare.
 - [docs/incident-runbook.md](incident-runbook.md) — what to do when revoke does not land.
 - [`chain_adapter/README.md`](../chain_adapter/README.md) — adapter env table.
-- [`chain_adapter/scripts/`](../chain_adapter/scripts/) — operator scripts. The provisioning + verification templates here are currently **deferred stubs** (see scripts/README.md); only `check-env.sh` is live.
+- [`chain_adapter/scripts/`](../chain_adapter/scripts/) — operator scripts. `provision-kernel.ts`, `verify-installed-validator.ts`, and `check-env.sh` are all live, no-secret-safe templates.
 
-Tracks: GitHub #84. The runbook is partial pending the ZeroDev SDK
-integration described in
-[`docs/zerodev-permissions-integration.md`](zerodev-permissions-integration.md).
+Tracks: GitHub #84 (smart-account deploy) + #58 / #31
+(cryptographic grant + revoke, closed by PR #132 against Base
+Sepolia).
 
 ## Status
 
 This runbook records the **smart-account deployment portion** of
-provisioning as understood today. The corrected ZeroDev model
-invalidated the previous "install a Permission Validator at a
-recorded address" + "verify the validator's bytecode hash" steps —
-those are deferred to the integration doc. The remainder (deploy a
-Kernel v3 account, fund it, plumb the env vars the adapter actually
-reads) is operationally meaningful and described below.
+provisioning. The corrected ZeroDev model invalidated the previous
+"install a Permission Validator at a recorded address" + "verify
+the validator's bytecode hash" steps — see the integration doc.
+The remainder (deploy a Kernel v3 account, fund it, plumb the env
+vars the adapter actually reads) is described below; the
+permission-install side runs through the adapter runtime
+(`POST /dispatch/grant_delegation`, see the MVP smoke runbook).
 
 The `SMART_ACCOUNT_ADDRESS` shipped in the adapter's `.env.example`
-is still a placeholder. The runtime is sentinel-era and stays that
-way until the integration ships.
+is still a placeholder — operators bind the value they receive
+from `provision-kernel.ts`.
 
 ## End-state target
 
-When the SDK integration is complete and an operator has provisioned
-a Kernel v3 smart account, the adapter runtime needs (at minimum):
+Once an operator has provisioned a Kernel v3 smart account, the
+adapter runtime needs:
 
 | Env var (adapter side)         | Bound to                                                                           |
 | ------------------------------ | ---------------------------------------------------------------------------------- |
 | `SMART_ACCOUNT_ADDRESS`        | The deployed Kernel v3 modular account address.                                    |
 | `KERNEL_FACTORY_ADDRESS`       | The Kernel v3 factory used to deploy the account (recorded for redeploys / audit). |
-| `DELEGATION_SIGNER_KEY`        | The EOA signing UserOperations against the smart account.                          |
+| `DELEGATION_SIGNER_KEY`        | Runtime session key — signs UserOperations under the installed permission.         |
+| `OPERATOR_PRIVATE_KEY`         | Kernel root validator (sudo) key — signs grant install + cryptographic revoke. Required for #58 cryptographic path. |
+| `OPERATOR_ADDRESS`             | EOA derived from `OPERATOR_PRIVATE_KEY` (paste-mismatch guard).                    |
 
-Additional ZeroDev SDK env shape (per-account sudo key, plugin blob
-storage, etc.) is part of the integration TODO and not yet decided —
-see [`docs/zerodev-permissions-integration.md`](zerodev-permissions-integration.md).
-The previous `PERMISSION_VALIDATOR_ADDRESS` env has been removed.
+`DELEGATION_SIGNER_KEY` and `OPERATOR_PRIVATE_KEY` MUST derive to
+different EOAs; the adapter refuses any config where they
+collide. The previous `PERMISSION_VALIDATOR_ADDRESS` env has been
+removed.
 
-Phoenix-side, no schema change is needed. `delegations.delegation_id`
-remains a free-form string column; the adapter and Phoenix will
-agree on its on-the-wire encoding when the integration lands.
+Phoenix-side, the `delegations` table now carries `permission_blob`,
+`permission_id`, `validation_id`, `kernel_version`,
+`permission_package_version`, `installed_at_block`,
+`install_tx_hash`, and `session_signer_address`. New rows write
+the 4-byte `permission_id` (10 hex chars) into `delegation_id`;
+legacy rows continue to use `del_…` placeholders. See
+[`docs/zerodev-permissions-integration.md`](zerodev-permissions-integration.md).
 
 ## Vendor + chain choice
 
@@ -102,8 +109,13 @@ mix bank.kernel.preflight --phase install
 mix bank.kernel.preflight --phase verify
 ```
 
-Each phase reports `mode: awaiting_zerodev_integration` until the
-corrected SDK integration lands.
+Each phase reports `mode: awaiting_zerodev_integration` — that
+label predates PR #132 and is now stale at the runtime level
+(cryptographic grant + revoke are live), but the preflight tool
+itself has not yet been re-labeled. Operators can ignore the
+mode string and proceed through the runbook; the on-chain path
+is exercised by the MVP smoke runbook
+([`docs/mvp-smoke-runbook.md`](mvp-smoke-runbook.md)).
 
 ## Step 1 — Pick the smart-account address scheme
 
@@ -190,14 +202,19 @@ an on-chain observation against a pinned expectation:
 Exit code is `0` iff every finding passes. `1` otherwise — do NOT
 bind the address to the adapter env if verification fails.
 
-## Step 4 — Install permissions on the account (deferred)
+## Step 4 — Install permissions on the account
 
-The runtime does not yet wire ZeroDev permissions end-to-end;
-per-permission install requires the SDK integration tracked in
+Permission install runs through the adapter runtime, not from
+this provisioning script. Once the kernel account is deployed
+and the adapter env is bound (see Step 5), kick off a connect
+via `POST /v1/connect/smart_account`; the adapter's
+`executeGrant` builds the ZeroDev `PermissionPlugin`, installs
+it via the SDK's first-UserOp enable-signature flow, and emits
+a `granted` callback whose `permission` block carries the
+artifacts Phoenix persists. The full smoke flow is in
+[`docs/mvp-smoke-runbook.md`](mvp-smoke-runbook.md). The
+integration doc explains the on-chain shape:
 [`docs/zerodev-permissions-integration.md`](zerodev-permissions-integration.md).
-Until then, leave the account in its base configuration; the
-adapter's revoke path is sentinel-only and does not exercise
-permissions.
 
 ## Step 5 — Adapter env binding + hygiene
 
@@ -209,8 +226,11 @@ sh chain_adapter/scripts/check-env.sh
 ```
 
 Expected output: `mode: sentinel-era (awaiting ZeroDev SDK
-integration)` plus `PASS: required envs look healthy`. The script
-makes no network calls.
+integration)` plus `PASS: required envs look healthy`. The
+`mode` string is out of date relative to runtime — cryptographic
+grant + revoke landed under PR #132 — and the script itself has
+not yet been re-labeled. The `PASS` line is what matters; the
+script makes no network calls.
 
 ## Step 6 — Smoke tests
 
@@ -222,12 +242,17 @@ mix bank.smoke.transfer
 mix bank.smoke.revoke
 ```
 
-In sentinel-era mode `mix bank.smoke.revoke` exercises the AA
-plumbing end-to-end (`SimpleAccount.execute(self, 0, 0x)` UserOp,
-bundler, callback) but does NOT cryptographically disable the
-delegation. A successful smoke means "on-chain anchored, trust
-downgraded", not "cryptographically impossible". Phoenix's state
-machine fail-closes regardless.
+For rows without `permission` artifacts (legacy or
+freshly-granted-without-the-grant-flow), `mix bank.smoke.revoke`
+exercises the sentinel AA plumbing
+(`SimpleAccount.execute(self, 0, 0x)` UserOp, bundler, callback)
+and a successful run means "on-chain anchored, trust
+downgraded", not "cryptographically impossible". For rows with
+`permission` artifacts (default for new grants under #58 / #31,
+closed by PR #132) the cryptographic
+`Kernel.uninstallValidation(...)` path runs instead — see
+[`docs/mvp-smoke-runbook.md`](mvp-smoke-runbook.md). Phoenix's
+state machine fail-closes regardless of which path runs.
 
 ## Re-roll procedure
 
@@ -248,12 +273,13 @@ journal.
 ## Tracking
 
 - #56 — Kernel v3 architectural decision. Landed.
-- #84 — provisioning runbook + templates. **Partial.** Smart-account
-  deployment portion is documented; the wrong-model template
-  scripts are now deferred stubs. Closes when the SDK integration
-  lands.
-- #83 — pin contract for the corrected ZeroDev model. **Re-scoped.**
-  See [`docs/zerodev-permissions-integration.md`](zerodev-permissions-integration.md).
-- #58 — sentinel → cryptographic revoke swap. Blocked on the SDK
-  integration above.
-- #31 — umbrella; closes when #58 closes.
+- #84 — provisioning runbook + templates. Closed.
+  `provision-kernel.ts` and `verify-installed-validator.ts` are
+  real, no-secret-safe templates targeting Kernel v3.1.
+- #83 — `KernelPermissionPin` populated. Closed. See
+  [`docs/zerodev-permissions-integration.md`](zerodev-permissions-integration.md).
+- #58 — sentinel → cryptographic revoke swap. **Closed by PR
+  #132.** Operator smoke runbook:
+  [`docs/mvp-smoke-runbook.md`](mvp-smoke-runbook.md).
+- #31 — umbrella for cryptographic revoke. **Closed by PR
+  #132.**

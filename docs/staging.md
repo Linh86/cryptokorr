@@ -112,11 +112,12 @@ The in-repo artifacts are ready. What's left is:
    account on Base. This is a one-shot operator procedure — see
    [`docs/provisioning-kernel-v3.md`](provisioning-kernel-v3.md) for
    the runbook. The output address (`SMART_ACCOUNT_ADDRESS`) feeds
-   the adapter's env in step 6. Per-permission install (and the
-   cryptographic revoke that consumes it) depends on the ZeroDev
-   SDK integration tracked in
-   [`docs/zerodev-permissions-integration.md`](zerodev-permissions-integration.md);
-   until that ships the runtime is sentinel-era.
+   the adapter's env in step 6. Per-permission install + the
+   cryptographic revoke that consumes it shipped under PR #132
+   (#58 / #31 closed); the operator smoke runbook is in
+   [`docs/mvp-smoke-runbook.md`](mvp-smoke-runbook.md). For rows
+   without `permission` artifacts the legacy sentinel revoke
+   still runs.
 6. **Issue and distribute secrets.** `SECRET_KEY_BASE`,
    `ADAPTER_DISPATCH_SECRET`, `ADAPTER_CALLBACK_SECRET`, bundler API
    keys, paymaster API keys. See [docs/security.md](security.md) for
@@ -128,16 +129,20 @@ The in-repo artifacts are ready. What's left is:
    on the Phoenix side and a Fastify HTTPS listen on the adapter side
    — both are documented in `docs/security.md`.
 8. **Point a DNS record** at the LB (e.g. `bank-staging.internal`).
-9. **Smoke test end-to-end.** `mix bank.smoke.transfer` +
-   `mix bank.smoke.revoke` from the operator host; see
-   [docs/smoke-tests.md](smoke-tests.md). Run
+9. **Smoke test end-to-end.** Run the cryptographic
+   grant + revoke smoke per
+   [`docs/mvp-smoke-runbook.md`](mvp-smoke-runbook.md). The
+   legacy sentinel smokes (`mix bank.smoke.transfer` +
+   `mix bank.smoke.revoke`, see
+   [docs/smoke-tests.md](smoke-tests.md)) still work for rows
+   without `permission` artifacts. Run
    `chain_adapter/scripts/check-env.sh` on the adapter host
-   first; it reports `mode: sentinel-era (awaiting ZeroDev SDK
-   integration)` and the smoke `state: revoked` must be read as
-   "on-chain anchored, trust downgraded" rather than
-   cryptographically disabled until the integration in
-   [docs/zerodev-permissions-integration.md](zerodev-permissions-integration.md)
-   ships.
+   first; the script's `mode: sentinel-era (awaiting ZeroDev
+   SDK integration)` line is stale relative to runtime
+   (cryptographic grant + revoke landed under PR #132). For
+   rows with `permission` artifacts a `revoked` state means
+   cryptographic disablement; for legacy rows it means
+   "on-chain anchored, trust downgraded" only.
 
 ## Blocker note for issue #35
 

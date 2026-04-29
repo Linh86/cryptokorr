@@ -53,8 +53,8 @@ caught at build time by the contract test suite.
 | GET    | `/health`                     | Live        |
 | POST   | `/dispatch/transfer`          | Live        |
 | POST   | `/dispatch/swap`              | Scaffolded  |
-| POST   | `/dispatch/grant_delegation`  | Live (#58 grant flow — wired in code; see "Cryptographic grant + revoke status" below) |
-| POST   | `/dispatch/revoke_delegation` | Live, sentinel by default; cryptographic when the dispatch carries a `permission` block (see "Cryptographic grant + revoke status" below) |
+| POST   | `/dispatch/grant_delegation`  | Live (#58 grant flow — confirmed on Base Sepolia by PR #132; see "Cryptographic grant + revoke status" below) |
+| POST   | `/dispatch/revoke_delegation` | Live, cryptographic when the dispatch carries a `permission` block (default for rows granted under #58) and sentinel for legacy rows without artifacts |
 
 **Transfer** is the first real execution path. It builds a USDC
 ERC-20 transfer on Base wrapped in a `SimpleAccount.execute` call,
@@ -141,8 +141,9 @@ Status of the implementation:
    [`docs/provisioning-kernel-v3.md`](../docs/provisioning-kernel-v3.md).
    A real Kernel v3.1 smart account was deployed on Base Sepolia
    at `0xacb3390BF0E13eB0755317Fbb2C73Ed185F4142C`.
-5. **Cryptographic grant + revoke — WIRED IN CODE (#58 PR #129
-   + #130).** Both paths now exist as real code:
+5. **Cryptographic grant + revoke — LIVE on Base Sepolia (#58
+   + #31 closed by PR #132).** Both paths run end-to-end on
+   chain:
    - Grant: `executeGrant` in
      [`src/chains/base/grant.ts`](src/chains/base/grant.ts) builds
      a `PermissionPlugin` via `toPermissionValidator(...)` (session
@@ -162,18 +163,20 @@ Status of the implementation:
      SDK's `uninstallPlugin` action signed by
      `OPERATOR_PRIVATE_KEY`.
    - Sentinel revoke (`SimpleAccount.execute(self, 0, 0x)`) stays
-     as the fallback path for legacy rows whose grant predates
+     as the LEGACY fallback for rows whose grant predates
      `permission` artifacts. The tripwire test
      `test/base-revoke-sentinel-pin.test.ts` still pins the
      sentinel body so any drift surfaces loudly.
 
-   **Honesty boundary:** the cryptographic paths are unit-tested
-   (mocking the SDK) and structurally complete, but no real
-   on-chain grant + revoke has run yet on Base Sepolia under
-   the current code. Issues #58 and #31 stay OPEN until that
-   first end-to-end run confirms with public artifacts (install
-   tx hash + revoke tx hash). The operator's runbook step lives
-   in
+   **Public proof (PR #132):** smart account
+   `0xacb3390BF0E13eB0755317Fbb2C73Ed185F4142C` on Base Sepolia,
+   permission id `0xbb2f68d9`, install tx
+   `0xbbb3a2e8ae78e6c7c4ce6fb5c69f735baaf3af346ffd5b2ff7954724db39891a`,
+   revoke tx
+   `0xf81c969dafc25eccd0dccad0379317ec64b66916a45cdb9fae8c38e31d795ceb`,
+   block `40820243`. The operator smoke runbook lives in
+   [`docs/mvp-smoke-runbook.md`](../docs/mvp-smoke-runbook.md);
+   the integration model is in
    [`docs/zerodev-permissions-integration.md`](../docs/zerodev-permissions-integration.md).
 
 ## Local setup
@@ -227,11 +230,15 @@ Read it first.
 
 Operator-side templates ship under [`scripts/`](scripts/). They
 are NOT part of the adapter runtime — `tsconfig.json` excludes
-them and `vitest` does not pick them up — and the runtime
-container does NOT ship the ZeroDev SDK that real provisioning
-requires. The expectation is that an operator copies a template
-into a separate provisioning workspace, installs the SDK there,
-fills in the env placeholders, and runs it once.
+them and `vitest` does not pick them up. The ZeroDev SDK packages
+they reuse (`@zerodev/sdk`, `@zerodev/ecdsa-validator`,
+`@zerodev/permissions`) live in `dependencies` (not
+`devDependencies`) of `chain_adapter/package.json` because the
+runtime cryptographic grant + revoke paths import them at
+dispatch time, so a production install via `npm ci --omit=dev`
+ships them. An operator running these templates from a separate
+provisioning workspace can either reuse the adapter's installed
+tree or `npm install` the same pinned versions there.
 
 | Script | Purpose | Modes |
 | --- | --- | --- |
@@ -239,32 +246,34 @@ fills in the env placeholders, and runs it once.
 | [`scripts/verify-installed-validator.ts`](scripts/verify-installed-validator.ts) | Read-only RPC checks against the configured `SMART_ACCOUNT_ADDRESS`: deployed bytecode, kernel implementation, kernel version, root validator, current nonce. | always read-only |
 | [`scripts/check-env.sh`](scripts/check-env.sh) | Runtime env hygiene check: confirms every required adapter env is set, non-placeholder, well-shaped. No network calls. | always offline |
 
-The expected end-to-end flow today (sentinel-era; the corrected
-ZeroDev SDK integration is tracked in
-[`docs/zerodev-permissions-integration.md`](../docs/zerodev-permissions-integration.md)):
+The expected end-to-end flow today:
 
-1. Deploy a Kernel v3 smart account on Base Sepolia in a separate
-   operator workspace using `@zerodev/sdk` directly. Record the
-   address. The `provision-kernel.ts` template is currently a
-   deferred stub — see scripts/README.md for why.
-2. Set `SMART_ACCOUNT_ADDRESS`, `KERNEL_FACTORY_ADDRESS`, and
-   `DELEGATION_SIGNER_KEY` on the adapter host. Run
-   `check-env.sh` to confirm the runtime env is consistent.
-3. Run the Phoenix smokes (`mix bank.smoke.transfer`,
-   `mix bank.smoke.revoke`) end-to-end. The revoke smoke
-   exercises the sentinel path — `state: revoked` means
-   "on-chain anchored, trust downgraded", not "cryptographically
-   impossible".
-4. Promote to Base mainnet only after Sepolia is proven AND the
-   cryptographic revoke (#58) has shipped against Sepolia.
+1. Deploy a Kernel v3 smart account on Base Sepolia using
+   `provision-kernel.ts --broadcast` (real, no-secret-safe template
+   targeting Kernel v3.1). Record the address.
+2. Set `SMART_ACCOUNT_ADDRESS`, `KERNEL_FACTORY_ADDRESS`,
+   `DELEGATION_SIGNER_KEY`, and the kernel-root pair
+   (`OPERATOR_PRIVATE_KEY` + `OPERATOR_ADDRESS`) on the adapter
+   host. Run `check-env.sh` to confirm the runtime env is
+   consistent.
+3. Run the MVP smoke runbook
+   ([`docs/mvp-smoke-runbook.md`](../docs/mvp-smoke-runbook.md))
+   to exercise the cryptographic grant + revoke path end-to-end.
+   The legacy sentinel smokes
+   (`mix bank.smoke.transfer`, `mix bank.smoke.revoke`) still
+   work for rows without `permission` artifacts.
+4. Promote to Base mainnet only after Sepolia is proven
+   end-to-end (cryptographic grant + revoke confirmed on chain
+   per #58 / #31, closed by PR #132).
 
 What this provisioning step does NOT do:
 
 - It does not install ZeroDev permissions on the smart account.
-  That is part of the SDK integration tracked in the integration
-  doc above.
-- It does not wire the cryptographic revoke into `executeRevoke`.
-  That is #58.
+  That happens in the adapter runtime via
+  `POST /dispatch/grant_delegation` (`executeGrant`).
+- It does not run the cryptographic revoke. That happens in the
+  adapter runtime via `POST /dispatch/revoke_delegation` when
+  Phoenix attaches a `permission` block (`executeCryptographicRevoke`).
 
 ## Tests
 
@@ -324,18 +333,15 @@ Test suites:
 
 - **Real swap execution.** Router integration (Uniswap, CoW, etc.) is
   not wired. The handler validates and aborts safely.
-- **Cryptographic delegation revoke at the smart-account level.**
-  The current sentinel user-op anchors the revoke on chain and
-  exercises the full AA callback plumbing, but it does not disable
-  the delegation key at the contract level. The smart-account
-  choice (Kernel v3) is decided in #56; the corrected
-  ZeroDev permissions integration (SDK runtime deps, per-account
-  sudo signer, plugin-blob persistence,
-  `Kernel.uninstallValidation` wiring) is tracked in
-  [`docs/zerodev-permissions-integration.md`](../docs/zerodev-permissions-integration.md).
-  Phoenix issue #31 stays open until #58 ships end-to-end against
-  a Kernel-provisioned account. See the "Revoke delegation"
-  subsection above for the swap shape when it lands.
+- **Sentinel revoke as legacy fallback.** Cryptographic revoke
+  is the default for rows with `permission` artifacts (#58 /
+  #31, closed by PR #132). The sentinel
+  `SimpleAccount.execute(self, 0, 0x)` user-op continues to
+  anchor revokes for legacy rows that were granted before the
+  permission block was wired through; on those rows
+  `state: revoked` still means "on-chain anchored, trust
+  downgraded" rather than "cryptographically disabled". See
+  the "Revoke delegation" subsection above.
 - **Paymaster / sponsored flow.** The adapter funds user-ops from
   the smart account itself. Paymaster support remains reserved in
   the contract (`paymaster_denied` abort reason) but no code emits

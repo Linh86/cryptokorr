@@ -53,9 +53,10 @@ this file; the runbook only describes operator behavior.
   `uninstallValidation(bytes21,bytes,bytes)` ABI fragment from
   `KernelV3_1AccountAbi`; both halves are verified by the
   `permission-validator-pin.test.ts` tripwire.
-- **#58 — ENCODER + EXECUTOR + PERSISTENCE LANDED.** The
-  sentinel revoke is now the LEGACY path; it runs only when the
-  dispatch carries no `permission` block. The cryptographic path
+- **#58 — CLOSED by PR #132.** Cryptographic grant + revoke
+  confirmed live on Base Sepolia. The sentinel revoke is the
+  LEGACY path; it runs only when the dispatch carries no
+  `permission` block. The cryptographic path
   (`executeCryptographicRevoke` in
   [`chain_adapter/src/chains/base/revoke.ts`](../chain_adapter/src/chains/base/revoke.ts))
   reconstructs the ZeroDev plugin via
@@ -70,16 +71,17 @@ this file; the runbook only describes operator behavior.
   Phoenix carries the artifacts in `delegations.permission_blob` /
   `permission_id` / `validation_id` / `kernel_version` /
   `permission_package_version` (migration `20260427120000`).
-  The cryptographic path runs the moment two operator-driven gates
-  close: (a) provisioning the actual `OPERATOR_PRIVATE_KEY` in
-  adapter env, and (b) the grant flow emitting a `granted`
-  callback that populates the artifact columns. Until both close,
-  every revoke continues on the sentinel path; the cryptographic
-  branch fails closed with a precise reason rather than downgrading
-  silently.
-- **#31 — UNCHANGED.** Closes when the first end-to-end
-  cryptographic revoke confirms on chain (operator runbook step,
-  not blocked by code).
+  Public proof: smart account
+  `0xacb3390BF0E13eB0755317Fbb2C73Ed185F4142C`, permission id
+  `0xbb2f68d9`, install tx `0xbbb3a2e8…`, revoke tx
+  `0xf81c969d…`, block `40820243`. The cryptographic branch
+  still fails closed with a precise reason rather than
+  downgrading silently when a `permission` block arrives without
+  a configured operator key.
+- **#31 — CLOSED by PR #132.** First end-to-end cryptographic
+  revoke confirmed on chain with the artifacts above; the
+  operator smoke runbook is in
+  [`docs/mvp-smoke-runbook.md`](mvp-smoke-runbook.md).
 
 What is verifiable today, independent of the integration:
 

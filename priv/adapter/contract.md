@@ -23,20 +23,24 @@ staging or production deploy pipeline.
 
 ## Status (issue #31)
 
-**Issue #31 is NOT closed.** A true contract-level delegation revoke
-is blocked on three concrete missing artifacts — see the **Still
-deferred** subsection below for the exact list. The work under #31
-keeps the revoke plumbing and state model truthful while those are
-missing; it does NOT provide cryptographic revocation.
+**Issue #31 is CLOSED by PR #132.** A true contract-level
+delegation revoke is live on Base Sepolia for rows that carry a
+`permission` block (cryptographic path); the legacy sentinel
+self-transfer of 0 wei remains the fallback for rows without
+permission artifacts. Public proof: smart account
+`0xacb3390BF0E13eB0755317Fbb2C73Ed185F4142C`, install tx
+`0xbbb3a2e8…`, revoke tx `0xf81c969d…`, block `40820243`. The
+operator smoke runbook is in
+[`docs/mvp-smoke-runbook.md`](../../docs/mvp-smoke-runbook.md).
 
-The adapter submits a **sentinel self-transfer of 0 wei** on Base.
-The sentinel is NOT a cryptographic revocation — it is a real
-on-chain tx that anchors the revoke attempt in a block with a real
-hash, real confirmations, and real failure modes (send error,
-confirmation timeout, revert), exercising the same plumbing the
-permission-module revoke will use. The delegation key can still sign
-another userop until those three missing artifacts land; Phoenix enforces fail-closed on its
-side for the entire window.
+For rows without `permission` artifacts the adapter still
+submits the sentinel self-transfer. The sentinel is NOT a
+cryptographic revocation — it is a real on-chain tx that anchors
+the revoke attempt in a block with a real hash, real
+confirmations, and real failure modes (send error, confirmation
+timeout, revert). The delegation key can still sign another
+userop on those legacy rows; Phoenix enforces fail-closed on its
+side for the entire window regardless of which path runs.
 
 What landed under #31:
 
@@ -108,19 +112,18 @@ What landed under #31:
   end-to-end on the same plumbing a real permission-module revoke
   will use.
 
-**Still deferred (blocker for closing #31):**
-
-Cryptographic revocation at the smart-account level. The sentinel
-user-op does not prevent the delegation key from signing another
-user-op. The architectural decision behind a real revoke is captured
-in [`docs/smart-account-and-revoke-design.md`](../../docs/smart-account-and-revoke-design.md)
+**Cryptographic revocation at the smart-account level — LIVE
+under PR #132.** The architectural decision behind the real
+revoke is captured in
+[`docs/smart-account-and-revoke-design.md`](../../docs/smart-account-and-revoke-design.md)
 (GitHub #56): a **Kernel v3 (ERC-7579) modular account on Base**.
 The shape of the cryptographic revoke (which signer + policy
-modules, what `delegation_id` carries on the wire, whether revoke
-is per-permission via `Kernel.uninstallValidation` or coarser via
-`Kernel.invalidateNonce`) is deferred to the ZeroDev SDK
-integration tracked in
+modules, what `delegation_id` carries on the wire, per-permission
+via `Kernel.uninstallValidation` rather than coarser
+`Kernel.invalidateNonce`) is documented in
 [`docs/zerodev-permissions-integration.md`](../../docs/zerodev-permissions-integration.md).
+The legacy sentinel path remains for rows without `permission`
+artifacts.
 
 What is verifiable today:
 
@@ -152,43 +155,49 @@ What is verifiable today:
   `KernelV3_1AccountAbi`; the
   `permission-validator-pin.test.ts` tripwire imports the same
   package values and asserts equality.
-- **#58 — open.** The swap target is `Kernel.uninstallValidation`
-  ON the smart account itself, signed by a sudo signer the adapter
-  does not yet hold. There is no separate validator address to
-  call into. Hard-blocker list (SDK runtime deps, per-account sudo
-  signer, bundler/paymaster, plugin-blob persistence, pin shape,
-  on-the-wire `delegation_id` encoding) is documented in the
-  integration doc.
+- **#58 — closed by PR #132.** Cryptographic grant + revoke
+  confirmed on Base Sepolia. The swap target is
+  `Kernel.uninstallValidation` ON the smart account itself,
+  signed by `OPERATOR_PRIVATE_KEY` (the kernel's root validator
+  EOA). There is no separate validator address to call into.
+  See [`docs/mvp-smoke-runbook.md`](../../docs/mvp-smoke-runbook.md)
+  for the operator smoke and
+  [`docs/zerodev-permissions-integration.md`](../../docs/zerodev-permissions-integration.md)
+  for the integration shape.
 
-When #58 lands, the change is to the revoke `callData` only — both
-the OUTER envelope (SimpleAccount → ERC-7579) AND the INNER body
-(no-op self-call → kernel-account `uninstallValidation` call)
-swap. Phoenix's callback contract and state machine do NOT need
-to change. The adapter's tripwire test
-(`test/base-revoke-sentinel-pin.test.ts`) will fail loudly the
-moment the inner call shape changes, forcing whoever makes the
-change to also update this contract, the runbook, and close #31.
+Under PR #132 the cryptographic revoke `callData` swaps in for
+rows with `permission` artifacts: the OUTER envelope is ERC-7579
+(`execute(bytes32,bytes)`, selector `0xe9ae5c53`) and the INNER
+body is `Kernel.uninstallValidation(...)` against the smart
+account itself. The legacy SimpleAccount envelope
+(`execute(address,uint256,bytes)`, selector `0xb61d27f6`) with a
+no-op self-call still anchors revokes for rows without
+artifacts. Phoenix's callback contract and state machine did not
+change. The adapter's `test/base-revoke-sentinel-pin.test.ts`
+remains as a tripwire on the legacy sentinel body.
 
 ### `delegation_id` semantics
 
 Phoenix stores `delegations.delegation_id` as an opaque string
-column. The on-the-wire encoding is deferred to the ZeroDev SDK
-integration described in
-[`docs/zerodev-permissions-integration.md`](../../docs/zerodev-permissions-integration.md);
-the eventual value is one of: a 4-byte ZeroDev `permissionId`
-(10 hex chars), a 21-byte Kernel `validationId` (44 hex chars),
-or a serialized plugin blob. An earlier revision of this section
-claimed the value was a 66-char `bytes32 permissionId` derived
-from a single Permission Validator contract — that was a
-wrong-model assumption (see the integration doc).
+column. New rows under #58 (cryptographic grant flow) write the
+4-byte ZeroDev `permissionId` (10 hex chars) into
+`delegation_id` so the field is human-pasteable into Etherscan
+and `kernel.permissionConfig(bytes4)`. The 21-byte
+`validation_id` rides separately on the dispatch's `permission`
+block; the adapter feeds that to `uninstallValidation` rather
+than re-deriving from `delegation_id`.
 
-Pre-integration sentinel-era grants continue to use legacy
-`del_…` placeholder ids. The adapter accepts and echoes any
-non-empty string; no format-validation helpers run today.
+Legacy sentinel-era grants continue to use `del_…` placeholder
+ids. The adapter accepts and echoes any non-empty string; no
+format-validation helpers run today.
 
-Phoenix continues to treat `revoked` (via the sentinel path) as
-"on-chain anchored, trust downgraded", NOT as "cryptographically
-impossible". Fail-closed posture is unchanged until #31 closes.
+For sentinel-path revokes (legacy rows without `permission`
+artifacts), Phoenix treats `revoked` as "on-chain anchored,
+trust downgraded", NOT as "cryptographically impossible". For
+cryptographic-path revokes (rows with artifacts) `revoked`
+additionally means the kernel rejects further user-ops from the
+disabled permission. Fail-closed posture is unchanged in either
+case.
 
 ## Status (issue #32)
 

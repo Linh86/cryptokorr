@@ -66,16 +66,23 @@ endpoint on the adapter (currently only `dispatch_transfer` and
 `dispatch_revoke_delegation` exist). Step 9 reuses the existing
 callback kind.
 
-## Phoenix-side scaffolding (landing in this issue)
+## Phoenix-side scaffolding (landed)
 
 - `BankWeb.API.V1.ConnectController.request/2` at
-  `POST /v1/connect/smart_account`. Accepts the signed payload the
-  JS hook built, validates shape, writes an `intent-to-connect`
-  audit event, and calls the adapter-side grant dispatch (stubbed
-  until the adapter exposes the endpoint).
+  `POST /v1/connect/smart_account`. Accepts a payload (signed or
+  null), validates shape, writes an `intent-to-connect` audit
+  event, and calls `Bank.Delegations.request_connect/1`, which
+  enqueues `Bank.Runtime.Workers.GrantDelegation`. The worker
+  dispatches to the live adapter endpoint
+  `POST /dispatch/grant_delegation` (no longer stubbed — wired
+  end-to-end since #58, confirmed live on Base Sepolia under PR
+  #132).
 - `assets/js/hooks/wallet_connect.js` — scaffold with EIP-1193
   detection, clear `TODO` markers for the wagmi/viem integration, and
   the `phx:wallet_connect:request` push that calls the controller.
+  Until a wallet SDK lands, the hook reports
+  `wallet_connect:stub` and operator-driven flows post a
+  `delegation_payload: null` body directly.
 - Control tower: replace the passive "not yet available" text with
   a **Connect wallet** button that talks to the hook. When the hook
   is stubbed (no wallet SDK installed), the button stays disabled
@@ -141,11 +148,14 @@ type (ERC-7579 session key vs EntryPoint v0.7 native session
 key). Until that lands the JS hook reports `wallet_connect:stub`
 and the controller's `delegation_payload` field carries `null`.
 
-**Operator runbook step required to actually exercise on chain**:
-end-to-end cryptographic grant + revoke needs a provisioned
-`OPERATOR_PRIVATE_KEY` matching the kernel's root validator (see
-`scripts/provision-kernel.ts`), a real Base Sepolia bundler
-endpoint, and a kernel deployed under that operator EOA. The
-adapter unit tests mock the SDK; the broadcast path is not
-exercised in CI. #31 stays open until the first real grant +
-revoke confirms on chain.
+**Operator runbook**: end-to-end cryptographic grant + revoke
+runs against a provisioned `OPERATOR_PRIVATE_KEY` matching the
+kernel's root validator (see `scripts/provision-kernel.ts`), a
+real Base Sepolia bundler endpoint, and a kernel deployed under
+that operator EOA. Adapter unit tests mock the SDK; the live
+broadcast path is exercised through the operator smoke runbook
+in [`docs/mvp-smoke-runbook.md`](mvp-smoke-runbook.md). #58 and
+#31 closed under PR #132 — the first end-to-end run on Base
+Sepolia confirmed the path against smart account
+`0xacb3390BF0E13eB0755317Fbb2C73Ed185F4142C` (install tx
+`0xbbb3a2e8…`, revoke tx `0xf81c969d…`, block `40820243`).

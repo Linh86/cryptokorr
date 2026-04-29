@@ -306,10 +306,14 @@ Both keys are validated at startup:
     the EOA derived from `DELEGATION_SIGNER_KEY` (role-conflation
     guard).
 
-The pair `(OPERATOR_PRIVATE_KEY, OPERATOR_ADDRESS)` is optional in
-v0.1 — leaving both unset keeps the adapter on the sentinel revoke
-path. Setting only one of them is refused at startup so a
-half-configured deploy fails fast.
+The pair `(OPERATOR_PRIVATE_KEY, OPERATOR_ADDRESS)` is required
+for the cryptographic grant + revoke path (live on Base Sepolia
+since PR #132 — #58 / #31 closed). Leaving both unset keeps the
+adapter on the legacy sentinel revoke path AND refuses any
+`grant_delegation` dispatch (`state=grant_failed,
+reason=operator_key_missing`) — Phoenix never persists an
+active row that was never installed. Setting only one of them is
+refused at startup so a half-configured deploy fails fast.
 
 ## Incident response
 
