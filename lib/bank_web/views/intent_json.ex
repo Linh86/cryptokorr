@@ -1,13 +1,15 @@
 defmodule BankWeb.API.V1.IntentJSON do
   @moduledoc """
-  JSON renderers for `/v1/intents` create / show / cancel responses.
+  JSON renderers for `/v1/intents` create / show / cancel / simulate
+  responses.
 
   Replay rendering for `GET /v1/intents/:id/replay` lives in
   `BankWeb.API.V1.AuditJSON.replay/1` — keeping this module narrow to
-  the create + show + cancel shape avoids duplicate intent renderers
-  across the audit and intent surfaces.
+  the create + show + cancel + simulate shape avoids duplicate intent
+  renderers across the audit and intent surfaces.
   """
 
+  alias Bank.Decisions.SimulationReport
   alias Bank.Intents.AgentIntent
 
   @doc """
@@ -53,6 +55,52 @@ defmodule BankWeb.API.V1.IntentJSON do
       reason: reason,
       links: links(intent),
       intent: intent_payload(intent)
+    }
+  end
+
+  @doc """
+  `POST /v1/intents/:id/simulate` payload. Returns the produced
+  `SimulationReport`, the intent (whose `current_simulation_id` may
+  have moved if `reason == "refresh"`), and the simulation `reason`
+  echoed back to the caller. `refreshed?` is `true` when the
+  produced report became the active one.
+  """
+  def simulated(%{
+        intent: %AgentIntent{} = intent,
+        report: %SimulationReport{} = report,
+        reason: reason,
+        refreshed?: refreshed?
+      }) do
+    %{
+      intent_id: intent.id,
+      state: intent.state,
+      reason: reason,
+      refreshed: refreshed?,
+      links: links(intent),
+      intent: intent_payload(intent),
+      simulation: simulation_payload(report)
+    }
+  end
+
+  defp simulation_payload(%SimulationReport{} = report) do
+    %{
+      id: report.id,
+      provider: report.provider,
+      provider_trace_ref: report.provider_trace_ref,
+      chain: report.chain,
+      asset: report.asset,
+      status: report.status,
+      current: report.current,
+      generated_at: report.generated_at,
+      freshness_ttl_seconds: report.freshness_ttl_seconds,
+      predicted_balance_changes: report.predicted_balance_changes,
+      estimated_gas: report.estimated_gas,
+      estimated_fees: report.estimated_fees,
+      routing_path: report.routing_path,
+      expected_output: decimal(report.expected_output),
+      slippage_exposure: decimal(report.slippage_exposure),
+      failure_conditions: report.failure_conditions,
+      supersedes_id: report.supersedes_id
     }
   end
 

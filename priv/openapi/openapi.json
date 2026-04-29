@@ -1541,6 +1541,50 @@
         "title": "IntentShowResponse",
         "type": "object"
       },
+      "IntentSimulationResponse": {
+        "description": "Response body for a successful on-demand simulation. The runtime\npersists the produced `SimulationReport` and returns it inline\nalong with the (possibly updated) intent and its links.\n`refreshed` is `true` when the produced report became the\nintent's active one (`reason == \"refresh\"`); for\n`pre_submit_dry_run` and `operator_inspection` the field is\n`false` and the intent's `current_simulation_id` is unchanged.\n",
+        "properties": {
+          "intent": {
+            "$ref": "#/components/schemas/IntentEntity"
+          },
+          "intent_id": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "links": {
+            "$ref": "#/components/schemas/Links"
+          },
+          "reason": {
+            "enum": [
+              "pre_submit_dry_run",
+              "refresh",
+              "operator_inspection"
+            ],
+            "example": "refresh",
+            "type": "string"
+          },
+          "refreshed": {
+            "description": "True when the produced report supersedes the prior current report and the intent's `current_simulation_id` advances. Always `true` for `reason == \"refresh\"`, otherwise `false`.",
+            "type": "boolean"
+          },
+          "simulation": {
+            "$ref": "#/components/schemas/SimulationReportEntity"
+          },
+          "state": {
+            "$ref": "#/components/schemas/IntentState"
+          }
+        },
+        "required": [
+          "intent_id",
+          "state",
+          "reason",
+          "refreshed",
+          "links",
+          "intent",
+          "simulation"
+        ],
+        "title": "IntentSimulationResponse",
+        "type": "object"
+      },
       "IntentState": {
         "description": "Lifecycle state of an `AgentIntent`. The flow is\n`submitted → evaluating → decided → executing → executed`\non the happy path, with `blocked` and `cancelled` as\nterminal side branches.\n",
         "enum": [
@@ -1984,6 +2028,100 @@
           "scope"
         ],
         "title": "SecurityStateResponse",
+        "type": "object"
+      },
+      "SimulationReportEntity": {
+        "description": "A persisted `SimulationReport` row. `current` is `true` when the\nreport is the active one for its intent (only one current report\nper intent at a time, enforced by a partial unique index).\n`status` is `\"completed\"` when the underlying provider preview\nsucceeded and `\"failed\"` when it did not — failed reports still\npersist so replay can show what was attempted.\n",
+        "properties": {
+          "asset": {
+            "$ref": "#/components/schemas/Asset"
+          },
+          "chain": {
+            "$ref": "#/components/schemas/Chain"
+          },
+          "current": {
+            "description": "Active flag for this intent.",
+            "type": "boolean"
+          },
+          "estimated_fees": {
+            "additionalProperties": true,
+            "description": "Provider fee summary, e.g. `{\"asset\":\"ETH\",\"amount\":\"0.00015\"}`.",
+            "nullable": true,
+            "type": "object"
+          },
+          "estimated_gas": {
+            "nullable": true,
+            "type": "integer"
+          },
+          "expected_output": {
+            "nullable": true,
+            "type": "string"
+          },
+          "failure_conditions": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "freshness_ttl_seconds": {
+            "example": 30,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "generated_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "id": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "predicted_balance_changes": {
+            "additionalProperties": true,
+            "description": "Provider-shaped balance impact, e.g. `{\"items\": [{\"asset\":\"USDC\",\"delta\":\"-25\"}]}`.",
+            "type": "object"
+          },
+          "provider": {
+            "example": "stub",
+            "type": "string"
+          },
+          "provider_trace_ref": {
+            "nullable": true,
+            "type": "string"
+          },
+          "routing_path": {
+            "additionalProperties": true,
+            "nullable": true,
+            "type": "object"
+          },
+          "slippage_exposure": {
+            "nullable": true,
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "completed",
+              "failed",
+              "stale"
+            ],
+            "example": "completed",
+            "type": "string"
+          },
+          "supersedes_id": {
+            "description": "Prior report this one supersedes, if any.",
+            "format": "uuid",
+            "nullable": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "provider",
+          "chain",
+          "asset",
+          "status",
+          "current",
+          "generated_at",
+          "freshness_ttl_seconds"
+        ],
+        "title": "SimulationReportEntity",
         "type": "object"
       },
       "SimulationRequest": {
@@ -3161,7 +3299,7 @@
     "/v1/intents/{id}/simulate": {
       "post": {
         "callbacks": {},
-        "description": "Produces a fresh `SimulationReport` on demand (pre-submit dry\nrun, refresh, or operator inspection). `reason=\"refresh\"`\nresets the active report used by decisioning.\n\n**Current runtime behavior: returns `501 Not Implemented`.**\n",
+        "description": "Produces a fresh `SimulationReport` on demand. `reason` chooses\nthe semantic:\n\n  * `pre_submit_dry_run` — produce a report without changing the\n    intent's `current_simulation_id`. History-only.\n  * `refresh` — supersede the prior current simulation, mark the\n    new one current, and advance the intent pointer. Resets the\n    active report decisioning reads.\n  * `operator_inspection` — same shape as `pre_submit_dry_run`\n    with an audit trail tagged for operator inspection.\n\nAllowed source states: `:submitted`, `:evaluating`, `:decided`,\n`:blocked`. In-flight (`:executing`) and terminal\n(`:executed`, `:cancelled`, `:expired`) states return `409`.\n",
         "operationId": "BankWeb.API.V1.IntentController.simulate",
         "parameters": [
           {
@@ -3190,8 +3328,22 @@
           "required": false
         },
         "responses": {
-          "501": {
-            "$ref": "#/components/responses/NotImplemented"
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.IntentSimulationResponse"
+              }
+            },
+            "description": "Simulation report"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
           }
         },
         "summary": "Request an on-demand simulation",

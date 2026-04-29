@@ -400,7 +400,29 @@ defmodule Bank.Decisions do
 
   defp wrap_contradictions(attrs), do: attrs
 
-  defp build_simulation_attrs(intent, {:ok, %Quotes.Preview{} = preview}, prior, _now) do
+  @doc """
+  Build a `SimulationReport`-shaped attribute map from the result of
+  `Bank.Quotes.preview/2`. Returns the intent / preview-derived
+  fields only — the caller layers in `:current` and `:supersedes_id`
+  per its own state-machine semantics.
+
+  Used by both `evaluate_intent/2` (which writes a `current: true`
+  report on every evaluation) and `Bank.Intents.simulate/3` (which
+  only sets `current: true` for `reason: "refresh"`).
+
+  Options:
+
+    * `:now` — clock for the failed-preview path (default
+      `DateTime.utc_now/0`). For `{:ok, preview}`, `generated_at`
+      comes from the preview struct itself.
+  """
+  @spec simulation_attrs_from_preview(AgentIntent.t(), Quotes.result(), keyword()) :: map()
+  def simulation_attrs_from_preview(%AgentIntent{} = intent, preview_result, opts \\ []) do
+    now = Keyword.get(opts, :now, DateTime.utc_now())
+    do_simulation_attrs(intent, preview_result, now)
+  end
+
+  defp do_simulation_attrs(intent, {:ok, %Quotes.Preview{} = preview}, _now) do
     %{
       intent_id: intent.id,
       provider: preview.provider,
@@ -416,13 +438,11 @@ defmodule Bank.Decisions do
       failure_conditions: %{"items" => preview.failure_conditions || []},
       generated_at: preview.generated_at,
       freshness_ttl_seconds: preview.freshness_ttl_seconds || @default_simulation_freshness_ttl,
-      status: :completed,
-      current: true,
-      supersedes_id: prior && prior.id
+      status: :completed
     }
   end
 
-  defp build_simulation_attrs(intent, {:error, reason}, prior, now) do
+  defp do_simulation_attrs(intent, {:error, reason}, now) do
     %{
       intent_id: intent.id,
       provider: @default_simulation_provider,
@@ -445,14 +465,19 @@ defmodule Bank.Decisions do
       },
       generated_at: now,
       freshness_ttl_seconds: @default_simulation_freshness_ttl,
-      status: :failed,
-      current: true,
-      supersedes_id: prior && prior.id
+      status: :failed
     }
   end
 
-  defp build_simulation_attrs(intent, _other, prior, now) do
-    build_simulation_attrs(intent, {:error, :preview_missing}, prior, now)
+  defp do_simulation_attrs(intent, _other, now) do
+    do_simulation_attrs(intent, {:error, :preview_missing}, now)
+  end
+
+  defp build_simulation_attrs(intent, preview_result, prior, now) do
+    intent
+    |> simulation_attrs_from_preview(preview_result, now: now)
+    |> Map.put(:current, true)
+    |> Map.put(:supersedes_id, prior && prior.id)
   end
 
   defp simulation_failure_message(:provider_unavailable), do: "preview provider unavailable"
