@@ -344,7 +344,7 @@ defmodule Bank.Decisions do
       Runtime.emit_audit(Bank.Audit.Events.intent_auto_exec_held(intent, envelope, reason))
 
     Logger.info(
-      "Decisions.evaluate_intent: auto_exec dispatch held for intent #{intent.id} " <>
+      "Decisions: auto_exec dispatch held for intent #{intent.id} " <>
         "(envelope=#{envelope.id}, reason=#{inspect(reason)})"
     )
 
@@ -803,12 +803,26 @@ defmodule Bank.Decisions do
       {:ok, smart_account_id} ->
         case dispatch_auto_exec(successor.id, smart_account_id, opts) do
           {:ok, plan} -> {:dispatched, plan}
-          {:error, reason} -> {:held, reason}
+          {:error, reason} -> handle_approval_held(successor, reason)
         end
 
       {:error, reason} ->
-        {:held, reason}
+        handle_approval_held(successor, reason)
     end
+  end
+
+  defp handle_approval_held(%DecisionEnvelope{} = successor, reason) do
+    # Mirror the evaluation-driven held path: write `intent.auto_exec_held`
+    # so replay surfaces the same audit row regardless of which path
+    # produced the held state. The intent row is already updated by
+    # `apply_approval_decision/4` (same DB connection); reload it here
+    # so the audit `before_ref` carries the post-approve state.
+    case Repo.get(AgentIntent, successor.intent_id) do
+      %AgentIntent{} = intent -> emit_auto_exec_held(intent, successor, reason)
+      _ -> :ok
+    end
+
+    {:held, reason}
   end
 
   @doc """
