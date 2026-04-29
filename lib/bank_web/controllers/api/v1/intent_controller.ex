@@ -11,19 +11,21 @@ defmodule BankWeb.API.V1.IntentController do
     * `POST /v1/intents/:id/cancel`   — operator pre-execution cancel
     * `GET  /v1/intents/:id/replay`   — full replay bundle
 
-  `create/2`, `show/2`, and `cancel/2` are live: create persists an
-  `%AgentIntent{}` in `:submitted`, audits `intent.submitted`, and
-  enqueues `Bank.Runtime.Workers.EvaluateIntent`. cancel transitions
-  pre-execution intents to `:cancelled`, audits `intent.cancelled`
-  with the operator-supplied reason, and is idempotent against an
-  already-cancelled intent. `simulate/2` still returns `501` until
-  the decision engine lands.
+  `create/2`, `show/2`, `cancel/2`, and `simulate/2` are live: create
+  persists an `%AgentIntent{}` in `:submitted`, audits
+  `intent.submitted`, and enqueues `Bank.Runtime.Workers.EvaluateIntent`.
+  cancel transitions pre-execution intents to `:cancelled`, audits
+  `intent.cancelled` with the operator-supplied reason, and is
+  idempotent against an already-cancelled intent. simulate produces
+  a fresh `SimulationReport` via `Bank.Quotes.preview/2`; with
+  `reason="refresh"` the new report supersedes the prior current and
+  the intent's `current_simulation_id` advances, while
+  `pre_submit_dry_run` and `operator_inspection` write a
+  non-current report (history-only).
   """
 
   use BankWeb, :controller
   use OpenApiSpex.ControllerSpecs
-
-  import BankWeb.API.V1.FallbackController, only: [not_implemented: 3]
 
   alias Bank.Audit
   alias Bank.Intents
@@ -32,7 +34,6 @@ defmodule BankWeb.API.V1.IntentController do
 
   @idempotency_key_ref %Reference{"$ref": "#/components/parameters/IdempotencyKey"}
   @request_id_in_ref %Reference{"$ref": "#/components/parameters/RequestIdIn"}
-  @not_implemented_ref %Reference{"$ref": "#/components/responses/NotImplemented"}
   @not_found_ref %Reference{"$ref": "#/components/responses/NotFound"}
   @conflict_ref %Reference{"$ref": "#/components/responses/Conflict"}
   @unprocessable_ref %Reference{"$ref": "#/components/responses/UnprocessableEntity"}
@@ -158,23 +159,146 @@ defmodule BankWeb.API.V1.IntentController do
   operation(:simulate,
     summary: "Request an on-demand simulation",
     description: """
-    Produces a fresh `SimulationReport` on demand (pre-submit dry
-    run, refresh, or operator inspection). `reason="refresh"`
-    resets the active report used by decisioning.
+    Produces a fresh `SimulationReport` on demand. `reason` chooses
+    the semantic:
 
-    **Current runtime behavior: returns `501 Not Implemented`.**
+      * `pre_submit_dry_run` — produce a report without changing the
+        intent's `current_simulation_id`. History-only.
+      * `refresh` — supersede the prior current simulation, mark the
+        new one current, and advance the intent pointer. Resets the
+        active report decisioning reads.
+      * `operator_inspection` — same shape as `pre_submit_dry_run`
+        with an audit trail tagged for operator inspection.
+
+    Allowed source states: `:submitted`, `:evaluating`, `:decided`,
+    `:blocked`. In-flight (`:executing`) and terminal
+    (`:executed`, `:cancelled`, `:expired`) states return `409`.
     """,
     tags: ["Intents"],
     parameters: [@intent_id_param, @idempotency_key_ref, @request_id_in_ref],
     request_body:
       {"Simulation request body", "application/json", BankWeb.OpenApi.Schemas.SimulationRequest},
     responses: %{
-      501 => @not_implemented_ref
+      200 =>
+        {"Simulation report", "application/json",
+         BankWeb.OpenApi.Schemas.IntentSimulationResponse},
+      404 => @not_found_ref,
+      409 => @conflict_ref,
+      422 => @unprocessable_ref
     }
   )
 
-  def simulate(conn, _params),
-    do: not_implemented(conn, "POST /v1/intents/:id/simulate", "implemented in issue #9")
+  def simulate(conn, %{"id" => id} = params) do
+    with {:ok, _uuid} <- cast_uuid(id),
+         {:ok, reason} <- cast_simulate_reason(params) do
+      handle_simulate(conn, id, reason)
+    else
+      :error ->
+        conn
+        |> put_status(:not_found)
+        |> json(not_found_envelope(id))
+
+      {:error, :reason_required} ->
+        render_error(
+          conn,
+          :unprocessable_entity,
+          "invalid_body",
+          "`reason` is required"
+        )
+
+      {:error, {:invalid_reason, value}} ->
+        render_error(
+          conn,
+          :unprocessable_entity,
+          "invalid_reason",
+          "`reason` must be one of: pre_submit_dry_run, refresh, operator_inspection",
+          hint: "got #{inspect(value)}"
+        )
+    end
+  end
+
+  defp cast_simulate_reason(%{"reason" => reason}) when is_binary(reason) do
+    case String.trim(reason) do
+      "" ->
+        {:error, :reason_required}
+
+      trimmed when trimmed in ~w(pre_submit_dry_run refresh operator_inspection) ->
+        {:ok, trimmed}
+
+      other ->
+        {:error, {:invalid_reason, other}}
+    end
+  end
+
+  defp cast_simulate_reason(%{"reason" => other}) do
+    {:error, {:invalid_reason, other}}
+  end
+
+  defp cast_simulate_reason(_), do: {:error, :reason_required}
+
+  defp handle_simulate(conn, id, reason) do
+    case Intents.simulate(id, reason, actor: :agent) do
+      {:ok, %{intent: intent, report: report, reason: reason, refreshed?: refreshed?}} ->
+        conn
+        |> put_status(:ok)
+        |> json(
+          IntentJSON.simulated(%{
+            intent: intent,
+            report: report,
+            reason: reason,
+            refreshed?: refreshed?
+          })
+        )
+
+      {:error, :not_found} ->
+        conn
+        |> put_status(:not_found)
+        |> json(not_found_envelope(id))
+
+      {:error, {:wrong_state, state}} ->
+        render_error(
+          conn,
+          :conflict,
+          "wrong_state",
+          "intent cannot be simulated in state `#{state}`",
+          hint: simulate_wrong_state_hint(state)
+        )
+
+      {:error, {:invalid_reason, value}} ->
+        render_error(
+          conn,
+          :unprocessable_entity,
+          "invalid_reason",
+          "`reason` must be one of: pre_submit_dry_run, refresh, operator_inspection",
+          hint: "got #{inspect(value)}"
+        )
+
+      {:error, {:unsupported_chain, chain}} ->
+        render_error(
+          conn,
+          :unprocessable_entity,
+          "unsupported_chain",
+          "chain `#{chain}` is not supported by simulation",
+          hint: ~s|the runtime currently accepts only `"base"`|
+        )
+
+      {:error, {:invalid, _other}} ->
+        render_error(
+          conn,
+          :unprocessable_entity,
+          "invalid_body",
+          "request body failed validation"
+        )
+    end
+  end
+
+  defp simulate_wrong_state_hint(:executing),
+    do: "execution is in flight; use replay to inspect what already happened"
+
+  defp simulate_wrong_state_hint(state) when state in [:executed, :blocked, :cancelled, :expired],
+    do: "intent is terminal in state `#{state}`; use replay to inspect what was simulated"
+
+  defp simulate_wrong_state_hint(_), do: nil
 
   operation(:cancel,
     summary: "Cancel an intent before execution",

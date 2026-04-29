@@ -13,17 +13,23 @@ defmodule Bank.Intents do
     * accept an intent (create + persist + enqueue evaluation)
     * look up an intent and its linked decision / simulation / plan
     * operator cancellation (pre-execution)
+    * on-demand simulation (`simulate/3`) — produces a fresh
+      `SimulationReport` without re-running policy / autonomy
     * replay bundle assembly (delegates to `Bank.Audit`)
 
-  Evaluation, simulation, and decisioning belong to `Bank.Policies`,
-  `Bank.Decisions`, and `Bank.Runtime` — not here.
+  Evaluation, simulation engine, and decisioning belong to
+  `Bank.Policies`, `Bank.Decisions`, and `Bank.Runtime` — this module
+  is the agent-facing facade.
   """
 
   import Ecto.Query
 
   alias Bank.Audit
   alias Bank.Audit.Events, as: AuditEvents
+  alias Bank.Decisions
+  alias Bank.Decisions.SimulationReport
   alias Bank.Intents.AgentIntent
+  alias Bank.Quotes
   alias Bank.Repo
   alias Bank.Runtime
   alias Ecto.Multi
@@ -255,6 +261,222 @@ defmodule Bank.Intents do
   defp annotate_cancel_reason(attrs, reason) do
     after_ref = Map.get(attrs, :after_ref) || %{}
     Map.put(attrs, :after_ref, Map.put(after_ref, :reason, reason))
+  end
+
+  # --- Simulation ---------------------------------------------------------
+
+  @simulate_allowed_states [:submitted, :evaluating, :decided, :blocked]
+  @simulate_supported_reasons ~w(pre_submit_dry_run refresh operator_inspection)
+
+  @doc """
+  Produce an on-demand `SimulationReport` for an intent.
+
+  Reuses `Bank.Quotes.preview/2` for the dry-run output and
+  `Bank.Decisions.simulation_attrs_from_preview/3` for the
+  preview→attrs translation, so the report shape is identical to what
+  `Bank.Decisions.evaluate_intent/2` writes during the live evaluation
+  pipeline.
+
+  ## Reason semantics
+
+    * `"pre_submit_dry_run"` — produce a report (`current: false`)
+      without touching the intent's `current_simulation_id`. Pure
+      preview.
+    * `"refresh"` — produce a report (`current: true`), demote the
+      prior current simulation (if any), and update the intent's
+      `current_simulation_id`. Inside one `Ecto.Multi`. Used to
+      reset the active report decisioning reads.
+    * `"operator_inspection"` — same shape as `pre_submit_dry_run`:
+      `current: false`, no intent pointer change. The audit event
+      records the operator's inspection trail; replay surfaces the
+      report alongside the active one.
+
+  In every case an `intent.cancelled`-style audit row is written
+  (`simulation.requested` with the reason) so replay readers can
+  reconstruct who asked, why, and whether the produced report became
+  the active one.
+
+  ## State guard
+
+  Allowed source states: `:submitted`, `:evaluating`, `:decided`,
+  `:blocked`. Anything else (`:executing`, `:executed`, `:cancelled`,
+  `:expired`) returns `{:error, {:wrong_state, state}}` — there is no
+  meaningful pre-flight simulation once execution is in flight or the
+  intent is terminal.
+
+  ## Returns
+
+    * `{:ok, %{intent: intent, report: report, reason: reason,
+      superseded: prior_or_nil, refreshed?: bool}}`
+    * `{:error, :not_found}` — id did not resolve.
+    * `{:error, {:wrong_state, state}}` — state guard.
+    * `{:error, {:invalid_reason, reason}}` — `reason` not in the
+      supported set.
+    * `{:error, {:unsupported_chain, chain}}` — `Bank.Quotes.preview/2`
+      rejected the chain at the boundary (e.g. not `"base"`).
+
+  Idempotency: simulate is **not** idempotent — every call produces a
+  fresh `SimulationReport` row. The OpenAPI body has no
+  `idempotency_key` field for this reason; callers that need to dedupe
+  must do so on their side.
+  """
+  @spec simulate(String.t() | AgentIntent.t(), String.t(), keyword()) ::
+          {:ok,
+           %{
+             intent: AgentIntent.t(),
+             report: SimulationReport.t(),
+             reason: String.t(),
+             superseded: SimulationReport.t() | nil,
+             refreshed?: boolean()
+           }}
+          | {:error,
+             :not_found
+             | {:wrong_state, atom()}
+             | {:invalid_reason, String.t() | nil}
+             | {:unsupported_chain, String.t()}}
+  def simulate(id_or_intent, reason, opts \\ [])
+
+  def simulate(id, reason, opts) when is_binary(id) do
+    case Ecto.UUID.cast(id) do
+      :error ->
+        {:error, :not_found}
+
+      {:ok, uuid} ->
+        case Repo.get(AgentIntent, uuid) do
+          nil -> {:error, :not_found}
+          %AgentIntent{} = intent -> simulate(intent, reason, opts)
+        end
+    end
+  end
+
+  def simulate(%AgentIntent{} = intent, reason, opts) when is_list(opts) do
+    with {:ok, validated_reason} <- validate_simulate_reason(reason),
+         {:ok, _state} <- check_simulate_allowed(intent),
+         {:ok, preview_result} <- run_preview(intent, opts) do
+      do_simulate(intent, validated_reason, preview_result, opts)
+    end
+  end
+
+  defp validate_simulate_reason(reason) when reason in @simulate_supported_reasons,
+    do: {:ok, reason}
+
+  defp validate_simulate_reason(reason), do: {:error, {:invalid_reason, reason}}
+
+  defp check_simulate_allowed(%AgentIntent{state: state}) when state in @simulate_allowed_states,
+    do: {:ok, state}
+
+  defp check_simulate_allowed(%AgentIntent{state: state}), do: {:error, {:wrong_state, state}}
+
+  defp run_preview(intent, opts) do
+    case Quotes.preview(intent, opts) do
+      {:ok, _preview} = ok ->
+        {:ok, ok}
+
+      {:error, {:unsupported, _msg}} ->
+        {:error, {:unsupported_chain, intent.chain}}
+
+      {:error, _other} = err ->
+        # Provider unavailable / stale / simulation_failed are persisted
+        # as a `:failed` SimulationReport row; replay records what we
+        # asked for and what we got back.
+        {:ok, err}
+    end
+  end
+
+  @refresh_reason "refresh"
+
+  defp do_simulate(intent, reason, preview_result, opts) do
+    base_attrs =
+      Decisions.simulation_attrs_from_preview(intent, preview_result)
+
+    refreshed? = reason == @refresh_reason
+    prior = if refreshed?, do: current_simulation_for(intent.id), else: nil
+
+    sim_attrs =
+      base_attrs
+      |> Map.put(:current, refreshed?)
+      |> Map.put(:supersedes_id, prior && prior.id)
+
+    multi =
+      Multi.new()
+      |> maybe_demote_simulation(prior)
+      |> Multi.insert(
+        :report,
+        SimulationReport.changeset(%SimulationReport{}, sim_attrs)
+      )
+      |> maybe_update_intent_pointer(intent, refreshed?)
+
+    case Repo.transaction(multi) do
+      {:ok, %{report: report} = changes} ->
+        updated_intent = Map.get(changes, :intent, intent)
+        emit_simulate_audits(report, reason, refreshed?, opts)
+
+        {:ok,
+         %{
+           intent: updated_intent,
+           report: report,
+           reason: reason,
+           superseded: prior,
+           refreshed?: refreshed?
+         }}
+
+      {:error, _step, reason_value, _changes} ->
+        {:error, {:invalid, reason_value}}
+    end
+  end
+
+  defp maybe_demote_simulation(multi, nil), do: multi
+
+  defp maybe_demote_simulation(multi, %SimulationReport{} = prior) do
+    Multi.update(multi, :demote_prior, SimulationReport.mark_not_current(prior))
+  end
+
+  defp maybe_update_intent_pointer(multi, _intent, false), do: multi
+
+  defp maybe_update_intent_pointer(multi, intent, true) do
+    Multi.update(multi, :intent, fn %{report: report} ->
+      AgentIntent.current_pointer_changeset(intent, %{
+        current_simulation_id: report.id
+      })
+    end)
+  end
+
+  defp current_simulation_for(intent_id) do
+    Repo.one(
+      from(s in SimulationReport,
+        where: s.intent_id == ^intent_id and s.current == true,
+        limit: 1
+      )
+    )
+  end
+
+  defp emit_simulate_audits(report, reason, refreshed?, opts) do
+    audit_opts =
+      []
+      |> maybe_put_actor(opts)
+      |> maybe_put_actor_id(opts)
+
+    _ = Runtime.emit_audit(AuditEvents.simulation_requested(report, reason, audit_opts))
+
+    if refreshed? do
+      _ = Runtime.emit_audit(AuditEvents.simulation_produced(report))
+    end
+
+    :ok
+  end
+
+  defp maybe_put_actor(audit_opts, opts) do
+    case Keyword.get(opts, :actor) do
+      nil -> audit_opts
+      actor -> Keyword.put(audit_opts, :actor, actor)
+    end
+  end
+
+  defp maybe_put_actor_id(audit_opts, opts) do
+    case Keyword.get(opts, :actor_id) do
+      nil -> audit_opts
+      actor_id -> Keyword.put(audit_opts, :actor_id, actor_id)
+    end
   end
 
   @doc """

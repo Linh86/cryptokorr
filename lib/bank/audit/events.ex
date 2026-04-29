@@ -100,6 +100,37 @@ defmodule Bank.Audit.Events do
   end
 
   @doc """
+  `simulation.requested` — an agent or operator asked the runtime
+  for an on-demand simulation through `POST /v1/intents/:id/simulate`.
+
+  Distinct from `simulation.produced` because the simulate endpoint
+  can be called with reasons that do *not* mark the produced report
+  as current (`pre_submit_dry_run`, `operator_inspection`). The
+  event records the request, the resulting report id, and the
+  reason — replay readers can see who asked, why, and whether the
+  produced report became the active one.
+  """
+  @spec simulation_requested(SimulationReport.t(), String.t(), keyword()) :: attrs()
+  def simulation_requested(%SimulationReport{} = report, reason, opts \\ [])
+      when is_binary(reason) do
+    %{
+      actor: Keyword.get(opts, :actor, :agent),
+      actor_id: Keyword.get(opts, :actor_id),
+      event_type: "simulation.requested",
+      subject_type: "simulation_report",
+      subject_id: report.id,
+      correlation_id: report.intent_id,
+      after_ref: %{
+        id: report.id,
+        provider: report.provider,
+        status: atom_or_nil(report.status),
+        current: report.current,
+        reason: reason
+      }
+    }
+  end
+
+  @doc """
   `decision.decided` — a new decision envelope is current for an
   intent. If this envelope supersedes another (retry, approval
   successor), pass the prior envelope via `:supersedes` so the

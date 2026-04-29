@@ -282,6 +282,120 @@ defmodule BankWeb.OpenApi.Schemas.SimulationRequest do
   })
 end
 
+defmodule BankWeb.OpenApi.Schemas.SimulationReportEntity do
+  @moduledoc """
+  Persisted `SimulationReport` projection embedded in
+  `IntentSimulationResponse`.
+  """
+
+  require OpenApiSpex
+  alias OpenApiSpex.{Reference, Schema}
+
+  OpenApiSpex.schema(%{
+    title: "SimulationReportEntity",
+    description: """
+    A persisted `SimulationReport` row. `current` is `true` when the
+    report is the active one for its intent (only one current report
+    per intent at a time, enforced by a partial unique index).
+    `status` is `"completed"` when the underlying provider preview
+    succeeded and `"failed"` when it did not — failed reports still
+    persist so replay can show what was attempted.
+    """,
+    type: :object,
+    required: [
+      :id,
+      :provider,
+      :chain,
+      :asset,
+      :status,
+      :current,
+      :generated_at,
+      :freshness_ttl_seconds
+    ],
+    properties: %{
+      id: %Reference{"$ref": "#/components/schemas/Id"},
+      provider: %Schema{type: :string, example: "stub"},
+      provider_trace_ref: %Schema{type: :string, nullable: true},
+      chain: %Reference{"$ref": "#/components/schemas/Chain"},
+      asset: %Reference{"$ref": "#/components/schemas/Asset"},
+      status: %Schema{
+        type: :string,
+        enum: ["pending", "completed", "failed", "stale"],
+        example: "completed"
+      },
+      current: %Schema{type: :boolean, description: "Active flag for this intent."},
+      generated_at: %Reference{"$ref": "#/components/schemas/Timestamp"},
+      freshness_ttl_seconds: %Schema{type: :integer, minimum: 1, example: 30},
+      predicted_balance_changes: %Schema{
+        type: :object,
+        additionalProperties: true,
+        description:
+          ~s|Provider-shaped balance impact, e.g. `{"items": [{"asset":"USDC","delta":"-25"}]}`.|
+      },
+      estimated_gas: %Schema{type: :integer, nullable: true},
+      estimated_fees: %Schema{
+        type: :object,
+        additionalProperties: true,
+        nullable: true,
+        description: ~s|Provider fee summary, e.g. `{"asset":"ETH","amount":"0.00015"}`.|
+      },
+      routing_path: %Schema{type: :object, additionalProperties: true, nullable: true},
+      expected_output: %Schema{type: :string, nullable: true},
+      slippage_exposure: %Schema{type: :string, nullable: true},
+      failure_conditions: %Schema{type: :object, additionalProperties: true},
+      supersedes_id: %Schema{
+        type: :string,
+        format: :uuid,
+        nullable: true,
+        description: "Prior report this one supersedes, if any."
+      }
+    }
+  })
+end
+
+defmodule BankWeb.OpenApi.Schemas.IntentSimulationResponse do
+  @moduledoc """
+  Body for `POST /v1/intents/{id}/simulate` (`200 OK`).
+  """
+
+  require OpenApiSpex
+  alias OpenApiSpex.{Reference, Schema}
+
+  OpenApiSpex.schema(%{
+    title: "IntentSimulationResponse",
+    description: """
+    Response body for a successful on-demand simulation. The runtime
+    persists the produced `SimulationReport` and returns it inline
+    along with the (possibly updated) intent and its links.
+    `refreshed` is `true` when the produced report became the
+    intent's active one (`reason == "refresh"`); for
+    `pre_submit_dry_run` and `operator_inspection` the field is
+    `false` and the intent's `current_simulation_id` is unchanged.
+    """,
+    type: :object,
+    required: [:intent_id, :state, :reason, :refreshed, :links, :intent, :simulation],
+    properties: %{
+      intent_id: %Reference{"$ref": "#/components/schemas/Id"},
+      state: %Reference{"$ref": "#/components/schemas/IntentState"},
+      reason: %Schema{
+        type: :string,
+        enum: ["pre_submit_dry_run", "refresh", "operator_inspection"],
+        example: "refresh"
+      },
+      refreshed: %Schema{
+        type: :boolean,
+        description:
+          "True when the produced report supersedes the prior current report and " <>
+            "the intent's `current_simulation_id` advances. Always `true` for " <>
+            "`reason == \"refresh\"`, otherwise `false`."
+      },
+      links: %Reference{"$ref": "#/components/schemas/Links"},
+      intent: %Reference{"$ref": "#/components/schemas/IntentEntity"},
+      simulation: %Reference{"$ref": "#/components/schemas/SimulationReportEntity"}
+    }
+  })
+end
+
 defmodule BankWeb.OpenApi.Schemas.CancelRequest do
   @moduledoc """
   Body for `POST /v1/intents/{id}/cancel`.

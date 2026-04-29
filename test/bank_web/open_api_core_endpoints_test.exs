@@ -95,22 +95,25 @@ defmodule BankWeb.OpenApiCoreEndpointsTest do
     end
   end
 
-  describe "intent stubs are documented as 501 Not Implemented" do
-    for {path, method} <- [
-          {"/v1/intents/{id}/simulate", :post}
-        ] do
-      @path path
-      @method method
+  describe "intent simulate is documented live (issue #138)" do
+    test "POST /v1/intents/{id}/simulate documents 200 + IntentSimulationResponse, plus 404/409/422" do
+      op = get_in(paths(), ["/v1/intents/{id}/simulate", Access.key(:post)])
+      assert op
 
-      test "#{String.upcase(to_string(method))} #{path} documents 501 + ErrorEnvelope" do
-        responses = get_in(paths(), [@path, Access.key(@method), Access.key(:responses)])
-        assert is_map(responses)
-        assert Map.has_key?(responses, 501)
+      responses = op.responses
 
-        # The 501 response is the shared NotImplemented component.
-        assert %OpenApiSpex.Reference{"$ref": "#/components/responses/NotImplemented"} =
-                 responses[501]
-      end
+      refute Map.has_key?(responses, 501),
+             "POST /v1/intents/{id}/simulate must no longer document 501"
+
+      %{content: content} = responses[200]
+      assert %{"application/json" => media} = content
+      assert media.schema == BankWeb.OpenApi.Schemas.IntentSimulationResponse
+
+      assert %OpenApiSpex.Reference{"$ref": "#/components/responses/NotFound"} = responses[404]
+      assert %OpenApiSpex.Reference{"$ref": "#/components/responses/Conflict"} = responses[409]
+
+      assert %OpenApiSpex.Reference{"$ref": "#/components/responses/UnprocessableEntity"} =
+               responses[422]
     end
   end
 
@@ -342,8 +345,11 @@ defmodule BankWeb.OpenApiCoreEndpointsTest do
       assert Map.has_key?(decoded, "paths")
       assert Map.has_key?(decoded["paths"], "/v1/intents/{id}/replay")
 
-      assert decoded["paths"]["/v1/intents/{id}/simulate"]["post"]["responses"]["501"]["$ref"] =~
-               "NotImplemented"
+      # No /v1/intents endpoint references NotImplemented any more —
+      # every action under /v1/intents is live.
+      simulate_responses = decoded["paths"]["/v1/intents/{id}/simulate"]["post"]["responses"]
+      refute Map.has_key?(simulate_responses, "501")
+      assert Map.has_key?(simulate_responses, "200")
     end
   end
 end
