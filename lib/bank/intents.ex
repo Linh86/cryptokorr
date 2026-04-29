@@ -125,6 +125,139 @@ defmodule Bank.Intents do
   end
 
   @doc """
+  Operator pre-execution cancellation.
+
+  Accepts an intent id (UUID string) or an already-loaded
+  `%AgentIntent{}`. Cancellation is allowed while the intent is in a
+  pre-execution state; in-flight or already-terminal intents reject
+  with `{:error, {:wrong_state, state}}`.
+
+  `opts` is required to carry a `:reason` (string), which is persisted
+  on the `intent.cancelled` audit event so replay records *why* the
+  intent was withdrawn. `:actor_id` is optional and stamps the audit
+  event when supplied.
+
+  Allowed prior states: `:submitted`, `:evaluating`, `:decided`.
+
+  Idempotency: re-cancelling an already-`:cancelled` intent returns
+  `{:ok, :already_cancelled, intent}` without writing a new state
+  transition or audit event. Any other terminal state
+  (`:executed`, `:blocked`, `:expired`) and the in-flight `:executing`
+  state reject with `{:error, {:wrong_state, state}}` — operators
+  facing `:executing` must use the security-pause / revoke paths.
+
+  Return shapes:
+
+    * `{:ok, intent}` — newly cancelled.
+    * `{:ok, :already_cancelled, intent}` — re-cancel of a
+      `:cancelled` intent.
+    * `{:error, :not_found}` — id did not resolve.
+    * `{:error, {:wrong_state, state}}` — cancellation no longer
+      makes sense.
+    * `{:error, {:invalid, :reason_required}}` — `opts` missing the
+      `:reason` string.
+  """
+  @spec cancel(AgentIntent.t() | String.t(), keyword()) ::
+          {:ok, AgentIntent.t()}
+          | {:ok, :already_cancelled, AgentIntent.t()}
+          | {:error, :not_found}
+          | {:error, {:wrong_state, atom()}}
+          | {:error, {:invalid, :reason_required}}
+  def cancel(id_or_intent, opts \\ [])
+
+  def cancel(id, opts) when is_binary(id) do
+    case Ecto.UUID.cast(id) do
+      :error ->
+        {:error, :not_found}
+
+      {:ok, uuid} ->
+        case Repo.get(AgentIntent, uuid) do
+          nil -> {:error, :not_found}
+          %AgentIntent{} = intent -> cancel(intent, opts)
+        end
+    end
+  end
+
+  def cancel(%AgentIntent{} = intent, opts) when is_list(opts) do
+    with {:ok, reason} <- require_cancel_reason(opts),
+         {:ok, _state} <- check_cancellable(intent) do
+      do_cancel(intent, reason, opts)
+    else
+      {:already_cancelled, intent} ->
+        {:ok, :already_cancelled, preload_target(intent)}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  defp require_cancel_reason(opts) do
+    case Keyword.get(opts, :reason) do
+      reason when is_binary(reason) and reason != "" ->
+        {:ok, reason}
+
+      _ ->
+        {:error, {:invalid, :reason_required}}
+    end
+  end
+
+  @cancel_allowed_states [:submitted, :evaluating, :decided]
+
+  defp check_cancellable(%AgentIntent{state: state} = intent) do
+    cond do
+      state in @cancel_allowed_states -> {:ok, state}
+      state == :cancelled -> {:already_cancelled, intent}
+      true -> {:error, {:wrong_state, state}}
+    end
+  end
+
+  defp do_cancel(%AgentIntent{} = intent, reason, opts) do
+    prior_state = intent.state
+    actor = Keyword.get(opts, :actor, :user)
+    actor_id = Keyword.get(opts, :actor_id)
+
+    audit_opts = [actor: actor]
+    audit_opts = if actor_id, do: Keyword.put(audit_opts, :actor_id, actor_id), else: audit_opts
+
+    multi =
+      Multi.new()
+      |> Multi.update(
+        :intent,
+        AgentIntent.current_pointer_changeset(intent, %{state: :cancelled})
+      )
+      |> Multi.run(:audit, fn _repo, %{intent: cancelled} ->
+        attrs =
+          cancelled
+          |> AuditEvents.intent_state_changed(prior_state, :cancelled, audit_opts)
+          |> Map.put(:event_type, "intent.cancelled")
+          |> annotate_cancel_reason(reason)
+
+        Audit.append_event(attrs)
+      end)
+
+    case Repo.transaction(multi) do
+      {:ok, %{intent: cancelled, audit: event}} ->
+        # Fan the persisted event out to the realtime audit stream the
+        # same way `Bank.Runtime.emit_audit/1` does — the persistence
+        # already happened atomically with the state update inside the
+        # multi, so this call is just the broadcast step.
+        Runtime.Notifier.audit_stream(event)
+        {:ok, preload_target(cancelled)}
+
+      {:error, :intent, %Ecto.Changeset{} = changeset, _} ->
+        {:error, {:invalid, changeset}}
+
+      {:error, :audit, audit_reason, _} ->
+        {:error, {:invalid, {:audit_failed, audit_reason}}}
+    end
+  end
+
+  defp annotate_cancel_reason(attrs, reason) do
+    after_ref = Map.get(attrs, :after_ref) || %{}
+    Map.put(attrs, :after_ref, Map.put(after_ref, :reason, reason))
+  end
+
+  @doc """
   Accept a freshly-submitted agent intent.
 
   `attrs` is the parsed `POST /v1/intents` body (string-keyed map). The

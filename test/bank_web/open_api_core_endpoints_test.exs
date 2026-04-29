@@ -97,8 +97,7 @@ defmodule BankWeb.OpenApiCoreEndpointsTest do
 
   describe "intent stubs are documented as 501 Not Implemented" do
     for {path, method} <- [
-          {"/v1/intents/{id}/simulate", :post},
-          {"/v1/intents/{id}/cancel", :post}
+          {"/v1/intents/{id}/simulate", :post}
         ] do
       @path path
       @method method
@@ -112,6 +111,35 @@ defmodule BankWeb.OpenApiCoreEndpointsTest do
         assert %OpenApiSpex.Reference{"$ref": "#/components/responses/NotImplemented"} =
                  responses[501]
       end
+    end
+  end
+
+  describe "intent cancel is documented live (issue #139)" do
+    test "POST /v1/intents/{id}/cancel documents 200 + IntentCancelResponse, plus 404/409/422" do
+      op = get_in(paths(), ["/v1/intents/{id}/cancel", Access.key(:post)])
+      assert op
+
+      responses = op.responses
+
+      refute Map.has_key?(responses, 501),
+             "POST /v1/intents/{id}/cancel must no longer document 501"
+
+      %{content: content} = responses[200]
+      assert %{"application/json" => media} = content
+      assert media.schema == BankWeb.OpenApi.Schemas.IntentCancelResponse
+
+      assert %OpenApiSpex.Reference{"$ref": "#/components/responses/NotFound"} = responses[404]
+
+      assert %OpenApiSpex.Reference{"$ref": "#/components/responses/Conflict"} = responses[409]
+
+      assert %OpenApiSpex.Reference{"$ref": "#/components/responses/UnprocessableEntity"} =
+               responses[422]
+    end
+
+    test "IntentCancelResponse is registered as a top-level schema component" do
+      schemas = spec().components.schemas
+      assert Map.has_key?(schemas, "IntentCancelResponse")
+      assert schemas["IntentCancelResponse"].title == "IntentCancelResponse"
     end
   end
 

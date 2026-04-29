@@ -11,11 +11,13 @@ defmodule BankWeb.API.V1.IntentController do
     * `POST /v1/intents/:id/cancel`   — operator pre-execution cancel
     * `GET  /v1/intents/:id/replay`   — full replay bundle
 
-  `create/2` and `show/2` are live: create persists an
+  `create/2`, `show/2`, and `cancel/2` are live: create persists an
   `%AgentIntent{}` in `:submitted`, audits `intent.submitted`, and
-  enqueues `Bank.Runtime.Workers.EvaluateIntent`. `simulate/2` and
-  `cancel/2` still return `501` until the decision / approval engines
-  land.
+  enqueues `Bank.Runtime.Workers.EvaluateIntent`. cancel transitions
+  pre-execution intents to `:cancelled`, audits `intent.cancelled`
+  with the operator-supplied reason, and is idempotent against an
+  already-cancelled intent. `simulate/2` still returns `501` until
+  the decision engine lands.
   """
 
   use BankWeb, :controller
@@ -180,20 +182,107 @@ defmodule BankWeb.API.V1.IntentController do
     Operator cancellation prior to execution. Allowed while the
     intent is `submitted`, `evaluating`, or `decided`; once
     `executing`, operators must use security controls instead.
+    Re-cancelling an already-`cancelled` intent is idempotent and
+    returns `200` with `idempotent: true`.
 
-    **Current runtime behavior: returns `501 Not Implemented`.**
+    On success the intent transitions to `:cancelled`, an
+    `intent.cancelled` audit event is written carrying the supplied
+    `reason`, and the event is fanned out on `audit:stream`.
     """,
     tags: ["Intents"],
     parameters: [@intent_id_param, @idempotency_key_ref, @request_id_in_ref],
     request_body:
       {"Cancel request body", "application/json", BankWeb.OpenApi.Schemas.CancelRequest},
     responses: %{
-      501 => @not_implemented_ref
+      200 =>
+        {"Intent cancelled", "application/json", BankWeb.OpenApi.Schemas.IntentCancelResponse},
+      404 => @not_found_ref,
+      409 => @conflict_ref,
+      422 => @unprocessable_ref
     }
   )
 
-  def cancel(conn, _params),
-    do: not_implemented(conn, "POST /v1/intents/:id/cancel", "implemented with the intent engine")
+  def cancel(conn, %{"id" => id} = params) do
+    with {:ok, _uuid} <- cast_uuid(id),
+         {:ok, reason} <- cast_cancel_reason(params) do
+      handle_cancel(conn, id, reason)
+    else
+      :error ->
+        conn
+        |> put_status(:not_found)
+        |> json(not_found_envelope(id))
+
+      {:error, :reason_required} ->
+        render_error(
+          conn,
+          :unprocessable_entity,
+          "invalid_body",
+          "`reason` is required"
+        )
+    end
+  end
+
+  defp handle_cancel(conn, id, reason) do
+    case Intents.cancel(id, reason: reason, actor: :user) do
+      {:ok, intent} ->
+        conn
+        |> put_status(:ok)
+        |> json(IntentJSON.cancelled(%{intent: intent, idempotent?: false, reason: reason}))
+
+      {:ok, :already_cancelled, intent} ->
+        conn
+        |> put_status(:ok)
+        |> json(IntentJSON.cancelled(%{intent: intent, idempotent?: true, reason: reason}))
+
+      {:error, :not_found} ->
+        conn
+        |> put_status(:not_found)
+        |> json(not_found_envelope(id))
+
+      {:error, {:wrong_state, state}} ->
+        render_error(
+          conn,
+          :conflict,
+          "wrong_state",
+          "intent cannot be cancelled in state `#{state}`",
+          hint: cancel_wrong_state_hint(state)
+        )
+
+      {:error, {:invalid, :reason_required}} ->
+        render_error(
+          conn,
+          :unprocessable_entity,
+          "invalid_body",
+          "`reason` is required"
+        )
+
+      {:error, {:invalid, _other}} ->
+        render_error(
+          conn,
+          :unprocessable_entity,
+          "invalid_body",
+          "request body failed validation"
+        )
+    end
+  end
+
+  defp cast_cancel_reason(%{"reason" => reason}) when is_binary(reason) do
+    case String.trim(reason) do
+      "" -> {:error, :reason_required}
+      trimmed -> {:ok, trimmed}
+    end
+  end
+
+  defp cast_cancel_reason(_), do: {:error, :reason_required}
+
+  defp cancel_wrong_state_hint(:executing),
+    do: "use the security pause / revoke surface to halt an executing intent"
+
+  defp cancel_wrong_state_hint(state)
+       when state in [:executed, :blocked, :expired],
+       do: "intent is already terminal in state `#{state}`"
+
+  defp cancel_wrong_state_hint(_), do: nil
 
   operation(:replay,
     summary: "Get the full replay bundle for an intent",

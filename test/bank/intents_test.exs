@@ -2,7 +2,7 @@ defmodule Bank.IntentsTest do
   @moduledoc """
   Context-level tests for `Bank.Intents`.
 
-  Two surfaces are pinned here:
+  Three surfaces are pinned here:
 
     * `counts_by_state/1` (issue #53) — the chip-bar count breakdown
       that the intents page renders. The semantics: counts respect
@@ -13,12 +13,19 @@ defmodule Bank.IntentsTest do
       `POST /v1/intents` calls. Tests cover the happy paths,
       idempotent replay, hash mismatch conflict, and boundary
       validation (chain / asset / amount / target shape).
+
+    * `cancel/2` (issue #139) — the operator pre-execution cancel
+      facade `POST /v1/intents/:id/cancel` calls. Tests cover the
+      allowed-state matrix, idempotent re-cancel, the wrong-state
+      matrix (executing / executed / blocked / expired), the
+      not-found / malformed-id cases, and the missing-reason guard.
   """
 
   use Bank.DataCase, async: false
   use Oban.Testing, repo: Bank.Repo
 
   import Bank.Fixtures
+  import Ecto.Query
 
   alias Bank.Intents
   alias Bank.Intents.AgentIntent
@@ -232,6 +239,185 @@ defmodule Bank.IntentsTest do
 
       assert {:error, {:idempotency_conflict, prior}} = Intents.submit(mismatched)
       assert prior.id == first.id
+    end
+  end
+
+  describe "cancel/2 — happy paths" do
+    test "cancels a :submitted intent, audits, and returns the updated record" do
+      intent = agent_intent()
+
+      assert {:ok, %AgentIntent{} = cancelled} =
+               Intents.cancel(intent.id, reason: "operator change of plans")
+
+      assert cancelled.state == :cancelled
+      assert cancelled.id == intent.id
+
+      audits =
+        Bank.Repo.all(
+          from(e in Bank.Audit.AuditEvent,
+            where: e.subject_id == ^intent.id and e.event_type == "intent.cancelled"
+          )
+        )
+
+      assert [event] = audits
+      assert event.actor == :user
+      assert event.before_ref["state"] == "submitted"
+      assert event.after_ref["state"] == "cancelled"
+      assert event.after_ref["reason"] == "operator change of plans"
+    end
+
+    test "cancels a :decided intent" do
+      intent =
+        agent_intent()
+        |> Ecto.Changeset.change(%{state: :decided})
+        |> Bank.Repo.update!()
+
+      assert {:ok, cancelled} =
+               Intents.cancel(intent.id, reason: "supersession")
+
+      assert cancelled.state == :cancelled
+    end
+
+    test "cancels an :evaluating intent" do
+      intent =
+        agent_intent()
+        |> Ecto.Changeset.change(%{state: :evaluating})
+        |> Bank.Repo.update!()
+
+      assert {:ok, cancelled} =
+               Intents.cancel(intent.id, reason: "policy change")
+
+      assert cancelled.state == :cancelled
+    end
+
+    test "accepts an %AgentIntent{} struct directly" do
+      intent = agent_intent()
+
+      assert {:ok, cancelled} = Intents.cancel(intent, reason: "by struct")
+      assert cancelled.state == :cancelled
+    end
+
+    test "honours an :actor_id stamp on the audit event" do
+      intent = agent_intent()
+
+      assert {:ok, _} =
+               Intents.cancel(intent.id,
+                 reason: "operator-initiated",
+                 actor_id: "operator-bob"
+               )
+
+      [event] =
+        Bank.Repo.all(
+          from(e in Bank.Audit.AuditEvent,
+            where: e.subject_id == ^intent.id and e.event_type == "intent.cancelled"
+          )
+        )
+
+      assert event.actor_id == "operator-bob"
+      assert event.actor == :user
+    end
+  end
+
+  describe "cancel/2 — idempotent re-cancel" do
+    test "re-cancelling an already-cancelled intent does not write a second audit row" do
+      intent = agent_intent()
+
+      assert {:ok, _first} = Intents.cancel(intent.id, reason: "first")
+
+      audits_before =
+        Bank.Repo.all(
+          from(e in Bank.Audit.AuditEvent,
+            where: e.subject_id == ^intent.id and e.event_type == "intent.cancelled"
+          )
+        )
+
+      assert length(audits_before) == 1
+
+      assert {:ok, :already_cancelled, %AgentIntent{state: :cancelled} = same} =
+               Intents.cancel(intent.id, reason: "second")
+
+      assert same.id == intent.id
+
+      audits_after =
+        Bank.Repo.all(
+          from(e in Bank.Audit.AuditEvent,
+            where: e.subject_id == ^intent.id and e.event_type == "intent.cancelled"
+          )
+        )
+
+      assert length(audits_after) == 1
+    end
+  end
+
+  describe "cancel/2 — wrong state" do
+    test "rejects an :executing intent with :wrong_state" do
+      intent =
+        agent_intent()
+        |> Ecto.Changeset.change(%{state: :executing})
+        |> Bank.Repo.update!()
+
+      assert {:error, {:wrong_state, :executing}} =
+               Intents.cancel(intent.id, reason: "halt")
+
+      reloaded = Bank.Repo.get!(AgentIntent, intent.id)
+      assert reloaded.state == :executing
+    end
+
+    test "rejects an :executed intent with :wrong_state" do
+      intent =
+        agent_intent()
+        |> Ecto.Changeset.change(%{state: :executed})
+        |> Bank.Repo.update!()
+
+      assert {:error, {:wrong_state, :executed}} =
+               Intents.cancel(intent.id, reason: "n/a")
+    end
+
+    test "rejects a :blocked intent with :wrong_state" do
+      intent =
+        agent_intent()
+        |> Ecto.Changeset.change(%{state: :blocked})
+        |> Bank.Repo.update!()
+
+      assert {:error, {:wrong_state, :blocked}} =
+               Intents.cancel(intent.id, reason: "n/a")
+    end
+
+    test "rejects an :expired intent with :wrong_state" do
+      intent =
+        agent_intent()
+        |> Ecto.Changeset.change(%{state: :expired})
+        |> Bank.Repo.update!()
+
+      assert {:error, {:wrong_state, :expired}} =
+               Intents.cancel(intent.id, reason: "n/a")
+    end
+  end
+
+  describe "cancel/2 — not found" do
+    test "returns :not_found for an unknown UUID" do
+      assert {:error, :not_found} = Intents.cancel(Ecto.UUID.generate(), reason: "x")
+    end
+
+    test "returns :not_found for a malformed id" do
+      assert {:error, :not_found} = Intents.cancel("not-a-uuid", reason: "x")
+    end
+  end
+
+  describe "cancel/2 — invalid opts" do
+    test "rejects a missing reason" do
+      intent = agent_intent()
+      assert {:error, {:invalid, :reason_required}} = Intents.cancel(intent.id, [])
+    end
+
+    test "rejects a blank reason" do
+      intent = agent_intent()
+      assert {:error, {:invalid, :reason_required}} = Intents.cancel(intent.id, reason: "")
+    end
+
+    test "rejects a non-string reason" do
+      intent = agent_intent()
+      assert {:error, {:invalid, :reason_required}} = Intents.cancel(intent.id, reason: 42)
     end
   end
 
