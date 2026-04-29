@@ -449,6 +449,70 @@ defmodule Bank.Audit.Events do
     }
   end
 
+  @doc """
+  `execution.auto_dispatched` — the runtime materialised an
+  `ExecutionPlan` for a fresh `:auto_exec` `DecisionEnvelope`
+  without operator intervention.
+
+  Distinct from `execution.manually_requested` so audit consumers
+  can distinguish operator-triggered execution from runtime-driven
+  auto-exec dispatch.
+  """
+  @spec execution_auto_dispatched(ExecutionPlan.t(), keyword()) :: attrs()
+  def execution_auto_dispatched(%ExecutionPlan{} = plan, opts \\ []) do
+    %{
+      actor: Keyword.get(opts, :actor, :runtime),
+      actor_id: Keyword.get(opts, :actor_id),
+      event_type: "execution.auto_dispatched",
+      subject_type: "execution_plan",
+      subject_id: plan.id,
+      correlation_id: plan.intent_id,
+      after_ref: %{
+        id: plan.id,
+        decision_id: plan.decision_id,
+        execution_status: atom_or_nil(plan.execution_status),
+        smart_account_id: plan.smart_account_id
+      }
+    }
+  end
+
+  @doc """
+  `intent.auto_exec_held` — an `:auto_exec` decision was reached but
+  dispatch was withheld because a safety gate failed (no executable
+  smart account, ambiguous account, runtime paused, an active plan
+  is already in flight, etc.).
+
+  The decision envelope itself is still current and the intent
+  remains in `:decided`; the operator can either resolve the gate
+  and re-evaluate or call the manual execution path explicitly.
+  """
+  @spec intent_auto_exec_held(
+          AgentIntent.t(),
+          DecisionEnvelope.t(),
+          atom() | String.t(),
+          keyword()
+        ) ::
+          attrs()
+  def intent_auto_exec_held(
+        %AgentIntent{} = intent,
+        %DecisionEnvelope{} = envelope,
+        reason,
+        opts \\ []
+      ) do
+    %{
+      actor: Keyword.get(opts, :actor, :runtime),
+      actor_id: Keyword.get(opts, :actor_id),
+      event_type: "intent.auto_exec_held",
+      subject_type: "agent_intent",
+      subject_id: intent.id,
+      correlation_id: intent.id,
+      after_ref: %{
+        decision_envelope_id: envelope.id,
+        held_reason: atom_or_nil(reason)
+      }
+    }
+  end
+
   # --- snapshot builders ------------------------------------------------
 
   defp intent_snapshot(%AgentIntent{} = intent) do

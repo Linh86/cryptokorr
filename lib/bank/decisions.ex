@@ -23,6 +23,41 @@ defmodule Bank.Decisions do
   If all gates pass, an execution plan is created and enqueued. The
   plan references the delegation that was checked at the time of the
   request, so replay can verify the delegation was valid.
+
+  ## Auto-exec dispatch
+
+  `dispatch_auto_exec/3` is the runtime-driven counterpart to
+  `request_manual_execution/3`. It is called from
+  `evaluate_intent/2` when the decision the autonomy router produced
+  is `:auto_exec`. The two paths share the same gate set; the only
+  differences are the audit `event_type` (`execution.auto_dispatched`
+  vs. `execution.manually_requested`) and the actor (`:runtime` vs.
+  `:user`).
+
+  ### Smart-account sourcing (v0.1)
+
+  `AgentIntent` does not carry a `smart_account_id` field today and
+  there is no per-deployment "default smart account" config that the
+  runtime can read. Rather than guess, `evaluate_intent/2` resolves
+  the dispatch account through `resolve_executable_account/0`, which
+  uses a single-active-delegation fallback:
+
+    * exactly one executable smart account → dispatch through it
+      (the intended single-tenant v0.1 deployment shape);
+    * zero executable accounts → hold dispatch with reason
+      `:no_executable_account`;
+    * two or more → hold dispatch with reason
+      `:ambiguous_executable_account`.
+
+  In a held state the `:auto_exec` `DecisionEnvelope` is still
+  current, the intent stays in `:decided`, and an
+  `intent.auto_exec_held` audit event captures the reason. The
+  operator can resolve the gate and call `request_manual_execution/3`
+  explicitly to dispatch — no decision is lost.
+
+  Multi-tenant deployments will require an explicit
+  `smart_account_id` on the intent contract; that is a follow-up,
+  not a v0.1 hardcode.
   """
 
   import Ecto.Query
@@ -52,9 +87,29 @@ defmodule Bank.Decisions do
 
   @typedoc """
   Result of `evaluate_intent/2`. Carries the freshly-written current
-  rows, the prior current rows that were superseded (if any), and the
-  outcome that drove the intent's new state.
+  rows, the prior current rows that were superseded (if any), the
+  outcome that drove the intent's new state, and — for `:auto_exec`
+  decisions — the dispatch outcome.
+
+  `dispatch` is one of:
+
+    * `:dispatched`        — an `ExecutionPlan` was created and
+      `RunExecution` was enqueued. `execution_plan` is populated.
+    * `{:held, reason}`    — the decision is `:auto_exec` but a
+      safety gate held dispatch. `execution_plan` is `nil`. The
+      reason is the same atom vocabulary
+      `request_manual_execution/3` returns
+      (`:no_executable_account`, `:ambiguous_executable_account`,
+      `:runtime_paused`, `:active_plan_exists`,
+      `:delegation_not_active`, `:stablecoin_adapter_not_wired`,
+      `:not_current`, `:outcome_is_*`).
+    * `:not_applicable`    — outcome is not `:auto_exec`.
   """
+  @type dispatch_outcome ::
+          :dispatched
+          | {:held, atom()}
+          | :not_applicable
+
   @type evaluation_result :: %{
           intent: AgentIntent.t(),
           trust: TrustAssessment.t(),
@@ -66,7 +121,9 @@ defmodule Bank.Decisions do
             decision: DecisionEnvelope.t() | nil
           },
           outcome: Autonomy.outcome(),
-          preview: Quotes.result()
+          preview: Quotes.result(),
+          dispatch: dispatch_outcome(),
+          execution_plan: ExecutionPlan.t() | nil
         }
 
   @doc """
@@ -97,9 +154,13 @@ defmodule Bank.Decisions do
        `:blocked` for `block`).
 
   After the transaction commits, the audit events for the four
-  effects are appended via `Bank.Runtime.emit_audit/1`. No execution
-  is enqueued and no on-chain work is dispatched — that is issue
-  #137's surface.
+  effects are appended via `Bank.Runtime.emit_audit/1`. When the
+  outcome is `:auto_exec`, the facade also tries to materialise an
+  `ExecutionPlan` via `dispatch_auto_exec/3` (see the auto-exec
+  dispatch section in the moduledoc). When dispatch is held the
+  decision envelope is preserved as `:auto_exec` and the operator
+  can fall back to `request_manual_execution/3` once the gate is
+  resolved.
 
   ## Inputs
 
@@ -227,6 +288,8 @@ defmodule Bank.Decisions do
 
         maybe_enqueue_approval_expiry(envelope)
 
+        {dispatch, plan} = maybe_dispatch_auto_exec(updated_intent, envelope, opts)
+
         {:ok,
          %{
            intent: updated_intent,
@@ -239,13 +302,53 @@ defmodule Bank.Decisions do
              decision: prior_decision
            },
            outcome: decision.outcome,
-           preview: preview_result
+           preview: preview_result,
+           dispatch: dispatch,
+           execution_plan: plan
          }}
 
       {:error, step, reason, _changes} ->
         Logger.error("Decisions.evaluate_intent: multi failed at #{step}: #{inspect(reason)}")
         {:error, {step, reason}}
     end
+  end
+
+  defp maybe_dispatch_auto_exec(_intent, %DecisionEnvelope{outcome: outcome}, _opts)
+       when outcome != :auto_exec do
+    {:not_applicable, nil}
+  end
+
+  defp maybe_dispatch_auto_exec(intent, %DecisionEnvelope{} = envelope, opts) do
+    with {:ok, smart_account_id} <- resolve_dispatch_account(opts),
+         {:ok, plan} <- dispatch_auto_exec(envelope.id, smart_account_id, opts) do
+      {:dispatched, plan}
+    else
+      {:error, reason} ->
+        emit_auto_exec_held(intent, envelope, reason)
+        {{:held, reason}, nil}
+    end
+  end
+
+  defp resolve_dispatch_account(opts) do
+    case Keyword.get(opts, :smart_account_id) do
+      account when is_binary(account) and account != "" ->
+        {:ok, account}
+
+      _ ->
+        resolve_executable_account()
+    end
+  end
+
+  defp emit_auto_exec_held(intent, envelope, reason) do
+    _ =
+      Runtime.emit_audit(Bank.Audit.Events.intent_auto_exec_held(intent, envelope, reason))
+
+    Logger.info(
+      "Decisions.evaluate_intent: auto_exec dispatch held for intent #{intent.id} " <>
+        "(envelope=#{envelope.id}, reason=#{inspect(reason)})"
+    )
+
+    :ok
   end
 
   defp maybe_enqueue_approval_expiry(%DecisionEnvelope{
@@ -829,12 +932,97 @@ defmodule Bank.Decisions do
           {:ok, ExecutionPlan.t()} | {:error, atom() | String.t()}
   def request_manual_execution(envelope_id, smart_account_id, opts \\ []) do
     with {:ok, envelope} <- get_envelope(envelope_id),
-         :ok <- validate_executable_envelope(envelope),
-         :ok <- validate_no_active_plan(envelope_id),
+         {:ok, plan} <- create_execution_plan(envelope, smart_account_id, :manual, opts) do
+      {:ok, plan}
+    end
+  end
+
+  @doc """
+  Runtime-driven counterpart to `request_manual_execution/3`. Called
+  from `evaluate_intent/2` when the autonomy router produces
+  `:auto_exec`. Reuses the same gate set so dispatch policy stays
+  one piece of code; the only differences are the audit event type
+  (`execution.auto_dispatched`), the actor (`:runtime`), and one
+  extra safety gate.
+
+  ## Extra intent-level safety gate
+
+  In addition to the per-decision `:active_plan_exists` gate the
+  manual path enforces, the auto path also rejects when **any**
+  active execution plan exists for the same intent — even if it
+  belongs to a prior, now-superseded decision. Without this gate, a
+  re-evaluation that produces `:auto_exec` again (for example
+  after a policy revision) would race the in-flight plan and
+  dispatch a parallel one to the adapter.
+
+  The manual path (`request_manual_execution/3`) intentionally does
+  not enforce this gate so an operator can run a one-shot override
+  after explicitly aborting a stuck plan.
+
+  Returns `{:ok, plan}` on success, or the same `{:error, reason}`
+  vocabulary the manual path returns.
+  """
+  @spec dispatch_auto_exec(String.t(), String.t(), keyword()) ::
+          {:ok, ExecutionPlan.t()} | {:error, atom() | String.t()}
+  def dispatch_auto_exec(envelope_id, smart_account_id, opts \\ []) do
+    with {:ok, envelope} <- get_envelope(envelope_id),
+         :ok <- validate_no_intent_in_flight(envelope.intent_id),
+         {:ok, plan} <- create_execution_plan(envelope, smart_account_id, :auto, opts) do
+      {:ok, plan}
+    end
+  end
+
+  defp validate_no_intent_in_flight(intent_id) do
+    case Repo.one(
+           from(p in ExecutionPlan,
+             where: p.intent_id == ^intent_id and p.active == true,
+             limit: 1
+           )
+         ) do
+      nil -> :ok
+      _plan -> {:error, :active_plan_exists}
+    end
+  end
+
+  @doc """
+  Resolve a `smart_account_id` to dispatch a runtime-driven
+  `:auto_exec` envelope through.
+
+  v0.1 single-tenant policy: succeed iff there is exactly one
+  currently-executable delegation across the projection. Zero
+  matches return `{:error, :no_executable_account}`; two or more
+  return `{:error, :ambiguous_executable_account}`. Held cases are
+  recorded by the caller as `intent.auto_exec_held`; the decision
+  envelope itself is preserved as `:auto_exec` so the manual
+  execution path can still be invoked once the account is
+  unambiguous.
+  """
+  @spec resolve_executable_account() ::
+          {:ok, String.t()}
+          | {:error, :no_executable_account | :ambiguous_executable_account}
+  def resolve_executable_account do
+    case executable_smart_accounts() do
+      [single] -> {:ok, single}
+      [] -> {:error, :no_executable_account}
+      _ -> {:error, :ambiguous_executable_account}
+    end
+  end
+
+  defp executable_smart_accounts do
+    Delegations.list_active()
+    |> Enum.map(& &1.smart_account_id)
+    |> Enum.uniq()
+    |> Enum.filter(&Delegations.executable?/1)
+  end
+
+  defp create_execution_plan(envelope, smart_account_id, source, opts)
+       when source in [:manual, :auto] do
+    with :ok <- validate_executable_envelope(envelope),
+         :ok <- validate_no_active_plan(envelope.id),
          :ok <- validate_stablecoin_adapter_ready(envelope),
          :ok <- validate_not_paused(),
          :ok <- validate_delegation_active(smart_account_id) do
-      reason = Keyword.get(opts, :reason, "manual_confirm")
+      reason = Keyword.get(opts, :reason, default_reason_for(source))
 
       plan_attrs = %{
         decision_id: envelope.id,
@@ -851,27 +1039,36 @@ defmodule Bank.Decisions do
         |> ExecutionPlan.changeset(plan_attrs)
         |> Repo.insert()
 
-      # Audit
-      audit_attrs =
-        Bank.Audit.Events.execution_manually_requested(plan,
-          actor: :user,
-          actor_id: Keyword.get(opts, :actor_id)
-        )
+      _ = Runtime.emit_audit(audit_attrs_for_source(plan, source, opts))
 
-      _ = Runtime.emit_audit(audit_attrs)
-
-      # Broadcast
       Runtime.broadcast_intent_lifecycle(envelope.intent_id, :execution_requested, %{
         decision_id: envelope.id,
         plan_id: plan.id,
-        reason: reason
+        reason: reason,
+        source: source
       })
 
-      # Enqueue for adapter dispatch
       _ = Runtime.enqueue_execution(envelope.id)
 
       {:ok, plan}
     end
+  end
+
+  defp default_reason_for(:manual), do: "manual_confirm"
+  defp default_reason_for(:auto), do: "auto_exec_dispatch"
+
+  defp audit_attrs_for_source(plan, :manual, opts) do
+    Bank.Audit.Events.execution_manually_requested(plan,
+      actor: Keyword.get(opts, :actor, :user),
+      actor_id: Keyword.get(opts, :actor_id)
+    )
+  end
+
+  defp audit_attrs_for_source(plan, :auto, opts) do
+    Bank.Audit.Events.execution_auto_dispatched(plan,
+      actor: Keyword.get(opts, :actor, :runtime),
+      actor_id: Keyword.get(opts, :actor_id)
+    )
   end
 
   # --- Validation gates ---------------------------------------------------

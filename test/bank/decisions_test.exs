@@ -7,6 +7,8 @@ defmodule Bank.DecisionsTest do
   use Bank.DataCase, async: false
   use Oban.Testing, repo: Bank.Repo
 
+  import Ecto.Query
+
   import Bank.Fixtures
 
   alias Bank.Decisions
@@ -331,5 +333,129 @@ defmodule Bank.DecisionsTest do
       assert {:error, :not_found} =
                Decisions.request_manual_execution(Ecto.UUID.generate(), "sa_nf")
     end
+  end
+
+  describe "dispatch_auto_exec/3" do
+    test "creates a plan, audits as auto_dispatched, and enqueues RunExecution" do
+      envelope = decision_envelope(outcome: :auto_exec, current: true)
+      {:ok, _del} = Delegations.grant("sa-auto-disp", "del-auto-disp")
+
+      assert {:ok, plan} = Decisions.dispatch_auto_exec(envelope.id, "sa-auto-disp")
+
+      assert plan.decision_id == envelope.id
+      assert plan.intent_id == envelope.intent_id
+      assert plan.smart_account_id == "sa-auto-disp"
+      assert plan.execution_status == :prepared
+      assert plan.active
+
+      assert_enqueued(
+        worker: RunExecution,
+        queue: :executions_run,
+        args: %{"decision_id" => envelope.id}
+      )
+
+      assert "execution.auto_dispatched" in audit_event_types_for_subject(plan.id)
+    end
+
+    test "reuses the manual-path gates: rejects non-current envelopes" do
+      envelope = decision_envelope(outcome: :auto_exec, current: false)
+      {:ok, _del} = Delegations.grant("sa-auto-nc", "del-auto-nc")
+
+      assert {:error, :not_current} =
+               Decisions.dispatch_auto_exec(envelope.id, "sa-auto-nc")
+    end
+
+    test "reuses the manual-path gates: rejects when an active plan already exists" do
+      envelope = decision_envelope(outcome: :auto_exec, current: true)
+      _existing = execution_plan(decision: envelope, active: true)
+      {:ok, _del} = Delegations.grant("sa-auto-active", "del-auto-active")
+
+      assert {:error, :active_plan_exists} =
+               Decisions.dispatch_auto_exec(envelope.id, "sa-auto-active")
+    end
+
+    test "reuses the manual-path gates: rejects when paused" do
+      envelope = decision_envelope(outcome: :auto_exec, current: true)
+      {:ok, _del} = Delegations.grant("sa-auto-pause", "del-auto-pause")
+      {:ok, :paused} = Bank.Security.pause(:global)
+
+      assert {:error, :runtime_paused} =
+               Decisions.dispatch_auto_exec(envelope.id, "sa-auto-pause")
+    end
+
+    test "reuses the manual-path gates: rejects when delegation is not active" do
+      envelope = decision_envelope(outcome: :auto_exec, current: true)
+
+      assert {:error, :delegation_not_active} =
+               Decisions.dispatch_auto_exec(envelope.id, "sa-auto-missing")
+    end
+
+    test "rejects non-auto_exec envelopes with :outcome_is_*" do
+      envelope = decision_envelope(outcome: :hold, current: true)
+      {:ok, _del} = Delegations.grant("sa-auto-hold", "del-auto-hold")
+
+      assert {:error, :outcome_is_hold} =
+               Decisions.dispatch_auto_exec(envelope.id, "sa-auto-hold")
+    end
+
+    test "rejects when ANY plan is active for the intent (even on a prior superseded envelope)" do
+      # This is the auto-path-only safety gate that the manual path
+      # intentionally skips: a re-evaluation must not dispatch a
+      # parallel plan while a plan from a prior decision is still
+      # in flight for the same intent.
+      intent = agent_intent()
+      prior_envelope = decision_envelope(intent: intent, outcome: :auto_exec, current: false)
+      _prior_plan = execution_plan(decision: prior_envelope, intent_id: intent.id, active: true)
+
+      successor_envelope =
+        decision_envelope(intent: intent, outcome: :auto_exec, current: true)
+
+      {:ok, _del} = Delegations.grant("sa-auto-inflight", "del-auto-inflight")
+
+      assert {:error, :active_plan_exists} =
+               Decisions.dispatch_auto_exec(successor_envelope.id, "sa-auto-inflight")
+
+      # The manual path does NOT enforce this intent-level gate; an
+      # operator can still override after handling the in-flight plan.
+      # The per-decision check is what gates the manual path.
+      assert {:ok, _plan} =
+               Decisions.request_manual_execution(successor_envelope.id, "sa-auto-inflight")
+    end
+  end
+
+  describe "resolve_executable_account/0" do
+    test "returns :no_executable_account when no delegations exist" do
+      assert {:error, :no_executable_account} = Decisions.resolve_executable_account()
+    end
+
+    test "returns the unique smart_account_id when exactly one is executable" do
+      {:ok, _del} = Delegations.grant("sa-resolve-1", "del-resolve-1")
+
+      assert {:ok, "sa-resolve-1"} = Decisions.resolve_executable_account()
+    end
+
+    test "returns :ambiguous_executable_account when two or more are executable" do
+      {:ok, _del1} = Delegations.grant("sa-resolve-2a", "del-resolve-2a")
+      {:ok, _del2} = Delegations.grant("sa-resolve-2b", "del-resolve-2b")
+
+      assert {:error, :ambiguous_executable_account} = Decisions.resolve_executable_account()
+    end
+
+    test "ignores non-executable (revoking / revoke_failed) delegations" do
+      {:ok, _del1} = Delegations.grant("sa-resolve-3a", "del-resolve-3a")
+      {:ok, _del2} = Delegations.grant("sa-resolve-3b", "del-resolve-3b")
+      {:ok, _} = Delegations.record_revoke_requested("sa-resolve-3b")
+
+      assert {:ok, "sa-resolve-3a"} = Decisions.resolve_executable_account()
+    end
+  end
+
+  defp audit_event_types_for_subject(subject_id) do
+    Bank.Repo.all(
+      from(e in Bank.Audit.AuditEvent,
+        where: e.subject_id == ^subject_id,
+        select: e.event_type
+      )
+    )
   end
 end
