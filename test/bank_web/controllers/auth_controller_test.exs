@@ -18,6 +18,8 @@ defmodule BankWeb.AuthControllerTest do
 
   use BankWeb.ConnCase, async: false
 
+  import Ecto.Query
+
   alias Bank.Accounts
   alias Bank.Accounts.User
   alias Bank.Workspaces
@@ -149,6 +151,79 @@ defmodule BankWeb.AuthControllerTest do
 
       assert redirected_to(conn2) == ~p"/"
       assert Phoenix.Flash.get(conn2.assigns.flash, :info) =~ "Welcome"
+    end
+
+    test "matching exact-email invite creates a membership and lands on /", %{conn: conn} do
+      {:ok, ws} = Workspaces.create_workspace(%{slug: "invited", name: "Invited"})
+
+      {:ok, _invite} =
+        Workspaces.create_invite(nil, %{
+          workspace_id: ws.id,
+          invite_type: :exact_email,
+          email: "vip@example.com",
+          role: :operator
+        })
+
+      put_stub(%{claims: claims_for("vip-sub", "VIP@example.com", "VIP")})
+
+      conn = get(conn, ~p"/auth/google")
+      state = get_session(conn, :oauth_state)
+      conn = get(conn, ~p"/auth/google/callback?code=stub-code&state=#{state}")
+
+      assert redirected_to(conn) == ~p"/"
+
+      assert Phoenix.Flash.get(conn.assigns.flash, :info) =~
+               "your invite has been accepted"
+
+      user = Accounts.get_user(get_session(conn, :user_id))
+      [membership] = Workspaces.list_active_memberships(user)
+      assert membership.workspace_id == ws.id
+      assert membership.role == :operator
+    end
+
+    test "matching domain invite leaves user pending and lands on /pending", %{conn: conn} do
+      {:ok, ws} = Workspaces.create_workspace(%{slug: "by-domain", name: "By Domain"})
+
+      {:ok, _invite} =
+        Workspaces.create_invite(nil, %{
+          workspace_id: ws.id,
+          invite_type: :domain,
+          domain: "customer-corp.com",
+          role: :viewer
+        })
+
+      put_stub(%{claims: claims_for("dom-sub", "anyone@customer-corp.com", "Anyone")})
+
+      conn = get(conn, ~p"/auth/google")
+      state = get_session(conn, :oauth_state)
+      conn = get(conn, ~p"/auth/google/callback?code=stub-code&state=#{state}")
+
+      assert redirected_to(conn) == ~p"/pending"
+      assert Phoenix.Flash.get(conn.assigns.flash, :info) =~ "allowlist"
+
+      user = Accounts.get_user(get_session(conn, :user_id))
+      assert Workspaces.list_active_memberships(user) == []
+    end
+
+    test "no matching invite leaves user pending and audits allowlist_missed", %{conn: conn} do
+      put_stub(%{claims: claims_for("missed-sub", "ghost@example.com")})
+
+      conn = get(conn, ~p"/auth/google")
+      state = get_session(conn, :oauth_state)
+      conn = get(conn, ~p"/auth/google/callback?code=stub-code&state=#{state}")
+
+      assert redirected_to(conn) == ~p"/pending"
+      assert Phoenix.Flash.get(conn.assigns.flash, :info) =~ "pending operator approval"
+
+      user_id = get_session(conn, :user_id)
+
+      missed =
+        Bank.Repo.all(
+          from e in Bank.Audit.AuditEvent,
+            where: e.event_type == "access.allowlist_missed" and e.subject_id == ^user_id
+        )
+
+      assert length(missed) == 1
     end
 
     test "user with multiple active memberships lands on /pending (ambiguous)", %{conn: conn} do

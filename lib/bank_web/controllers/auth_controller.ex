@@ -26,6 +26,20 @@ defmodule BankWeb.AuthController do
   starts a session — they just see the pending-access screen
   (issue #157). `:disabled` users get a flash and no session.
 
+  ## Invite / allowlist (issue #156)
+
+  After identity is verified the controller invokes
+  `Bank.Workspaces.apply_invite_for_user/1`. The three relevant
+  outcomes:
+
+    * exact-email invite matched → membership created, user lands
+      on `/` with a "your access has been activated" flash.
+    * domain invite matched → user stays in `:pending_access`,
+      lands on `/pending` with a domain-matched flash. Membership
+      creation is deferred to the admin approval flow (#157).
+    * no invite (or `:user_disabled`) → `/pending` with the
+      generic "awaiting operator approval" flash.
+
   ## Logging hygiene
 
   This controller never logs `params` (which carry the auth code)
@@ -121,12 +135,21 @@ defmodule BankWeb.AuthController do
     case Accounts.find_or_create_from_oauth(claims) do
       {:ok, user} ->
         if Accounts.session_allowed?(user) do
+          # Apply any matching invite *before* resolving scope —
+          # `apply_invite_for_user/1` may create the user's first
+          # membership, which then surfaces in `resolve_scope/1`
+          # below. Errors from invite application are logged and
+          # treated as :no_match for routing purposes; the session
+          # still starts so a benign DB hiccup doesn't strand the
+          # user.
+          invite_outcome = apply_invite(user)
+
           resolution = Workspaces.resolve_scope(user)
 
           conn
           |> renew_session()
           |> put_session(FetchCurrentUser.session_key(), user.id)
-          |> put_flash(:info, login_flash(user, resolution))
+          |> put_flash(:info, login_flash(user, resolution, invite_outcome))
           |> redirect(to: post_login_path(user, resolution))
         else
           Logger.warning("AuthController: refused session for disabled user")
@@ -145,6 +168,21 @@ defmodule BankWeb.AuthController do
         conn
         |> put_flash(:error, "Could not complete sign-in. Please try again.")
         |> redirect(to: ~p"/login")
+    end
+  end
+
+  defp apply_invite(user) do
+    case Workspaces.apply_invite_for_user(user) do
+      {:ok, outcome} when is_atom(outcome) ->
+        outcome
+
+      {:ok, outcome, _resource} when is_atom(outcome) ->
+        outcome
+
+      {:error, reason} ->
+        Logger.warning("AuthController: apply_invite_for_user failed (reason=#{inspect(reason)})")
+
+        :no_match
     end
   end
 
@@ -180,19 +218,40 @@ defmodule BankWeb.AuthController do
   defp post_login_path(_user, :no_membership), do: ~p"/pending"
   defp post_login_path(_user, {:ambiguous, _memberships}), do: ~p"/pending"
 
-  defp login_flash(%Bank.Accounts.User{name: name}, {:single, _})
+  # Three signals shape the flash:
+  #
+  #   * Workspace `resolution` — `{:single, _}`, `:no_membership`, or
+  #     `{:ambiguous, _}`.
+  #   * Invite outcome — `:membership_created` (exact-email invite
+  #     just matched), `:pending_admin_approval` (domain invite
+  #     matched but no membership), `:no_match` /
+  #     `:already_member` (everything else).
+  #   * The user's display name, when present.
+  #
+  # First-time exact-email match wins the most specific flash, then
+  # ambiguous, then domain-only match, then plain pending, then
+  # returning login.
+  defp login_flash(_user, {:single, _}, :membership_created) do
+    "Welcome — your invite has been accepted and your workspace access is active."
+  end
+
+  defp login_flash(%Bank.Accounts.User{name: name}, {:single, _}, _)
        when is_binary(name) and name != "" do
     "Welcome back, #{name}."
   end
 
-  defp login_flash(_user, {:single, _}), do: "Welcome back."
+  defp login_flash(_user, {:single, _}, _), do: "Welcome back."
 
-  defp login_flash(_user, :no_membership) do
-    "Signed in. Your workspace access is pending operator approval."
+  defp login_flash(_user, {:ambiguous, _}, _) do
+    "Signed in. You belong to multiple workspaces — an operator will help you select one."
   end
 
-  defp login_flash(_user, {:ambiguous, _}) do
-    "Signed in. You belong to multiple workspaces — an operator will help you select one."
+  defp login_flash(_user, :no_membership, :pending_admin_approval) do
+    "Signed in. Your organization is on the allowlist — an admin will activate your access shortly."
+  end
+
+  defp login_flash(_user, :no_membership, _) do
+    "Signed in. Your workspace access is pending operator approval."
   end
 
   defp callback_error_message(:invalid_state),
