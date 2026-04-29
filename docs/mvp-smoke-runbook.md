@@ -173,15 +173,20 @@ curl -X POST http://localhost:4000/v1/intents \
   -H 'Content-Type: application/json' \
   -d '{
     "idempotency_key": "smoke-001",
-    "source": "smoke-runbook",
+    "source": "agent",
     "agent_id": "smoke-agent",
     "kind": "transfer",
     "asset": "USDC",
     "chain": "base",
     "amount": "10.00",
-    "target": { "raw_address": "0x" + "ab" * 20 }
+    "target": { "raw_address": "0xabababababababababababababababababababab" }
   }'
 ```
+
+> `source` is the enum `"agent" | "user" | "runtime"` (see
+> `Bank.Intents.normalize/1`); free-form strings return `422
+> invalid_body`. Use `"agent"` for agent-submitted smokes,
+> `"user"` for operator-driven ones.
 
 Expected `202 Accepted`:
 
@@ -313,12 +318,29 @@ intent.submitted
   → intent.state_changed      (decided → executing → executed)
 ```
 
-For a held auto_exec, an `intent.auto_exec_held` row replaces the
+For an evaluation-driven held auto_exec (no executable account at
+evaluation time), an `intent.auto_exec_held` row replaces the
 `execution.auto_dispatched` row and replay shows no execution plan.
-For an approval-required path, `approval.granted` (or
-`approval.rejected`) appears between `decision.decided` and
-`execution.auto_dispatched`. For simulate calls, a
-`simulation.requested` row carries the `reason`.
+
+For an approval-required path, the chain is:
+```
+intent.submitted → trust.assessed → simulation.produced →
+decision.decided (outcome: approval_required) →
+intent.state_changed → approval.granted →
+decision.decided (outcome: auto_exec, successor) →
+intent.state_changed
+```
+followed by either `execution.auto_dispatched` (when a delegation
+is executable at approve time) OR no further row (when the approve
+path holds dispatch). Today the approve path does not emit a
+dedicated `intent.auto_exec_held` row when it holds — the held
+state is visible from the absence of `execution.auto_dispatched`
+and the `dispatch: "held"` field on the synchronous HTTP response;
+making the approve-path held state explicit in audit is a follow-up.
+
+For simulate calls, a `simulation.requested` row carries the
+`reason`; `refresh` additionally writes a `simulation.produced`
+row for the new current report.
 
 ### 6.8 Audit event vocabulary (intent-correlated)
 
