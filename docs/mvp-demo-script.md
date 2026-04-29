@@ -56,6 +56,25 @@ Code-complete, exercised by tests:
 - Phoenix control plane: append-only audit, supersession-versioned
   policies, intent / decision / execution state machines, Oban
   workers, PubSub realtime, operator console, Telegram bot.
+- Intent Execution MVP (epic #134, closed by PRs #142–#148):
+  `POST /v1/intents` accepts an agent intent and enqueues
+  `EvaluateIntent`; the worker calls `Bank.Decisions.evaluate_intent/2`,
+  which composes the trust engine, policy evaluator, simulation
+  preview, and autonomy router into a single deterministic
+  pipeline that writes the `TrustAssessment` /
+  `SimulationReport` / `DecisionEnvelope` rows in one
+  `Ecto.Multi`. `:auto_exec` decisions auto-dispatch via
+  `Bank.Decisions.dispatch_auto_exec/3` (single-active-delegation
+  fallback); `:approval_required` decisions enqueue
+  `ExpireApproval` at the TTL and surface in `GET /v1/approvals`,
+  where `approve` records the decision AND attempts dispatch
+  (`dispatched` / `held` / `no_dispatch`); `:hold` and `:block`
+  surface in the queue without dispatch. `POST
+  /v1/intents/:id/simulate` produces fresh `SimulationReport`s
+  (`pre_submit_dry_run`, `refresh`, `operator_inspection`).
+  `POST /v1/intents/:id/cancel` withdraws pre-execution intents.
+  `GET /v1/intents/:id/replay` returns the full deterministic
+  bundle for any intent.
 - Adapter: ERC-4337 v0.7 transfer / grant / revoke through a pinned
   bundler; failure taxonomy (`userop_build_failed`,
   `bundler_rejected`, `bundler_hash_mismatch`,
@@ -77,12 +96,14 @@ end-to-end smokes.
 - Multi-chain. Only Base. Runtime rejects anything else at the API
   boundary.
 - Multi-asset. Only USDC has whitelisted automation policy.
-- Public agent-facing intent intake. `POST /v1/intents`,
-  `GET /v1/intents/:id`, `POST /v1/intents/:id/simulate`,
-  `POST /v1/intents/:id/cancel` are routed but return `501
-  not_implemented` until the trust + simulation engines finish
-  wiring. `EvaluateIntent` / `ReevaluateIntent` Oban workers are
-  safe boundaries that cancel as `:engines_pending`.
+- Multi-tenant smart-account binding. `Bank.Decisions.resolve_executable_account/0`
+  uses a single-active-delegation fallback for v0.1: dispatch
+  proceeds when exactly one delegation is currently executable;
+  otherwise the runtime emits `intent.auto_exec_held` with a
+  machine-readable `held_reason` and the operator dispatches
+  manually via `POST /v1/decisions/{id}/execute`. Multi-tenant
+  deployments will need an explicit `smart_account_id` on the
+  intent contract.
 - Browser-native wallet connect. `assets/js/hooks/wallet_connect.js`
   is a scaffold; v0.1 connect is operator-driven via the adapter
   callback. (See `docs/wallet-connect.md`.)
@@ -121,6 +142,13 @@ the readiness checklist. The seed contains the four scenarios from
 
 For a clean active-delegation slate, check
 `Bank.Delegations.list_active/0` from `iex -S mix`.
+
+> **Live agent intake.** All five `/v1/intents` actions are live as
+> of epic #134 (PRs #142–#148): submit, show, simulate, cancel,
+> replay. A real demo can curl-submit a fresh intent and watch it
+> evaluate, dispatch, and execute end-to-end against the seeded
+> delegation. See `docs/mvp-smoke-runbook.md §6 Intent lifecycle`
+> for curl recipes.
 
 ### 1. Connect (1 min)
 
@@ -238,10 +266,16 @@ If you are on real Sepolia and the adapter is in sentinel-era mode,
   on Base Sepolia is the step that closes #58 / #31. Until then
   any environment running the adapter in sentinel-era mode treats
   `:revoked` as trust-downgrade-only.
-- `EvaluateIntent` / `ReevaluateIntent` cancel as
-  `:engines_pending` until the trust + simulation engines wire in.
-  The demo relies on the seeded dataset for the decisioning steps;
-  full end-to-end agent intake is not yet live.
+- Smart-account binding for auto-exec dispatch is a single-active-
+  delegation fallback in v0.1. Deployments with zero or two-or-more
+  executable delegations get an `intent.auto_exec_held` audit row
+  and a `held` HTTP response; the operator dispatches manually via
+  `POST /v1/decisions/{id}/execute`. Multi-tenant deployments will
+  require an explicit `smart_account_id` on the intent contract.
+- Live preview is `Bank.Quotes.StubProvider` by default
+  (deterministic, side-effect free). Real provider integration for
+  on-chain preview is a follow-up; the runtime's fail-closed
+  posture (provider error → `:hold`) is unaffected.
 
 ## What to look at after the demo
 

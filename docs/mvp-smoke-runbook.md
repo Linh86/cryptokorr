@@ -148,3 +148,194 @@ smart account's owner off chain (see
 [`docs/incident-runbook.md`](incident-runbook.md)) — the adapter
 does NOT silently downgrade to the legacy sentinel revoke when a
 `permission` block is present and the cryptographic path refuses.
+
+## 6. Intent lifecycle
+
+Smoke for the agent-facing intent path that landed in epic #134
+(PRs #142–#148). All five `/v1/intents` actions are live: submit,
+show, simulate, cancel, replay; `/v1/approvals` is live for the
+operator review loop. No chain calls are needed for these recipes —
+the runtime uses the deterministic in-process
+`Bank.Quotes.StubProvider` when no provider is configured.
+
+> The runtime resolves `smart_account_id` for auto-dispatch via
+> `Bank.Decisions.resolve_executable_account/0` — single-active-
+> delegation fallback. If you want a positive `dispatched` outcome
+> in step 6.3 below, run §2 first so exactly one delegation is
+> active. Otherwise the runtime emits `intent.auto_exec_held` with
+> `held_reason: "no_executable_account"` and the curl response
+> shows `dispatch: "held"`. That's the documented v0.1 behavior.
+
+### 6.1 Submit an intent
+
+```sh
+curl -X POST http://localhost:4000/v1/intents \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "idempotency_key": "smoke-001",
+    "source": "smoke-runbook",
+    "agent_id": "smoke-agent",
+    "kind": "transfer",
+    "asset": "USDC",
+    "chain": "base",
+    "amount": "10.00",
+    "target": { "raw_address": "0x" + "ab" * 20 }
+  }'
+```
+
+Expected `202 Accepted`:
+
+```json
+{
+  "intent_id": "<uuid>",
+  "state": "submitted",
+  "idempotent_replay": false,
+  "links": {
+    "self": "/v1/intents/<uuid>",
+    "replay": "/v1/intents/<uuid>/replay"
+  },
+  "intent": { ... }
+}
+```
+
+`EvaluateIntent` runs in milliseconds; the intent transitions to
+`:decided` (or `:blocked`). For a 10 USDC raw-address payment, the
+v0.1 autonomy router returns `:approval_required` (under the
+unknown-trust ceiling).
+
+### 6.2 Inspect the intent
+
+```sh
+curl http://localhost:4000/v1/intents/<intent_id>
+```
+
+Expected `200 OK` with `state: "decided"` and the cached
+`current_decision_id` / `current_simulation_id` /
+`current_trust_assessment_id` populated.
+
+### 6.3 Approve an `:approval_required` intent
+
+If §6.1 produced an `:approval_required` decision, it shows up in
+the queue:
+
+```sh
+curl http://localhost:4000/v1/approvals
+```
+
+Approve it:
+
+```sh
+curl -X POST http://localhost:4000/v1/approvals/<decision_id>/approve \
+  -H 'Content-Type: application/json' \
+  -d '{ "actor_id": "op-smoke" }'
+```
+
+Expected `200 OK`. The `dispatch` field tells you what happened
+next:
+
+| `dispatch` | meaning |
+| --- | --- |
+| `"dispatched"` | One executable delegation; `execution_plan` is in the response and `RunExecution` is enqueued. |
+| `"held"` | Successor envelope recorded, dispatch withheld. `held_reason` is one of: `no_executable_account`, `ambiguous_executable_account`, `runtime_paused`, `delegation_not_active`, `active_plan_exists`, `stablecoin_adapter_not_wired`. `next_step` points at `POST /v1/decisions/{id}/execute`. |
+| `"no_dispatch"` | Reject path (not used for approve). |
+
+For the held case, resolve the gate (e.g., grant a delegation via
+§2) and dispatch manually:
+
+```sh
+curl -X POST http://localhost:4000/v1/decisions/<successor_id>/execute \
+  -H 'Content-Type: application/json' \
+  -d '{ "smart_account_id": "<sa_id>" }'
+```
+
+### 6.4 Reject an approval
+
+```sh
+curl -X POST http://localhost:4000/v1/approvals/<decision_id>/reject \
+  -H 'Content-Type: application/json' \
+  -d '{ "actor_id": "op-smoke", "reason": "duplicate" }'
+```
+
+Expected `200 OK` with `dispatch: "no_dispatch"`. The intent moves
+to `:blocked`. Reject never dispatches even when a delegation is
+present.
+
+### 6.5 Cancel a pre-execution intent
+
+```sh
+curl -X POST http://localhost:4000/v1/intents/<intent_id>/cancel \
+  -H 'Content-Type: application/json' \
+  -d '{ "reason": "operator_withdrew" }'
+```
+
+Allowed states: `:submitted`, `:evaluating`, `:decided`. Other
+terminal / in-flight states return `409 wrong_state`. Re-cancelling
+an already-`:cancelled` intent returns `200` with `idempotent: true`.
+
+### 6.6 Simulate
+
+```sh
+curl -X POST http://localhost:4000/v1/intents/<intent_id>/simulate \
+  -H 'Content-Type: application/json' \
+  -d '{ "reason": "refresh" }'
+```
+
+Three reasons:
+
+| `reason` | `simulation.current` | intent pointer | use case |
+| --- | --- | --- | --- |
+| `pre_submit_dry_run` | `false` | unchanged | preview before submit |
+| `refresh` | `true` | advances | reset the active report |
+| `operator_inspection` | `false` | unchanged | history-only audit trail |
+
+`200 OK` returns the produced `SimulationReport` inline.
+
+### 6.7 Replay
+
+```sh
+curl http://localhost:4000/v1/intents/<intent_id>/replay
+```
+
+Returns the deterministic bundle: intent record, policy snapshot,
+trust assessment chain, simulation chain, decision envelope chain,
+execution plan chain, audit events, screening evidence, and
+stablecoin route evidence. The audit chain for an end-to-end
+auto-dispatched intent looks like:
+
+```
+intent.submitted
+  → trust.assessed
+  → simulation.produced
+  → decision.decided          (outcome: auto_exec)
+  → execution.auto_dispatched (decision-driven dispatch)
+  → execution.broadcast       (adapter signs + bundles)
+  → execution.confirmed       (chain inclusion)
+  → intent.state_changed      (decided → executing → executed)
+```
+
+For a held auto_exec, an `intent.auto_exec_held` row replaces the
+`execution.auto_dispatched` row and replay shows no execution plan.
+For an approval-required path, `approval.granted` (or
+`approval.rejected`) appears between `decision.decided` and
+`execution.auto_dispatched`. For simulate calls, a
+`simulation.requested` row carries the `reason`.
+
+### 6.8 Audit event vocabulary (intent-correlated)
+
+| event_type | when | actor (default) |
+| --- | --- | --- |
+| `intent.submitted` | `Bank.Intents.submit/2` accepted the body | `:agent` |
+| `intent.cancelled` | `Bank.Intents.cancel/2` ran successfully | `:user` |
+| `intent.state_changed` | Intent state transition (e.g., `:decided` → `:executing`) | `:runtime` |
+| `intent.auto_exec_held` | Auto-exec dispatch was withheld by a safety gate | `:runtime` |
+| `trust.assessed` | New current `TrustAssessment` written | `:runtime` |
+| `simulation.produced` | New current `SimulationReport` written | `:runtime` |
+| `simulation.requested` | `/v1/intents/:id/simulate` called (any reason) | `:agent` |
+| `decision.decided` | New current `DecisionEnvelope` written | `:runtime` |
+| `approval.granted` | Operator approved an envelope | `:user` |
+| `approval.rejected` | Operator rejected an envelope | `:user` |
+| `execution.auto_dispatched` | Runtime auto-dispatched an `:auto_exec` envelope | `:runtime` |
+| `execution.manually_requested` | Operator-triggered manual execution | `:user` |
+| `execution.<status>` | Execution-plan status transition (`prepared → broadcasting → confirmed | reverted | aborted`) | `:adapter` |
+| `delegation.connect_requested` / `delegation.state_changed` | Connect / grant / revoke lifecycle | `:user` / `:adapter` |
+| `security.paused` / `security.resumed` | Operator pause / resume | `:user` |
