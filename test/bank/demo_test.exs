@@ -2,7 +2,7 @@ defmodule Bank.DemoTest do
   use Bank.DataCase, async: false
 
   alias Bank.Audit.AuditEvent
-  alias Bank.Counterparties.{AddressLabel, Counterparty}
+  alias Bank.Counterparties.{AddressLabel, Counterparty, EvidenceArtifact, TrustAssertion}
   alias Bank.Decisions.{DecisionEnvelope, ExecutionPlan}
   alias Bank.Delegations.Delegation
   alias Bank.Demo
@@ -287,6 +287,59 @@ defmodule Bank.DemoTest do
       refute Repo.get(AgentIntent, legacy_intent.id)
 
       ids = Demo.identifiers()
+      assert Repo.get_by(Counterparty, name: hd(ids.counterparty_names))
+    end
+
+    test "deletes polymorphic evidence + trust rows attached to sandbox subjects, keeps non-demo ones" do
+      :ok = Demo.seed()
+
+      ids = Demo.identifiers()
+
+      sandbox_cp = Repo.get_by!(Counterparty, name: hd(ids.counterparty_names))
+
+      sandbox_label =
+        Repo.one!(
+          from l in AddressLabel,
+            where: l.counterparty_id == ^sandbox_cp.id,
+            limit: 1
+        )
+
+      sandbox_cp_evidence = Fixtures.evidence_artifact(subject: sandbox_cp)
+      sandbox_cp_trust = Fixtures.trust_assertion(subject: sandbox_cp)
+      sandbox_label_evidence = Fixtures.evidence_artifact(subject: sandbox_label)
+      sandbox_label_trust = Fixtures.trust_assertion(subject: sandbox_label)
+
+      keeper_cp = Fixtures.counterparty(name: "Keeper Corp.", current_trust_level: :trusted)
+
+      keeper_label =
+        Fixtures.address_label(
+          counterparty: keeper_cp,
+          chain: "base",
+          address: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        )
+
+      keeper_cp_evidence = Fixtures.evidence_artifact(subject: keeper_cp)
+      keeper_cp_trust = Fixtures.trust_assertion(subject: keeper_cp)
+      keeper_label_evidence = Fixtures.evidence_artifact(subject: keeper_label)
+      keeper_label_trust = Fixtures.trust_assertion(subject: keeper_label)
+
+      assert :ok = Demo.reset(env: :test, confirm: true)
+
+      # Sandbox-subject evidence + trust must be gone (no orphans).
+      refute Repo.get(EvidenceArtifact, sandbox_cp_evidence.id)
+      refute Repo.get(EvidenceArtifact, sandbox_label_evidence.id)
+      refute Repo.get(TrustAssertion, sandbox_cp_trust.id)
+      refute Repo.get(TrustAssertion, sandbox_label_trust.id)
+
+      # Non-demo evidence + trust survive.
+      assert Repo.get(EvidenceArtifact, keeper_cp_evidence.id)
+      assert Repo.get(EvidenceArtifact, keeper_label_evidence.id)
+      assert Repo.get(TrustAssertion, keeper_cp_trust.id)
+      assert Repo.get(TrustAssertion, keeper_label_trust.id)
+      assert Repo.get(Counterparty, keeper_cp.id)
+      assert Repo.get(AddressLabel, keeper_label.id)
+
+      # Seed re-ran cleanly (sandbox counterparty is back).
       assert Repo.get_by(Counterparty, name: hd(ids.counterparty_names))
     end
   end

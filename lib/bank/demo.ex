@@ -48,7 +48,7 @@ defmodule Bank.Demo do
   import Ecto.Query
 
   alias Bank.Audit.AuditEvent
-  alias Bank.Counterparties.{AddressLabel, Counterparty}
+  alias Bank.Counterparties.{AddressLabel, Counterparty, EvidenceArtifact, TrustAssertion}
   alias Bank.Decisions.{DecisionEnvelope, ExecutionPlan, SimulationReport, TrustAssessment}
   alias Bank.Delegations.Delegation
   alias Bank.Intents.AgentIntent
@@ -771,17 +771,37 @@ defmodule Bank.Demo do
   defp delete_demo_counterparties do
     names = all_demo_counterparty_names()
 
-    counterparty_ids_query =
-      from c in Counterparty,
-        where: c.name in ^names,
-        select: c.id
+    counterparty_ids =
+      Counterparty
+      |> where([c], c.name in ^names)
+      |> select([c], c.id)
+      |> Repo.all()
 
+    label_ids =
+      AddressLabel
+      |> where([l], l.counterparty_id in ^counterparty_ids)
+      |> select([l], l.id)
+      |> Repo.all()
+
+    # Polymorphic evidence/trust have no DB FK to their subject, so a
+    # cascade won't reach them. Wipe them by `(subject_type,
+    # subject_id)` ahead of deleting the labels and counterparties so
+    # the seed cannot re-create the subject row underneath an orphaned
+    # assertion.
+    delete_demo_subject_rows(EvidenceArtifact, counterparty_ids, label_ids)
+    delete_demo_subject_rows(TrustAssertion, counterparty_ids, label_ids)
+
+    Repo.delete_all(from l in AddressLabel, where: l.id in ^label_ids)
+    Repo.delete_all(from c in Counterparty, where: c.id in ^counterparty_ids)
+  end
+
+  defp delete_demo_subject_rows(schema, counterparty_ids, label_ids) do
     Repo.delete_all(
-      from l in AddressLabel,
-        where: l.counterparty_id in subquery(counterparty_ids_query)
+      from r in schema,
+        where:
+          (r.subject_type == "counterparty" and r.subject_id in ^counterparty_ids) or
+            (r.subject_type == "address_label" and r.subject_id in ^label_ids)
     )
-
-    Repo.delete_all(from c in Counterparty, where: c.name in ^names)
   end
 
   defp delete_demo_delegation do
