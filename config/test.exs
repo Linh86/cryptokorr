@@ -103,3 +103,8 @@ config :bank, Bank.Stablecoins.Providers.OneInch,
 config :bank, Bank.Stablecoins.Providers.Jupiter,
   base_url: "http://jupiter.test",
   req_options: [plug: {Req.Test, Bank.Stablecoins.Providers.Jupiter}]
+
+# Auth foundation (epic #153, issue #154): use the deterministic
+# in-process stub instead of calling Google.
+config :bank, Bank.Accounts.OAuthProvider, provider: Bank.Accounts.OAuthProvider.Stub
+config :bank, Bank.Accounts.OAuthProvider.Stub, %{}

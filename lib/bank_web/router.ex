@@ -8,6 +8,7 @@ defmodule BankWeb.Router do
     plug :put_root_layout, html: {BankWeb.Layouts, :root}
     plug :protect_from_forgery
     plug :put_secure_browser_headers
+    plug BankWeb.Plugs.FetchCurrentUser
   end
 
   pipeline :api do
@@ -129,6 +130,23 @@ defmodule BankWeb.Router do
     pipe_through :internal_telegram
 
     post "/webhook", TelegramWebhookController, :webhook
+  end
+
+  # Auth surface — Google OAuth identity (epic #153, issue #154).
+  # Identity-only: a successful callback creates a `:pending_access`
+  # user and starts a session. Workspace access is granted by the
+  # invite/approval flow in #156-#157, not here.
+  scope "/", BankWeb do
+    pipe_through :browser
+
+    get "/login", SessionController, :login
+    get "/pending", SessionController, :pending
+
+    get "/auth/google", AuthController, :request
+    get "/auth/google/callback", AuthController, :callback
+
+    delete "/logout", AuthController, :delete
+    post "/logout", AuthController, :delete
   end
 
   # Web control tower — LiveView-based operator console.
