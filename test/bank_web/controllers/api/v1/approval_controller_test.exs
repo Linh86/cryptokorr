@@ -4,6 +4,7 @@ defmodule BankWeb.API.V1.ApprovalControllerTest do
 
   import Bank.Fixtures
 
+  alias Bank.Audit.AuditEvent
   alias Bank.Decisions
   alias Bank.Decisions.{DecisionEnvelope, ExecutionPlan}
   alias Bank.Delegations
@@ -12,6 +13,8 @@ defmodule BankWeb.API.V1.ApprovalControllerTest do
   alias Bank.Security
   alias Bank.Security.PauseState
   alias Bank.WalletScreening
+
+  import Ecto.Query
 
   setup do
     PauseState.reset()
@@ -147,6 +150,11 @@ defmodule BankWeb.API.V1.ApprovalControllerTest do
       assert successor.outcome == :auto_exec
       assert is_nil(Decisions.active_plan_for(successor.id))
       refute_enqueued(worker: RunExecution)
+
+      # `intent.auto_exec_held` is written symmetrically with the
+      # evaluation-driven held path so replay shows the same row
+      # regardless of which path produced the held state (issue #151).
+      assert_held_audit(intent.id, successor.id, "no_executable_account")
     end
 
     test "ambiguous delegations -> dispatch held with :ambiguous_executable_account",
@@ -252,6 +260,116 @@ defmodule BankWeb.API.V1.ApprovalControllerTest do
 
       assert plan.smart_account_id == "sa-explicit"
       _ = conn
+    end
+  end
+
+  describe "POST /v1/approvals/:id/approve — held audit symmetry (issue #151)" do
+    test "ambiguous-account held writes intent.auto_exec_held{ambiguous_executable_account}", %{
+      conn: conn
+    } do
+      intent = agent_intent()
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      {:ok, _} = Delegations.grant("sa-held-amb-1", "del-held-amb-1")
+      {:ok, _} = Delegations.grant("sa-held-amb-2", "del-held-amb-2")
+
+      post(conn, ~p"/v1/approvals/#{envelope.id}/approve", %{"actor_id" => "op-amb"})
+
+      successor = Repo.get_by(DecisionEnvelope, intent_id: intent.id, current: true)
+      assert_held_audit(intent.id, successor.id, "ambiguous_executable_account")
+    end
+
+    test "paused-runtime held writes intent.auto_exec_held{runtime_paused}", %{conn: conn} do
+      intent = agent_intent()
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      # One executable delegation so resolution succeeds; the paused
+      # check inside dispatch_auto_exec/3 is what trips.
+      {:ok, _} = Delegations.grant("sa-held-paused", "del-held-paused")
+      {:ok, :paused} = Security.pause(:global)
+
+      post(conn, ~p"/v1/approvals/#{envelope.id}/approve", %{"actor_id" => "op-paused"})
+
+      successor = Repo.get_by(DecisionEnvelope, intent_id: intent.id, current: true)
+      assert_held_audit(intent.id, successor.id, "runtime_paused")
+    end
+
+    test "replay surfaces the held audit row for an approval-driven held intent", %{conn: conn} do
+      intent = agent_intent()
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      # No delegation seeded -> dispatch held.
+      post(conn, ~p"/v1/approvals/#{envelope.id}/approve", %{"actor_id" => "op-replay"})
+
+      replay = json_response(get(build_conn(), ~p"/v1/intents/#{intent.id}/replay"), 200)
+      audit_event_types = Enum.map(replay["audit"], & &1["event_type"])
+
+      assert "intent.auto_exec_held" in audit_event_types
+      assert "approval.granted" in audit_event_types
+    end
+
+    test "dispatched approval does NOT write intent.auto_exec_held", %{conn: conn} do
+      intent = agent_intent()
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      {:ok, _del} = Delegations.grant("sa-dispatched-no-held", "del-dispatched-no-held")
+
+      post(conn, ~p"/v1/approvals/#{envelope.id}/approve", %{"actor_id" => "op-d"})
+
+      refute held_audit_written?(intent.id),
+             "intent.auto_exec_held must not be written when dispatch succeeds"
+    end
+
+    test "rejected approval does NOT write intent.auto_exec_held even with delegation present",
+         %{conn: conn} do
+      intent = agent_intent()
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      # Even with an executable delegation, reject must not auto_exec_held.
+      {:ok, _del} = Delegations.grant("sa-reject-no-held", "del-reject-no-held")
+
+      post(conn, ~p"/v1/approvals/#{envelope.id}/reject", %{
+        "actor_id" => "op-r",
+        "reason" => "duplicate"
+      })
+
+      refute held_audit_written?(intent.id),
+             "intent.auto_exec_held must not be written on the reject path"
     end
   end
 
@@ -395,5 +513,32 @@ defmodule BankWeb.API.V1.ApprovalControllerTest do
       body = json_response(conn2, 409)
       assert body["error"]["code"] == "already_superseded"
     end
+  end
+
+  # --- Held-audit helpers (issue #151) ---------------------------------------
+
+  defp assert_held_audit(intent_id, envelope_id, expected_reason) do
+    rows =
+      Repo.all(
+        from e in AuditEvent,
+          where: e.event_type == "intent.auto_exec_held" and e.correlation_id == ^intent_id,
+          order_by: [desc: e.ts, desc: e.id]
+      )
+
+    assert [%AuditEvent{} = row | _] = rows,
+           "expected an intent.auto_exec_held audit row for intent #{intent_id}; got: #{inspect(rows)}"
+
+    assert row.subject_type == "agent_intent"
+    assert row.subject_id == intent_id
+    assert row.after_ref["decision_envelope_id"] == envelope_id
+    assert row.after_ref["held_reason"] == expected_reason
+    assert row.actor in [:runtime, "runtime"]
+  end
+
+  defp held_audit_written?(intent_id) do
+    Repo.exists?(
+      from e in AuditEvent,
+        where: e.event_type == "intent.auto_exec_held" and e.correlation_id == ^intent_id
+    )
   end
 end

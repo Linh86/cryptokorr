@@ -318,11 +318,15 @@ intent.submitted
   → intent.state_changed      (decided → executing → executed)
 ```
 
-For an evaluation-driven held auto_exec (no executable account at
-evaluation time), an `intent.auto_exec_held` row replaces the
-`execution.auto_dispatched` row and replay shows no execution plan.
+For a held auto_exec — whether the held state was produced by the
+evaluation pipeline (no executable account at evaluation time) or
+by the operator approval path (no/ambiguous/paused/missing-
+delegation gate at approve time) — replay surfaces an
+`intent.auto_exec_held` row in place of the
+`execution.auto_dispatched` row, with the held reason in
+`after_ref.held_reason`. Both paths emit the same audit shape.
 
-For an approval-required path, the chain is:
+For an approval-required path the chain is:
 ```
 intent.submitted → trust.assessed → simulation.produced →
 decision.decided (outcome: approval_required) →
@@ -331,12 +335,9 @@ decision.decided (outcome: auto_exec, successor) →
 intent.state_changed
 ```
 followed by either `execution.auto_dispatched` (when a delegation
-is executable at approve time) OR no further row (when the approve
-path holds dispatch). Today the approve path does not emit a
-dedicated `intent.auto_exec_held` row when it holds — the held
-state is visible from the absence of `execution.auto_dispatched`
-and the `dispatch: "held"` field on the synchronous HTTP response;
-making the approve-path held state explicit in audit is a follow-up.
+is executable at approve time) OR `intent.auto_exec_held` (when a
+gate held the dispatch — the synchronous HTTP response also sets
+`dispatch: "held"` with a `held_reason`).
 
 For simulate calls, a `simulation.requested` row carries the
 `reason`; `refresh` additionally writes a `simulation.produced`
