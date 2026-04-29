@@ -277,8 +277,11 @@ defmodule BankWeb.QueueLiveTest do
         |> render_click()
 
       refute html =~ envelope.id
+      # No delegation in this test setup -> dispatch is held; flash
+      # carries the held-state hint pointing operators at /execute.
       assert html =~ "Approval recorded"
-      assert html =~ "Trigger execution from the decision page"
+      assert html =~ "dispatch held"
+      assert html =~ "no_executable_account"
 
       # DB state reflects the successor envelope.
       successor =
@@ -288,7 +291,8 @@ defmodule BankWeb.QueueLiveTest do
       assert successor.decided_by == :user
       assert successor.supersedes_id == envelope.id
 
-      # No active execution plan was created — operator must trigger
+      # Held: no active execution plan was created — operator must
+      # resolve the gate (e.g. grant a delegation) and trigger
       # /v1/decisions/{id}/execute manually.
       assert is_nil(Bank.Decisions.active_plan_for(successor.id))
     end

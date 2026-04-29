@@ -112,6 +112,7 @@ defmodule BankWeb.ApiSpec do
     ApprovalActionRequest,
     ApprovalActionResponse,
     ApprovalDecisionSummary,
+    ApprovalDispatchedPlan,
     ApprovalNextStep,
     ApprovalQueueResponse,
     Asset,
@@ -315,6 +316,7 @@ defmodule BankWeb.ApiSpec do
       "ApprovalQueueResponse" => ApprovalQueueResponse.schema(),
       "ApprovalActionRequest" => ApprovalActionRequest.schema(),
       "ApprovalNextStep" => ApprovalNextStep.schema(),
+      "ApprovalDispatchedPlan" => ApprovalDispatchedPlan.schema(),
       "ApprovalActionResponse" => ApprovalActionResponse.schema(),
 
       # Per-domain shapes added in #89.

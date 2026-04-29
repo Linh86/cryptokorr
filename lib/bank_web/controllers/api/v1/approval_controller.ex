@@ -6,7 +6,8 @@ defmodule BankWeb.API.V1.ApprovalController do
 
     * `GET  /v1/approvals`                         — pending queue
     * `POST /v1/approvals/:decision_id/approve`    — produces a
-      successor envelope with outcome `auto_exec`
+      successor envelope with outcome `auto_exec` and (when an
+      executable account resolves) materialises an `ExecutionPlan`
     * `POST /v1/approvals/:decision_id/reject`     — produces a
       successor envelope with outcome `block`
 
@@ -19,23 +20,34 @@ defmodule BankWeb.API.V1.ApprovalController do
   The success response carries a `dispatch` field describing what
   happened next:
 
-    * `"recorded"` — approve path; the successor envelope was written
-      but no `ExecutionPlan` was created and no execution was
-      enqueued. The operator must follow up with
-      `POST /v1/decisions/{id}/execute` (passing `smart_account_id`)
-      to actually start execution. This is the v0.1 default; future
-      tiered-autonomy modes may change it.
+    * `"dispatched"` — approve path; the successor envelope was
+      written, an `ExecutionPlan` was created, and `RunExecution`
+      was enqueued. The response includes an `execution_plan`
+      object with the plan id and `smart_account_id`. This is the
+      symmetric counterpart of the auto-exec path the runtime
+      itself takes when `evaluate_intent/2` produces `:auto_exec`
+      (see `Bank.Decisions.dispatch_auto_exec/3`).
+    * `"held"` — approve path; the successor envelope was written
+      but a safety gate withheld dispatch. The response includes a
+      `held_reason` (`no_executable_account`,
+      `ambiguous_executable_account`, `runtime_paused`,
+      `active_plan_exists`, `delegation_not_active`,
+      `stablecoin_adapter_not_wired`). The successor is preserved
+      as `:auto_exec` and current; the operator can resolve the
+      gate and call `POST /v1/decisions/{id}/execute` with an
+      explicit `smart_account_id` to dispatch manually.
     * `"no_dispatch"` — reject path; nothing to execute.
 
-  The `next_step` field on `"recorded"` responses is a hint
-  pointing the operator at the execute endpoint.
+  Dispatch is symmetric with the runtime's evaluation path: pause
+  state, ambiguous accounts, missing delegations, and other gates
+  hold dispatch but never roll back the operator's decision.
   """
 
   use BankWeb, :controller
   use OpenApiSpex.ControllerSpecs
 
   alias Bank.Decisions
-  alias Bank.Decisions.DecisionEnvelope
+  alias Bank.Decisions.{DecisionEnvelope, ExecutionPlan}
   alias Bank.Intents.AgentIntent
   alias Bank.Repo
   alias Bank.WalletScreening.Evidence
@@ -187,13 +199,28 @@ defmodule BankWeb.API.V1.ApprovalController do
     |> json(%{error: %{code: "approval_failed", message: inspect(reason)}})
   end
 
-  defp success_body(%DecisionEnvelope{} = successor, :recorded) do
+  defp success_body(%DecisionEnvelope{} = successor, {:dispatched, %ExecutionPlan{} = plan}) do
     %{
       decision: summarize(successor),
-      dispatch: "recorded",
+      dispatch: "dispatched",
+      execution_plan: %{
+        id: plan.id,
+        smart_account_id: plan.smart_account_id,
+        execution_status: plan.execution_status
+      }
+    }
+  end
+
+  defp success_body(%DecisionEnvelope{} = successor, {:held, reason}) do
+    %{
+      decision: summarize(successor),
+      dispatch: "held",
+      held_reason: Atom.to_string(reason),
       next_step: %{
         endpoint: "POST /v1/decisions/#{successor.id}/execute",
-        message: "approval recorded; execute manually with smart_account_id when ready"
+        message:
+          "approval recorded but dispatch held (#{reason}); resolve the gate and " <>
+            "execute manually with smart_account_id"
       }
     }
   end

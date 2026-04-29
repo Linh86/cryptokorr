@@ -85,11 +85,12 @@ defmodule Bank.DecisionsTest do
       %{intent: intent, envelope: envelope}
     end
 
-    test "happy path: writes auto_exec successor and does NOT enqueue execution", %{
+    test "happy path: writes auto_exec successor; held when no executable account", %{
       intent: intent,
       envelope: envelope
     } do
-      assert {:ok, successor, :recorded} =
+      # No delegation -> dispatch held with :no_executable_account.
+      assert {:ok, successor, {:held, :no_executable_account}} =
                Decisions.approve(envelope.id, actor_id: "op-test")
 
       assert successor.outcome == :auto_exec
@@ -106,34 +107,74 @@ defmodule Bank.DecisionsTest do
       assert reloaded_intent.current_decision_id == successor.id
       assert reloaded_intent.state == :decided
 
-      # No execution plan was implicitly created.
+      # Held: no execution plan, no RunExecution enqueued.
       assert is_nil(Decisions.active_plan_for(successor.id))
-
-      # No RunExecution job was enqueued. Operator must follow up with
-      # POST /v1/decisions/{id}/execute.
       refute_enqueued(worker: RunExecution)
     end
 
-    test "while runtime paused: still records the approval (paused does not block decisions)",
-         %{
-           envelope: envelope
-         } do
+    test "with one executable delegation: dispatches, creates plan, and enqueues RunExecution",
+         %{envelope: envelope} do
+      {:ok, _del} = Delegations.grant("sa_approval_dispatch", "del_approval_dispatch")
+
+      assert {:ok, successor, {:dispatched, plan}} =
+               Decisions.approve(envelope.id, actor_id: "op-dispatch")
+
+      assert successor.outcome == :auto_exec
+      assert plan.decision_id == successor.id
+      assert plan.smart_account_id == "sa_approval_dispatch"
+      assert plan.execution_status == :prepared
+      assert plan.active
+
+      assert_enqueued(
+        worker: RunExecution,
+        queue: :executions_run,
+        args: %{"decision_id" => successor.id}
+      )
+    end
+
+    test "while runtime paused: records the approval but holds dispatch with :runtime_paused",
+         %{envelope: envelope} do
+      {:ok, _del} = Delegations.grant("sa_paused_approval", "del_paused_approval")
       {:ok, :paused} = Security.pause(:global)
 
-      assert {:ok, successor, :recorded} =
+      assert {:ok, successor, {:held, :runtime_paused}} =
                Decisions.approve(envelope.id, actor_id: "op-pause")
 
       assert successor.outcome == :auto_exec
       assert successor.state == :decided
       assert successor.current == true
 
-      # Approval no longer attempts dispatch, so pause has no extra
-      # effect on its side.
       refute_enqueued(worker: RunExecution)
       assert is_nil(Decisions.active_plan_for(successor.id))
     end
 
-    test "rejects already-superseded envelope", %{envelope: envelope} do
+    test "ambiguous delegations -> held with :ambiguous_executable_account",
+         %{envelope: envelope} do
+      {:ok, _del1} = Delegations.grant("sa_amb_a", "del_amb_a")
+      {:ok, _del2} = Delegations.grant("sa_amb_b", "del_amb_b")
+
+      assert {:ok, _successor, {:held, :ambiguous_executable_account}} =
+               Decisions.approve(envelope.id, actor_id: "op-amb")
+
+      refute_enqueued(worker: RunExecution)
+    end
+
+    test "explicit :smart_account_id opt overrides the resolver",
+         %{envelope: envelope} do
+      {:ok, _del1} = Delegations.grant("sa_amb_c", "del_amb_c")
+      {:ok, _del2} = Delegations.grant("sa_amb_d", "del_amb_d")
+      {:ok, _del3} = Delegations.grant("sa_explicit_app", "del_explicit_app")
+
+      assert {:ok, _successor, {:dispatched, plan}} =
+               Decisions.approve(envelope.id,
+                 actor_id: "op-explicit",
+                 smart_account_id: "sa_explicit_app"
+               )
+
+      assert plan.smart_account_id == "sa_explicit_app"
+    end
+
+    test "rejects already-superseded envelope (double-approve)", %{envelope: envelope} do
       {:ok, _, _} = Decisions.approve(envelope.id, actor_id: "op-1")
 
       assert {:error, :already_superseded} =
@@ -148,10 +189,13 @@ defmodule Bank.DecisionsTest do
                Decisions.approve(envelope.id, actor_id: "op")
     end
 
-    test "approved envelope is executable via request_manual_execution", %{
+    test "approved+held envelope is still executable via request_manual_execution", %{
       envelope: envelope
     } do
-      {:ok, successor, :recorded} =
+      # Held path leaves the successor in :auto_exec / :decided so the
+      # operator can resolve the gate (e.g. grant a delegation) and
+      # dispatch manually.
+      {:ok, successor, {:held, :no_executable_account}} =
         Decisions.approve(envelope.id, actor_id: "op-test")
 
       {:ok, _del} = Delegations.grant("sa_handoff", "del_handoff")

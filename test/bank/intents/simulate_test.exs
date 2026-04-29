@@ -190,7 +190,20 @@ defmodule Bank.Intents.SimulateTest do
   describe "replay integration" do
     test "replay surfaces both the prior and the new simulation in deterministic order" do
       intent = agent_intent()
-      prior = simulation_report(intent: intent, current: true)
+
+      # Seed the prior with a clearly-earlier generated_at. The fixture
+      # default uses a monotonic offset that, under heavy precommit
+      # load, can drift past the wall-clock `DateTime.utc_now/0` the
+      # `Quotes.preview/2` stub uses — pinning a definite past
+      # timestamp here keeps the (generated_at asc, id asc) replay
+      # ordering deterministic across precommit interleavings.
+      prior =
+        simulation_report(
+          intent: intent,
+          current: true,
+          generated_at: DateTime.add(DateTime.utc_now(), -3600, :second)
+        )
+
       assert {:ok, %{report: new_report}} = Intents.simulate(intent.id, "refresh")
 
       {:ok, bundle} = Bank.Audit.replay(intent.id)
@@ -198,8 +211,7 @@ defmodule Bank.Intents.SimulateTest do
       simulation_ids = Enum.map(bundle.simulations, & &1.id)
       assert prior.id in simulation_ids
       assert new_report.id in simulation_ids
-      # Sorted ascending by generated_at — the prior fixture uses an
-      # earlier monotonic timestamp.
+
       assert Enum.find_index(simulation_ids, &(&1 == prior.id)) <
                Enum.find_index(simulation_ids, &(&1 == new_report.id))
     end

@@ -4,9 +4,11 @@ defmodule BankWeb.API.V1.ApprovalControllerTest do
 
   import Bank.Fixtures
 
-  alias Bank.Decisions.DecisionEnvelope
+  alias Bank.Decisions
+  alias Bank.Decisions.{DecisionEnvelope, ExecutionPlan}
+  alias Bank.Delegations
   alias Bank.Repo
-  alias Bank.Runtime.Workers.RunExecution
+  alias Bank.Runtime.Workers.{ExpireApproval, RunExecution}
   alias Bank.Security
   alias Bank.Security.PauseState
   alias Bank.WalletScreening
@@ -75,8 +77,48 @@ defmodule BankWeb.API.V1.ApprovalControllerTest do
     end
   end
 
-  describe "POST /v1/approvals/:id/approve" do
-    test "approves and produces auto_exec successor", %{conn: conn} do
+  describe "POST /v1/approvals/:id/approve — dispatched path" do
+    test "produces auto_exec successor + ExecutionPlan + RunExecution job when one delegation is executable",
+         %{conn: conn} do
+      intent = agent_intent()
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      {:ok, _del} = Delegations.grant("sa-approval-1", "del-approval-1")
+
+      conn =
+        post(conn, ~p"/v1/approvals/#{envelope.id}/approve", %{"actor_id" => "op-linh"})
+
+      body = json_response(conn, 200)
+      assert body["decision"]["outcome"] == "auto_exec"
+      assert body["dispatch"] == "dispatched"
+      assert body["execution_plan"]["smart_account_id"] == "sa-approval-1"
+      assert body["execution_plan"]["execution_status"] == "prepared"
+      refute Map.has_key?(body, "next_step")
+      refute Map.has_key?(body, "held_reason")
+
+      successor = Repo.get_by(DecisionEnvelope, intent_id: intent.id, current: true)
+      assert successor.outcome == :auto_exec
+      assert successor.supersedes_id == envelope.id
+
+      assert %ExecutionPlan{} = Decisions.active_plan_for(successor.id)
+
+      assert_enqueued(
+        worker: RunExecution,
+        queue: :executions_run,
+        args: %{"decision_id" => successor.id}
+      )
+    end
+  end
+
+  describe "POST /v1/approvals/:id/approve — held path" do
+    test "no delegation -> dispatch held with :no_executable_account, no plan", %{conn: conn} do
       intent = agent_intent()
 
       envelope =
@@ -88,33 +130,27 @@ defmodule BankWeb.API.V1.ApprovalControllerTest do
         )
 
       conn =
-        post(conn, ~p"/v1/approvals/#{envelope.id}/approve", %{
-          "actor_id" => "op-linh"
-        })
+        post(conn, ~p"/v1/approvals/#{envelope.id}/approve", %{"actor_id" => "op-linh"})
 
       body = json_response(conn, 200)
       assert body["decision"]["outcome"] == "auto_exec"
-      assert body["dispatch"] == "recorded"
+      assert body["dispatch"] == "held"
+      assert body["held_reason"] == "no_executable_account"
 
       assert %{"endpoint" => endpoint, "message" => message} = body["next_step"]
       assert endpoint =~ "/v1/decisions/"
       assert endpoint =~ "/execute"
+      assert message =~ "no_executable_account"
       assert message =~ "smart_account_id"
 
-      successor =
-        Repo.get_by(DecisionEnvelope, intent_id: intent.id, current: true)
-
-      assert successor.id != envelope.id
+      successor = Repo.get_by(DecisionEnvelope, intent_id: intent.id, current: true)
       assert successor.outcome == :auto_exec
-      assert successor.supersedes_id == envelope.id
-
-      # Approval is now record-only — no plan, no enqueue. Operator
-      # must follow up with POST /v1/decisions/{id}/execute.
+      assert is_nil(Decisions.active_plan_for(successor.id))
       refute_enqueued(worker: RunExecution)
-      assert is_nil(Bank.Decisions.active_plan_for(successor.id))
     end
 
-    test "approve while paused still records (paused does not block decisions)", %{conn: conn} do
+    test "ambiguous delegations -> dispatch held with :ambiguous_executable_account",
+         %{conn: conn} do
       intent = agent_intent()
 
       envelope =
@@ -125,21 +161,48 @@ defmodule BankWeb.API.V1.ApprovalControllerTest do
           approval_expires_at: ~U[2030-01-01 00:00:00Z]
         )
 
+      {:ok, _del1} = Delegations.grant("sa-amb-1", "del-amb-1")
+      {:ok, _del2} = Delegations.grant("sa-amb-2", "del-amb-2")
+
+      conn =
+        post(conn, ~p"/v1/approvals/#{envelope.id}/approve", %{"actor_id" => "op-linh"})
+
+      body = json_response(conn, 200)
+      assert body["dispatch"] == "held"
+      assert body["held_reason"] == "ambiguous_executable_account"
+      refute_enqueued(worker: RunExecution)
+    end
+
+    test "paused runtime -> approval recorded but dispatch held with :runtime_paused",
+         %{conn: conn} do
+      intent = agent_intent()
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      {:ok, _del} = Delegations.grant("sa-paused", "del-paused")
       {:ok, :paused} = Security.pause(:global)
 
       conn =
-        post(conn, ~p"/v1/approvals/#{envelope.id}/approve", %{
-          "actor_id" => "op-paused"
-        })
+        post(conn, ~p"/v1/approvals/#{envelope.id}/approve", %{"actor_id" => "op-paused"})
 
       body = json_response(conn, 200)
       assert body["decision"]["outcome"] == "auto_exec"
-      assert body["dispatch"] == "recorded"
+      assert body["dispatch"] == "held"
+      assert body["held_reason"] == "runtime_paused"
 
       refute_enqueued(worker: RunExecution)
+      successor = Repo.get_by(DecisionEnvelope, intent_id: intent.id, current: true)
+      assert is_nil(Decisions.active_plan_for(successor.id))
     end
 
-    test "reject response carries no_dispatch", %{conn: conn} do
+    test "non-active delegation (revoking) -> dispatch held with :delegation_not_active",
+         %{conn: conn} do
       intent = agent_intent()
 
       envelope =
@@ -150,12 +213,94 @@ defmodule BankWeb.API.V1.ApprovalControllerTest do
           approval_expires_at: ~U[2030-01-01 00:00:00Z]
         )
 
+      {:ok, _del} = Delegations.grant("sa-revoking", "del-revoking")
+      {:ok, _} = Delegations.record_revoke_requested("sa-revoking")
+
       conn =
-        post(conn, ~p"/v1/approvals/#{envelope.id}/reject", %{"actor_id" => "op"})
+        post(conn, ~p"/v1/approvals/#{envelope.id}/approve", %{"actor_id" => "op-linh"})
 
       body = json_response(conn, 200)
-      assert body["dispatch"] == "no_dispatch"
+      assert body["dispatch"] == "held"
+      assert body["held_reason"] == "no_executable_account"
       refute_enqueued(worker: RunExecution)
+    end
+
+    test "explicit smart_account_id opt overrides the resolver", %{conn: conn} do
+      # The HTTP endpoint does not currently accept smart_account_id in
+      # the body, but the underlying facade does — this pins that
+      # facade-level override path so future endpoint additions can
+      # rely on it. Test calls Bank.Decisions.approve/2 directly.
+      intent = agent_intent()
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      {:ok, _del1} = Delegations.grant("sa-amb-3", "del-amb-3")
+      {:ok, _del2} = Delegations.grant("sa-amb-4", "del-amb-4")
+      {:ok, _del3} = Delegations.grant("sa-explicit", "del-explicit")
+
+      assert {:ok, _successor, {:dispatched, plan}} =
+               Decisions.approve(envelope.id,
+                 actor_id: "op-explicit",
+                 smart_account_id: "sa-explicit"
+               )
+
+      assert plan.smart_account_id == "sa-explicit"
+      _ = conn
+    end
+  end
+
+  describe "POST /v1/approvals/:id/approve — guards" do
+    test "double-approve returns 409 already_superseded on the second call", %{conn: conn} do
+      intent = agent_intent()
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      conn1 = post(conn, ~p"/v1/approvals/#{envelope.id}/approve", %{"actor_id" => "op-1"})
+      assert json_response(conn1, 200)
+
+      conn2 = post(conn, ~p"/v1/approvals/#{envelope.id}/approve", %{"actor_id" => "op-2"})
+      body = json_response(conn2, 409)
+      assert body["error"]["code"] == "already_superseded"
+    end
+
+    test "approving an expired-and-already-superseded envelope returns 409", %{conn: conn} do
+      intent = agent_intent()
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          current: true,
+          # Past expiry so ExpireApproval will accept the job below.
+          approval_expires_at: DateTime.add(DateTime.utc_now(), -3600, :second)
+        )
+
+      # Run the expiry worker — supersedes prior with :block, intent → :blocked.
+      assert :ok =
+               perform_job(ExpireApproval, %{"decision_envelope_id" => envelope.id})
+
+      # Confirm the prior is no longer current and there is now a :block successor.
+      refute Repo.get!(DecisionEnvelope, envelope.id).current
+
+      block_successor = Repo.get_by(DecisionEnvelope, intent_id: intent.id, current: true)
+      assert block_successor.outcome == :block
+
+      # Operator tries to approve the (now non-current) original envelope.
+      conn = post(conn, ~p"/v1/approvals/#{envelope.id}/approve", %{"actor_id" => "op"})
+      body = json_response(conn, 409)
+      assert body["error"]["code"] == "already_superseded"
     end
 
     test "requires actor_id", %{conn: conn} do
@@ -195,7 +340,7 @@ defmodule BankWeb.API.V1.ApprovalControllerTest do
   end
 
   describe "POST /v1/approvals/:id/reject" do
-    test "rejects and blocks the intent", %{conn: conn} do
+    test "rejects, blocks intent, never dispatches", %{conn: conn} do
       intent = agent_intent()
 
       envelope =
@@ -206,6 +351,10 @@ defmodule BankWeb.API.V1.ApprovalControllerTest do
           approval_expires_at: ~U[2030-01-01 00:00:00Z]
         )
 
+      # Even with an executable delegation present, reject must NOT
+      # dispatch — the operator chose to block.
+      {:ok, _del} = Delegations.grant("sa-reject", "del-reject")
+
       conn =
         post(conn, ~p"/v1/approvals/#{envelope.id}/reject", %{
           "actor_id" => "op-linh",
@@ -214,13 +363,37 @@ defmodule BankWeb.API.V1.ApprovalControllerTest do
 
       body = json_response(conn, 200)
       assert body["decision"]["outcome"] == "block"
+      assert body["dispatch"] == "no_dispatch"
+      refute Map.has_key?(body, "execution_plan")
+      refute Map.has_key?(body, "held_reason")
 
-      successor =
-        Repo.get_by(DecisionEnvelope, intent_id: intent.id, current: true)
-
+      successor = Repo.get_by(DecisionEnvelope, intent_id: intent.id, current: true)
       assert successor.outcome == :block
+
       updated_intent = Repo.get!(Bank.Intents.AgentIntent, intent.id)
       assert updated_intent.state == :blocked
+
+      refute_enqueued(worker: RunExecution)
+      assert is_nil(Decisions.active_plan_for(successor.id))
+    end
+
+    test "double-reject returns 409 already_superseded", %{conn: conn} do
+      intent = agent_intent()
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      conn1 = post(conn, ~p"/v1/approvals/#{envelope.id}/reject", %{"actor_id" => "op-1"})
+      assert json_response(conn1, 200)
+
+      conn2 = post(conn, ~p"/v1/approvals/#{envelope.id}/reject", %{"actor_id" => "op-2"})
+      body = json_response(conn2, 409)
+      assert body["error"]["code"] == "already_superseded"
     end
   end
 end
