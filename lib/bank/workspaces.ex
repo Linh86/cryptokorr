@@ -97,6 +97,18 @@ defmodule Bank.Workspaces do
   end
 
   @doc """
+  Look up a membership by `(user, workspace_id)`. Returns the struct
+  or `nil`. Used by `Bank.Access.apply_invites_for_user/1` to decide
+  whether to insert or accept-as-already-member when an exact-email
+  invite matches.
+  """
+  @spec get_membership(User.t(), uuid()) :: Membership.t() | nil
+  def get_membership(%User{id: user_id}, workspace_id)
+      when is_binary(workspace_id) do
+    Repo.get_by(Membership, user_id: user_id, workspace_id: workspace_id)
+  end
+
+  @doc """
   All active memberships for a user, joined with the workspace.
   Ordered by workspace slug for deterministic test output.
   """

@@ -18,6 +18,8 @@ defmodule BankWeb.AuthControllerTest do
 
   use BankWeb.ConnCase, async: false
 
+  alias Bank.Access
+  alias Bank.Access.AccessInvite
   alias Bank.Accounts
   alias Bank.Accounts.User
   alias Bank.Workspaces
@@ -282,6 +284,180 @@ defmodule BankWeb.AuthControllerTest do
       conn = post(conn, ~p"/logout", %{"_method" => "delete"})
       assert redirected_to(conn) == ~p"/login"
       assert get_session(conn, :user_id) == nil
+    end
+  end
+
+  describe "invite-driven login (#156)" do
+    setup do
+      {:ok, ws} = Workspaces.create_workspace(%{slug: "invite-ws", name: "Invite Workspace"})
+
+      {:ok, admin} =
+        Accounts.find_or_create_from_oauth(%{
+          provider: :google,
+          subject: "admin-#{System.unique_integer([:positive])}",
+          email: "admin@cryptobank.test",
+          name: "Admin"
+        })
+
+      %{workspace: ws, admin: admin}
+    end
+
+    defp finish_login(conn, sub, email) do
+      put_stub(%{claims: claims_for(sub, email)})
+      conn = get(conn, ~p"/auth/google")
+      state = get_session(conn, :oauth_state)
+      get(conn, ~p"/auth/google/callback?code=stub-code&state=#{state}")
+    end
+
+    test "exact-email invite turns a fresh login into a workspace member landing on /",
+         %{conn: conn, workspace: ws, admin: admin} do
+      {:ok, _invite} =
+        Access.create_invite(
+          %{
+            workspace_id: ws.id,
+            invite_type: :exact_email,
+            email: "alice@example.com",
+            role: :operator
+          },
+          admin
+        )
+
+      conn = finish_login(conn, "exact-invitee", "alice@example.com")
+
+      assert redirected_to(conn) == ~p"/"
+      assert Phoenix.Flash.get(conn.assigns.flash, :info) =~ "Welcome"
+
+      user = Accounts.get_user(get_session(conn, :user_id))
+
+      assert [%{workspace_id: workspace_id, role: :operator}] =
+               Workspaces.list_active_memberships(user)
+
+      assert workspace_id == ws.id
+    end
+
+    test "domain-only invite leaves the login on /pending with no membership",
+         %{conn: conn, workspace: ws, admin: admin} do
+      {:ok, _invite} =
+        Access.create_invite(
+          %{
+            workspace_id: ws.id,
+            invite_type: :domain,
+            domain: "example.com",
+            role: :viewer
+          },
+          admin
+        )
+
+      conn = finish_login(conn, "domain-invitee", "carol@example.com")
+
+      assert redirected_to(conn) == ~p"/pending"
+
+      user = Accounts.get_user(get_session(conn, :user_id))
+      assert [] = Workspaces.list_active_memberships(user)
+    end
+
+    test "expired invite is ignored — login lands on /pending",
+         %{conn: conn, workspace: ws, admin: admin} do
+      past = DateTime.add(DateTime.utc_now(), -3600, :second)
+
+      {:ok, _invite} =
+        Access.create_invite(
+          %{
+            workspace_id: ws.id,
+            invite_type: :exact_email,
+            email: "alice@example.com",
+            role: :operator,
+            expires_at: past
+          },
+          admin
+        )
+
+      conn = finish_login(conn, "expired-invitee", "alice@example.com")
+
+      assert redirected_to(conn) == ~p"/pending"
+
+      user = Accounts.get_user(get_session(conn, :user_id))
+      assert [] = Workspaces.list_active_memberships(user)
+    end
+
+    test "revoked invite is ignored — login lands on /pending",
+         %{conn: conn, workspace: ws, admin: admin} do
+      {:ok, invite} =
+        Access.create_invite(
+          %{
+            workspace_id: ws.id,
+            invite_type: :exact_email,
+            email: "alice@example.com",
+            role: :operator
+          },
+          admin
+        )
+
+      {:ok, _} = Access.revoke_invite(invite, admin)
+
+      conn = finish_login(conn, "revoked-invitee", "alice@example.com")
+
+      assert redirected_to(conn) == ~p"/pending"
+
+      user = Accounts.get_user(get_session(conn, :user_id))
+      assert [] = Workspaces.list_active_memberships(user)
+    end
+
+    test "repeat login is idempotent: only one membership and the invite stays accepted",
+         %{conn: conn, workspace: ws, admin: admin} do
+      {:ok, invite} =
+        Access.create_invite(
+          %{
+            workspace_id: ws.id,
+            invite_type: :exact_email,
+            email: "alice@example.com",
+            role: :operator
+          },
+          admin
+        )
+
+      conn = finish_login(conn, "idempotent", "alice@example.com")
+      assert redirected_to(conn) == ~p"/"
+
+      _conn = finish_login(build_conn(), "idempotent", "alice@example.com")
+
+      user = Accounts.get_user(get_session(conn, :user_id))
+      assert [_one] = Workspaces.list_active_memberships(user)
+      assert %AccessInvite{status: :accepted} = Bank.Repo.reload(invite)
+    end
+
+    test "no invite at all keeps the login on /pending", %{conn: conn} do
+      conn = finish_login(conn, "no-invite", "stranger@nowhere.org")
+
+      assert redirected_to(conn) == ~p"/pending"
+
+      user = Accounts.get_user(get_session(conn, :user_id))
+      assert [] = Workspaces.list_active_memberships(user)
+    end
+
+    test "disabled user with a matching exact-email invite is still refused",
+         %{conn: conn, workspace: ws, admin: admin} do
+      {:ok, _invite} =
+        Access.create_invite(
+          %{
+            workspace_id: ws.id,
+            invite_type: :exact_email,
+            email: "alice@example.com",
+            role: :operator
+          },
+          admin
+        )
+
+      # First login — invite would normally apply. Disable the user
+      # immediately afterward, then try a second login.
+      conn1 = finish_login(conn, "disabled-invitee", "alice@example.com")
+      user = Accounts.get_user(get_session(conn1, :user_id))
+      {:ok, _} = Accounts.disable_user(user)
+
+      conn2 = finish_login(build_conn(), "disabled-invitee", "alice@example.com")
+      assert redirected_to(conn2) == ~p"/login"
+      assert Phoenix.Flash.get(conn2.assigns.flash, :error) =~ "disabled"
+      assert get_session(conn2, :user_id) == nil
     end
   end
 
