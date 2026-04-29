@@ -28,16 +28,450 @@ defmodule Bank.Decisions do
   import Ecto.Query
 
   alias Bank.Audit.Events
-  alias Bank.Decisions.{DecisionEnvelope, ExecutionPlan}
+  alias Bank.Autonomy
+  alias Bank.Decisions.{DecisionEnvelope, ExecutionPlan, SimulationReport, TrustAssessment}
   alias Bank.Delegations
   alias Bank.Intents.AgentIntent
+  alias Bank.Policies
+  alias Bank.Quotes
   alias Bank.Repo
   alias Bank.Runtime
   alias Bank.Runtime.Notifier
   alias Bank.Security
+  alias Bank.TrustEngine
   alias Ecto.Multi
 
   require Logger
+
+  @evaluable_states [:submitted, :evaluating, :decided, :blocked]
+  @decided_outcomes [:auto_exec, :hold, :approval_required]
+  @default_simulation_provider "stub"
+  @default_simulation_freshness_ttl 30
+
+  # --- Evaluation pipeline ------------------------------------------------
+
+  @typedoc """
+  Result of `evaluate_intent/2`. Carries the freshly-written current
+  rows, the prior current rows that were superseded (if any), and the
+  outcome that drove the intent's new state.
+  """
+  @type evaluation_result :: %{
+          intent: AgentIntent.t(),
+          trust: TrustAssessment.t(),
+          simulation: SimulationReport.t(),
+          decision: DecisionEnvelope.t(),
+          superseded: %{
+            trust: TrustAssessment.t() | nil,
+            simulation: SimulationReport.t() | nil,
+            decision: DecisionEnvelope.t() | nil
+          },
+          outcome: Autonomy.outcome(),
+          preview: Quotes.result()
+        }
+
+  @doc """
+  Run the deterministic evaluation pipeline for an `%AgentIntent{}`
+  and persist the resulting trust / simulation / decision rows.
+
+  This is the single facade the workers `EvaluateIntent` and
+  `ReevaluateIntent` call. It composes the existing primitives:
+
+    * `Bank.TrustEngine.classify/2`        — produces trust attrs
+    * `Bank.Quotes.preview/2`              — produces a Preview struct
+    * `Bank.Policies.evaluate/2`           — produces a policy `%Evaluation{}`
+    * `Bank.Autonomy.route/2`              — chooses outcome + risk tier
+
+  Then, inside one `Ecto.Multi`:
+
+    1. demotes the prior current `TrustAssessment` (if any) and
+       inserts the new one;
+    2. demotes the prior current `SimulationReport` (if any) and
+       inserts the new one — `:completed` for a healthy preview,
+       `:failed` otherwise;
+    3. demotes the prior current `DecisionEnvelope` (if any) and
+       inserts the new one with its policy snapshot, references to
+       the new trust + simulation rows, and supersedes_id pointing
+       at the prior envelope;
+    4. updates the intent's cached `current_*_id` pointers and its
+       `state` (`:decided` for `auto_exec | hold | approval_required`,
+       `:blocked` for `block`).
+
+  After the transaction commits, the audit events for the four
+  effects are appended via `Bank.Runtime.emit_audit/1`. No execution
+  is enqueued and no on-chain work is dispatched — that is issue
+  #137's surface.
+
+  ## Inputs
+
+    * `intent_or_id` — `%AgentIntent{}` struct or its uuid string.
+    * `opts`:
+      * `:now`      — clock override (default `DateTime.utc_now/0`).
+      * `:rules`    — pre-loaded policy rule list (avoids a second DB
+        round-trip when the caller already holds the snapshot).
+      * `:preview`  — pre-computed `Bank.Quotes.preview/2` result;
+        skips the in-process call. Tests use this to drive specific
+        branches of the autonomy router.
+      * `:paused?`  — pre-computed paused state; defaults to
+        `Bank.Security.paused?(:global)`.
+      * `:thresholds` — autonomy threshold override, forwarded to
+        `Bank.Autonomy.route/2`.
+      * `:reason`   — string carried into the envelope's reasons list
+        when present (e.g. `"policy_changed"` for re-evaluation).
+
+  ## Returns
+
+    * `{:ok, evaluation_result()}` on success.
+    * `{:error, :not_found}` — the id resolves to no intent.
+    * `{:error, {:wrong_state, state}}` — the intent is in a state
+      where evaluation is not legal (`:executing`, `:executed`,
+      `:cancelled`, `:expired`).
+
+  Re-evaluation is the same call: pass an intent that is already in
+  `:decided` or `:blocked`. The supersession chain on each child row
+  preserves replay history.
+  """
+  @spec evaluate_intent(AgentIntent.t() | String.t(), keyword()) ::
+          {:ok, evaluation_result()}
+          | {:error, :not_found | {:wrong_state, atom()} | term()}
+  def evaluate_intent(intent_or_id, opts \\ [])
+
+  def evaluate_intent(%AgentIntent{} = intent, opts), do: do_evaluate_intent(intent, opts)
+
+  def evaluate_intent(intent_id, opts) when is_binary(intent_id) do
+    case Repo.get(AgentIntent, intent_id) do
+      nil -> {:error, :not_found}
+      %AgentIntent{} = intent -> do_evaluate_intent(intent, opts)
+    end
+  end
+
+  defp do_evaluate_intent(%AgentIntent{state: state} = intent, opts)
+       when state in @evaluable_states do
+    intent = Repo.preload(intent, [:target_address_label, :target_counterparty])
+    run_evaluation(intent, opts)
+  end
+
+  defp do_evaluate_intent(%AgentIntent{state: state}, _opts) do
+    {:error, {:wrong_state, state}}
+  end
+
+  defp run_evaluation(%AgentIntent{} = intent, opts) do
+    now = Keyword.get(opts, :now, DateTime.utc_now())
+
+    trust_attrs = TrustEngine.classify(intent, Keyword.put_new(opts, :now, now))
+    preview_result = Keyword.get_lazy(opts, :preview, fn -> Quotes.preview(intent, opts) end)
+    policy = evaluate_policy(intent, opts, now)
+    paused? = Keyword.get_lazy(opts, :paused?, fn -> Security.paused?(:global) end)
+
+    decision =
+      Autonomy.route(
+        %{
+          intent: intent,
+          policy: policy,
+          trust: trust_attrs,
+          preview: preview_result,
+          paused?: paused?
+        },
+        opts
+      )
+
+    prior_trust = current_trust_for(intent.id)
+    prior_simulation = current_simulation_for(intent.id)
+    prior_decision = current_decision_for(intent.id)
+    prior_intent_state = intent.state
+
+    multi =
+      Multi.new()
+      |> maybe_demote(:demote_trust, prior_trust, &TrustAssessment.mark_not_current/1)
+      |> Multi.insert(
+        :trust,
+        TrustAssessment.changeset(
+          %TrustAssessment{},
+          build_trust_attrs(intent, trust_attrs, prior_trust)
+        )
+      )
+      |> maybe_demote(:demote_simulation, prior_simulation, &SimulationReport.mark_not_current/1)
+      |> Multi.insert(
+        :simulation,
+        SimulationReport.changeset(
+          %SimulationReport{},
+          build_simulation_attrs(intent, preview_result, prior_simulation, now)
+        )
+      )
+      |> maybe_demote(:demote_decision, prior_decision, &DecisionEnvelope.mark_not_current/1)
+      |> Multi.insert(:decision, fn %{trust: t, simulation: s} ->
+        DecisionEnvelope.changeset(
+          %DecisionEnvelope{},
+          build_decision_attrs(intent, decision, policy, t, s, prior_decision, opts)
+        )
+      end)
+      |> Multi.update(:intent, fn %{trust: t, simulation: s, decision: d} ->
+        AgentIntent.current_pointer_changeset(intent, %{
+          state: intent_state_for_outcome(decision.outcome),
+          current_trust_assessment_id: t.id,
+          current_simulation_id: s.id,
+          current_decision_id: d.id
+        })
+      end)
+
+    case Repo.transaction(multi) do
+      {:ok, %{trust: trust, simulation: simulation, decision: envelope, intent: updated_intent}} ->
+        emit_evaluation_audits(
+          updated_intent,
+          prior_intent_state,
+          trust,
+          simulation,
+          envelope,
+          prior_trust,
+          prior_simulation
+        )
+
+        maybe_enqueue_approval_expiry(envelope)
+
+        {:ok,
+         %{
+           intent: updated_intent,
+           trust: trust,
+           simulation: simulation,
+           decision: envelope,
+           superseded: %{
+             trust: prior_trust,
+             simulation: prior_simulation,
+             decision: prior_decision
+           },
+           outcome: decision.outcome,
+           preview: preview_result
+         }}
+
+      {:error, step, reason, _changes} ->
+        Logger.error("Decisions.evaluate_intent: multi failed at #{step}: #{inspect(reason)}")
+        {:error, {step, reason}}
+    end
+  end
+
+  defp maybe_enqueue_approval_expiry(%DecisionEnvelope{
+         outcome: :approval_required,
+         id: id,
+         approval_expires_at: %DateTime{} = expires_at
+       }) do
+    case Runtime.enqueue_approval_expiry(id, expires_at) do
+      {:ok, _job} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Decisions.evaluate_intent: failed to enqueue approval expiry for #{id}: #{inspect(reason)}"
+        )
+
+        :ok
+    end
+  end
+
+  defp maybe_enqueue_approval_expiry(_envelope), do: :ok
+
+  defp evaluate_policy(intent, opts, now) do
+    eval_opts = [now: now]
+
+    eval_opts =
+      if Keyword.has_key?(opts, :rules), do: [{:rules, opts[:rules]} | eval_opts], else: eval_opts
+
+    Policies.evaluate(intent, eval_opts)
+  end
+
+  defp maybe_demote(multi, _key, nil, _fun), do: multi
+
+  defp maybe_demote(multi, key, %_{} = prior, fun) do
+    Multi.update(multi, key, fun.(prior))
+  end
+
+  defp build_trust_attrs(intent, trust_attrs, prior) do
+    trust_attrs
+    |> Map.put(:intent_id, intent.id)
+    |> Map.put(:current, true)
+    |> Map.put(:supersedes_id, prior && prior.id)
+    |> wrap_contradictions()
+  end
+
+  defp wrap_contradictions(%{contradictions: items} = attrs) when is_list(items) do
+    Map.put(attrs, :contradictions, %{"items" => items})
+  end
+
+  defp wrap_contradictions(attrs), do: attrs
+
+  defp build_simulation_attrs(intent, {:ok, %Quotes.Preview{} = preview}, prior, _now) do
+    %{
+      intent_id: intent.id,
+      provider: preview.provider,
+      provider_trace_ref: preview.provider_trace_ref,
+      chain: intent.chain,
+      asset: intent.asset,
+      predicted_balance_changes: balance_changes_payload(preview.balance_impact),
+      estimated_gas: preview.estimated_gas,
+      estimated_fees: estimated_fees_payload(preview),
+      routing_path: preview.route,
+      expected_output: preview.expected_output,
+      slippage_exposure: nil,
+      failure_conditions: %{"items" => preview.failure_conditions || []},
+      generated_at: preview.generated_at,
+      freshness_ttl_seconds: preview.freshness_ttl_seconds || @default_simulation_freshness_ttl,
+      status: :completed,
+      current: true,
+      supersedes_id: prior && prior.id
+    }
+  end
+
+  defp build_simulation_attrs(intent, {:error, reason}, prior, now) do
+    %{
+      intent_id: intent.id,
+      provider: @default_simulation_provider,
+      provider_trace_ref: nil,
+      chain: intent.chain,
+      asset: intent.asset,
+      predicted_balance_changes: %{"items" => []},
+      estimated_gas: nil,
+      estimated_fees: nil,
+      routing_path: nil,
+      expected_output: nil,
+      slippage_exposure: nil,
+      failure_conditions: %{
+        "items" => [
+          %{
+            "kind" => "preview_failed",
+            "message" => simulation_failure_message(reason)
+          }
+        ]
+      },
+      generated_at: now,
+      freshness_ttl_seconds: @default_simulation_freshness_ttl,
+      status: :failed,
+      current: true,
+      supersedes_id: prior && prior.id
+    }
+  end
+
+  defp build_simulation_attrs(intent, _other, prior, now) do
+    build_simulation_attrs(intent, {:error, :preview_missing}, prior, now)
+  end
+
+  defp simulation_failure_message(:provider_unavailable), do: "preview provider unavailable"
+  defp simulation_failure_message(:stale), do: "preview stale; awaiting refresh"
+  defp simulation_failure_message(:preview_missing), do: "no preview produced"
+  defp simulation_failure_message({:simulation_failed, msg}), do: "simulation failed: #{msg}"
+  defp simulation_failure_message({:unsupported, msg}), do: "preview unsupported: #{msg}"
+  defp simulation_failure_message({:provider_exception, msg}), do: "provider exception: #{msg}"
+  defp simulation_failure_message(other), do: "preview error: #{inspect(other)}"
+
+  defp balance_changes_payload(%{} = balance_impact) do
+    items =
+      balance_impact
+      |> Enum.map(fn {asset, delta} ->
+        %{
+          "asset" => to_string(asset),
+          "delta" => decimal_to_string(delta)
+        }
+      end)
+
+    %{"items" => items}
+  end
+
+  defp balance_changes_payload(_), do: %{"items" => []}
+
+  defp estimated_fees_payload(%Quotes.Preview{estimated_fee: nil}), do: nil
+
+  defp estimated_fees_payload(%Quotes.Preview{estimated_fee: fee, fee_asset: asset}) do
+    %{
+      "asset" => asset,
+      "amount" => decimal_to_string(fee)
+    }
+  end
+
+  defp decimal_to_string(nil), do: nil
+  defp decimal_to_string(%Decimal{} = d), do: Decimal.to_string(d, :normal)
+  defp decimal_to_string(other), do: to_string(other)
+
+  defp build_decision_attrs(intent, decision, policy, trust, simulation, prior_decision, opts) do
+    extras =
+      %{
+        intent_id: intent.id,
+        trust_assessment_id: trust.id,
+        simulation_report_id: simulation.id,
+        policy_snapshot_ref: policy.snapshot_ref,
+        state: :decided,
+        supersedes_id: prior_decision && prior_decision.id
+      }
+      |> maybe_put_reason(opts)
+
+    Autonomy.to_envelope_attrs(decision, extras)
+  end
+
+  defp maybe_put_reason(extras, opts) do
+    case Keyword.get(opts, :reason) do
+      nil -> extras
+      _string -> extras
+    end
+  end
+
+  defp intent_state_for_outcome(:block), do: :blocked
+  defp intent_state_for_outcome(outcome) when outcome in @decided_outcomes, do: :decided
+
+  defp current_trust_for(intent_id) do
+    Repo.one(
+      from(t in TrustAssessment,
+        where: t.intent_id == ^intent_id and t.current == true,
+        limit: 1
+      )
+    )
+  end
+
+  defp current_simulation_for(intent_id) do
+    Repo.one(
+      from(s in SimulationReport,
+        where: s.intent_id == ^intent_id and s.current == true,
+        limit: 1
+      )
+    )
+  end
+
+  defp current_decision_for(intent_id) do
+    Repo.one(
+      from(d in DecisionEnvelope,
+        where: d.intent_id == ^intent_id and d.current == true,
+        limit: 1
+      )
+    )
+  end
+
+  defp emit_evaluation_audits(
+         intent,
+         prior_intent_state,
+         trust,
+         simulation,
+         envelope,
+         prior_trust,
+         prior_simulation
+       ) do
+    if is_nil(prior_trust) or prior_trust.id != trust.id do
+      _ = Runtime.emit_audit(Events.trust_assessed(trust))
+    end
+
+    if is_nil(prior_simulation) or prior_simulation.id != simulation.id do
+      _ = Runtime.emit_audit(Events.simulation_produced(simulation))
+    end
+
+    _ = Runtime.emit_audit(Events.decision_decided(envelope))
+
+    if intent.state != prior_intent_state do
+      _ =
+        Runtime.emit_audit(Events.intent_state_changed(intent, prior_intent_state, intent.state))
+    end
+
+    Notifier.intent_lifecycle(intent, :decision_updated, %{
+      decision_envelope_id: envelope.id,
+      outcome: envelope.outcome,
+      risk_tier: envelope.risk_tier
+    })
+
+    :ok
+  end
 
   # --- Read API -----------------------------------------------------------
 
