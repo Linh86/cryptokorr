@@ -91,6 +91,35 @@ defmodule Bank.Intents.SimulateTest do
              }
     end
 
+    test "refresh with a failed preview AND a prior current still demotes the prior" do
+      # Pins a non-obvious choice: a refresh that asks the provider and
+      # hits an error (e.g. provider unavailable) replaces a previously
+      # successful current simulation with a `:failed` one as current.
+      # Rationale: the operator/agent explicitly asked to refresh, so a
+      # stale "good" simulation is not the right thing to keep as
+      # current — the autonomy router reads `current` and will route to
+      # `:hold` / `:block` on a `:failed` status, which is the safe
+      # outcome.
+      Application.put_env(:bank, Bank.Quotes.StubProvider, outcome: :unavailable)
+      on_exit(fn -> Application.put_env(:bank, Bank.Quotes.StubProvider, []) end)
+
+      intent = agent_intent()
+      prior = simulation_report(intent: intent, current: true, status: :completed)
+
+      assert {:ok, result} = Intents.simulate(intent.id, "refresh")
+
+      assert result.report.status == :failed
+      assert result.report.current
+      assert result.report.supersedes_id == prior.id
+      assert result.superseded.id == prior.id
+
+      # Prior was demoted even though the new report is :failed.
+      refute Repo.get!(SimulationReport, prior.id).current
+
+      # Intent pointer advanced to the new (failed) report.
+      assert Repo.get!(AgentIntent, intent.id).current_simulation_id == result.report.id
+    end
+
     test "writes an audit event (`simulation.requested`) and `simulation.produced` on refresh" do
       intent = agent_intent()
       assert {:ok, _} = Intents.simulate(intent.id, "refresh")
