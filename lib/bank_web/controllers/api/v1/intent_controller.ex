@@ -10,6 +10,12 @@ defmodule BankWeb.API.V1.IntentController do
     * `POST /v1/intents/:id/simulate` — on-demand dry-run simulation
     * `POST /v1/intents/:id/cancel`   — operator pre-execution cancel
     * `GET  /v1/intents/:id/replay`   — full replay bundle
+
+  `create/2` and `show/2` are live: create persists an
+  `%AgentIntent{}` in `:submitted`, audits `intent.submitted`, and
+  enqueues `Bank.Runtime.Workers.EvaluateIntent`. `simulate/2` and
+  `cancel/2` still return `501` until the decision / approval engines
+  land.
   """
 
   use BankWeb, :controller
@@ -17,15 +23,17 @@ defmodule BankWeb.API.V1.IntentController do
 
   import BankWeb.API.V1.FallbackController, only: [not_implemented: 3]
 
-  alias OpenApiSpex.{Parameter, Reference}
-
   alias Bank.Audit
-  alias BankWeb.API.V1.AuditJSON
+  alias Bank.Intents
+  alias BankWeb.API.V1.{AuditJSON, IntentJSON}
+  alias OpenApiSpex.{Parameter, Reference}
 
   @idempotency_key_ref %Reference{"$ref": "#/components/parameters/IdempotencyKey"}
   @request_id_in_ref %Reference{"$ref": "#/components/parameters/RequestIdIn"}
   @not_implemented_ref %Reference{"$ref": "#/components/responses/NotImplemented"}
   @not_found_ref %Reference{"$ref": "#/components/responses/NotFound"}
+  @conflict_ref %Reference{"$ref": "#/components/responses/Conflict"}
+  @unprocessable_ref %Reference{"$ref": "#/components/responses/UnprocessableEntity"}
   @id_ref %Reference{"$ref": "#/components/schemas/Id"}
 
   @intent_id_param %Parameter{
@@ -43,10 +51,17 @@ defmodule BankWeb.API.V1.IntentController do
     `AgentIntent` for evaluation. Request body fields match the
     pinned contract in `docs/bank-v0.1-runtime-flow-and-api.md`.
 
-    **Current runtime behavior: returns `501 Not Implemented` —
-    intent engine work is still pending.** The operation spec
-    documents the target contract so SDK tooling can be generated
-    ahead of the engine landing.
+    Persists the intent in `:submitted`, audits `intent.submitted`,
+    and enqueues `Bank.Runtime.Workers.EvaluateIntent`. Decision /
+    simulation / approval engines have not yet landed, so the
+    enqueued job currently cancels with `:engines_pending` —
+    expected and visible in the Oban dashboard. Returns
+    `202 Accepted`.
+
+    Idempotency: a duplicate `(agent_id, idempotency_key)` with a
+    matching body returns the existing intent and sets
+    `idempotent_replay: true`; a duplicate with a mismatched body
+    returns `409`.
     """,
     tags: ["Intents"],
     parameters: [@idempotency_key_ref, @request_id_in_ref],
@@ -54,30 +69,89 @@ defmodule BankWeb.API.V1.IntentController do
       {"Intent submission body", "application/json",
        BankWeb.OpenApi.Schemas.IntentSubmissionRequest},
     responses: %{
-      501 => @not_implemented_ref
+      202 =>
+        {"Intent accepted", "application/json", BankWeb.OpenApi.Schemas.IntentSubmitResponse},
+      409 => @conflict_ref,
+      422 => @unprocessable_ref
     }
   )
 
-  def create(conn, _params),
-    do: not_implemented(conn, "POST /v1/intents", "implemented with the intent engine")
+  def create(conn, params) do
+    case Intents.submit(params) do
+      {:ok, %{intent: intent, replay?: replay?}} ->
+        conn
+        |> put_status(:accepted)
+        |> json(IntentJSON.created(%{intent: intent, replay?: replay?}))
+
+      {:error, {:idempotency_conflict, prior}} ->
+        render_error(
+          conn,
+          :conflict,
+          "idempotency_conflict",
+          "Idempotency-Key reused with a mismatched payload.",
+          hint:
+            "Retry with a fresh Idempotency-Key for a new intent, " <>
+              "or resend the original payload to replay intent #{prior.id}."
+        )
+
+      {:error, {:unsupported_chain, chain}} ->
+        render_error(
+          conn,
+          :unprocessable_entity,
+          "unsupported_chain",
+          "chain `#{chain}` is not supported",
+          hint: ~s|the runtime currently accepts only `"base"`|
+        )
+
+      {:error, {:unsupported_asset, asset}} ->
+        render_error(
+          conn,
+          :unprocessable_entity,
+          "unsupported_asset",
+          "asset `#{asset}` is not supported",
+          hint: ~s|the runtime currently accepts only `"USDC"`|
+        )
+
+      {:error, {:invalid, %Ecto.Changeset{} = changeset}} ->
+        render_changeset_error(conn, changeset)
+
+      {:error, {:invalid, reason}} ->
+        render_invalid(conn, reason)
+    end
+  end
 
   operation(:show,
     summary: "Get an intent by id",
     description: """
-    Returns the current state of an intent together with linked
-    decision / simulation / plan summaries.
+    Returns the current state of an intent together with the
+    cached current-pointer ids for decision / simulation / trust
+    assessment / execution plan.
 
-    **Current runtime behavior: returns `501 Not Implemented`.**
+    Decision / simulation / plan summaries are not inlined here in
+    v0.1 — those engines have not landed yet. Callers that need
+    the historical chain should use `GET /v1/intents/:id/replay`.
     """,
     tags: ["Intents"],
     parameters: [@intent_id_param, @request_id_in_ref],
     responses: %{
-      501 => @not_implemented_ref
+      200 => {"Intent detail", "application/json", BankWeb.OpenApi.Schemas.IntentShowResponse},
+      404 => @not_found_ref
     }
   )
 
-  def show(conn, _params),
-    do: not_implemented(conn, "GET /v1/intents/:id", "implemented with the intent engine")
+  def show(conn, %{"id" => id}) do
+    with {:ok, uuid} <- cast_uuid(id),
+         %_{} = intent <- Intents.get(uuid) do
+      conn
+      |> put_status(:ok)
+      |> json(IntentJSON.show(%{intent: intent}))
+    else
+      _ ->
+        conn
+        |> put_status(:not_found)
+        |> json(not_found_envelope(id))
+    end
+  end
 
   operation(:simulate,
     summary: "Request an on-demand simulation",
@@ -130,9 +204,7 @@ defmodule BankWeb.API.V1.IntentController do
     and audit events. Rendered by
     `BankWeb.API.V1.AuditJSON.replay/1`.
 
-    This endpoint is live today — unlike the other `/v1/intents`
-    actions, it is not routed through the `not_implemented`
-    fallback.
+    This endpoint is live today.
     """,
     tags: ["Intents"],
     parameters: [@intent_id_param, @request_id_in_ref],
@@ -164,6 +236,15 @@ defmodule BankWeb.API.V1.IntentController do
     end
   end
 
+  defp cast_uuid(value) when is_binary(value) do
+    case Ecto.UUID.cast(value) do
+      {:ok, uuid} -> {:ok, uuid}
+      :error -> :error
+    end
+  end
+
+  defp cast_uuid(_), do: :error
+
   defp not_found_envelope(intent_id) do
     %{
       error: %{
@@ -173,5 +254,117 @@ defmodule BankWeb.API.V1.IntentController do
         retryable: false
       }
     }
+  end
+
+  defp render_invalid(conn, :amount) do
+    render_error(
+      conn,
+      :unprocessable_entity,
+      "invalid_amount",
+      "`amount` must be a positive decimal string",
+      hint: ~s|example: "250.00"|
+    )
+  end
+
+  defp render_invalid(conn, :target_ambiguous) do
+    render_error(
+      conn,
+      :unprocessable_entity,
+      "invalid_target",
+      "exactly one of `target.counterparty_id` or `target.raw_address` must be set"
+    )
+  end
+
+  defp render_invalid(conn, :target_missing) do
+    render_error(
+      conn,
+      :unprocessable_entity,
+      "invalid_target",
+      "`target.counterparty_id` or `target.raw_address` is required"
+    )
+  end
+
+  defp render_invalid(conn, :target_label_without_counterparty) do
+    render_error(
+      conn,
+      :unprocessable_entity,
+      "invalid_target",
+      "`target.address_label_id` requires `target.counterparty_id`"
+    )
+  end
+
+  defp render_invalid(conn, :target_counterparty_id) do
+    render_error(
+      conn,
+      :unprocessable_entity,
+      "invalid_target",
+      "`target.counterparty_id` must be a UUID"
+    )
+  end
+
+  defp render_invalid(conn, :target_address_label_id) do
+    render_error(
+      conn,
+      :unprocessable_entity,
+      "invalid_target",
+      "`target.address_label_id` must be a UUID"
+    )
+  end
+
+  defp render_invalid(conn, field) when is_atom(field) do
+    render_error(
+      conn,
+      :unprocessable_entity,
+      "invalid_body",
+      "`#{field}` is required"
+    )
+  end
+
+  defp render_invalid(conn, _) do
+    render_error(
+      conn,
+      :unprocessable_entity,
+      "invalid_body",
+      "request body failed validation"
+    )
+  end
+
+  defp render_error(conn, status, code, message, opts \\ []) do
+    conn
+    |> put_status(status)
+    |> json(%{
+      error: %{
+        code: code,
+        message: message,
+        hint: Keyword.get(opts, :hint),
+        retryable: Keyword.get(opts, :retryable, false)
+      }
+    })
+  end
+
+  defp render_changeset_error(conn, %Ecto.Changeset{} = changeset) do
+    details = Ecto.Changeset.traverse_errors(changeset, &translate_error/1)
+
+    conn
+    |> put_status(:unprocessable_entity)
+    |> json(%{
+      error: %{
+        code: "invalid_body",
+        message: "request body failed validation",
+        hint: nil,
+        retryable: false,
+        details: details
+      }
+    })
+  end
+
+  defp translate_error({msg, opts}) do
+    Enum.reduce(opts, msg, fn
+      {key, value}, acc when is_binary(value) or is_atom(value) or is_integer(value) ->
+        String.replace(acc, "%{#{key}}", to_string(value))
+
+      _, acc ->
+        acc
+    end)
   end
 end
