@@ -942,7 +942,22 @@ defmodule Bank.Decisions do
   from `evaluate_intent/2` when the autonomy router produces
   `:auto_exec`. Reuses the same gate set so dispatch policy stays
   one piece of code; the only differences are the audit event type
-  (`execution.auto_dispatched`) and the actor (`:runtime`).
+  (`execution.auto_dispatched`), the actor (`:runtime`), and one
+  extra safety gate.
+
+  ## Extra intent-level safety gate
+
+  In addition to the per-decision `:active_plan_exists` gate the
+  manual path enforces, the auto path also rejects when **any**
+  active execution plan exists for the same intent — even if it
+  belongs to a prior, now-superseded decision. Without this gate, a
+  re-evaluation that produces `:auto_exec` again (for example
+  after a policy revision) would race the in-flight plan and
+  dispatch a parallel one to the adapter.
+
+  The manual path (`request_manual_execution/3`) intentionally does
+  not enforce this gate so an operator can run a one-shot override
+  after explicitly aborting a stuck plan.
 
   Returns `{:ok, plan}` on success, or the same `{:error, reason}`
   vocabulary the manual path returns.
@@ -951,8 +966,21 @@ defmodule Bank.Decisions do
           {:ok, ExecutionPlan.t()} | {:error, atom() | String.t()}
   def dispatch_auto_exec(envelope_id, smart_account_id, opts \\ []) do
     with {:ok, envelope} <- get_envelope(envelope_id),
+         :ok <- validate_no_intent_in_flight(envelope.intent_id),
          {:ok, plan} <- create_execution_plan(envelope, smart_account_id, :auto, opts) do
       {:ok, plan}
+    end
+  end
+
+  defp validate_no_intent_in_flight(intent_id) do
+    case Repo.one(
+           from(p in ExecutionPlan,
+             where: p.intent_id == ^intent_id and p.active == true,
+             limit: 1
+           )
+         ) do
+      nil -> :ok
+      _plan -> {:error, :active_plan_exists}
     end
   end
 

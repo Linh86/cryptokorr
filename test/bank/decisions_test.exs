@@ -397,6 +397,30 @@ defmodule Bank.DecisionsTest do
       assert {:error, :outcome_is_hold} =
                Decisions.dispatch_auto_exec(envelope.id, "sa-auto-hold")
     end
+
+    test "rejects when ANY plan is active for the intent (even on a prior superseded envelope)" do
+      # This is the auto-path-only safety gate that the manual path
+      # intentionally skips: a re-evaluation must not dispatch a
+      # parallel plan while a plan from a prior decision is still
+      # in flight for the same intent.
+      intent = agent_intent()
+      prior_envelope = decision_envelope(intent: intent, outcome: :auto_exec, current: false)
+      _prior_plan = execution_plan(decision: prior_envelope, intent_id: intent.id, active: true)
+
+      successor_envelope =
+        decision_envelope(intent: intent, outcome: :auto_exec, current: true)
+
+      {:ok, _del} = Delegations.grant("sa-auto-inflight", "del-auto-inflight")
+
+      assert {:error, :active_plan_exists} =
+               Decisions.dispatch_auto_exec(successor_envelope.id, "sa-auto-inflight")
+
+      # The manual path does NOT enforce this intent-level gate; an
+      # operator can still override after handling the in-flight plan.
+      # The per-decision check is what gates the manual path.
+      assert {:ok, _plan} =
+               Decisions.request_manual_execution(successor_envelope.id, "sa-auto-inflight")
+    end
   end
 
   describe "resolve_executable_account/0" do

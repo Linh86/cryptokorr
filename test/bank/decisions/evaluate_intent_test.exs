@@ -376,7 +376,7 @@ defmodule Bank.Decisions.EvaluateIntentTest do
       refute_enqueued(worker: Bank.Runtime.Workers.RunExecution)
     end
 
-    test "re-evaluation that yields auto_exec again does not duplicate a still-active plan" do
+    test "re-evaluation never dispatches a parallel plan while the prior is still active" do
       intent = small_trusted_intent()
       {:ok, _del} = Bank.Delegations.grant("sa-idem-1", "del-idem-1")
 
@@ -385,31 +385,16 @@ defmodule Bank.Decisions.EvaluateIntentTest do
 
       reloaded = Repo.get!(AgentIntent, intent.id)
 
-      assert {:ok, %{dispatch: dispatch_two, execution_plan: plan_two}} =
+      # Without the intent-level gate, this re-evaluation would
+      # produce a new envelope, pass the per-decision active-plan
+      # check (which is per envelope id), and dispatch a SECOND plan
+      # for the same intent — racing the still-in-flight plan_one
+      # against the adapter. The intent-level gate in
+      # `dispatch_auto_exec/3` rejects with :active_plan_exists.
+      assert {:ok, %{dispatch: {:held, :active_plan_exists}, execution_plan: nil}} =
                Decisions.evaluate_intent(reloaded, preview: {:ok, ok_preview(reloaded)})
 
-      # Re-evaluation produces a new envelope that has no plan; the
-      # prior plan is still active under the prior envelope. The new
-      # envelope's dispatch is held with :active_plan_exists when the
-      # old envelope's plan is still present (same intent already in
-      # flight). The active plan from the prior decision is unchanged.
-      case dispatch_two do
-        :dispatched ->
-          # The new envelope id != old envelope id, so its
-          # active-plan check passes; both envelopes can hold an
-          # active plan for the same intent. Pin that the new plan
-          # is on the new envelope.
-          assert plan_two.id != plan_one.id
-          assert plan_two.decision_id == Repo.get!(AgentIntent, intent.id).current_decision_id
-
-        {:held, :active_plan_exists} ->
-          assert is_nil(plan_two)
-
-        other ->
-          flunk("unexpected re-eval dispatch outcome: #{inspect(other)}")
-      end
-
-      # The original plan is still active.
+      # The original plan is still active and untouched.
       assert Repo.get!(Bank.Decisions.ExecutionPlan, plan_one.id).active
     end
 
