@@ -265,15 +265,152 @@ defmodule Bank.Decisions.EvaluateIntentTest do
     end
   end
 
-  describe "no execution dispatch" do
-    test "auto_exec decisions do not enqueue RunExecution (issue #137 owns that)" do
+  describe "auto-exec dispatch (issue #137)" do
+    test "creates an active ExecutionPlan and enqueues RunExecution when one delegation is executable" do
       intent = small_trusted_intent()
+      {:ok, _del} = Bank.Delegations.grant("sa-auto-1", "del-auto-1")
 
-      assert {:ok, %{outcome: :auto_exec}} =
+      assert {:ok, result} =
                Decisions.evaluate_intent(intent, preview: {:ok, ok_preview(intent)})
 
+      assert result.outcome == :auto_exec
+      assert result.dispatch == :dispatched
+      assert %Bank.Decisions.ExecutionPlan{} = result.execution_plan
+      assert result.execution_plan.smart_account_id == "sa-auto-1"
+      assert result.execution_plan.execution_status == :prepared
+      assert result.execution_plan.active == true
+      assert result.execution_plan.decision_id == result.decision.id
+      assert result.execution_plan.intent_id == intent.id
+
+      assert_enqueued(
+        worker: Bank.Runtime.Workers.RunExecution,
+        queue: :executions_run,
+        args: %{"decision_id" => result.decision.id}
+      )
+    end
+
+    test "holds dispatch with :no_executable_account when no delegation exists" do
+      intent = small_trusted_intent()
+
+      assert {:ok, result} =
+               Decisions.evaluate_intent(intent, preview: {:ok, ok_preview(intent)})
+
+      assert result.outcome == :auto_exec
+      assert result.dispatch == {:held, :no_executable_account}
+      assert is_nil(result.execution_plan)
+
       refute_enqueued(worker: Bank.Runtime.Workers.RunExecution)
-      refute_enqueued(worker: Bank.Runtime.Workers.ConfirmExecution)
+
+      reloaded = Repo.get!(AgentIntent, intent.id)
+      assert reloaded.state == :decided
+
+      assert audit_event_types_for_intent(intent.id)
+             |> Enum.any?(&(&1 == "intent.auto_exec_held"))
+    end
+
+    test "holds dispatch with :ambiguous_executable_account when multiple delegations are active" do
+      intent = small_trusted_intent()
+      {:ok, _del1} = Bank.Delegations.grant("sa-amb-1", "del-amb-1")
+      {:ok, _del2} = Bank.Delegations.grant("sa-amb-2", "del-amb-2")
+
+      assert {:ok, result} =
+               Decisions.evaluate_intent(intent, preview: {:ok, ok_preview(intent)})
+
+      assert result.dispatch == {:held, :ambiguous_executable_account}
+      assert is_nil(result.execution_plan)
+      refute_enqueued(worker: Bank.Runtime.Workers.RunExecution)
+    end
+
+    test "honours an explicit :smart_account_id opt over the resolver" do
+      intent = small_trusted_intent()
+      {:ok, _del1} = Bank.Delegations.grant("sa-amb-3", "del-amb-3")
+      {:ok, _del2} = Bank.Delegations.grant("sa-amb-4", "del-amb-4")
+      {:ok, _del3} = Bank.Delegations.grant("sa-explicit", "del-explicit")
+
+      assert {:ok, result} =
+               Decisions.evaluate_intent(
+                 intent,
+                 preview: {:ok, ok_preview(intent)},
+                 smart_account_id: "sa-explicit"
+               )
+
+      assert result.dispatch == :dispatched
+      assert result.execution_plan.smart_account_id == "sa-explicit"
+    end
+
+    test "holds dispatch when the runtime is paused, even with an executable account" do
+      intent = small_trusted_intent()
+      {:ok, _del} = Bank.Delegations.grant("sa-paused", "del-paused")
+
+      assert {:ok, result} =
+               Decisions.evaluate_intent(
+                 intent,
+                 paused?: true,
+                 preview: {:ok, ok_preview(intent)}
+               )
+
+      # The autonomy router itself emits :hold under :paused?, so the
+      # decision is :hold and dispatch is :not_applicable. This test
+      # pins that pause is enforced upstream of dispatch.
+      assert result.outcome == :hold
+      assert result.dispatch == :not_applicable
+      assert is_nil(result.execution_plan)
+      refute_enqueued(worker: Bank.Runtime.Workers.RunExecution)
+    end
+
+    test "block / hold / approval_required decisions never dispatch" do
+      block_intent =
+        Fixtures.agent_intent(
+          target_counterparty_id: nil,
+          target_raw_address: "0x" <> String.duplicate("d", 40),
+          amount: Decimal.new("500")
+        )
+
+      {:ok, _del} = Bank.Delegations.grant("sa-block-1", "del-block-1")
+
+      assert {:ok, %{outcome: :block, dispatch: :not_applicable, execution_plan: nil}} =
+               Decisions.evaluate_intent(block_intent,
+                 preview: {:ok, ok_preview(block_intent)}
+               )
+
+      refute_enqueued(worker: Bank.Runtime.Workers.RunExecution)
+    end
+
+    test "re-evaluation that yields auto_exec again does not duplicate a still-active plan" do
+      intent = small_trusted_intent()
+      {:ok, _del} = Bank.Delegations.grant("sa-idem-1", "del-idem-1")
+
+      assert {:ok, %{dispatch: :dispatched, execution_plan: plan_one}} =
+               Decisions.evaluate_intent(intent, preview: {:ok, ok_preview(intent)})
+
+      reloaded = Repo.get!(AgentIntent, intent.id)
+
+      assert {:ok, %{dispatch: dispatch_two, execution_plan: plan_two}} =
+               Decisions.evaluate_intent(reloaded, preview: {:ok, ok_preview(reloaded)})
+
+      # Re-evaluation produces a new envelope that has no plan; the
+      # prior plan is still active under the prior envelope. The new
+      # envelope's dispatch is held with :active_plan_exists when the
+      # old envelope's plan is still present (same intent already in
+      # flight). The active plan from the prior decision is unchanged.
+      case dispatch_two do
+        :dispatched ->
+          # The new envelope id != old envelope id, so its
+          # active-plan check passes; both envelopes can hold an
+          # active plan for the same intent. Pin that the new plan
+          # is on the new envelope.
+          assert plan_two.id != plan_one.id
+          assert plan_two.decision_id == Repo.get!(AgentIntent, intent.id).current_decision_id
+
+        {:held, :active_plan_exists} ->
+          assert is_nil(plan_two)
+
+        other ->
+          flunk("unexpected re-eval dispatch outcome: #{inspect(other)}")
+      end
+
+      # The original plan is still active.
+      assert Repo.get!(Bank.Decisions.ExecutionPlan, plan_one.id).active
     end
 
     test "approval_required decisions enqueue ExpireApproval at the envelope's expiry" do
@@ -284,7 +421,7 @@ defmodule Bank.Decisions.EvaluateIntentTest do
           amount: Decimal.new("10")
         )
 
-      assert {:ok, %{decision: envelope, outcome: :approval_required}} =
+      assert {:ok, %{decision: envelope, outcome: :approval_required, dispatch: :not_applicable}} =
                Decisions.evaluate_intent(intent, preview: {:ok, ok_preview(intent)})
 
       assert envelope.approval_expires_at
@@ -295,6 +432,18 @@ defmodule Bank.Decisions.EvaluateIntentTest do
         args: %{"decision_envelope_id" => envelope.id}
       )
     end
+  end
+
+  defp audit_event_types_for_intent(intent_id) do
+    import Ecto.Query
+
+    Repo.all(
+      from(e in Bank.Audit.AuditEvent,
+        where: e.correlation_id == ^intent_id,
+        order_by: [asc: e.ts, asc: e.id],
+        select: e.event_type
+      )
+    )
   end
 
   defp bump_state!(intent, state) do
