@@ -1,13 +1,16 @@
 defmodule Mix.Tasks.Bank.Demo.Seed do
-  @shortdoc "Seed the demo dataset into the current environment"
+  @shortdoc "Seed the sandbox demo dataset into the current environment"
 
   @moduledoc """
-  Idempotently populates the curated demo dataset: counterparties,
-  address labels, policy rules, a delegation, and four representative
-  intents (completed auto-exec, approved after review, blocked
-  unknown-recipient, in-flight executing).
+  Idempotently populates the curated sandbox demo dataset:
+  `[Sandbox]`-prefixed counterparties, address labels, policy rules,
+  a `sa_demo_01` delegation, and nine representative intents covering
+  every state the runtime produces — submitted, decided (auto_exec /
+  approval_required / hold), executing, executed, blocked, cancelled.
 
-  Safe to run repeatedly; records are keyed so a second run is a no-op.
+  Safe to run repeatedly; records are keyed so a second run is a
+  no-op. Until issue #155 ships the `workspaces` table, every seeded
+  row is implicitly scoped to `Bank.Demo.workspace_slug/0`.
 
   ## Example
 
@@ -23,13 +26,17 @@ defmodule Mix.Tasks.Bank.Demo.Seed do
   @impl Mix.Task
   def run(_argv) do
     :ok = Bank.Demo.seed()
+    ids = Bank.Demo.identifiers()
 
     IO.puts("""
-    OK — demo dataset seeded
-      counterparties : Payroll Provider, Treasury Ops, New Partner X, Unverified Recipient
-      intents        : 4 (payroll-confirmed, partner-x-approved, unknown-blocked, treasury-executing)
-      smart account  : sa_demo_01
-      delegation     : del_demo_01 (active, base)
+    OK — sandbox demo dataset seeded
+      workspace      : #{ids.workspace_slug} (placeholder until #155)
+      counterparties : #{Enum.join(ids.counterparty_names, ", ")}
+      intents        : 9 (submitted-fresh, decided-pending-exec, payroll-confirmed,
+                         partner-x-pending-approval, partner-x-approved, treasury-held,
+                         treasury-executing, unknown-blocked, cancelled-pre-decision)
+      smart account  : #{ids.smart_account_id}
+      delegation     : #{ids.delegation_id} (active, base)
     """)
   end
 end

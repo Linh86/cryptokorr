@@ -1,18 +1,23 @@
 defmodule Mix.Tasks.Bank.Demo.Reset do
-  @shortdoc "Truncate the demo dataset and re-seed (dev/test/staging only)"
+  @shortdoc "Scoped-delete the sandbox demo dataset and re-seed (dev/test/staging only)"
 
   @moduledoc """
-  Destructively resets the demo dataset. Truncates every demo-owned
-  table (counterparties, address_labels, policy_rules, delegations,
-  agent_intents, decision_envelopes, execution_plans, audit_events,
-  and their sidecars), then re-runs `Bank.Demo.seed/0`.
+  Resets the sandbox demo dataset by issuing targeted `DELETE`s
+  against the rows `Bank.Demo.seed/0` produces — matched by
+  `[Sandbox]` counterparty names, `sandbox-demo-*` agent ids, the
+  `sa_demo_01` smart account, and the exact demo policy-rule specs.
+  Non-demo rows in the same tables are preserved.
+
+  `audit_events` is append-only at the DB layer and is not touched
+  by the reset; old demo audit rows are left as orphans and the
+  next seed writes fresh audit rows for the new intent uuids.
 
   ## Safety
 
     * Refuses to run in `:prod`. Only `:dev`, `:test`, and `:staging`
       are permitted.
     * Requires the `--confirm` flag. Without it the task prints the
-      list of tables it would truncate and exits.
+      list of tables it would touch and exits.
 
   ## Example
 
@@ -37,16 +42,17 @@ defmodule Mix.Tasks.Bank.Demo.Reset do
 
       not confirm? ->
         IO.puts("""
-        DRY RUN — bank.demo.reset would truncate the following tables in #{env}:
-          #{Enum.join(Bank.Demo.owned_tables(), "\n  ")}
+        DRY RUN — bank.demo.reset would delete demo-tagged rows in #{env}
+        from the following tables (audit_events is append-only and is left intact):
+          #{Enum.join(Bank.Demo.owned_tables() -- ["audit_events"], "\n  ")}
 
-        Pass --confirm to actually truncate and re-seed.
+        Pass --confirm to actually delete demo rows and re-seed.
         """)
 
       true ->
         case Bank.Demo.reset(env: env, confirm: true) do
           :ok ->
-            IO.puts("OK — demo dataset reset and re-seeded in #{env}")
+            IO.puts("OK — sandbox demo dataset reset and re-seeded in #{env}")
 
           {:error, reason} ->
             Mix.raise("bank.demo.reset failed: #{inspect(reason)}")
