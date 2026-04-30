@@ -1157,6 +1157,14 @@ defmodule Bank.Decisions do
          :ok <- validate_delegation_active(smart_account_id) do
       reason = Keyword.get(opts, :reason, default_reason_for(source))
 
+      # Stamp the plan with the parent intent's workspace_id (#158d).
+      # `execution_plans.workspace_id` is a nullable read hint added
+      # by #158a so adapter callbacks can resolve workspace context
+      # without joining through the intent. Loading just the
+      # workspace_id field keeps this lightweight; if the intent is
+      # somehow unscoped (legacy nil), the plan stays unscoped too.
+      workspace_id = lookup_intent_workspace_id(envelope.intent_id)
+
       plan_attrs = %{
         decision_id: envelope.id,
         intent_id: envelope.intent_id,
@@ -1164,7 +1172,8 @@ defmodule Bank.Decisions do
         asset: "USDC",
         smart_account_id: smart_account_id,
         execution_status: :prepared,
-        signing_requirements: build_signing_requirements(smart_account_id)
+        signing_requirements: build_signing_requirements(smart_account_id),
+        workspace_id: workspace_id
       }
 
       {:ok, plan} =
@@ -1185,6 +1194,10 @@ defmodule Bank.Decisions do
 
       {:ok, plan}
     end
+  end
+
+  defp lookup_intent_workspace_id(intent_id) when is_binary(intent_id) do
+    Repo.one(from(i in AgentIntent, where: i.id == ^intent_id, select: i.workspace_id))
   end
 
   defp default_reason_for(:manual), do: "manual_confirm"

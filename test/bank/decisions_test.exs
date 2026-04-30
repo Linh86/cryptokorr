@@ -262,6 +262,49 @@ defmodule Bank.DecisionsTest do
       assert plan.active == true
     end
 
+    test "stamps the new plan with the parent intent's workspace_id (#158d)" do
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{slug: "exec-stamp", name: "Exec stamp"})
+
+      intent = agent_intent(workspace_id: ws.id)
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :auto_exec,
+          current: true
+        )
+
+      {:ok, _del} = Delegations.grant("sa_stamp", "del_stamp")
+
+      assert {:ok, plan} =
+               Decisions.request_manual_execution(envelope.id, "sa_stamp",
+                 reason: "manual_confirm"
+               )
+
+      assert plan.workspace_id == ws.id
+    end
+
+    test "leaves plan workspace_id nil when parent intent is unscoped (legacy)" do
+      intent = agent_intent(workspace_id: nil)
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :auto_exec,
+          current: true
+        )
+
+      {:ok, _del} = Delegations.grant("sa_legacy", "del_legacy")
+
+      assert {:ok, plan} =
+               Decisions.request_manual_execution(envelope.id, "sa_legacy",
+                 reason: "manual_confirm"
+               )
+
+      assert plan.workspace_id == nil
+    end
+
     test "gate 1: rejects non-current envelope" do
       envelope = decision_envelope(outcome: :auto_exec, current: false)
       {:ok, _del} = Delegations.grant("sa_g1", "del_g1")
@@ -407,6 +450,25 @@ defmodule Bank.DecisionsTest do
 
       assert {:error, :not_current} =
                Decisions.dispatch_auto_exec(envelope.id, "sa-auto-nc")
+    end
+
+    test "stamps the auto-dispatched plan with the parent intent's workspace_id (#158d)" do
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{slug: "auto-stamp", name: "Auto stamp"})
+
+      intent = agent_intent(workspace_id: ws.id)
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :auto_exec,
+          current: true
+        )
+
+      {:ok, _del} = Delegations.grant("sa-auto-stamp", "del-auto-stamp")
+
+      assert {:ok, plan} = Decisions.dispatch_auto_exec(envelope.id, "sa-auto-stamp")
+      assert plan.workspace_id == ws.id
     end
 
     test "reuses the manual-path gates: rejects when an active plan already exists" do
