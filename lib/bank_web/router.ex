@@ -302,6 +302,7 @@ defmodule BankWeb.Router do
 
     live_session :admin, on_mount: {BankWeb.LiveAuth, :require_admin} do
       live "/access", AccessAdminLive, :index
+      live "/api_keys", APIKeysAdminLive, :index
     end
   end
 
