@@ -74,4 +74,30 @@ defmodule Bank.Workspaces.Membership do
   @doc "Returns the supported status list."
   @spec statuses() :: [status()]
   def statuses, do: @statuses
+
+  # Role authority order for #159a authz comparisons. Listed in
+  # ascending capability — `viewer` is the weakest, `owner` the
+  # strongest. `role_at_least?(actual, required)` returns true iff
+  # the actual role is the same as or stronger than the required
+  # role.
+  @role_authority [:viewer, :operator, :admin, :owner]
+
+  @doc """
+  True if `actual_role` satisfies `required_role` under the
+  authority order `viewer < operator < admin < owner`.
+
+  Returns `false` when `actual_role` is `nil` (no membership
+  resolved) or unrecognised. Tested in
+  `Bank.Workspaces.MembershipTest`.
+  """
+  @spec role_at_least?(role() | nil, role()) :: boolean()
+  def role_at_least?(actual_role, required_role) when required_role in @roles do
+    actual_index = Enum.find_index(@role_authority, &(&1 == actual_role))
+    required_index = Enum.find_index(@role_authority, &(&1 == required_role))
+
+    case {actual_index, required_index} do
+      {nil, _} -> false
+      {a, r} -> a >= r
+    end
+  end
 end

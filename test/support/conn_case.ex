@@ -49,7 +49,23 @@ defmodule BankWeb.ConnCase do
   workspace}}` so individual tests can pattern-match on the setup
   map when they need the user / workspace ids.
   """
-  def register_and_log_in_user(%{conn: conn} = _context) do
+  def register_and_log_in_user(context),
+    do: register_and_log_in_user_with_role(context, :operator)
+
+  @doc """
+  Same as `register_and_log_in_user/1` but with a custom membership
+  role (#159a). Tests that exercise admin-only actions
+  (pause/resume/revoke, archive) call this with `:admin`; tests for
+  the role-gate redirects call it with `:viewer` or other roles.
+  """
+  def register_and_log_in_user_as_admin(context),
+    do: register_and_log_in_user_with_role(context, :admin)
+
+  def register_and_log_in_user_as_viewer(context),
+    do: register_and_log_in_user_with_role(context, :viewer)
+
+  def register_and_log_in_user_with_role(%{conn: conn} = _context, role)
+      when role in [:viewer, :operator, :admin, :owner] do
     suffix = System.unique_integer([:positive])
 
     {:ok, user} =
@@ -70,7 +86,7 @@ defmodule BankWeb.ConnCase do
       Bank.Workspaces.create_membership(%{
         user_id: user.id,
         workspace_id: workspace.id,
-        role: :operator
+        role: role
       })
 
     conn =

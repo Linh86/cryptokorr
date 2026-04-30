@@ -7,7 +7,7 @@ defmodule BankWeb.CounterpartyDetailLiveTest do
 
   import Phoenix.LiveViewTest
 
-  setup :register_and_log_in_user
+  setup :register_and_log_in_user_as_admin
   import Bank.Fixtures
 
   setup do
