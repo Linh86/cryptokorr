@@ -321,6 +321,38 @@ defmodule Bank.Workspaces.BackfillTest do
       end
     end
 
+    test "bypass refuses to mutate before_ref (defense-in-depth on hash payload)" do
+      w = ws()
+      intent = agent_intent(workspace_id: w.id)
+      e = unscoped_audit(subject_type: "agent_intent", subject_id: intent.id)
+
+      assert_raise Postgrex.Error, ~r/audit_events is append-only/, fn ->
+        Repo.transaction(fn ->
+          Repo.query!("SET LOCAL bank.audit_workspace_backfill = 'on'")
+
+          AuditEvent
+          |> Ecto.Query.where([a], a.id == ^e.id)
+          |> Repo.update_all(set: [workspace_id: w.id, before_ref: %{"tampered" => true}])
+        end)
+      end
+    end
+
+    test "bypass refuses to mutate after_ref (defense-in-depth on hash payload)" do
+      w = ws()
+      intent = agent_intent(workspace_id: w.id)
+      e = unscoped_audit(subject_type: "agent_intent", subject_id: intent.id)
+
+      assert_raise Postgrex.Error, ~r/audit_events is append-only/, fn ->
+        Repo.transaction(fn ->
+          Repo.query!("SET LOCAL bank.audit_workspace_backfill = 'on'")
+
+          AuditEvent
+          |> Ecto.Query.where([a], a.id == ^e.id)
+          |> Repo.update_all(set: [workspace_id: w.id, after_ref: %{"tampered" => true}])
+        end)
+      end
+    end
+
     test "DELETE remains absolutely refused (no bypass branch)" do
       intent = agent_intent()
       e = unscoped_audit(subject_type: "agent_intent", subject_id: intent.id)
@@ -333,6 +365,36 @@ defmodule Bank.Workspaces.BackfillTest do
           |> Ecto.Query.where([a], a.id == ^e.id)
           |> Repo.delete_all()
         end)
+      end
+    end
+
+    test "bypass armed inside Backfill.run/2 does not leak to a subsequent stray UPDATE" do
+      # `SET LOCAL` is transaction-scoped: when the backfill's
+      # internal `Repo.transaction` commits, the flag clears. A
+      # later `Repo.update_all` issued OUTSIDE that transaction must
+      # see the strict-deny trigger again. This pins the
+      # transaction-scoped property so a future refactor that swaps
+      # `SET LOCAL` for `SET` (session-scoped) regresses loudly.
+      w = ws()
+      intent = agent_intent(workspace_id: w.id)
+      a = unscoped_audit(subject_type: "agent_intent", subject_id: intent.id)
+      b = unscoped_audit(subject_type: "agent_intent", subject_id: intent.id)
+
+      # First call commits a SET LOCAL inside its own transaction;
+      # the LOCAL flag is dropped at commit.
+      {:ok, _} = Backfill.run(:audit_events, apply?: true)
+      assert Repo.get!(AuditEvent, a.id).workspace_id == w.id
+      assert Repo.get!(AuditEvent, b.id).workspace_id == w.id
+
+      # Now create a fresh NULL audit row and try to UPDATE it
+      # without arming the bypass. The flag from the prior
+      # transaction must NOT be visible, so the trigger refuses.
+      c = unscoped_audit(subject_type: "agent_intent", subject_id: intent.id)
+
+      assert_raise Postgrex.Error, ~r/audit_events is append-only/, fn ->
+        AuditEvent
+        |> Ecto.Query.where([a], a.id == ^c.id)
+        |> Repo.update_all(set: [workspace_id: w.id])
       end
     end
   end

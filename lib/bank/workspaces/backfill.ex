@@ -137,7 +137,9 @@ defmodule Bank.Workspaces.Backfill do
   defp process_batch(table, rows, state) do
     Repo.transaction(fn ->
       maybe_arm_audit_bypass(table, state)
-      Enum.reduce(rows, state, &derive_and_update(table, &1, &2))
+      new_state = Enum.reduce(rows, state, &derive_and_update(table, &1, &2))
+      maybe_disarm_audit_bypass(table, state)
+      new_state
     end)
     |> case do
       {:ok, new_state} -> new_state
@@ -150,14 +152,27 @@ defmodule Bank.Workspaces.Backfill do
   # The trigger's relaxed branch (#158d-d migration
   # `20260430140000_allow_audit_workspace_backfill`) lets a
   # workspace_id-only UPDATE through iff the session-local setting
-  # `bank.audit_workspace_backfill` is `'on'`. We arm it per
-  # transaction with `SET LOCAL` so the bypass auto-clears on
-  # commit/abort and never leaks to the next checkout.
+  # `bank.audit_workspace_backfill` is `'on'`. We arm it per batch
+  # with `SET LOCAL` (transaction-scoped) and explicitly disarm at
+  # the end of the work block. In production `SET LOCAL` already
+  # clears at `COMMIT`; the disarm is belt-and-suspenders. In test
+  # (Ecto.Sandbox) the `Repo.transaction` is a savepoint inside the
+  # test's outer transaction, so committing the savepoint does NOT
+  # clear `SET LOCAL` — the explicit disarm closes that gap so the
+  # flag never bleeds across tests or back to the calling context.
+  # On failure the savepoint rolls back and `SET LOCAL` reverts
+  # automatically, so no try/after is needed.
   defp maybe_arm_audit_bypass(:audit_events, %{apply?: true}) do
     Repo.query!("SET LOCAL bank.audit_workspace_backfill = 'on'")
   end
 
   defp maybe_arm_audit_bypass(_table, _state), do: :ok
+
+  defp maybe_disarm_audit_bypass(:audit_events, %{apply?: true}) do
+    Repo.query!("SET LOCAL bank.audit_workspace_backfill = 'off'")
+  end
+
+  defp maybe_disarm_audit_bypass(_table, _state), do: :ok
 
   defp derive_and_update(table, row, state) do
     state = %{state | scanned: state.scanned + 1}

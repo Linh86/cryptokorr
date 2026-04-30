@@ -25,9 +25,15 @@ defmodule Bank.Repo.Migrations.AllowAuditWorkspaceBackfill do
     * the row's prior `workspace_id` was `NULL` (so the backfill
       can fill but never overwrite),
     * the new `workspace_id` is non-NULL (no churn writes),
-    * every other authoritative column on the row is unchanged
-      (id, ts, actor, actor_id, event_type, subject_type,
-      subject_id, correlation_id, payload_hash, schema_version).
+    * every other authoritative column on the row is byte-for-byte
+      unchanged: `id`, `ts`, `actor`, `actor_id`, `event_type`,
+      `subject_type`, `subject_id`, `correlation_id`, `before_ref`,
+      `after_ref`, `payload_hash`, `schema_version`,
+      `inserted_at`. `before_ref` and `after_ref` are part of the
+      canonical hash payload, so an out-of-band edit would already
+      invalidate `payload_hash` on replay — locking them at the
+      trigger as well is defense in depth so a corrupt row never
+      lands in the first place.
 
   Any UPDATE that violates a single one of these constraints — and
   every DELETE — still raises the same
@@ -62,8 +68,11 @@ defmodule Bank.Repo.Migrations.AllowAuditWorkspaceBackfill do
          AND OLD.subject_type = NEW.subject_type
          AND OLD.subject_id IS NOT DISTINCT FROM NEW.subject_id
          AND OLD.correlation_id IS NOT DISTINCT FROM NEW.correlation_id
+         AND OLD.before_ref IS NOT DISTINCT FROM NEW.before_ref
+         AND OLD.after_ref IS NOT DISTINCT FROM NEW.after_ref
          AND OLD.payload_hash = NEW.payload_hash
-         AND OLD.schema_version = NEW.schema_version THEN
+         AND OLD.schema_version = NEW.schema_version
+         AND OLD.inserted_at = NEW.inserted_at THEN
         RETURN NEW;
       END IF;
 
