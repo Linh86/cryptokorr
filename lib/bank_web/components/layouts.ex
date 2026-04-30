@@ -4,6 +4,8 @@ defmodule BankWeb.Layouts do
   """
   use BankWeb, :html
 
+  alias Bank.Access
+
   embed_templates "layouts/*"
 
   @doc """
@@ -30,6 +32,8 @@ defmodule BankWeb.Layouts do
   slot :inner_block, required: true
 
   def app(assigns) do
+    assigns = assign(assigns, :admin_visible?, admin_visible?(assigns[:current_scope]))
+
     ~H"""
     <div id="app-shell" class="flex h-screen bg-base-100">
       <%!-- Sidebar --%>
@@ -98,6 +102,13 @@ defmodule BankWeb.Layouts do
             label="Security"
             active={@active_page == :security}
           />
+          <.nav_item
+            :if={@admin_visible?}
+            href="/admin/api_keys"
+            icon="hero-key"
+            label="API Keys"
+            active={@active_page == :api_keys}
+          />
         </nav>
 
         <div class="px-3 py-4 border-t border-base-300">
@@ -135,6 +146,16 @@ defmodule BankWeb.Layouts do
     <.flash_group flash={@flash} />
     """
   end
+
+  # --- Nav visibility -------------------------------------------------------
+
+  # Returns true when the current_scope's user is in the
+  # BANK_ADMIN_EMAILS bootstrap allowlist. Drives admin-only
+  # sidebar links — does NOT change route gates (LiveAuth
+  # `:require_admin` continues to enforce the same check on
+  # mount).
+  defp admin_visible?(%{user: %_{} = user}), do: Access.can_admin_access?(user)
+  defp admin_visible?(_), do: false
 
   # --- Nav helpers ----------------------------------------------------------
 
