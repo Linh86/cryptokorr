@@ -40,6 +40,39 @@ defmodule Bank.DelegationsTest do
       assert {:ok, re} = Delegations.grant("sa_1", "del_2")
       assert re.state == :active
     end
+
+    test "stamps workspace_id from attrs when supplied (#158d-c)" do
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{slug: "grant-stamp", name: "Grant stamp"})
+
+      assert {:ok, record} =
+               Delegations.grant("sa_grant_ws", "del_grant_ws", %{workspace_id: ws.id})
+
+      assert record.workspace_id == ws.id
+    end
+
+    test "leaves workspace_id nil when caller supplies no attr (legacy / adapter callback path)" do
+      assert {:ok, record} = Delegations.grant("sa_legacy_grant", "del_legacy_grant")
+      assert record.workspace_id == nil
+    end
+
+    test "subsequent delegation.state_changed audit event inherits workspace_id from the row" do
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{slug: "grant-audit", name: "Grant audit"})
+
+      {:ok, granted} =
+        Delegations.grant("sa_grant_audit", "del_grant_audit", %{workspace_id: ws.id})
+
+      # Build the audit attrs the adapter-callback emit path uses.
+      # `Bank.Audit.Events.delegation_state_changed/3` (#158d-b)
+      # reads `delegation.workspace_id` directly, so the stamped
+      # row carries the scope onto the event.
+      attrs = Bank.Audit.Events.delegation_state_changed(granted, :pending, actor: :adapter)
+
+      {:ok, event} = Bank.Audit.append_event(attrs)
+      assert event.workspace_id == ws.id
+      assert event.event_type == "delegation.state_changed"
+    end
   end
 
   describe "get/1" do
@@ -265,6 +298,31 @@ defmodule Bank.DelegationsTest do
                })
 
       assert delegation.id == existing.id
+    end
+
+    test "granted callback ignores a `workspace_id` smuggled in the HTTP body (#158d-c forge guard)" do
+      # The adapter callback path is the only externally-reachable
+      # entry to `Delegations.grant/3`, and it is intentionally
+      # workspace-blind (#158d-c). A future regression that naively
+      # spread `params` into the grant attrs would let a malicious
+      # adapter forge a workspace assignment for a fresh row. Pin
+      # the construction here: even if the HTTP body carries a
+      # `workspace_id`, the resulting row stays unscoped.
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{slug: "forge-guard", name: "Forge guard"})
+
+      assert {:ok, delegation} =
+               Delegations.apply_callback(%{
+                 "smart_account_id" => "sa_forge",
+                 "delegation_id" => "del_forge",
+                 "state" => "granted",
+                 "reason" => "wallet_connect",
+                 # Hostile field — must be ignored.
+                 "workspace_id" => ws.id
+               })
+
+      assert delegation.state == :active
+      assert delegation.workspace_id == nil
     end
 
     test "revoking callback transitions active to revoking" do
