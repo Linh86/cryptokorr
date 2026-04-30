@@ -53,12 +53,26 @@ defmodule Bank.Access do
 
   ## Audit
 
-  Invite-related audit events (`access_invite.created`,
-  `access_invite.accepted`, `access_invite.revoked`,
-  `access.admin_approved`, `access.admin_rejected`) are deferred to
-  issue #161 to keep this module small and the OAuth callback path
-  free of `Bank.Audit.Envelope` plumbing. The hooks live as TODOs
-  in the relevant functions.
+  Each lifecycle transition emits a `Bank.Audit` row through the
+  `Bank.Audit.Events` builders (issue #161). Events are appended via
+  `safe_emit/1`, which swallows + logs on failure so a transient
+  audit-table problem cannot roll back a user-visible action like
+  login, approve, or invite create.
+
+  Vocabulary:
+    * `access.invite_created` / `access.invite_revoked` — invite
+      lifecycle, correlated by invite id.
+    * `access.allowlist_matched` — emitted once per real state
+      transition; `match_type` distinguishes `:exact_email_accepted`
+      from `:domain_matched`.
+    * `access.allowlist_missed` — login produced no matching invite.
+    * `access.admin_approved` / `access.admin_rejected` — bootstrap
+      admin transitions; idempotent no-ops (`:already_member`,
+      `:already_disabled`) do NOT emit.
+
+  The login envelope events (`auth.login_succeeded`,
+  `auth.login_denied`) live with the auth controller, where the
+  user-visible state transition actually happens.
   """
 
   import Ecto.Query
@@ -66,10 +80,14 @@ defmodule Bank.Access do
   alias Bank.Access.AccessInvite
   alias Bank.Accounts
   alias Bank.Accounts.User
+  alias Bank.Audit
+  alias Bank.Audit.Events
   alias Bank.Repo
   alias Bank.Workspaces
   alias Bank.Workspaces.Membership
   alias Bank.Workspaces.Workspace
+
+  require Logger
 
   @type uuid :: String.t()
   @type apply_outcome ::
@@ -142,8 +160,14 @@ defmodule Bank.Access do
     # have to do it here.
     if changeset.valid?, do: expire_stale_active_invites_for(changeset)
 
-    # TODO #161: emit `access_invite.created` audit event.
-    Repo.insert(changeset)
+    case Repo.insert(changeset) do
+      {:ok, %AccessInvite{} = invite} = ok ->
+        safe_emit(Events.access_invite_created(invite, invited_by))
+        ok
+
+      {:error, _} = err ->
+        err
+    end
   end
 
   @doc """
@@ -154,11 +178,17 @@ defmodule Bank.Access do
   """
   @spec revoke_invite(AccessInvite.t(), User.t()) ::
           {:ok, AccessInvite.t()} | {:error, Ecto.Changeset.t()}
-  def revoke_invite(%AccessInvite{} = invite, %User{} = _revoked_by) do
-    # TODO #161: emit `access_invite.revoked` audit event.
-    invite
-    |> AccessInvite.revoke_changeset(DateTime.utc_now())
-    |> Repo.update()
+  def revoke_invite(%AccessInvite{} = invite, %User{} = revoked_by) do
+    case invite
+         |> AccessInvite.revoke_changeset(DateTime.utc_now())
+         |> Repo.update() do
+      {:ok, %AccessInvite{} = revoked} = ok ->
+        safe_emit(Events.access_invite_revoked(revoked, revoked_by))
+        ok
+
+      {:error, _} = err ->
+        err
+    end
   end
 
   @doc """
@@ -222,8 +252,6 @@ defmodule Bank.Access do
   def apply_invites_for_user(%User{status: :disabled}), do: [:user_disabled]
 
   def apply_invites_for_user(%User{} = user) do
-    # TODO #161: emit `access_invite.accepted` / `access_invite.matched`
-    # audit events for each outcome below.
     case extract_match_keys(user) do
       {:ok, email, domain} ->
         invites =
@@ -231,12 +259,16 @@ defmodule Bank.Access do
           |> matching_invites_query(domain)
           |> Repo.all()
 
-        invites
-        |> group_by_workspace()
-        |> Enum.map(fn {workspace_id, invs} ->
-          apply_for_workspace(user, workspace_id, invs)
-        end)
-        |> Enum.reject(&is_nil/1)
+        outcomes =
+          invites
+          |> group_by_workspace()
+          |> Enum.map(fn {workspace_id, invs} ->
+            apply_for_workspace(user, workspace_id, invs)
+          end)
+          |> Enum.reject(&is_nil/1)
+
+        if outcomes == [], do: safe_emit(Events.access_allowlist_missed(user))
+        outcomes
 
       :error ->
         []
@@ -385,21 +417,34 @@ defmodule Bank.Access do
           end
       end
 
-    {:ok, _} =
+    {:ok, accepted} =
       invite
       |> AccessInvite.accept_changeset(user, now)
       |> Repo.update()
+
+    # The `accept_changeset` flips status :active → :accepted on every
+    # call (with a self-accept escape hatch for the race retry path).
+    # Either way, after the update the invite reflects "matched on
+    # this login", so the audit row is the right shape.
+    safe_emit(Events.access_allowlist_matched(accepted, user, :exact_email_accepted))
 
     {outcome_tag, membership}
   end
 
   defp apply_domain_match(user, %AccessInvite{} = invite) do
     now = DateTime.utc_now()
+    first_match? = is_nil(invite.matched_at)
 
     {:ok, updated} =
       invite
       |> AccessInvite.matched_changeset(user, now)
       |> Repo.update()
+
+    # Idempotent: only emit on the first match. Subsequent logins
+    # for the same domain invite are no-ops (matched_at preserved by
+    # `matched_changeset`) and produce no audit row.
+    if first_match?,
+      do: safe_emit(Events.access_allowlist_matched(updated, user, :domain_matched))
 
     {:domain_match_pending, updated}
   end
@@ -604,12 +649,12 @@ defmodule Bank.Access do
         cond do
           not can_admin_access?(actor) -> {:error, :unauthorized}
           current.status == :disabled -> {:error, :user_disabled}
-          true -> do_approve(current, opts)
+          true -> do_approve(actor, current, opts)
         end
     end
   end
 
-  defp do_approve(%User{} = target, opts) do
+  defp do_approve(%User{} = actor, %User{} = target, opts) do
     matching = find_matching_invite_for_user(target)
 
     workspace_id =
@@ -621,19 +666,20 @@ defmodule Bank.Access do
     cond do
       is_nil(workspace_id) -> {:error, :workspace_target_required}
       is_nil(role) -> {:error, :role_required}
-      true -> upsert_membership(target, workspace_id, role)
+      true -> upsert_membership(actor, target, workspace_id, role)
     end
   end
 
-  defp upsert_membership(%User{} = target, workspace_id, role) do
+  defp upsert_membership(%User{} = actor, %User{} = target, workspace_id, role) do
     case Workspaces.get_membership(target, workspace_id) do
       %Membership{status: :active} = m ->
+        # Idempotent no-op — no audit row.
         {:ok, :already_member, m}
 
       %Membership{status: :inactive} = m ->
         case Workspaces.set_status(m, :active) do
           {:ok, reactivated} ->
-            # TODO #161: emit `access.admin_approved`.
+            safe_emit(Events.access_admin_approved(reactivated, actor, :inactive))
             {:ok, :membership_reactivated, reactivated}
 
           err ->
@@ -647,7 +693,7 @@ defmodule Bank.Access do
                role: role
              }) do
           {:ok, m} ->
-            # TODO #161: emit `access.admin_approved`.
+            safe_emit(Events.access_admin_approved(m, actor, :no_membership))
             {:ok, :membership_created, m}
 
           {:error, %Ecto.Changeset{} = changeset} ->
@@ -657,11 +703,13 @@ defmodule Bank.Access do
             if unique_constraint_violation?(changeset) do
               case Workspaces.get_membership(target, workspace_id) do
                 %Membership{status: :active} = m ->
+                  # Race winner already emitted; no second event.
                   {:ok, :already_member, m}
 
                 %Membership{} = m ->
                   case Workspaces.set_status(m, :active) do
                     {:ok, reactivated} ->
+                      safe_emit(Events.access_admin_approved(reactivated, actor, :inactive))
                       {:ok, :membership_reactivated, reactivated}
 
                     err ->
@@ -709,18 +757,38 @@ defmodule Bank.Access do
             {:error, :unauthorized}
 
           current.status == :disabled ->
+            # Idempotent no-op — no audit row.
             {:ok, :already_disabled, current}
 
           true ->
+            prior_status = current.status
+
             case Accounts.disable_user(current) do
               {:ok, disabled} ->
-                # TODO #161: emit `access.admin_rejected`.
+                safe_emit(Events.access_admin_rejected(disabled, actor, prior_status))
                 {:ok, :rejected, disabled}
 
               err ->
                 err
             end
         end
+    end
+  end
+
+  # --- Audit emission helper -----------------------------------------------
+
+  # Audit failure must never roll back a committed state transition
+  # (login, invite create, approve, reject). Swallow + log so the
+  # caller's user-visible action proceeds even when the audit table
+  # is briefly unavailable.
+  defp safe_emit(attrs) do
+    case Audit.append_event(attrs) do
+      {:ok, _event} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Bank.Access: audit emission failed: #{inspect(reason)}")
+        :ok
     end
   end
 end
