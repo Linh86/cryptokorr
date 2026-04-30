@@ -51,6 +51,9 @@ defmodule Bank.Intents do
       `#{@default_limit}`
     * `:search` — case-insensitive substring match on agent_id or
       intent id
+    * `:workspace_id` — narrow to one workspace (#158b). Default
+      `nil` keeps the legacy "all workspaces" path open until every
+      caller is migrated.
 
   Returns intents newest-first with their target counterparty and
   address-label preloaded for rendering.
@@ -61,6 +64,7 @@ defmodule Bank.Intents do
     kind = Keyword.get(opts, :kind, :all)
     limit = opts |> Keyword.get(:limit, @default_limit) |> clamp_limit()
     search = opts |> Keyword.get(:search) |> normalise_search()
+    workspace_id = Keyword.get(opts, :workspace_id)
 
     query =
       from(i in AgentIntent,
@@ -73,6 +77,7 @@ defmodule Bank.Intents do
     |> apply_state_filter(state)
     |> apply_kind_filter(kind)
     |> apply_search_filter(search)
+    |> scope_intent_to_workspace(workspace_id)
     |> Repo.all()
   end
 
@@ -92,6 +97,8 @@ defmodule Bank.Intents do
     * `:kind`   — single `AgentIntent` kind atom (or `:all`, default)
     * `:search` — case-insensitive substring match on agent_id or
       intent id
+    * `:workspace_id` — narrow to one workspace (#158b). Default
+      `nil` (all workspaces).
 
   Returns a map keyed by state atom with integer counts; all known
   states are present (missing states map to 0).
@@ -100,6 +107,7 @@ defmodule Bank.Intents do
   def counts_by_state(opts \\ []) do
     kind = Keyword.get(opts, :kind, :all)
     search = opts |> Keyword.get(:search) |> normalise_search()
+    workspace_id = Keyword.get(opts, :workspace_id)
 
     base = %{
       submitted: 0,
@@ -115,6 +123,7 @@ defmodule Bank.Intents do
     from(i in AgentIntent, group_by: i.state, select: {i.state, count(i.id)})
     |> apply_kind_filter(kind)
     |> apply_search_filter(search)
+    |> scope_intent_to_workspace(workspace_id)
     |> Repo.all()
     |> Enum.reduce(base, fn {state, n}, acc -> Map.put(acc, state, n) end)
   end
@@ -518,6 +527,8 @@ defmodule Bank.Intents do
              | {:invalid, term()}}
   def submit(attrs, opts \\ []) when is_map(attrs) do
     with {:ok, normalized} <- normalize(attrs) do
+      normalized = stamp_workspace_id(normalized, opts)
+
       case lookup_existing(normalized.agent_id, normalized.idempotency_key) do
         nil ->
           do_insert(normalized, opts)
@@ -529,6 +540,17 @@ defmodule Bank.Intents do
         %AgentIntent{} = existing ->
           {:error, {:idempotency_conflict, existing}}
       end
+    end
+  end
+
+  # Stamp `opts[:workspace_id]` onto the normalised attrs (#158b).
+  # Caller-context wins over anything in `attrs`. Legacy callers that
+  # pass neither end up with `workspace_id: nil`, which is allowed by
+  # the schema until a future PR adds the NOT NULL.
+  defp stamp_workspace_id(%{} = attrs, opts) do
+    case Keyword.get(opts, :workspace_id) do
+      nil -> attrs
+      ws_id -> Map.put(attrs, :workspace_id, ws_id)
     end
   end
 
@@ -824,6 +846,13 @@ defmodule Bank.Intents do
   defp apply_state_filter(q, :all), do: q
   defp apply_state_filter(q, nil), do: q
   defp apply_state_filter(q, state) when is_atom(state), do: where(q, [i], i.state == ^state)
+
+  # Optional workspace filter for #158b. Default `nil` keeps the
+  # legacy "all workspaces" path open until every caller is migrated.
+  defp scope_intent_to_workspace(q, nil), do: q
+
+  defp scope_intent_to_workspace(q, workspace_id) when is_binary(workspace_id),
+    do: where(q, [i], i.workspace_id == ^workspace_id)
 
   defp apply_kind_filter(q, :all), do: q
   defp apply_kind_filter(q, nil), do: q

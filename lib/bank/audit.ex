@@ -151,6 +151,10 @@ defmodule Bank.Audit do
     * `:event_type` — string. Exact match; no wildcard in v1.
     * `:actor` — atom (`:user` | `:agent` | `:runtime` | `:adapter`).
     * `:from`, `:to` — `DateTime`s (inclusive); bound `ts`.
+    * `:workspace_id` — uuid; narrow to one workspace's audit slice
+      (#158b read hint). Existing rows with `workspace_id IS NULL`
+      are *not* matched. Default `nil` keeps the legacy "all
+      workspaces" path open.
 
   ## Options
 
@@ -372,6 +376,8 @@ defmodule Bank.Audit do
       {:to, %DateTime{} = ts}, q -> where(q, [e], e.ts <= ^ts)
       {:actor, nil}, q -> q
       {:actor, actor}, q when is_atom(actor) -> where(q, [e], e.actor == ^actor)
+      {:workspace_id, nil}, q -> q
+      {:workspace_id, id}, q when is_binary(id) -> where(q, [e], e.workspace_id == ^id)
       {_unknown, _}, q -> q
     end)
   end

@@ -55,6 +55,13 @@ defmodule Bank.Audit.Envelope do
     :ts
   ]
 
+  # Schema-accepted fields that the writer carries through but the
+  # canonical hash deliberately ignores. `workspace_id` lives here:
+  # #158a added it to the row as a read hint without disturbing the
+  # hash invariant from #161, so existing event hashes stay valid
+  # even when new emissions stamp it.
+  @passthrough_fields [:workspace_id]
+
   @required_fields [:actor, :event_type, :subject_type, :subject_id]
 
   @type attrs :: map()
@@ -73,15 +80,22 @@ defmodule Bank.Audit.Envelope do
   """
   @spec build(map() | keyword()) :: {:ok, attrs()} | {:error, term()}
   def build(attrs) do
-    attrs = attrs |> to_map() |> Map.take(@canonical_fields)
+    raw = to_map(attrs)
+    canonical = Map.take(raw, @canonical_fields)
+    passthrough = Map.take(raw, @passthrough_fields)
 
-    with :ok <- require_fields(attrs) do
-      attrs =
-        attrs
+    with :ok <- require_fields(canonical) do
+      canonical =
+        canonical
         |> Map.put_new(:ts, DateTime.utc_now())
         |> Map.put_new(:schema_version, "1")
 
-      {:ok, Map.put(attrs, :payload_hash, payload_hash(attrs))}
+      final =
+        canonical
+        |> Map.put(:payload_hash, payload_hash(canonical))
+        |> Map.merge(passthrough)
+
+      {:ok, final}
     end
   end
 
