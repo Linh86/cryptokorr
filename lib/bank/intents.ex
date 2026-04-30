@@ -543,14 +543,18 @@ defmodule Bank.Intents do
     end
   end
 
-  # Stamp `opts[:workspace_id]` onto the normalised attrs (#158b).
-  # Caller-context wins over anything in `attrs`. Legacy callers that
-  # pass neither end up with `workspace_id: nil`, which is allowed by
-  # the schema until a future PR adds the NOT NULL.
+  # Caller-supplied `opts[:workspace_id]` is the only sanctioned
+  # source of the workspace scope on an intent. `normalize/1` already
+  # constructs the changeset attrs from a fixed field list (no
+  # `"workspace_id"` is read from the JSON body), so this function
+  # mainly defends against a future change that opens a body field.
+  # Legacy callers that pass neither end up with `workspace_id: nil`.
   defp stamp_workspace_id(%{} = attrs, opts) do
+    stripped = attrs |> Map.delete(:workspace_id) |> Map.delete("workspace_id")
+
     case Keyword.get(opts, :workspace_id) do
-      nil -> attrs
-      ws_id -> Map.put(attrs, :workspace_id, ws_id)
+      nil -> stripped
+      ws_id -> Map.put(stripped, :workspace_id, ws_id)
     end
   end
 

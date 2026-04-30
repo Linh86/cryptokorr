@@ -259,13 +259,20 @@ defmodule Bank.Counterparties do
     end
   end
 
-  # Caller-supplied `opts[:workspace_id]` wins over anything in
-  # `attrs`; the opts position is the canonical place for caller-
-  # context fields (cf. `:actor`, `:actor_id`).
+  # Caller-supplied `opts[:workspace_id]` is the only sanctioned
+  # source of the workspace scope on a fresh insert. We always
+  # strip any `:workspace_id` (atom or string) from `attrs` first
+  # — `attrs` may carry user-controlled body fields, and the
+  # workspace boundary must never be forgeable from a request
+  # body. Trusted internal callers that need to set workspace_id
+  # without going through this function (e.g. `Bank.Demo`) call
+  # the schema changeset directly.
   defp stamp_workspace_id(attrs, opts) do
+    stripped = attrs |> Map.delete(:workspace_id) |> Map.delete("workspace_id")
+
     case Keyword.get(opts, :workspace_id) do
-      nil -> attrs
-      ws_id -> Map.put(attrs, :workspace_id, ws_id)
+      nil -> stripped
+      ws_id -> Map.put(stripped, :workspace_id, ws_id)
     end
   end
 

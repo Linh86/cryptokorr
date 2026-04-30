@@ -960,12 +960,20 @@ defmodule Bank.Policies do
   defp scope_rule_to_workspace(query, workspace_id) when is_binary(workspace_id),
     do: where(query, [r], r.workspace_id == ^workspace_id)
 
-  # Stamp `opts[:workspace_id]` onto the changeset attrs (if set);
-  # caller-context wins over anything in `attrs`.
+  # Caller-supplied `opts[:workspace_id]` is the only sanctioned
+  # source of the workspace scope. We always strip any
+  # `:workspace_id` (atom or string) from `attrs` first — `attrs`
+  # may carry user-controlled body fields, and the workspace
+  # boundary must never be forgeable from a request body. Trusted
+  # internal callers (e.g. `Bank.Demo`) call the schema changeset
+  # directly when they need to set workspace_id without going
+  # through this function.
   defp stamp_workspace_id(attrs, opts) do
+    stripped = attrs |> Map.delete(:workspace_id) |> Map.delete("workspace_id")
+
     case Keyword.get(opts, :workspace_id) do
-      nil -> attrs
-      ws_id -> Map.put(attrs, :workspace_id, ws_id)
+      nil -> stripped
+      ws_id -> Map.put(stripped, :workspace_id, ws_id)
     end
   end
 

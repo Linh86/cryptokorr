@@ -105,7 +105,7 @@ defmodule Bank.WorkspaceQueryScopingTest do
       assert cp.workspace_id == nil
     end
 
-    test "opts[:workspace_id] wins over attrs[:workspace_id]" do
+    test "opts[:workspace_id] wins; user-supplied attrs[:workspace_id] is stripped" do
       ws_a = create_workspace("c-opts-a")
       ws_b = create_workspace("c-opts-b")
 
@@ -118,6 +118,36 @@ defmodule Bank.WorkspaceQueryScopingTest do
         )
 
       assert cp.workspace_id == ws_a.id
+    end
+
+    test "user-supplied attrs[:workspace_id] is stripped even when opts has none" do
+      ws = create_workspace("c-forge")
+
+      {:ok, cp} =
+        Counterparties.create_counterparty(%{
+          name: "Forge attempt",
+          created_by: :user,
+          workspace_id: ws.id
+        })
+
+      # The workspace boundary must not be forgeable from `attrs`.
+      # Without a caller-supplied `opts[:workspace_id]`, the row
+      # ends up unscoped (legacy nil), regardless of what the body
+      # asked for.
+      assert cp.workspace_id == nil
+    end
+
+    test "string-keyed `\"workspace_id\"` in attrs is also stripped" do
+      ws = create_workspace("c-string-forge")
+
+      {:ok, cp} =
+        Counterparties.create_counterparty(%{
+          "name" => "Forge string",
+          "created_by" => "user",
+          "workspace_id" => ws.id
+        })
+
+      assert cp.workspace_id == nil
     end
   end
 
