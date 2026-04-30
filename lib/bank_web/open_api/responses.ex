@@ -14,6 +14,10 @@ defmodule BankWeb.OpenApi.Responses do
   ## Components exposed
 
     * `BadRequest` — 400, schema validation failure.
+    * `Unauthorized` — 401, missing / malformed / revoked / expired
+      API key. Added in #218c alongside the management endpoints
+      so every authenticated `/v1` operation can `$ref` the 401
+      response body shape consistently.
     * `Forbidden` — 403, caller scope does not cover the subject.
     * `NotFound` — 404, subject does not exist.
     * `Conflict` — 409, idempotency key replay mismatch or
@@ -44,6 +48,27 @@ defmodule BankWeb.OpenApi.Responses do
   @doc "400 — request body failed schema validation."
   @spec bad_request() :: Response.t()
   def bad_request, do: error_response("Malformed request body or missing required field.")
+
+  @doc """
+  401 — missing, malformed, revoked, or expired API key.
+
+  Body codes (collapsed by `BankWeb.Plugs.VerifyAPIKey` so the
+  client cannot distinguish internal reasons):
+
+    * `missing_authorization` — no `Authorization` header.
+    * `invalid_authorization_scheme` — header present but not
+      `Bearer ...`.
+    * `invalid_credentials` — bearer body did not authenticate
+      (unknown prefix, wrong secret, revoked, expired).
+  """
+  @spec unauthorized() :: Response.t()
+  def unauthorized,
+    do:
+      error_response(
+        "Missing, malformed, revoked, or expired API key. The body's `code` is one of " <>
+          "`missing_authorization`, `invalid_authorization_scheme`, or `invalid_credentials` " <>
+          "— internal verify reasons are deliberately collapsed to a single wire shape."
+      )
 
   @doc "403 — caller scope does not cover the subject."
   @spec forbidden() :: Response.t()

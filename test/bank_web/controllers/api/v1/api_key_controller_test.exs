@@ -152,6 +152,59 @@ defmodule BankWeb.API.V1.APIKeyControllerTest do
       refute json =~ "cb_"
     end
 
+    test "audit actor_id is the calling key's created_by_user_id (not request body)" do
+      # Pin the documented actor_id contract: when the request is
+      # authenticated by an API key (machine caller), the audit
+      # `actor_id` is the human who minted the *calling* key, NOT
+      # the user who created some other API key in the workspace.
+      # A regression that switched to `current_scope.user.id`
+      # (always nil for API auth) or to a request-body field would
+      # surface as a wrong actor here.
+      {:ok, ws} = Workspaces.create_workspace(%{slug: "actor-pin", name: "Actor Pin"})
+
+      {:ok, alice} =
+        Bank.Accounts.find_or_create_from_oauth(%{
+          provider: :google,
+          subject: "alice-pin",
+          email: "alice-pin@example.com",
+          name: "Alice"
+        })
+
+      {:ok, bob} =
+        Bank.Accounts.find_or_create_from_oauth(%{
+          provider: :google,
+          subject: "bob-pin",
+          email: "bob-pin@example.com",
+          name: "Bob"
+        })
+
+      {:ok, _} =
+        Workspaces.create_membership(%{user_id: alice.id, workspace_id: ws.id, role: :admin})
+
+      {:ok, _} =
+        Workspaces.create_membership(%{user_id: bob.id, workspace_id: ws.id, role: :admin})
+
+      # Calling key was created by Alice. Bob exists in the same
+      # workspace but is NOT the audit actor for keys minted via
+      # this calling key.
+      {:ok, _, alice_raw} = APIKeys.create_key(ws, alice, :admin, "alice-mgmt")
+
+      conn =
+        build_conn()
+        |> put_req_header("authorization", "Bearer " <> alice_raw)
+        |> post(~p"/v1/api_keys", %{"role" => "viewer", "name" => "minted-via-alice"})
+
+      assert %{"data" => %{"id" => new_key_id}} = json_response(conn, 201)
+
+      %{events: events} = Audit.list_events(%{event_type: "api_key.created"})
+      [event] = Enum.filter(events, &(&1.subject_id == new_key_id))
+
+      assert event.actor_id == alice.id,
+             "audit actor_id must be the calling key's created_by_user_id (Alice), not Bob"
+
+      refute event.actor_id == bob.id
+    end
+
     test "403 forbidden_role_above_creator when admin tries to mint owner",
          %{conn: conn} do
       conn = post(conn, ~p"/v1/api_keys", %{"role" => "owner", "name" => "too-strong"})

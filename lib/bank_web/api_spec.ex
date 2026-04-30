@@ -380,6 +380,7 @@ defmodule BankWeb.ApiSpec do
   defp responses do
     %{
       "BadRequest" => Responses.bad_request(),
+      "Unauthorized" => Responses.unauthorized(),
       "Forbidden" => Responses.forbidden(),
       "NotFound" => Responses.not_found(),
       "Conflict" => Responses.conflict(),

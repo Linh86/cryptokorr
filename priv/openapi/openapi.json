@@ -160,6 +160,21 @@
           }
         }
       },
+      "Unauthorized": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        },
+        "description": "Missing, malformed, revoked, or expired API key. The body's `code` is one of `missing_authorization`, `invalid_authorization_scheme`, or `invalid_credentials` — internal verify reasons are deliberately collapsed to a single wire shape.",
+        "headers": {
+          "X-Request-Id": {
+            "$ref": "#/components/headers/RequestIdOut"
+          }
+        }
+      },
       "UnprocessableEntity": {
         "content": {
           "application/json": {
@@ -2565,6 +2580,12 @@
               }
             },
             "description": "API key list"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           }
         },
         "summary": "List API keys for the current workspace",
@@ -2602,13 +2623,11 @@
             },
             "description": "Newly minted API key (raw_key shown once)"
           },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
           "403": {
-            "content": {
-              "application/json": {
-                "schema": "Elixir.BankWeb.OpenApi.Schemas.ErrorEnvelope"
-              }
-            },
-            "description": "Caller's role is below the requested key role"
+            "$ref": "#/components/responses/Forbidden"
           },
           "422": {
             "$ref": "#/components/responses/UnprocessableEntity"
@@ -2647,6 +2666,12 @@
               }
             },
             "description": "Revoked key"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
           },
           "404": {
             "$ref": "#/components/responses/NotFound"

@@ -31,6 +31,27 @@ defmodule BankWeb.API.V1.APIKeyController do
   closes the deferral documented on `Bank.APIKeys.create_key/4`
   in #218a — the context primitive trusts its caller, so the
   caller MUST be the controller, where the gate runs.
+
+  ## Duplicate names are allowed by design
+
+  Two keys can carry the same `name` within a workspace. The
+  prefix + secret are the unique identifiers; `name` is just a
+  human label. Allowing duplicates supports a common operator
+  workflow: rotation by minting a fresh `ci-runner` alongside
+  the old one, switching consumers, then revoking the old key.
+  Forcing uniqueness would push operators to invent rotation
+  suffixes (`ci-runner-2`, `ci-runner-v3`) that drift from the
+  meaningful label.
+
+  ## Audit actor for issued keys
+
+  When the request is itself authenticated by an API key
+  (machine caller, `current_scope.user == nil`), `create/2`
+  attributes the `api_key.created` audit event to the calling
+  key's original `created_by_user_id` — the human who minted
+  the *calling* key. This keeps every issued key chained back
+  to a real human in the audit trail even when keys are minted
+  via a script using a service-account-style management key.
   """
 
   use BankWeb, :controller
@@ -44,6 +65,8 @@ defmodule BankWeb.API.V1.APIKeyController do
   @id_ref %Reference{"$ref": "#/components/schemas/Id"}
   @request_id_in_ref %Reference{"$ref": "#/components/parameters/RequestIdIn"}
   @idempotency_key_ref %Reference{"$ref": "#/components/parameters/IdempotencyKey"}
+  @unauthorized_ref %Reference{"$ref": "#/components/responses/Unauthorized"}
+  @forbidden_ref %Reference{"$ref": "#/components/responses/Forbidden"}
   @not_found_ref %Reference{"$ref": "#/components/responses/NotFound"}
   @unprocessable_ref %Reference{"$ref": "#/components/responses/UnprocessableEntity"}
 
@@ -67,7 +90,9 @@ defmodule BankWeb.API.V1.APIKeyController do
     tags: ["APIKeys"],
     parameters: [@request_id_in_ref],
     responses: %{
-      ok: {"API key list", "application/json", BankWeb.OpenApi.Schemas.APIKeyListResponse}
+      ok: {"API key list", "application/json", BankWeb.OpenApi.Schemas.APIKeyListResponse},
+      unauthorized: @unauthorized_ref,
+      forbidden: @forbidden_ref
     }
   )
 
@@ -101,9 +126,8 @@ defmodule BankWeb.API.V1.APIKeyController do
       created:
         {"Newly minted API key (raw_key shown once)", "application/json",
          BankWeb.OpenApi.Schemas.APIKeyCreatedResponse},
-      forbidden:
-        {"Caller's role is below the requested key role", "application/json",
-         BankWeb.OpenApi.Schemas.ErrorEnvelope},
+      unauthorized: @unauthorized_ref,
+      forbidden: @forbidden_ref,
       unprocessable_entity: @unprocessable_ref
     }
   )
@@ -166,6 +190,8 @@ defmodule BankWeb.API.V1.APIKeyController do
     parameters: [@api_key_id_param, @request_id_in_ref],
     responses: %{
       ok: {"Revoked key", "application/json", BankWeb.OpenApi.Schemas.APIKeyEntity},
+      unauthorized: @unauthorized_ref,
+      forbidden: @forbidden_ref,
       not_found: @not_found_ref
     }
   )
