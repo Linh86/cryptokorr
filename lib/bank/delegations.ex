@@ -120,16 +120,33 @@ defmodule Bank.Delegations do
   @doc """
   List all non-terminal delegations across all smart accounts.
   Returns a list of `Delegation` structs ordered by most recently created.
+
+  Options:
+
+    * `:workspace_id` — narrow to one workspace (#158b.2). Default
+      `nil` keeps the legacy "all workspaces" path open until every
+      caller is migrated.
   """
-  @spec list_active() :: [Delegation.t()]
-  def list_active do
-    Repo.all(
-      from(d in Delegation,
-        where: d.state in [:pending, :active, :revoking, :revoke_failed],
-        order_by: [desc: d.inserted_at]
-      )
+  @spec list_active(keyword()) :: [Delegation.t()]
+  def list_active(opts \\ []) do
+    workspace_id = Keyword.get(opts, :workspace_id)
+
+    from(d in Delegation,
+      where: d.state in [:pending, :active, :revoking, :revoke_failed],
+      order_by: [desc: d.inserted_at]
     )
+    |> scope_delegation_to_workspace(workspace_id)
+    |> Repo.all()
   end
+
+  # Optional workspace filter for #158b.2. The `delegations` table
+  # carries `workspace_id` directly (read hint added in #158a), so the
+  # filter is a direct WHERE. The `nil` default leaves the query
+  # untouched for legacy callers that have not been migrated.
+  defp scope_delegation_to_workspace(query, nil), do: query
+
+  defp scope_delegation_to_workspace(query, workspace_id) when is_binary(workspace_id),
+    do: where(query, [d], d.workspace_id == ^workspace_id)
 
   @doc """
   Fetch the current (non-terminal) delegation for a smart account.

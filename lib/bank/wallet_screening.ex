@@ -160,14 +160,19 @@ defmodule Bank.WalletScreening do
     * `:source` — filter by source name
     * `:control_tier` — filter by tier atom
     * `:limit` — default 50, max 500
+    * `:workspace_id` — narrow to one workspace (#158b.2). Default
+      `nil` keeps the legacy "all workspaces" path open until every
+      caller is migrated.
   """
   @spec list_records(map() | keyword(), keyword()) :: [ScreeningRecord.t()]
   def list_records(filters \\ %{}, opts \\ []) do
     filters = if is_list(filters), do: Map.new(filters), else: filters
     limit = opts |> Keyword.get(:limit, 50) |> min(500)
+    workspace_id = Keyword.get(opts, :workspace_id)
 
     ScreeningRecord
     |> apply_filters(filters)
+    |> scope_screening_to_workspace(workspace_id)
     |> order_by([r], desc: r.updated_at, desc: r.id)
     |> limit(^limit)
     |> Repo.all()
@@ -274,6 +279,16 @@ defmodule Bank.WalletScreening do
         q
     end)
   end
+
+  # Optional workspace filter for #158b.2. `nil` (the default) leaves
+  # the query untouched so legacy callers continue returning every
+  # workspace's hits. `screen/3` (the runtime hot path) does NOT pass
+  # this opt — wallet-screening hits apply globally regardless of the
+  # workspace context, by design.
+  defp scope_screening_to_workspace(query, nil), do: query
+
+  defp scope_screening_to_workspace(query, workspace_id) when is_binary(workspace_id),
+    do: where(query, [r], r.workspace_id == ^workspace_id)
 
   defp canonical_chain(chain) do
     chain

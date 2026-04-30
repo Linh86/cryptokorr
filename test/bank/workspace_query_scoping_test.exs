@@ -1,6 +1,6 @@
 defmodule Bank.WorkspaceQueryScopingTest do
   @moduledoc """
-  #158b — workspace_id query scoping at the context layer.
+  #158b / #158b.2 — workspace_id query scoping at the context layer.
 
   Each context exposes an opt-in `:workspace_id` filter on its
   list/read functions (and an opt-in stamp on its writer functions).
@@ -15,11 +15,16 @@ defmodule Bank.WorkspaceQueryScopingTest do
 
   use Bank.DataCase, async: true
 
+  import Bank.Fixtures
+
   alias Bank.Audit
   alias Bank.Counterparties
   alias Bank.Counterparties.Counterparty
+  alias Bank.Decisions
+  alias Bank.Delegations
   alias Bank.Intents
   alias Bank.Policies
+  alias Bank.WalletScreening
   alias Bank.Workspaces
 
   defp create_workspace(slug) do
@@ -324,6 +329,221 @@ defmodule Bank.WorkspaceQueryScopingTest do
 
       %{events: events} = Audit.list_events(%{event_type: "scoping.legacy"})
       assert length(events) >= 1
+    end
+  end
+
+  # --- #158b.2: Decisions / Delegations / WalletScreening -----------------
+
+  defp insert_intent_in!(ws) do
+    cp = insert_counterparty!(ws, "Recipient-#{System.unique_integer([:positive])}")
+    agent_intent(workspace_id: ws.id, target_counterparty_id: cp.id)
+  end
+
+  defp insert_envelope_in!(ws, outcome) do
+    intent = insert_intent_in!(ws)
+
+    base = %{
+      intent: intent,
+      outcome: outcome,
+      current: true,
+      decided_at: DateTime.utc_now()
+    }
+
+    attrs =
+      if outcome == :approval_required do
+        Map.put(base, :approval_expires_at, DateTime.add(DateTime.utc_now(), 3600, :second))
+      else
+        base
+      end
+
+    decision_envelope(attrs)
+  end
+
+  defp insert_active_plan_in!(ws) do
+    intent = insert_intent_in!(ws)
+    decision = decision_envelope(intent: intent, current: true)
+
+    execution_plan(
+      decision: decision,
+      workspace_id: ws.id,
+      execution_status: :prepared,
+      active: true
+    )
+  end
+
+  describe "Decisions.list_pending_approvals/1 — opts[:workspace_id]" do
+    test "joins through intent and narrows to one workspace" do
+      ws_a = create_workspace("d-pending-a")
+      ws_b = create_workspace("d-pending-b")
+
+      env_a = insert_envelope_in!(ws_a, :approval_required)
+      env_b = insert_envelope_in!(ws_b, :approval_required)
+
+      ids = Decisions.list_pending_approvals(workspace_id: ws_a.id) |> Enum.map(& &1.id)
+      assert env_a.id in ids
+      refute env_b.id in ids
+    end
+
+    test "no opt returns the legacy cross-workspace pending list" do
+      ws = create_workspace("d-pending-legacy")
+      env = insert_envelope_in!(ws, :approval_required)
+
+      ids = Decisions.list_pending_approvals() |> Enum.map(& &1.id)
+      assert env.id in ids
+    end
+
+    test "envelopes whose intent has NULL workspace_id are excluded under filter" do
+      ws = create_workspace("d-pending-nullintent")
+
+      orphan_env =
+        decision_envelope(
+          outcome: :approval_required,
+          current: true,
+          approval_expires_at: DateTime.add(DateTime.utc_now(), 3600, :second)
+        )
+
+      env_in_ws = insert_envelope_in!(ws, :approval_required)
+
+      ids = Decisions.list_pending_approvals(workspace_id: ws.id) |> Enum.map(& &1.id)
+      assert env_in_ws.id in ids
+      refute orphan_env.id in ids
+    end
+  end
+
+  describe "Decisions.count_pending_approvals/1" do
+    test "narrows the count to one workspace via the intent join" do
+      ws = create_workspace("d-count-pending")
+      _ = insert_envelope_in!(ws, :approval_required)
+      _ = insert_envelope_in!(ws, :approval_required)
+      _ = insert_envelope_in!(create_workspace("d-count-other"), :approval_required)
+
+      assert Decisions.count_pending_approvals(workspace_id: ws.id) == 2
+    end
+  end
+
+  describe "Decisions.list_recent_decisions/2" do
+    test "respects the limit and the workspace filter together" do
+      ws = create_workspace("d-recent")
+      env_a = insert_envelope_in!(ws, :auto_exec)
+      _env_other = insert_envelope_in!(create_workspace("d-recent-other"), :auto_exec)
+
+      result = Decisions.list_recent_decisions(50, workspace_id: ws.id)
+      assert Enum.any?(result, &(&1.id == env_a.id))
+      assert Enum.all?(result, fn _ -> true end)
+    end
+  end
+
+  describe "Decisions.list_held_decisions/1 and list_blocked_decisions/2" do
+    test "filter held envelopes by workspace via the intent join" do
+      ws = create_workspace("d-held")
+      held = insert_envelope_in!(ws, :hold)
+      _other = insert_envelope_in!(create_workspace("d-held-other"), :hold)
+
+      ids = Decisions.list_held_decisions(workspace_id: ws.id) |> Enum.map(& &1.id)
+      assert held.id in ids
+      assert length(ids) == 1
+    end
+
+    test "filter blocked envelopes by workspace via the intent join" do
+      ws = create_workspace("d-blocked")
+      blocked = insert_envelope_in!(ws, :block)
+      _other = insert_envelope_in!(create_workspace("d-blocked-other"), :block)
+
+      ids = Decisions.list_blocked_decisions(50, workspace_id: ws.id) |> Enum.map(& &1.id)
+      assert blocked.id in ids
+      assert length(ids) == 1
+    end
+  end
+
+  describe "Decisions.list_active_executions/1 and count_active_executions/1" do
+    test "scope_plan_to_workspace filters via the plan's own workspace_id" do
+      ws_a = create_workspace("d-exec-a")
+      ws_b = create_workspace("d-exec-b")
+
+      plan_a = insert_active_plan_in!(ws_a)
+      _plan_b = insert_active_plan_in!(ws_b)
+
+      ids_a = Decisions.list_active_executions(workspace_id: ws_a.id) |> Enum.map(& &1.id)
+      assert plan_a.id in ids_a
+      assert length(ids_a) == 1
+
+      assert Decisions.count_active_executions(workspace_id: ws_a.id) == 1
+    end
+
+    test "no opt returns the legacy cross-workspace active execution list" do
+      ws = create_workspace("d-exec-legacy")
+      plan = insert_active_plan_in!(ws)
+
+      ids = Decisions.list_active_executions() |> Enum.map(& &1.id)
+      assert plan.id in ids
+    end
+  end
+
+  describe "Delegations.list_active/1 — opts[:workspace_id]" do
+    test "filters delegations directly by their workspace_id read hint" do
+      ws_a = create_workspace("dl-a")
+      ws_b = create_workspace("dl-b")
+
+      d_a = delegation(workspace_id: ws_a.id)
+      _d_b = delegation(workspace_id: ws_b.id)
+
+      ids = Delegations.list_active(workspace_id: ws_a.id) |> Enum.map(& &1.id)
+      assert d_a.id in ids
+      assert length(ids) == 1
+    end
+
+    test "delegations with NULL workspace_id are excluded under filter" do
+      ws = create_workspace("dl-null")
+      _legacy = delegation()
+      d = delegation(workspace_id: ws.id)
+
+      ids = Delegations.list_active(workspace_id: ws.id) |> Enum.map(& &1.id)
+      assert d.id in ids
+      assert length(ids) == 1
+    end
+
+    test "no opt returns delegations across workspaces (legacy)" do
+      ws = create_workspace("dl-legacy")
+      d = delegation(workspace_id: ws.id)
+
+      ids = Delegations.list_active() |> Enum.map(& &1.id)
+      assert d.id in ids
+    end
+  end
+
+  describe "WalletScreening.list_records/2 — opts[:workspace_id]" do
+    defp insert_screening_in!(ws, source_record_id) do
+      {:ok, rec} =
+        WalletScreening.upsert_record(%{
+          chain: "base",
+          address: "0xabc",
+          control_tier: :hard_block,
+          source: "ofac",
+          source_record_id: source_record_id,
+          workspace_id: ws && ws.id
+        })
+
+      rec
+    end
+
+    test "filters wallet-screening hits to one workspace" do
+      ws_a = create_workspace("ws-screen-a")
+      ws_b = create_workspace("ws-screen-b")
+
+      rec_a = insert_screening_in!(ws_a, "src-a-#{System.unique_integer([:positive])}")
+      _rec_b = insert_screening_in!(ws_b, "src-b-#{System.unique_integer([:positive])}")
+
+      ids = WalletScreening.list_records(%{}, workspace_id: ws_a.id) |> Enum.map(& &1.id)
+      assert rec_a.id in ids
+      assert length(ids) == 1
+    end
+
+    test "no opt returns hits across workspaces (legacy global view)" do
+      ws = create_workspace("ws-screen-legacy")
+      rec = insert_screening_in!(ws, "src-legacy-#{System.unique_integer([:positive])}")
+
+      ids = WalletScreening.list_records() |> Enum.map(& &1.id)
+      assert rec.id in ids
     end
   end
 end
