@@ -35,6 +35,15 @@ defmodule BankWeb.Router do
     plug BankWeb.Plugs.RequireRole, :operator
   end
 
+  # Admin-tier role gate (#218c). Composes on top of
+  # `:api_authenticated` for surfaces that issue or revoke
+  # credentials — currently the API key management endpoints. Owner
+  # is admitted by the role hierarchy (`viewer < operator < admin
+  # < owner`), so this gate is "admin or owner".
+  pipeline :api_admin do
+    plug BankWeb.Plugs.RequireRole, :admin
+  end
+
   # Adapter callback pipeline — shared bearer secret check on top of
   # the JSON API pipeline. In production mTLS is terminated at the
   # ingress; this plug is defense in depth. See
@@ -170,6 +179,17 @@ defmodule BankWeb.Router do
     post "/security/pause", SecurityController, :pause
     post "/security/resume", SecurityController, :resume
     post "/security/revoke_delegation", SecurityController, :revoke_delegation
+  end
+
+  # API key management (#218c). Admin-tier surface — admins and
+  # owners only. The creator-privilege check inside `create/2`
+  # additionally refuses minting a key stronger than the caller.
+  scope "/v1", BankWeb.API.V1, as: :api_v1_admin do
+    pipe_through [:api, :api_authenticated, :api_admin]
+
+    get "/api_keys", APIKeyController, :index
+    post "/api_keys", APIKeyController, :create
+    delete "/api_keys/:id", APIKeyController, :delete
   end
 
   # Internal adapter callback — private network, not part of /v1/.

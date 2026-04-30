@@ -72,14 +72,16 @@ defmodule BankWeb.ApiSpecTest do
   end
 
   describe "tags — canonical top-level list" do
-    test "exactly matches the ten business domains plus Health" do
+    test "exactly matches the eleven business domains plus Health and APIKeys" do
       # Ten business-domain tags were pinned in #86; `Health` was
       # added in #88 alongside the operation specs on
-      # `BankWeb.HealthController` so every operation tag the spec
-      # references is also declared at the top level.
+      # `BankWeb.HealthController`; `APIKeys` was added in #218c
+      # alongside `BankWeb.API.V1.APIKeyController`. Every
+      # operation tag the spec references is also declared at the
+      # top level.
       expected = ~w(
         Intents Decisions Approvals Counterparties AddressLabels
-        TrustAssertions Policies Audit Security Connect Health
+        TrustAssertions Policies Audit Security Connect Health APIKeys
       )
 
       actual = Enum.map(ApiSpec.spec().tags, & &1.name)

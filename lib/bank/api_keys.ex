@@ -257,6 +257,41 @@ defmodule Bank.APIKeys do
     |> Repo.all()
   end
 
+  @doc """
+  List ALL keys for a workspace with the `created_by` user
+  preloaded, newest first. Used by the management surface
+  (#218c) so the listing can render the creator's email without
+  N+1 lookups.
+  """
+  @spec list_keys_with_creator(String.t()) :: [APIKey.t()]
+  def list_keys_with_creator(workspace_id) when is_binary(workspace_id) do
+    from(k in APIKey,
+      where: k.workspace_id == ^workspace_id,
+      order_by: [desc: k.inserted_at],
+      preload: [:created_by]
+    )
+    |> Repo.all()
+  end
+
+  @doc """
+  Fetch a key by id scoped to a workspace (#218c). Returns
+  `:not_found` for unknown ids AND for ids that belong to a
+  different workspace — the management surface MUST NEVER let an
+  admin from workspace A read or revoke a key in workspace B.
+  """
+  @spec get_workspace_key(String.t(), String.t()) ::
+          {:ok, APIKey.t()} | {:error, :not_found}
+  def get_workspace_key(workspace_id, id)
+      when is_binary(workspace_id) and is_binary(id) do
+    case Repo.one(
+           from k in APIKey,
+             where: k.id == ^id and k.workspace_id == ^workspace_id
+         ) do
+      nil -> {:error, :not_found}
+      %APIKey{} = key -> {:ok, key}
+    end
+  end
+
   # --- Private helpers -----------------------------------------------------
 
   # 32 random bytes → ~256 bits of entropy. Encoded with base32
