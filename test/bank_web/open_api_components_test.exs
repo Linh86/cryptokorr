@@ -179,8 +179,10 @@ defmodule BankWeb.OpenApiComponentsTest do
   describe "shared responses" do
     test "declares the full error-response family under stable names" do
       # `NotImplemented` was added in #88 for the intent stubs.
+      # `Unauthorized` was added in #218c so authenticated `/v1`
+      # operations can $ref a consistent 401 body shape.
       expected =
-        ~w(BadRequest Forbidden NotFound Conflict UnprocessableEntity
+        ~w(BadRequest Unauthorized Forbidden NotFound Conflict UnprocessableEntity
            NotImplemented ServiceUnavailable BadGateway GatewayTimeout)
 
       actual = components().responses |> Map.keys() |> Enum.sort()

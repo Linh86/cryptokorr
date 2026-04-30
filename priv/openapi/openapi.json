@@ -160,6 +160,21 @@
           }
         }
       },
+      "Unauthorized": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        },
+        "description": "Missing, malformed, revoked, or expired API key. The body's `code` is one of `missing_authorization`, `invalid_authorization_scheme`, or `invalid_credentials` — internal verify reasons are deliberately collapsed to a single wire shape.",
+        "headers": {
+          "X-Request-Id": {
+            "$ref": "#/components/headers/RequestIdOut"
+          }
+        }
+      },
       "UnprocessableEntity": {
         "content": {
           "application/json": {
@@ -177,6 +192,120 @@
       }
     },
     "schemas": {
+      "APIKeyCreateRequest": {
+        "properties": {
+          "expires_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "name": {
+            "description": "Operator-supplied label, free-form.",
+            "example": "ci-runner",
+            "maxLength": 255,
+            "minLength": 1,
+            "type": "string"
+          },
+          "role": {
+            "description": "Role assigned to the new key. The caller MUST hold a role\nequal to or stronger than this; e.g. an `:admin` cannot\nmint an `:owner` key.\n",
+            "enum": [
+              "viewer",
+              "operator",
+              "admin",
+              "owner"
+            ],
+            "example": "operator",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "name"
+        ],
+        "title": "APIKeyCreateRequest",
+        "type": "object"
+      },
+      "APIKeyCreatedResponse": {
+        "description": "The newly minted API key, including the raw secret in\n`raw_key`. The raw secret is shown EXACTLY ONCE — losing it\nmeans rotating the key. The same key metadata is also\navailable without the raw secret via the list endpoint.\n",
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/APIKeyEntity"
+          },
+          "raw_key": {
+            "description": "The on-the-wire credential, of the form `cb_<base32>`. Must\nbe supplied as `Authorization: Bearer <raw_key>` on every\nsubsequent request. Shown once.\n",
+            "example": "cb_abcdefgh1234567890abcdefgh1234567890abcdefgh",
+            "type": "string"
+          }
+        },
+        "required": [
+          "data",
+          "raw_key"
+        ],
+        "title": "APIKeyCreatedResponse",
+        "type": "object"
+      },
+      "APIKeyEntity": {
+        "description": "Public-facing API key metadata. The raw secret is shown ONCE\non creation in `APIKeyCreatedResponse`; this entity shape\ndeliberately omits it.\n",
+        "properties": {
+          "created_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "created_by_user_id": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "expires_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "id": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "name": {
+            "description": "Operator-supplied label.",
+            "example": "ci-runner",
+            "type": "string"
+          },
+          "prefix": {
+            "description": "Public lookup prefix — first 8 chars after `cb_`.",
+            "example": "abcdefgh",
+            "type": "string"
+          },
+          "revoked_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "role": {
+            "enum": [
+              "viewer",
+              "operator",
+              "admin",
+              "owner"
+            ],
+            "example": "operator",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "prefix",
+          "role",
+          "name",
+          "created_at"
+        ],
+        "title": "APIKeyEntity",
+        "type": "object"
+      },
+      "APIKeyListResponse": {
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/APIKeyEntity"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "APIKeyListResponse",
+        "type": "object"
+      },
       "AddEvidenceRequest": {
         "description": "Pin a new evidence artifact to a counterparty. Append-only: this endpoint never edits prior artifacts.",
         "properties": {
@@ -2433,6 +2562,127 @@
         ]
       }
     },
+    "/v1/api_keys": {
+      "get": {
+        "callbacks": {},
+        "description": "Returns the workspace's API keys (active + revoked) ordered\nnewest first. The raw secret is NEVER included — this surface\nonly renders the public prefix and metadata.\n",
+        "operationId": "BankWeb.API.V1.APIKeyController.index",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.APIKeyListResponse"
+              }
+            },
+            "description": "API key list"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        },
+        "summary": "List API keys for the current workspace",
+        "tags": [
+          "APIKeys"
+        ]
+      },
+      "post": {
+        "callbacks": {},
+        "description": "Creates a new workspace-scoped, role-bound API key. The\nresponse body includes `raw_key` — the on-the-wire credential.\nIt is shown EXACTLY ONCE; persist it immediately.\n\nThe caller's role must be greater than or equal to the\nrequested `role` under the hierarchy `viewer < operator <\nadmin < owner`. Attempting to mint a key stronger than the\ncaller produces `403 forbidden_role_above_creator`.\n",
+        "operationId": "BankWeb.API.V1.APIKeyController.create",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": "Elixir.BankWeb.OpenApi.Schemas.APIKeyCreateRequest"
+            }
+          },
+          "description": "API key create body",
+          "required": false
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.APIKeyCreatedResponse"
+              }
+            },
+            "description": "Newly minted API key (raw_key shown once)"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        },
+        "summary": "Mint a new API key",
+        "tags": [
+          "APIKeys"
+        ]
+      }
+    },
+    "/v1/api_keys/{id}": {
+      "delete": {
+        "callbacks": {},
+        "description": "Sets `revoked_at` on the key and emits the\n`api_key.revoked` audit event. Idempotent — calling on an\nalready-revoked key returns 200 without re-emitting the\naudit event.\n",
+        "operationId": "BankWeb.API.V1.APIKeyController.delete",
+        "parameters": [
+          {
+            "description": "API key id (UUID).",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Id"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.APIKeyEntity"
+              }
+            },
+            "description": "Revoked key"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "summary": "Soft-revoke an API key",
+        "tags": [
+          "APIKeys"
+        ]
+      }
+    },
     "/v1/approvals": {
       "get": {
         "callbacks": {},
@@ -3861,6 +4111,10 @@
     {
       "description": "Readiness and deep operational-health probes under `/v1/health`.",
       "name": "Health"
+    },
+    {
+      "description": "Workspace-scoped API key management — admin only.",
+      "name": "APIKeys"
     }
   ]
 }

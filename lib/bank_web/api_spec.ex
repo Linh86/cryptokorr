@@ -109,6 +109,10 @@ defmodule BankWeb.ApiSpec do
     AddressLabelEntity,
     AddressLabelResponse,
     AmountString,
+    APIKeyCreatedResponse,
+    APIKeyCreateRequest,
+    APIKeyEntity,
+    APIKeyListResponse,
     ApprovalActionRequest,
     ApprovalActionResponse,
     ApprovalDecisionSummary,
@@ -189,7 +193,8 @@ defmodule BankWeb.ApiSpec do
     {"Audit", "Append-only runtime audit event stream."},
     {"Security", "Runtime pause, resume, and delegation revoke."},
     {"Connect", "Browser-wallet / smart-account connection scaffolding."},
-    {"Health", "Readiness and deep operational-health probes under `/v1/health`."}
+    {"Health", "Readiness and deep operational-health probes under `/v1/health`."},
+    {"APIKeys", "Workspace-scoped API key management — admin only."}
   ]
 
   @impl OpenApi
@@ -349,7 +354,13 @@ defmodule BankWeb.ApiSpec do
       "RevokeDelegationRequest" => RevokeDelegationRequest.schema(),
       "RevokeDelegationResponse" => RevokeDelegationResponse.schema(),
       "ConnectSmartAccountRequest" => ConnectSmartAccountRequest.schema(),
-      "ConnectSmartAccountResponse" => ConnectSmartAccountResponse.schema()
+      "ConnectSmartAccountResponse" => ConnectSmartAccountResponse.schema(),
+
+      # Per-domain shapes added in #218c.
+      "APIKeyEntity" => APIKeyEntity.schema(),
+      "APIKeyListResponse" => APIKeyListResponse.schema(),
+      "APIKeyCreateRequest" => APIKeyCreateRequest.schema(),
+      "APIKeyCreatedResponse" => APIKeyCreatedResponse.schema()
     }
   end
 
@@ -369,6 +380,7 @@ defmodule BankWeb.ApiSpec do
   defp responses do
     %{
       "BadRequest" => Responses.bad_request(),
+      "Unauthorized" => Responses.unauthorized(),
       "Forbidden" => Responses.forbidden(),
       "NotFound" => Responses.not_found(),
       "Conflict" => Responses.conflict(),
