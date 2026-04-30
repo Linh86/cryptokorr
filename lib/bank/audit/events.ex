@@ -18,6 +18,7 @@ defmodule Bank.Audit.Events do
 
   alias Bank.Access.AccessInvite
   alias Bank.Accounts.User
+  alias Bank.APIKeys.APIKey
   alias Bank.Counterparties.{AddressLabel, Counterparty, EvidenceArtifact, TrustAssertion}
   alias Bank.Decisions.{DecisionEnvelope, TrustAssessment, ExecutionPlan, SimulationReport}
   alias Bank.Delegations.Delegation
@@ -770,7 +771,83 @@ defmodule Bank.Audit.Events do
     }
   end
 
+  @doc """
+  `api_key.created` — operator minted a new API key (#218a).
+
+  Subject + correlation are both the `api_key.id`; this is a key-
+  lifecycle event, queryable independently of any user trace.
+  Workspace stamping rides on the audit envelope passthrough so
+  the row carries `api_key.workspace_id`.
+
+  The `after_ref` MUST NOT include the raw secret or its hash —
+  only public metadata (id, prefix, role, name, expires_at).
+  Secret hygiene is enforced by `api_key_snapshot/1`.
+  """
+  @spec api_key_created(APIKey.t(), User.t(), keyword()) :: attrs()
+  def api_key_created(%APIKey{} = api_key, %User{} = creator, opts \\ []) do
+    %{
+      actor: Keyword.get(opts, :actor, :user),
+      actor_id: creator.id,
+      event_type: "api_key.created",
+      subject_type: "api_key",
+      subject_id: api_key.id,
+      correlation_id: api_key.id,
+      after_ref: api_key_snapshot(api_key),
+      workspace_id: api_key.workspace_id
+    }
+  end
+
+  @doc """
+  `api_key.revoked` — operator soft-revoked an active API key
+  (#218a). Before / after refs pin the status flip so replay can
+  show the exact moment the key became unusable.
+
+  `actor_id` defaults to the API key's original `created_by_user_id`
+  if no `:actor` opt is supplied — useful for batch-revoke jobs
+  triggered by, e.g., a workspace-wide rotation.
+  """
+  @spec api_key_revoked(APIKey.t(), keyword()) :: attrs()
+  def api_key_revoked(%APIKey{} = api_key, opts \\ []) do
+    actor_id =
+      case Keyword.get(opts, :actor) do
+        %User{id: id} -> id
+        nil -> api_key.created_by_user_id
+        id when is_binary(id) -> id
+      end
+
+    %{
+      actor: Keyword.get(opts, :actor_role, :user),
+      actor_id: actor_id,
+      event_type: "api_key.revoked",
+      subject_type: "api_key",
+      subject_id: api_key.id,
+      correlation_id: api_key.id,
+      before_ref: %{status: "active"},
+      after_ref: %{
+        status: "revoked",
+        revoked_at: api_key.revoked_at,
+        prefix: api_key.prefix
+      },
+      workspace_id: api_key.workspace_id
+    }
+  end
+
   # --- snapshot builders ------------------------------------------------
+
+  defp api_key_snapshot(%APIKey{} = api_key) do
+    # Hard-coded field list (NOT `Map.from_struct/1` or similar) so
+    # a future column added to `APIKey` does not silently leak into
+    # the audit `after_ref`. `secret_hash` is deliberately absent.
+    %{
+      id: api_key.id,
+      prefix: api_key.prefix,
+      role: atom_or_nil(api_key.role),
+      name: api_key.name,
+      workspace_id: api_key.workspace_id,
+      created_by_user_id: api_key.created_by_user_id,
+      expires_at: api_key.expires_at
+    }
+  end
 
   defp invite_snapshot(%AccessInvite{} = invite) do
     %{
