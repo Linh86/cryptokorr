@@ -300,6 +300,31 @@ defmodule Bank.DelegationsTest do
       assert delegation.id == existing.id
     end
 
+    test "granted callback ignores a `workspace_id` smuggled in the HTTP body (#158d-c forge guard)" do
+      # The adapter callback path is the only externally-reachable
+      # entry to `Delegations.grant/3`, and it is intentionally
+      # workspace-blind (#158d-c). A future regression that naively
+      # spread `params` into the grant attrs would let a malicious
+      # adapter forge a workspace assignment for a fresh row. Pin
+      # the construction here: even if the HTTP body carries a
+      # `workspace_id`, the resulting row stays unscoped.
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{slug: "forge-guard", name: "Forge guard"})
+
+      assert {:ok, delegation} =
+               Delegations.apply_callback(%{
+                 "smart_account_id" => "sa_forge",
+                 "delegation_id" => "del_forge",
+                 "state" => "granted",
+                 "reason" => "wallet_connect",
+                 # Hostile field — must be ignored.
+                 "workspace_id" => ws.id
+               })
+
+      assert delegation.state == :active
+      assert delegation.workspace_id == nil
+    end
+
     test "revoking callback transitions active to revoking" do
       {:ok, _} = Delegations.grant("sa_1", "del_1")
 
