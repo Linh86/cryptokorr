@@ -160,6 +160,101 @@ defmodule BankWeb.APIV1WorkspaceIsolationTest do
     end
   end
 
+  # --- Create stamping (review patch) -------------------------------------
+
+  describe "POST /v1/counterparties stamps workspace_id from current_scope" do
+    test "ignores body workspace_id and uses current_scope" do
+      %{ws_a: ws_a, raw_a: raw_a, ws_b: ws_b} = setup_two_workspaces()
+
+      conn = conn_for(raw_a, ws_a.id)
+
+      conn =
+        post(conn, ~p"/v1/counterparties", %{
+          "name" => "Body forge",
+          # Hostile field — must be ignored.
+          "workspace_id" => ws_b.id
+        })
+
+      response = json_response(conn, 201)
+      created_id = response["data"]["id"]
+
+      cp = Bank.Repo.get!(Bank.Counterparties.Counterparty, created_id)
+
+      assert cp.workspace_id == ws_a.id,
+             "POST /v1/counterparties MUST stamp workspace_id from current_scope (A), not body (B)"
+
+      refute cp.workspace_id == ws_b.id
+    end
+  end
+
+  describe "POST /v1/policies stamps workspace_id from current_scope" do
+    test "ignores body workspace_id and uses current_scope" do
+      %{ws_a: ws_a, raw_a: raw_a, ws_b: ws_b} = setup_two_workspaces()
+
+      conn = conn_for(raw_a, ws_a.id)
+
+      conn =
+        post(conn, ~p"/v1/policies", %{
+          "rule_type" => "amount_limit",
+          "params" => %{"max_per_tx" => "100"},
+          # Hostile field — must be ignored.
+          "workspace_id" => ws_b.id
+        })
+
+      response = json_response(conn, 201)
+      created_id = response["data"]["id"]
+
+      rule = Bank.Repo.get!(Bank.Policies.PolicyRule, created_id)
+
+      assert rule.workspace_id == ws_a.id,
+             "POST /v1/policies MUST stamp workspace_id from current_scope (A), not body (B)"
+
+      refute rule.workspace_id == ws_b.id
+    end
+  end
+
+  describe "GET /v1/counterparties scopes by current_scope" do
+    test "lists only the caller's workspace counterparties" do
+      %{ws_a: ws_a, raw_a: raw_a, ws_b: ws_b} = setup_two_workspaces()
+
+      Process.put(:bank_test_workspace_id, ws_b.id)
+      cp_b = counterparty(workspace_id: ws_b.id, name: "B Corp")
+      Process.put(:bank_test_workspace_id, ws_a.id)
+      cp_a = counterparty(workspace_id: ws_a.id, name: "A Corp")
+
+      conn = conn_for(raw_a, ws_a.id)
+      conn = get(conn, ~p"/v1/counterparties")
+      response = json_response(conn, 200)
+
+      ids = Enum.map(response["data"], & &1["id"])
+      assert cp_a.id in ids
+
+      refute cp_b.id in ids,
+             "GET /v1/counterparties MUST NOT include another workspace's counterparties"
+    end
+  end
+
+  describe "GET /v1/policies scopes by current_scope" do
+    test "lists only the caller's workspace policies" do
+      %{ws_a: ws_a, raw_a: raw_a, ws_b: ws_b} = setup_two_workspaces()
+
+      Process.put(:bank_test_workspace_id, ws_b.id)
+      rule_b = policy_rule(workspace_id: ws_b.id)
+      Process.put(:bank_test_workspace_id, ws_a.id)
+      rule_a = policy_rule(workspace_id: ws_a.id)
+
+      conn = conn_for(raw_a, ws_a.id)
+      conn = get(conn, ~p"/v1/policies")
+      response = json_response(conn, 200)
+
+      ids = Enum.map(response["data"], & &1["id"])
+      assert rule_a.id in ids
+
+      refute rule_b.id in ids,
+             "GET /v1/policies MUST NOT include another workspace's rules"
+    end
+  end
+
   # --- Counterparty CRUD ---------------------------------------------------
 
   describe "PATCH /v1/counterparties/:id (cross-workspace)" do

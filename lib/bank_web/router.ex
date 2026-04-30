@@ -120,9 +120,26 @@ defmodule BankWeb.Router do
   # are explicitly named:
   #   * `GET /v1/screening/:chain/:address` — wallet screening is
   #     reference data keyed by `(chain, address)`, not workspace.
-  #   * `POST /v1/security/{pause,resume,revoke_delegation}` —
-  #     deployment-global kill switches; affect every workspace.
-  #     The admin-tier role gate guards them.
+  #   * `POST /v1/security/pause` and `POST /v1/security/resume` —
+  #     deployment-wide pause/resume of the runtime. Affect every
+  #     workspace because the underlying `Bank.Security.PauseState`
+  #     GenServer is process-global. Admin-tier role gate guards
+  #     them; alpha policy is "any workspace admin can hit the
+  #     deployment-wide kill switch", with the audit event
+  #     (`security.paused` / `security.resumed`) carrying the
+  #     calling key's owner id.
+  #   * `POST /v1/security/revoke_delegation` — operates on a
+  #     `smart_account_id`, NOT on a workspace-scoped row id. The
+  #     delegation row carries `workspace_id` from #158d-c, but
+  #     the security endpoint is documented as a deployment-wide
+  #     emergency revoke: any workspace admin can revoke any
+  #     smart account's delegation. Audit trail
+  #     (`delegation.revoke_requested` + `delegation.state_changed`)
+  #     records the calling key's owner so cross-workspace use is
+  #     attributable. Refining this to require the calling
+  #     workspace to own the smart account is a future tightening
+  #     gated on smart-account → workspace mapping (currently
+  #     workspace-blind per #158d-c's documented exception).
   scope "/v1", BankWeb.API.V1, as: :api_v1 do
     pipe_through [:api, :api_authenticated]
 

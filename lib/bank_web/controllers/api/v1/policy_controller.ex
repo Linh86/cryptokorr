@@ -139,8 +139,16 @@ defmodule BankWeb.API.V1.PolicyController do
   )
 
   def create(conn, params) do
+    workspace_id = conn.assigns.current_scope.workspace.id
+
     with {:ok, attrs} <- parse_create_attrs(params) do
-      case Policies.create_rule(attrs, actor_opts(conn)) do
+      # Stamp workspace_id from current_scope via the trusted opts
+      # channel — never from request params. The context's
+      # `stamp_workspace_id/2` strips any body-supplied workspace_id
+      # defensively (#159b).
+      opts = Keyword.put(actor_opts(conn), :workspace_id, workspace_id)
+
+      case Policies.create_rule(attrs, opts) do
         {:ok, rule} ->
           conn
           |> put_status(:created)

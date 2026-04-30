@@ -96,9 +96,18 @@ defmodule BankWeb.API.V1.CounterpartyController do
   )
 
   def index(conn, params) do
+    workspace_id = conn.assigns.current_scope.workspace.id
+
     with {:ok, filters} <- parse_filters(params),
          {:ok, opts} <- parse_list_opts(params) do
-      page = Counterparties.list_counterparties(filters, opts)
+      # Always scope to the caller's workspace — never honor a
+      # query-string workspace_id (#159b). The context's
+      # `list_counterparties/2` already supports this opt.
+      page =
+        Counterparties.list_counterparties(
+          filters,
+          Keyword.put(opts, :workspace_id, workspace_id)
+        )
 
       conn
       |> put_status(:ok)
@@ -128,12 +137,20 @@ defmodule BankWeb.API.V1.CounterpartyController do
   )
 
   def create(conn, params) do
+    workspace_id = conn.assigns.current_scope.workspace.id
+
     attrs =
       params
       |> Map.take(["name", "ownership_context", "notes"])
       |> Map.put("created_by", "user")
 
-    case Counterparties.create_counterparty(attrs, actor_opts(conn)) do
+    # Stamp workspace_id from current_scope via the trusted opts
+    # channel — never from request params. The context's
+    # `stamp_workspace_id/2` strips any body-supplied workspace_id
+    # defensively (#159b).
+    opts = Keyword.put(actor_opts(conn), :workspace_id, workspace_id)
+
+    case Counterparties.create_counterparty(attrs, opts) do
       {:ok, cp} ->
         {:ok, loaded} = Counterparties.get_counterparty_with_preloads(cp.id)
 
