@@ -292,6 +292,109 @@ defmodule Bank.APIKeys do
     end
   end
 
+  # `last_used_at` throttle window — see `touch_last_used/2`. The
+  # value is intentionally large enough that an active key only
+  # rolls its `last_used_at` once per window. Tests pass an
+  # explicit threshold via the second arg.
+  @touch_throttle_seconds 60 * 60
+
+  @doc """
+  Best-effort update of an API key's `last_used_at` (#218d).
+
+  Throttles by inspecting the current `last_used_at`: if it was
+  set within the last `threshold_seconds`, the call is a no-op
+  and the existing struct is returned. Otherwise the column is
+  updated to `DateTime.utc_now/0` via `update_all` so concurrent
+  requests do not generate Ecto.StaleEntryError.
+
+  Callers (`BankWeb.Plugs.VerifyAPIKey`) MUST treat the return
+  value as best-effort — a transient DB write failure here
+  cannot be allowed to fail an authenticated request. The plug
+  invokes this AFTER the verify+role checks have already
+  succeeded; revoked / expired keys never reach this path.
+
+  Returns `{:ok, api_key}` either way (with the original
+  `last_used_at` when throttled, or the updated value otherwise),
+  or `{:error, reason}` if the underlying update failed — the
+  plug logs the error and continues.
+  """
+  @spec touch_last_used(APIKey.t(), pos_integer()) :: {:ok, APIKey.t()} | {:error, term()}
+  def touch_last_used(api_key, threshold_seconds \\ @touch_throttle_seconds)
+
+  def touch_last_used(%APIKey{last_used_at: %DateTime{} = last} = api_key, threshold_seconds)
+      when is_integer(threshold_seconds) do
+    if DateTime.diff(DateTime.utc_now(), last, :second) < threshold_seconds do
+      {:ok, api_key}
+    else
+      do_touch(api_key)
+    end
+  end
+
+  def touch_last_used(%APIKey{last_used_at: nil} = api_key, _threshold_seconds) do
+    # First use ever — always advance.
+    do_touch(api_key)
+  end
+
+  defp do_touch(%APIKey{id: id} = api_key) do
+    now = DateTime.utc_now()
+
+    # Defense-in-depth (#218d review): filter the UPDATE on
+    # `revoked_at IS NULL` AND `expires_at IS NULL OR expires_at >
+    # now`. The plug only invokes touch AFTER `verify_key/1`
+    # returns OK, so in theory the in-memory struct already
+    # passed those checks — but a TOCTOU window exists where a
+    # key gets revoked between verify and touch. The DB-level
+    # filter closes that window: a touch on a revoked / expired
+    # key is a no-op and reports `:no_match` to the caller (which
+    # the plug logs and ignores).
+    update_query =
+      from(k in APIKey,
+        where:
+          k.id == ^id and is_nil(k.revoked_at) and
+            (is_nil(k.expires_at) or k.expires_at > ^now)
+      )
+
+    case Repo.update_all(update_query, set: [last_used_at: now, updated_at: now]) do
+      {1, _} -> {:ok, %APIKey{api_key | last_used_at: now, updated_at: now}}
+      {0, _} -> {:error, :no_match}
+    end
+  rescue
+    error -> {:error, error}
+  end
+
+  @doc """
+  List API keys whose `last_used_at` falls inside `[from, to)`
+  (#218d). Used by the daily aggregate worker to emit one
+  `api_key.used` audit event per key per window.
+  """
+  @spec list_keys_used_between(DateTime.t(), DateTime.t()) :: [APIKey.t()]
+  def list_keys_used_between(%DateTime{} = from, %DateTime{} = to) do
+    from(k in APIKey,
+      where: not is_nil(k.last_used_at) and k.last_used_at >= ^from and k.last_used_at < ^to,
+      order_by: [asc: k.workspace_id, asc: k.id]
+    )
+    |> Repo.all()
+  end
+
+  @doc """
+  True iff there's already an `api_key.used` audit row whose
+  `after_ref.window_start` matches `window_start_iso` for this
+  api_key id. Used by the worker to skip already-emitted keys
+  on a re-run within the same window (idempotency guard).
+  """
+  @spec used_event_exists?(String.t(), String.t()) :: boolean()
+  def used_event_exists?(api_key_id, window_start_iso)
+      when is_binary(api_key_id) and is_binary(window_start_iso) do
+    Repo.exists?(
+      from e in Bank.Audit.AuditEvent,
+        where:
+          e.event_type == "api_key.used" and
+            e.subject_type == "api_key" and
+            e.subject_id == ^api_key_id and
+            fragment("?->>'window_start' = ?", e.after_ref, ^window_start_iso)
+    )
+  end
+
   # --- Private helpers -----------------------------------------------------
 
   # 32 random bytes → ~256 bits of entropy. Encoded with base32

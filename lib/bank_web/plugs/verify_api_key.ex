@@ -60,6 +60,15 @@ defmodule BankWeb.Plugs.VerifyAPIKey do
   def call(conn, _opts) do
     with {:ok, presented} <- extract_bearer(conn),
          {:ok, api_key, workspace} <- APIKeys.verify_key(presented) do
+      # Best-effort `last_used_at` update on the success path
+      # only (#218d). Failed / revoked / expired keys never reach
+      # this branch. The throttle inside `touch_last_used/2`
+      # keeps the per-request DB write to at most once per
+      # active-key per throttle window. Errors here are logged
+      # and swallowed so a transient DB hiccup cannot block an
+      # otherwise-valid request.
+      api_key = maybe_touch_used(api_key)
+
       assign(conn, :current_scope, %{
         user: nil,
         workspace: workspace,
@@ -109,6 +118,21 @@ defmodule BankWeb.Plugs.VerifyAPIKey do
     case conn.remote_ip do
       {a, b, c, d} -> "#{a}.#{b}.#{c}.#{d}"
       other -> inspect(other)
+    end
+  end
+
+  defp maybe_touch_used(api_key) do
+    case APIKeys.touch_last_used(api_key) do
+      {:ok, refreshed} ->
+        refreshed
+
+      {:error, reason} ->
+        Logger.warning(
+          "BankWeb.Plugs.VerifyAPIKey: touch_last_used failed for prefix=#{api_key.prefix}: " <>
+            inspect(reason)
+        )
+
+        api_key
     end
   end
 end

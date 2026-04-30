@@ -138,6 +138,68 @@ defmodule BankWeb.Plugs.VerifyAPIKeyTest do
     end
   end
 
+  describe "last_used_at touch (#218d)" do
+    test "successful auth advances last_used_at on a fresh key" do
+      {_ws, _user, key, raw} = ws_user_key(:operator)
+      assert is_nil(key.last_used_at)
+
+      conn =
+        raw
+        |> build_conn_with_bearer()
+        |> VerifyAPIKey.call(VerifyAPIKey.init([]))
+
+      refute conn.halted
+
+      reloaded = Bank.Repo.get!(Bank.APIKeys.APIKey, key.id)
+      assert %DateTime{} = reloaded.last_used_at
+    end
+
+    test "FAILED auth (revoked key) does NOT advance last_used_at" do
+      {_ws, user, key, raw} = ws_user_key(:operator)
+
+      # Stamp a fixed prior last_used_at, then revoke. A subsequent
+      # request with the revoked key MUST NOT bump the stamp — the
+      # column should still equal `prior_ts` after the call.
+      prior_ts = ~U[2026-04-29 12:00:00.000000Z]
+
+      Bank.Repo.update_all(
+        Ecto.Query.from(k in Bank.APIKeys.APIKey, where: k.id == ^key.id),
+        set: [last_used_at: prior_ts]
+      )
+
+      {:ok, _} = Bank.APIKeys.revoke_key(key, actor: user)
+
+      conn =
+        raw
+        |> build_conn_with_bearer()
+        |> VerifyAPIKey.call(VerifyAPIKey.init([]))
+
+      assert conn.halted
+      assert conn.status == 401
+
+      reloaded = Bank.Repo.get!(Bank.APIKeys.APIKey, key.id)
+      assert reloaded.last_used_at == prior_ts
+    end
+
+    test "FAILED auth (no header) does NOT touch any key" do
+      # Negative control: no bearer means no key lookup, no
+      # last_used_at write. Pin the empty-state by checking that
+      # an unrelated key still has nil last_used_at after the
+      # request runs.
+      {_ws, _user, key, _raw} = ws_user_key(:operator)
+      assert is_nil(key.last_used_at)
+
+      conn =
+        Phoenix.ConnTest.build_conn()
+        |> VerifyAPIKey.call(VerifyAPIKey.init([]))
+
+      assert conn.halted
+
+      reloaded = Bank.Repo.get!(Bank.APIKeys.APIKey, key.id)
+      assert is_nil(reloaded.last_used_at)
+    end
+  end
+
   describe "halts on every failure mode" do
     test "missing header halts" do
       conn =
