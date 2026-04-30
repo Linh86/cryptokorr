@@ -2689,6 +2689,56 @@
         ]
       }
     },
+    "/v1/api_keys/{id}/rotate": {
+      "post": {
+        "callbacks": {},
+        "description": "Atomically replaces an active API key with a fresh one\ncarrying the same `workspace_id`, `role`, `name`, and\n`expires_at`. The old key is revoked immediately — there is no\ngrace period in v0.1; consumers must switch to the new\n`raw_key` synchronously. Operators who need overlap should\n`create + revoke` manually (duplicate names are allowed).\n\nResponse includes the new `raw_key` shown EXACTLY ONCE.\n\nFailure modes:\n\n  * `404 not_found` — id unknown OR belongs to another\n    workspace (cross-workspace rotation is invisible).\n  * `422 already_revoked` — the key was already revoked (or\n    another rotation won the race; see the context module\n    for the concurrency contract).\n",
+        "operationId": "BankWeb.API.V1.APIKeyController.rotate",
+        "parameters": [
+          {
+            "description": "API key id (UUID).",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Id"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.APIKeyCreatedResponse"
+              }
+            },
+            "description": "Newly minted replacement key (raw_key shown once)"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          }
+        },
+        "summary": "Rotate an API key",
+        "tags": [
+          "APIKeys"
+        ]
+      }
+    },
     "/v1/approvals": {
       "get": {
         "callbacks": {},

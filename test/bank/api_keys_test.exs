@@ -194,6 +194,141 @@ defmodule Bank.APIKeysTest do
     end
   end
 
+  # --- rotate_key/3 ---------------------------------------------------------
+
+  describe "rotate_key/3 (#220)" do
+    test "atomically replaces the old key with a fresh one", %{workspace: ws, user: user} do
+      {:ok, old_key, _old_raw} = APIKeys.create_key(ws, user, :operator, "ci-runner")
+
+      assert {:ok, new_key, raw_secret} = APIKeys.rotate_key(old_key, user)
+
+      # New key is fresh.
+      assert new_key.id != old_key.id
+      assert new_key.prefix != old_key.prefix
+      assert String.starts_with?(raw_secret, "cb_")
+
+      # Inherits role/name/workspace.
+      assert new_key.role == old_key.role
+      assert new_key.name == old_key.name
+      assert new_key.workspace_id == old_key.workspace_id
+
+      # Old key is revoked atomically.
+      reloaded = Repo.get!(APIKey, old_key.id)
+      assert %DateTime{} = reloaded.revoked_at
+    end
+
+    test "old key fails verification immediately after rotate (no grace period)",
+         %{workspace: ws, user: user} do
+      {:ok, old_key, old_raw} = APIKeys.create_key(ws, user, :operator, "no-grace")
+      {:ok, _new_key, _new_raw} = APIKeys.rotate_key(old_key, user)
+
+      assert {:error, :revoked} = APIKeys.verify_key(old_raw)
+    end
+
+    test "new key authenticates", %{workspace: ws, user: user} do
+      {:ok, old_key, _} = APIKeys.create_key(ws, user, :operator, "swap")
+      {:ok, new_key, new_raw} = APIKeys.rotate_key(old_key, user)
+
+      assert {:ok, %APIKey{id: id}, %_{} = verified_ws} = APIKeys.verify_key(new_raw)
+      assert id == new_key.id
+      assert verified_ws.id == ws.id
+    end
+
+    test "rotating an already-revoked key returns :already_revoked",
+         %{workspace: ws, user: user} do
+      {:ok, key, _} = APIKeys.create_key(ws, user, :operator, "stale")
+      {:ok, _} = APIKeys.revoke_key(key, actor: user)
+      revoked = Repo.get!(APIKey, key.id)
+
+      assert {:error, :already_revoked} = APIKeys.rotate_key(revoked, user)
+    end
+
+    test "concurrent rotates leave only ONE replacement (race-safe)",
+         %{workspace: ws, user: user} do
+      {:ok, old_key, _} = APIKeys.create_key(ws, user, :operator, "race")
+
+      # Two callers both holding the same pre-rotate struct in
+      # memory — simulates the API hitting the controller twice
+      # before the first transaction commits.
+      task_a = Task.async(fn -> APIKeys.rotate_key(old_key, user) end)
+      task_b = Task.async(fn -> APIKeys.rotate_key(old_key, user) end)
+
+      results = [Task.await(task_a), Task.await(task_b)]
+
+      successes = Enum.count(results, &match?({:ok, _, _}, &1))
+      already_revoked = Enum.count(results, &match?({:error, :already_revoked}, &1))
+
+      assert successes == 1
+      assert already_revoked == 1
+
+      # Exactly one replacement key should be active in the workspace
+      # (the original is revoked).
+      active = APIKeys.list_active_keys(ws.id)
+      assert length(active) == 1
+      [%APIKey{id: replacement_id}] = active
+      assert replacement_id != old_key.id
+    end
+
+    test "emits api_key.rotated event linking old → new",
+         %{workspace: ws, user: user} do
+      {:ok, old_key, _} = APIKeys.create_key(ws, user, :operator, "audited")
+      {:ok, new_key, _} = APIKeys.rotate_key(old_key, user)
+
+      %{events: events} = Audit.list_events(%{event_type: "api_key.rotated"})
+      [event] = Enum.filter(events, &(&1.subject_id == new_key.id))
+
+      assert event.workspace_id == ws.id
+      assert event.actor_id == user.id
+
+      # Before-ref points at the old key's id+prefix.
+      assert event.before_ref["id"] == old_key.id
+      assert event.before_ref["prefix"] == old_key.prefix
+      # before_ref records the terminal state of the old key.
+      assert event.before_ref["revoked_at"]
+
+      # After-ref carries the new key's public metadata.
+      assert event.after_ref["id"] == new_key.id
+      assert event.after_ref["prefix"] == new_key.prefix
+    end
+
+    test "audit event JSON contains NO raw secret and NO secret_hash",
+         %{workspace: ws, user: user} do
+      {:ok, old_key, _} = APIKeys.create_key(ws, user, :viewer, "hygiene")
+      {:ok, _new_key, _new_raw} = APIKeys.rotate_key(old_key, user)
+
+      %{events: events} = Audit.list_events(%{event_type: "api_key.rotated"})
+      [event] = events
+
+      sanitized = event |> Map.from_struct() |> Map.drop([:__meta__, :workspace])
+      json = Jason.encode!(sanitized)
+
+      refute json =~ "cb_"
+      refute json =~ "secret_hash"
+    end
+
+    test "honours :expires_at override when supplied", %{workspace: ws, user: user} do
+      {:ok, old_key, _} = APIKeys.create_key(ws, user, :viewer, "ttl-override")
+      assert is_nil(old_key.expires_at)
+
+      future = ~U[2030-01-01 00:00:00.000000Z]
+
+      assert {:ok, new_key, _} = APIKeys.rotate_key(old_key, user, expires_at: future)
+      assert DateTime.compare(new_key.expires_at, future) == :eq
+    end
+
+    test "inherits :expires_at from the old key by default",
+         %{workspace: ws, user: user} do
+      future = ~U[2030-06-01 00:00:00.000000Z]
+
+      {:ok, old_key, _} =
+        APIKeys.create_key(ws, user, :viewer, "ttl-inherit", expires_at: future)
+
+      {:ok, new_key, _} = APIKeys.rotate_key(old_key, user)
+
+      assert DateTime.compare(new_key.expires_at, future) == :eq
+    end
+  end
+
   # --- listing --------------------------------------------------------------
 
   describe "list_active_keys/1 and list_keys/1" do

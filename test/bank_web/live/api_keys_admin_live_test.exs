@@ -20,6 +20,7 @@ defmodule BankWeb.APIKeysAdminLiveTest do
 
   alias Bank.APIKeys
   alias Bank.APIKeys.APIKey
+  alias Bank.Audit
   alias Bank.Workspaces
 
   defp setup_admin_user(role) do
@@ -380,6 +381,207 @@ defmodule BankWeb.APIKeysAdminLiveTest do
 
       reloaded = Bank.Repo.get!(APIKey, foreign_key.id)
       assert is_nil(reloaded.revoked_at), "cross-workspace revoke MUST be a no-op"
+    end
+  end
+
+  # --- Rotate flow (#220) ---------------------------------------------------
+
+  describe "rotate" do
+    test "rotate button mints a new key, revokes old, shows raw secret once", %{} do
+      %{conn: conn, user: user, workspace: ws} = setup_admin_user(:admin)
+      {:ok, old_key, _} = APIKeys.create_key(ws, user, :operator, "ci-runner")
+
+      {:ok, view, _html} = live(conn, "/admin/api_keys")
+
+      html = view |> element("#api-key-rotate-" <> old_key.id) |> render_click()
+
+      # Old key is now revoked.
+      reloaded_old = Bank.Repo.get!(APIKey, old_key.id)
+      assert %DateTime{} = reloaded_old.revoked_at
+
+      # A new active key sits in the workspace.
+      [new_key] = APIKeys.list_active_keys(ws.id)
+      refute new_key.id == old_key.id
+      assert new_key.name == old_key.name
+
+      # Raw secret panel rendered exactly once with a `cb_` value.
+      assert html =~ "api-key-raw-secret"
+      assert html =~ "api-key-raw-secret-value"
+      assert html =~ "cb_"
+
+      # The rotate button on the OLD row is gone (revoked).
+      refute has_element?(view, "#api-key-rotate-" <> old_key.id)
+      refute has_element?(view, "#api-key-revoke-" <> old_key.id)
+
+      # The new row offers Rotate + Revoke.
+      assert has_element?(view, "#api-key-rotate-" <> new_key.id)
+      assert has_element?(view, "#api-key-revoke-" <> new_key.id)
+    end
+
+    test "raw secret panel is removed after dismiss; raw secret value is gone", %{} do
+      %{conn: conn, user: user, workspace: ws} = setup_admin_user(:admin)
+      {:ok, old_key, _} = APIKeys.create_key(ws, user, :operator, "dismissable")
+
+      {:ok, view, _html} = live(conn, "/admin/api_keys")
+
+      after_rotate = view |> element("#api-key-rotate-" <> old_key.id) |> render_click()
+
+      # Pull the raw secret rendered inside the panel so we can
+      # later refute its presence — it must be gone after dismiss.
+      assert [_, raw_secret] =
+               Regex.run(
+                 ~r/id="api-key-raw-secret-value"[^>]*>\s*([^<\s]+)\s*</,
+                 after_rotate
+               )
+
+      assert String.starts_with?(raw_secret, "cb_")
+
+      after_dismiss = view |> element("#api-key-raw-dismiss") |> render_click()
+
+      refute after_dismiss =~ "api-key-raw-secret-value"
+      refute after_dismiss =~ raw_secret
+    end
+
+    test "audit event has no raw key, no secret_hash, and links old → new", %{} do
+      %{conn: conn, user: user, workspace: ws} = setup_admin_user(:admin)
+      {:ok, old_key, _} = APIKeys.create_key(ws, user, :operator, "audited-via-ui")
+
+      {:ok, view, _html} = live(conn, "/admin/api_keys")
+
+      _ = view |> element("#api-key-rotate-" <> old_key.id) |> render_click()
+
+      [new_key] = APIKeys.list_active_keys(ws.id)
+
+      %{events: events} = Audit.list_events(%{event_type: "api_key.rotated"})
+      [event] = Enum.filter(events, &(&1.subject_id == new_key.id))
+
+      assert event.before_ref["id"] == old_key.id
+      assert event.after_ref["id"] == new_key.id
+
+      sanitized = event |> Map.from_struct() |> Map.drop([:__meta__, :workspace])
+      json = Jason.encode!(sanitized)
+
+      refute json =~ "cb_"
+      refute json =~ "secret_hash"
+    end
+
+    test "rotate on an already-revoked key surfaces a flash error", %{} do
+      %{conn: conn, user: user, workspace: ws} = setup_admin_user(:admin)
+      {:ok, key, _} = APIKeys.create_key(ws, user, :viewer, "stale-row")
+      {:ok, _} = APIKeys.revoke_key(key, actor: user)
+
+      {:ok, view, _html} = live(conn, "/admin/api_keys")
+
+      # The row should already render in the revoked state without
+      # a rotate button. Even if a hostile click targets the id,
+      # the handler refuses with an error flash.
+      refute has_element?(view, "#api-key-rotate-" <> key.id)
+
+      html = render_click(view, "rotate", %{"id" => key.id})
+      assert html =~ "Cannot rotate a revoked key"
+    end
+
+    test "cross-workspace rotate is refused with not-found flash", %{} do
+      %{conn: conn} = setup_admin_user(:admin)
+
+      suffix = System.unique_integer([:positive])
+
+      {:ok, other_ws} =
+        Workspaces.create_workspace(%{slug: "rot-iso-#{suffix}", name: "Rot Iso"})
+
+      {:ok, other_user} =
+        Bank.Accounts.find_or_create_from_oauth(%{
+          provider: :google,
+          subject: "rot-iso-other-#{suffix}",
+          email: "rot-iso-other-#{suffix}@example.com",
+          name: "Rot Iso Other"
+        })
+
+      {:ok, _} =
+        Workspaces.create_membership(%{
+          user_id: other_user.id,
+          workspace_id: other_ws.id,
+          role: :admin
+        })
+
+      {:ok, foreign_key, _} = APIKeys.create_key(other_ws, other_user, :viewer, "foreign")
+
+      {:ok, view, _html} = live(conn, "/admin/api_keys")
+
+      html = render_click(view, "rotate", %{"id" => foreign_key.id})
+      assert html =~ "API key not found"
+
+      reloaded = Bank.Repo.get!(APIKey, foreign_key.id)
+      assert is_nil(reloaded.revoked_at), "cross-workspace rotate MUST be a no-op"
+    end
+  end
+
+  # --- Create with expires_at (#220) ----------------------------------------
+
+  describe "create with expires_at" do
+    test "form exposes #api-key-expires-at input", %{} do
+      %{conn: conn} = setup_admin_user(:admin)
+
+      {:ok, view, html} = live(conn, "/admin/api_keys")
+
+      assert html =~ ~s(id="api-key-expires-at")
+      assert has_element?(view, "#api-key-expires-at")
+    end
+
+    test "honours an HTML datetime-local value (UTC normalised)", %{} do
+      %{conn: conn, workspace: ws} = setup_admin_user(:admin)
+
+      {:ok, view, _html} = live(conn, "/admin/api_keys")
+
+      _html =
+        view
+        |> form("#api-key-create-form",
+          api_key: %{
+            name: "with-ttl",
+            role: "viewer",
+            expires_at: "2030-01-15T12:00"
+          }
+        )
+        |> render_submit()
+
+      [created] = APIKeys.list_active_keys(ws.id)
+      assert created.name == "with-ttl"
+      assert %DateTime{} = created.expires_at
+      assert created.expires_at.year == 2030
+      assert created.expires_at.month == 1
+      assert created.expires_at.day == 15
+    end
+
+    test "blank expires_at means 'no expiry'", %{} do
+      %{conn: conn, workspace: ws} = setup_admin_user(:admin)
+
+      {:ok, view, _html} = live(conn, "/admin/api_keys")
+
+      _html =
+        view
+        |> form("#api-key-create-form",
+          api_key: %{name: "no-ttl", role: "viewer", expires_at: ""}
+        )
+        |> render_submit()
+
+      [created] = APIKeys.list_active_keys(ws.id)
+      assert is_nil(created.expires_at)
+    end
+
+    test "invalid expires_at surfaces a form error and does NOT create a key", %{} do
+      %{conn: conn, workspace: ws} = setup_admin_user(:admin)
+
+      {:ok, view, _html} = live(conn, "/admin/api_keys")
+
+      html =
+        view
+        |> form("#api-key-create-form",
+          api_key: %{name: "bad-ttl", role: "viewer", expires_at: "not-a-date"}
+        )
+        |> render_submit()
+
+      assert html =~ "expires_at"
+      assert APIKeys.list_active_keys(ws.id) == []
     end
   end
 end
