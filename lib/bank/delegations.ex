@@ -200,6 +200,22 @@ defmodule Bank.Delegations do
   @doc """
   Register a fresh delegation. Creates a new row in :active state.
   If a non-terminal delegation already exists, returns `{:error, :already_exists}`.
+
+  ## Workspace scope (#158d-c)
+
+  Pass `:workspace_id` in `attrs` whenever the caller knows the
+  workspace (operator-driven flows, demo / smoke seeders, tests).
+  The new column is the read hint added by #158a; populating it
+  here is what lets `delegation.state_changed` audit events from
+  the adapter callback path inherit `delegation.workspace_id`
+  (#158d-b's emit hook reads from the column).
+
+  Adapter callbacks (`apply_callback/1`) are intentionally
+  workspace-blind today: a callback arrives with only
+  `smart_account_id` and `delegation_id`, so the resulting fresh
+  row stays unscoped (`workspace_id: nil`). A future PR can add a
+  smart-account → workspace lookup; until then this is the
+  documented exception to "all new rows carry workspace_id".
   """
   @spec grant(smart_account_id(), String.t(), map()) ::
           {:ok, Delegation.t()} | {:error, :already_exists | Ecto.Changeset.t()}
