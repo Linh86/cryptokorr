@@ -57,6 +57,10 @@ defmodule BankWeb.ControlLiveTest do
       assert html =~ "Connection"
       assert html =~ "Intents"
       assert html =~ "Policies"
+
+      # API Keys link is admin-only (BANK_ADMIN_EMAILS); a workspace-admin
+      # who is NOT in the bootstrap allowlist must not see it.
+      refute html =~ ~s(href="/admin/api_keys")
     end
 
     test "shows architecture info panel", %{conn: conn} do

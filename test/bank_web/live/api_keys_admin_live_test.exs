@@ -129,6 +129,15 @@ defmodule BankWeb.APIKeysAdminLiveTest do
       assert has_element?(view, "#api-keys-page")
       assert has_element?(view, "#api-key-create-form")
     end
+
+    test "sidebar exposes the API Keys nav link for bootstrap admins" do
+      %{conn: conn} = setup_admin_user(:admin)
+
+      {:ok, _view, html} = live(conn, "/admin/api_keys")
+
+      assert html =~ ~s(href="/admin/api_keys")
+      assert html =~ "API Keys"
+    end
   end
 
   # --- List scoping ---------------------------------------------------------
