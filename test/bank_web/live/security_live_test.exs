@@ -176,11 +176,18 @@ defmodule BankWeb.SecurityLiveTest do
       assert html =~ "security.resumed"
     end
 
-    test "shows delegation revoke events", %{conn: conn} do
+    test "shows delegation revoke events for the operator's workspace", %{conn: conn} do
+      # The audit event's subject_id is the delegation uuid (#161
+      # convention). #158c filters delegation events on `SecurityLive`
+      # to delegations the operator's workspace owns, so the test
+      # creates a real delegation first and uses its id as the
+      # subject_id.
+      del = delegation(smart_account_id: "sa-revoke-#{System.unique_integer([:positive])}")
+
       audit_event(
         event_type: "delegation.revoke_requested",
-        subject_type: "smart_account",
-        subject_id: "sa-test",
+        subject_type: "delegation",
+        subject_id: del.id,
         actor: :user
       )
 

@@ -21,7 +21,9 @@ defmodule BankWeb.CounterpartyDetailLive do
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
-    case Counterparties.get_counterparty_with_preloads(id) do
+    workspace_id = socket.assigns.current_scope.workspace.id
+
+    case Counterparties.get_counterparty_with_preloads(id, workspace_id: workspace_id) do
       {:ok, cp} ->
         socket =
           socket
@@ -39,6 +41,10 @@ defmodule BankWeb.CounterpartyDetailLive do
         {:ok, socket}
 
       {:error, :not_found} ->
+        # The id resolves to nothing the operator's workspace owns
+        # — either it doesn't exist or it belongs to another
+        # workspace. Same flash either way; the UI must not leak the
+        # difference (#158c).
         {:ok,
          socket
          |> put_flash(:error, "Counterparty not found")
@@ -248,7 +254,11 @@ defmodule BankWeb.CounterpartyDetailLive do
   # --- State loading --------------------------------------------------------
 
   defp reload_counterparty(socket) do
-    case Counterparties.get_counterparty_with_preloads(socket.assigns.counterparty.id) do
+    workspace_id = socket.assigns.current_scope.workspace.id
+
+    case Counterparties.get_counterparty_with_preloads(socket.assigns.counterparty.id,
+           workspace_id: workspace_id
+         ) do
       {:ok, cp} -> assign(socket, :counterparty, cp)
       {:error, _} -> socket
     end
