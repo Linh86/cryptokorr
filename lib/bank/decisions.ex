@@ -638,23 +638,37 @@ defmodule Bank.Decisions do
   Returns envelopes ordered by `decided_at` descending, preloaded with
   the parent intent. Used by the action queue to show pending approvals.
   """
-  @spec list_pending_approvals() :: [DecisionEnvelope.t()]
-  def list_pending_approvals do
+  @spec list_pending_approvals(keyword()) :: [DecisionEnvelope.t()]
+  def list_pending_approvals(opts \\ []) do
+    workspace_id = Keyword.get(opts, :workspace_id)
+
     from(e in DecisionEnvelope,
       where: e.current == true and e.outcome == :approval_required,
       order_by: [desc: e.decided_at],
       preload: [:intent]
     )
+    |> scope_envelope_to_workspace(workspace_id)
     |> Repo.all()
   end
 
-  @doc "Count of current envelopes awaiting approval."
-  @spec count_pending_approvals() :: non_neg_integer()
-  def count_pending_approvals do
+  @doc """
+  Count of current envelopes awaiting approval.
+
+  Options:
+
+    * `:workspace_id` — narrow to one workspace (#158b.2). Default
+      `nil` keeps the legacy "all workspaces" path open until every
+      caller is migrated.
+  """
+  @spec count_pending_approvals(keyword()) :: non_neg_integer()
+  def count_pending_approvals(opts \\ []) do
+    workspace_id = Keyword.get(opts, :workspace_id)
+
     from(e in DecisionEnvelope,
       where: e.current == true and e.outcome == :approval_required,
       select: count(e.id)
     )
+    |> scope_envelope_to_workspace(workspace_id)
     |> Repo.one()
   end
 
@@ -663,15 +677,23 @@ defmodule Bank.Decisions do
 
   Accepts an optional `limit` (default 10). Preloads the parent intent
   for display in the dashboard.
+
+  Options:
+
+    * `:workspace_id` — narrow to one workspace (#158b.2). Default
+      `nil` (all workspaces).
   """
-  @spec list_recent_decisions(pos_integer()) :: [DecisionEnvelope.t()]
-  def list_recent_decisions(limit \\ 10) do
+  @spec list_recent_decisions(pos_integer(), keyword()) :: [DecisionEnvelope.t()]
+  def list_recent_decisions(limit \\ 10, opts \\ []) do
+    workspace_id = Keyword.get(opts, :workspace_id)
+
     from(e in DecisionEnvelope,
       where: e.current == true,
       order_by: [desc: e.decided_at],
       limit: ^limit,
       preload: [:intent]
     )
+    |> scope_envelope_to_workspace(workspace_id)
     |> Repo.all()
   end
 
@@ -679,15 +701,23 @@ defmodule Bank.Decisions do
   Count active (non-terminal) execution plans.
 
   Terminal statuses are `:confirmed`, `:reverted`, `:aborted`.
+
+  Options:
+
+    * `:workspace_id` — narrow to one workspace (#158b.2). Default
+      `nil` (all workspaces).
   """
-  @spec count_active_executions() :: non_neg_integer()
-  def count_active_executions do
+  @spec count_active_executions(keyword()) :: non_neg_integer()
+  def count_active_executions(opts \\ []) do
+    workspace_id = Keyword.get(opts, :workspace_id)
+
     from(p in ExecutionPlan,
       where:
         p.active == true and
           p.execution_status not in [:confirmed, :reverted, :aborted],
       select: count(p.id)
     )
+    |> scope_plan_to_workspace(workspace_id)
     |> Repo.one()
   end
 
@@ -695,9 +725,16 @@ defmodule Bank.Decisions do
   List active (non-terminal) execution plans, most recent first.
 
   Preloads the parent intent for display purposes.
+
+  Options:
+
+    * `:workspace_id` — narrow to one workspace (#158b.2). Default
+      `nil` (all workspaces).
   """
-  @spec list_active_executions() :: [ExecutionPlan.t()]
-  def list_active_executions do
+  @spec list_active_executions(keyword()) :: [ExecutionPlan.t()]
+  def list_active_executions(opts \\ []) do
+    workspace_id = Keyword.get(opts, :workspace_id)
+
     from(p in ExecutionPlan,
       where:
         p.active == true and
@@ -705,37 +742,73 @@ defmodule Bank.Decisions do
       order_by: [desc: p.inserted_at],
       preload: [:intent]
     )
+    |> scope_plan_to_workspace(workspace_id)
     |> Repo.all()
   end
 
   @doc """
   List current envelopes with outcome `:hold`, most recent first.
   Preloads the parent intent for the action queue held-items view.
+
+  Options:
+
+    * `:workspace_id` — narrow to one workspace (#158b.2). Default
+      `nil` (all workspaces).
   """
-  @spec list_held_decisions() :: [DecisionEnvelope.t()]
-  def list_held_decisions do
+  @spec list_held_decisions(keyword()) :: [DecisionEnvelope.t()]
+  def list_held_decisions(opts \\ []) do
+    workspace_id = Keyword.get(opts, :workspace_id)
+
     from(e in DecisionEnvelope,
       where: e.current == true and e.outcome == :hold,
       order_by: [desc: e.decided_at],
       preload: [:intent]
     )
+    |> scope_envelope_to_workspace(workspace_id)
     |> Repo.all()
   end
 
   @doc """
   List current envelopes with outcome `:block`, most recent first.
   Preloads the parent intent for the action queue blocked-items view.
+
+  Options:
+
+    * `:workspace_id` — narrow to one workspace (#158b.2). Default
+      `nil` (all workspaces).
   """
-  @spec list_blocked_decisions() :: [DecisionEnvelope.t()]
-  def list_blocked_decisions(limit \\ 20) do
+  @spec list_blocked_decisions(pos_integer(), keyword()) :: [DecisionEnvelope.t()]
+  def list_blocked_decisions(limit \\ 20, opts \\ []) do
+    workspace_id = Keyword.get(opts, :workspace_id)
+
     from(e in DecisionEnvelope,
       where: e.current == true and e.outcome == :block,
       order_by: [desc: e.decided_at],
       limit: ^limit,
       preload: [:intent]
     )
+    |> scope_envelope_to_workspace(workspace_id)
     |> Repo.all()
   end
+
+  # `decision_envelopes` does not carry its own `workspace_id`; the
+  # scope is derived from the parent intent (FK chain). Narrowing the
+  # query JOINs to intent and filters there. The `nil` clause is the
+  # legacy no-op default; existing callers stay unchanged.
+  defp scope_envelope_to_workspace(query, nil), do: query
+
+  defp scope_envelope_to_workspace(query, workspace_id) when is_binary(workspace_id) do
+    from e in query,
+      join: i in assoc(e, :intent),
+      where: i.workspace_id == ^workspace_id
+  end
+
+  # `execution_plans` carries its own `workspace_id` read hint
+  # (#158a), so the filter is a direct WHERE.
+  defp scope_plan_to_workspace(query, nil), do: query
+
+  defp scope_plan_to_workspace(query, workspace_id) when is_binary(workspace_id),
+    do: where(query, [p], p.workspace_id == ^workspace_id)
 
   # --- Approval state transitions -----------------------------------------
 
