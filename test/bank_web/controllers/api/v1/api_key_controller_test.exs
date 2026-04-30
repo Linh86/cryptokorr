@@ -481,11 +481,55 @@ defmodule BankWeb.API.V1.APIKeyControllerTest do
 
       assert %{"error" => %{"code" => "insufficient_role"}} = json_response(conn, 403)
     end
+
+    test "403 forbidden_role_above_creator when admin tries to rotate an owner key (#220 P2)",
+         %{conn: conn, workspace: ws} do
+      # The default admin caller (`setup_api_key_admin`) cannot mint
+      # an owner key via create. Without parity on rotate, the same
+      # admin could refresh an owner credential via this path —
+      # closes that escalation chain.
+      {:ok, owner_user} =
+        Bank.Accounts.find_or_create_from_oauth(%{
+          provider: :google,
+          subject: "owner-rotate",
+          email: "owner-rotate@example.com",
+          name: "Owner Rotate"
+        })
+
+      {:ok, _} =
+        Workspaces.create_membership(%{
+          user_id: owner_user.id,
+          workspace_id: ws.id,
+          role: :owner
+        })
+
+      {:ok, owner_key, _} = APIKeys.create_key(ws, owner_user, :owner, "owner-creds")
+
+      conn = post(conn, ~p"/v1/api_keys/#{owner_key.id}/rotate")
+      assert %{"error" => %{"code" => "forbidden_role_above_creator"}} = json_response(conn, 403)
+
+      # Owner key must remain active — refused rotate cannot revoke
+      # the old key.
+      reloaded = Bank.Repo.get!(APIKey, owner_key.id)
+      assert is_nil(reloaded.revoked_at)
+    end
   end
 
   # --- POST /v1/api_keys (with expires_at via UI / body) --------------------
 
   describe "POST /v1/api_keys with expires_at (UI exposure backfill, #220)" do
+    test "422 invalid_expires_at when expires_at is in the past (#220 P2)",
+         %{conn: conn} do
+      conn =
+        post(conn, ~p"/v1/api_keys", %{
+          "role" => "viewer",
+          "name" => "past-ttl",
+          "expires_at" => "2000-01-01T00:00:00Z"
+        })
+
+      assert %{"error" => %{"code" => "invalid_expires_at"}} = json_response(conn, 422)
+    end
+
     test "honours an empty-string expires_at as nil (UI sends '')",
          %{conn: conn} do
       conn =

@@ -215,6 +215,11 @@ defmodule BankWeb.API.V1.APIKeyController do
     scope = conn.assigns.current_scope
 
     with {:ok, old_key} <- APIKeys.get_workspace_key(scope.workspace.id, id),
+         # Creator-privilege parity with `create/2`: an admin caller
+         # cannot rotate an `:owner` key, otherwise rotation becomes a
+         # back door for refreshing a credential the caller could not
+         # mint via `create/2`. Mirrors the role gate at line 140.
+         :ok <- enforce_creator_role(scope.role, old_key.role),
          {:ok, actor} <- resolve_creator(scope),
          {:ok, new_key, raw_secret} <- APIKeys.rotate_key(old_key, actor) do
       conn
@@ -225,6 +230,11 @@ defmodule BankWeb.API.V1.APIKeyController do
         conn
         |> put_status(:not_found)
         |> json(%{error: %{code: "not_found"}})
+
+      {:error, :forbidden_role_above_creator} ->
+        conn
+        |> put_status(:forbidden)
+        |> json(%{error: %{code: "forbidden_role_above_creator"}})
 
       {:error, :already_revoked} ->
         conn
@@ -308,13 +318,25 @@ defmodule BankWeb.API.V1.APIKeyController do
   defp parse_expires_at(%{"expires_at" => ""}), do: {:ok, nil}
 
   defp parse_expires_at(%{"expires_at" => v}) when is_binary(v) do
-    case DateTime.from_iso8601(v) do
-      {:ok, dt, _} -> {:ok, dt}
+    with {:ok, dt, _} <- DateTime.from_iso8601(v),
+         :ok <- ensure_future(dt) do
+      {:ok, dt}
+    else
+      :past -> {:error, "invalid_expires_at"}
       _ -> {:error, "invalid_expires_at"}
     end
   end
 
   defp parse_expires_at(_), do: {:ok, nil}
+
+  # Reject past timestamps at create time. The auth plug already
+  # rejects expired keys at use-time, but accepting a past value
+  # here would produce a freshly-minted key that fails on first
+  # auth — pure operator footgun, plus an attribution-cleanliness
+  # issue (the new row looks "expired" instantly).
+  defp ensure_future(%DateTime{} = dt) do
+    if DateTime.compare(dt, DateTime.utc_now()) == :gt, do: :ok, else: :past
+  end
 
   defp enforce_creator_role(creator_role, requested_role) do
     if Membership.role_at_least?(creator_role, requested_role) do

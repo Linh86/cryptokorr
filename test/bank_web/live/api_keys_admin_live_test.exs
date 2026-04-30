@@ -514,6 +514,40 @@ defmodule BankWeb.APIKeysAdminLiveTest do
       reloaded = Bank.Repo.get!(APIKey, foreign_key.id)
       assert is_nil(reloaded.revoked_at), "cross-workspace rotate MUST be a no-op"
     end
+
+    test "admin caller cannot rotate an owner key (creator-role parity #220 P2)", %{} do
+      # The bootstrap admin LiveView caller has workspace role
+      # `:admin`. An owner key must not be refreshable from below.
+      %{conn: conn, workspace: ws} = setup_admin_user(:admin)
+
+      {:ok, owner_user} =
+        Bank.Accounts.find_or_create_from_oauth(%{
+          provider: :google,
+          subject: "owner-ui-rot",
+          email: "owner-ui-rot@example.com",
+          name: "Owner UI Rot"
+        })
+
+      {:ok, _} =
+        Workspaces.create_membership(%{
+          user_id: owner_user.id,
+          workspace_id: ws.id,
+          role: :owner
+        })
+
+      {:ok, owner_key, _} = APIKeys.create_key(ws, owner_user, :owner, "ui-owner")
+
+      {:ok, view, _html} = live(conn, "/admin/api_keys")
+
+      # Hostile event firing directly (UI button is also gated by
+      # role_options/1 server-side enforcement is what matters).
+      html = render_click(view, "rotate", %{"id" => owner_key.id})
+      assert html =~ "cannot rotate a key whose role exceeds your own"
+
+      # Owner key must still be active.
+      reloaded = Bank.Repo.get!(APIKey, owner_key.id)
+      assert is_nil(reloaded.revoked_at)
+    end
   end
 
   # --- Create with expires_at (#220) ----------------------------------------
@@ -581,6 +615,22 @@ defmodule BankWeb.APIKeysAdminLiveTest do
         |> render_submit()
 
       assert html =~ "expires_at"
+      assert APIKeys.list_active_keys(ws.id) == []
+    end
+
+    test "past expires_at is refused with a form error (#220 P2)", %{} do
+      %{conn: conn, workspace: ws} = setup_admin_user(:admin)
+
+      {:ok, view, _html} = live(conn, "/admin/api_keys")
+
+      html =
+        view
+        |> form("#api-key-create-form",
+          api_key: %{name: "past-ttl", role: "viewer", expires_at: "2000-01-01T00:00"}
+        )
+        |> render_submit()
+
+      assert html =~ "must be in the future"
       assert APIKeys.list_active_keys(ws.id) == []
     end
   end

@@ -153,9 +153,15 @@ defmodule BankWeb.APIKeysAdminLive do
 
   def handle_event("rotate", %{"id" => id}, socket) do
     workspace_id = socket.assigns.current_scope.workspace.id
+    caller_role = socket.assigns.current_scope.role
     actor = socket.assigns.current_scope.user
 
     with {:ok, old_key} <- APIKeys.get_workspace_key(workspace_id, id),
+         # Creator-privilege parity with `create`: an admin caller
+         # cannot rotate an `:owner` key — otherwise rotation becomes
+         # a back-door for refreshing a credential the caller could
+         # not mint.
+         :ok <- enforce_creator_role(caller_role, old_key.role),
          {:ok, new_key, raw_secret} <- APIKeys.rotate_key(old_key, actor) do
       {:noreply,
        socket
@@ -172,6 +178,10 @@ defmodule BankWeb.APIKeysAdminLive do
     else
       {:error, :not_found} ->
         {:noreply, put_flash(socket, :error, "API key not found.")}
+
+      {:error, :forbidden_role_above_creator} ->
+        {:noreply,
+         put_flash(socket, :error, "You cannot rotate a key whose role exceeds your own.")}
 
       {:error, :already_revoked} ->
         # Old key was revoked between the page render and this
@@ -423,8 +433,16 @@ defmodule BankWeb.APIKeysAdminLive do
             trimmed
           end
 
-        case DateTime.from_iso8601(normalised) do
-          {:ok, dt, _} -> {:ok, dt}
+        with {:ok, dt, _} <- DateTime.from_iso8601(normalised),
+             :gt <- DateTime.compare(dt, DateTime.utc_now()) do
+          {:ok, dt}
+        else
+          # Mirrors the controller-side past-rejection. Auth path
+          # already refuses expired keys at use-time; we refuse here
+          # too so the operator does not mint an immediately-broken
+          # key by mistake.
+          :eq -> {:error, "expires_at must be in the future"}
+          :lt -> {:error, "expires_at must be in the future"}
           _ -> {:error, "expires_at is not a valid datetime"}
         end
     end
