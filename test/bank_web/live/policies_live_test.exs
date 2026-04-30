@@ -206,6 +206,11 @@ defmodule BankWeb.PoliciesLiveTest do
   # --- Archive rule ---------------------------------------------------------
 
   describe "archive policy rule" do
+    # Archive is admin-only (#159a). Bumps the file-level operator
+    # user's membership to admin without rebuilding the user /
+    # workspace fixture.
+    setup :upgrade_to_admin_role
+
     setup do
       rule =
         policy_rule(rule_type: :allowed_chain, params: %{"chains" => ["base"]}, state: :active)

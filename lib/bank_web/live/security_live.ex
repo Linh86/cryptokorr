@@ -62,35 +62,50 @@ defmodule BankWeb.SecurityLive do
 
   @impl true
   def handle_event("pause_runtime", _params, socket) do
-    case Security.pause(:global, reason: :operator_requested, actor: :user) do
-      {:ok, _} ->
-        {:noreply, socket |> load_state() |> put_flash(:info, "Runtime paused")}
+    with :ok <- BankWeb.LiveAuth.authorize_action(socket, :admin) do
+      case Security.pause(:global, reason: :operator_requested, actor: :user) do
+        {:ok, _} ->
+          {:noreply, socket |> load_state() |> put_flash(:info, "Runtime paused")}
 
-      {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Pause failed: #{inspect(reason)}")}
+        {:error, reason} ->
+          {:noreply, put_flash(socket, :error, "Pause failed: #{inspect(reason)}")}
+      end
+    else
+      {:error, {:insufficient_role, _}} ->
+        {:noreply, put_flash(socket, :error, "Admin role required to pause the runtime.")}
     end
   end
 
   def handle_event("resume_runtime", _params, socket) do
-    case Security.resume(:global, actor: :user) do
-      {:ok, _} ->
-        {:noreply, socket |> load_state() |> put_flash(:info, "Runtime resumed")}
+    with :ok <- BankWeb.LiveAuth.authorize_action(socket, :admin) do
+      case Security.resume(:global, actor: :user) do
+        {:ok, _} ->
+          {:noreply, socket |> load_state() |> put_flash(:info, "Runtime resumed")}
 
-      {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Resume failed: #{inspect(reason)}")}
+        {:error, reason} ->
+          {:noreply, put_flash(socket, :error, "Resume failed: #{inspect(reason)}")}
+      end
+    else
+      {:error, {:insufficient_role, _}} ->
+        {:noreply, put_flash(socket, :error, "Admin role required to resume the runtime.")}
     end
   end
 
   def handle_event("revoke_delegation", %{"smart-account-id" => sa_id}, socket) do
-    case Security.revoke_delegation(sa_id, reason: :operator_requested, actor: :user) do
-      {:ok, _job} ->
-        {:noreply,
-         socket
-         |> load_state()
-         |> put_flash(:info, "Delegation revoke submitted. Awaiting on-chain confirmation.")}
+    with :ok <- BankWeb.LiveAuth.authorize_action(socket, :admin) do
+      case Security.revoke_delegation(sa_id, reason: :operator_requested, actor: :user) do
+        {:ok, _job} ->
+          {:noreply,
+           socket
+           |> load_state()
+           |> put_flash(:info, "Delegation revoke submitted. Awaiting on-chain confirmation.")}
 
-      {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Revoke failed: #{inspect(reason)}")}
+        {:error, reason} ->
+          {:noreply, put_flash(socket, :error, "Revoke failed: #{inspect(reason)}")}
+      end
+    else
+      {:error, {:insufficient_role, _}} ->
+        {:noreply, put_flash(socket, :error, "Admin role required to revoke a delegation.")}
     end
   end
 

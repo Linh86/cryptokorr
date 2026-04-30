@@ -88,6 +88,11 @@ defmodule BankWeb.CounterpartyDetailLiveTest do
   # --- Archive --------------------------------------------------------------
 
   describe "archive counterparty" do
+    # Archive is admin-only (#159a). Bumps the file-level operator
+    # user's membership to admin without rebuilding the user /
+    # workspace / counterparty fixture chain.
+    setup :upgrade_to_admin_role
+
     test "archives the counterparty", %{conn: conn, counterparty: cp} do
       {:ok, view, html} = live(conn, "/counterparties/#{cp.id}")
       assert html =~ ~s(id="archive-btn")

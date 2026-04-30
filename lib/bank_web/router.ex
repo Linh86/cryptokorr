@@ -141,6 +141,7 @@ defmodule BankWeb.Router do
 
     get "/login", SessionController, :login
     get "/pending", SessionController, :pending
+    get "/unauthorized", SessionController, :unauthorized
 
     get "/auth/google", AuthController, :request
     get "/auth/google/callback", AuthController, :callback
@@ -155,20 +156,35 @@ defmodule BankWeb.Router do
   # action queue, counterparty/policy management, audit / replay /
   # security console, and the intents explorer respectively. #157
   # wraps the lot in a `live_session` so the on_mount hook can refuse
-  # anonymous and pending users at the LiveView boundary.
+  # anonymous and pending users at the LiveView boundary. #159a
+  # splits the console into two role-gated live_sessions: viewer-
+  # readable explorers and operator-required surfaces.
   scope "/", BankWeb do
     pipe_through :browser
 
-    live_session :operator, on_mount: {BankWeb.LiveAuth, :require_workspace} do
-      live "/", ControlLive
+    # Read-only explorer pages — anyone with a workspace membership
+    # (viewer+) can mount. No mutations live here; refresh / filter
+    # / paginate are view-only.
+    live_session :workspace_viewer,
+      on_mount: {BankWeb.LiveAuth, {:require_role, :viewer}} do
       live "/dashboard", DashboardLive
       live "/intents", IntentsLive
+      live "/audit", AuditLive
+      live "/audit/replay/:intent_id", IntentReplayLive
+    end
+
+    # Operator surfaces — pages that carry mutations (approvals,
+    # counterparty/policy CRUD, runtime controls). Mount requires
+    # `:operator` minimum; admin-only individual handle_event
+    # callbacks (pause/resume/revoke, archive) check role inside the
+    # callback.
+    live_session :workspace_operator,
+      on_mount: {BankWeb.LiveAuth, {:require_role, :operator}} do
+      live "/", ControlLive
       live "/queue", QueueLive
       live "/counterparties", CounterpartiesLive
       live "/counterparties/:id", CounterpartyDetailLive
       live "/policies", PoliciesLive
-      live "/audit", AuditLive
-      live "/audit/replay/:intent_id", IntentReplayLive
       live "/security", SecurityLive
     end
   end

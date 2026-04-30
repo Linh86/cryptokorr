@@ -95,17 +95,22 @@ defmodule BankWeb.CounterpartyDetailLive do
   end
 
   def handle_event("archive", _params, socket) do
-    case Counterparties.archive_counterparty(socket.assigns.counterparty, actor: :user) do
-      {:ok, cp} ->
-        cp = Counterparties.preload_counterparty(cp)
+    with :ok <- BankWeb.LiveAuth.authorize_action(socket, :admin) do
+      case Counterparties.archive_counterparty(socket.assigns.counterparty, actor: :user) do
+        {:ok, cp} ->
+          cp = Counterparties.preload_counterparty(cp)
 
-        {:noreply,
-         socket
-         |> assign(:counterparty, cp)
-         |> put_flash(:info, "Counterparty archived")}
+          {:noreply,
+           socket
+           |> assign(:counterparty, cp)
+           |> put_flash(:info, "Counterparty archived")}
 
-      {:error, _changeset} ->
-        {:noreply, put_flash(socket, :error, "Failed to archive")}
+        {:error, _changeset} ->
+          {:noreply, put_flash(socket, :error, "Failed to archive")}
+      end
+    else
+      {:error, {:insufficient_role, _}} ->
+        {:noreply, put_flash(socket, :error, "Admin role required to archive a counterparty.")}
     end
   end
 

@@ -139,24 +139,29 @@ defmodule BankWeb.PoliciesLive do
   end
 
   def handle_event("archive_rule", %{"rule-id" => rule_id}, socket) do
-    rule = Enum.find(socket.assigns.rules, &(&1.id == rule_id))
+    with :ok <- BankWeb.LiveAuth.authorize_action(socket, :admin) do
+      rule = Enum.find(socket.assigns.rules, &(&1.id == rule_id))
 
-    if rule do
-      case Policies.archive_rule(rule, actor: :user) do
-        {:ok, _rule} ->
-          {:noreply,
-           socket
-           |> put_flash(:info, "Policy rule archived")
-           |> load_rules()}
+      if rule do
+        case Policies.archive_rule(rule, actor: :user) do
+          {:ok, _rule} ->
+            {:noreply,
+             socket
+             |> put_flash(:info, "Policy rule archived")
+             |> load_rules()}
 
-        {:error, :not_active} ->
-          {:noreply, put_flash(socket, :error, "Only active rules can be archived")}
+          {:error, :not_active} ->
+            {:noreply, put_flash(socket, :error, "Only active rules can be archived")}
 
-        {:error, _changeset} ->
-          {:noreply, put_flash(socket, :error, "Failed to archive rule")}
+          {:error, _changeset} ->
+            {:noreply, put_flash(socket, :error, "Failed to archive rule")}
+        end
+      else
+        {:noreply, put_flash(socket, :error, "Rule not found")}
       end
     else
-      {:noreply, put_flash(socket, :error, "Rule not found")}
+      {:error, {:insufficient_role, _}} ->
+        {:noreply, put_flash(socket, :error, "Admin role required to archive a policy rule.")}
     end
   end
 

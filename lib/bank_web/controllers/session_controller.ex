@@ -44,6 +44,18 @@ defmodule BankWeb.SessionController do
     |> render(:pending, layout: false)
   end
 
+  @doc """
+  Rendered when a signed-in user with a workspace lacks the role
+  required to view a page (#159a). Distinct from `/pending`
+  (`:no_membership` / `:ambiguous`) and `/login` (anonymous).
+  """
+  def unauthorized(conn, _params) do
+    conn
+    |> assign(:page_title, "Insufficient permissions")
+    |> put_status(:forbidden)
+    |> render(:unauthorized, layout: false)
+  end
+
   defp build_classification(nil), do: {:default, nil}
 
   defp build_classification(user) do
