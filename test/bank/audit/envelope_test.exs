@@ -66,6 +66,48 @@ defmodule Bank.Audit.EnvelopeTest do
       {:ok, built} = Envelope.build(Map.put(@valid_attrs, :garbage, "junk"))
       refute Map.has_key?(built, :garbage)
     end
+
+    test "passes :workspace_id through to the row but excludes it from payload_hash (#158d-b)" do
+      ws_id = "33333333-3333-3333-3333-333333333333"
+      ts = DateTime.from_naive!(~N[2026-04-15 12:00:00.000000], "Etc/UTC")
+
+      attrs_without = Map.put(@valid_attrs, :ts, ts)
+      attrs_with = Map.put(attrs_without, :workspace_id, ws_id)
+
+      {:ok, without} = Envelope.build(attrs_without)
+      {:ok, with_ws} = Envelope.build(attrs_with)
+
+      # Same canonical fields → same payload_hash. Adding the
+      # passthrough workspace_id MUST NOT mutate the hash.
+      assert without.payload_hash == with_ws.payload_hash
+
+      # The workspace_id is preserved on the writer-shaped attrs.
+      assert with_ws.workspace_id == ws_id
+      refute Map.has_key?(without, :workspace_id)
+    end
+
+    test "two events with the same canonical payload but different workspace_id share a payload_hash" do
+      ts = DateTime.from_naive!(~N[2026-04-15 12:00:00.000000], "Etc/UTC")
+
+      {:ok, a} =
+        Envelope.build(
+          Map.merge(@valid_attrs, %{
+            ts: ts,
+            workspace_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+          })
+        )
+
+      {:ok, b} =
+        Envelope.build(
+          Map.merge(@valid_attrs, %{
+            ts: ts,
+            workspace_id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+          })
+        )
+
+      assert a.payload_hash == b.payload_hash
+      refute a.workspace_id == b.workspace_id
+    end
   end
 
   describe "build!/1" do

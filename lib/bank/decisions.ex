@@ -577,15 +577,21 @@ defmodule Bank.Decisions do
          prior_trust,
          prior_simulation
        ) do
+    # Stamp every derived event with the parent intent's
+    # workspace_id (#158d-b). The audit envelope passthrough field
+    # (#158b) carries it onto the row without disturbing the
+    # canonical hash.
+    audit_opts = [workspace_id: intent.workspace_id]
+
     if is_nil(prior_trust) or prior_trust.id != trust.id do
-      _ = Runtime.emit_audit(Events.trust_assessed(trust))
+      _ = Runtime.emit_audit(Events.trust_assessed(trust, audit_opts))
     end
 
     if is_nil(prior_simulation) or prior_simulation.id != simulation.id do
-      _ = Runtime.emit_audit(Events.simulation_produced(simulation))
+      _ = Runtime.emit_audit(Events.simulation_produced(simulation, audit_opts))
     end
 
-    _ = Runtime.emit_audit(Events.decision_decided(envelope))
+    _ = Runtime.emit_audit(Events.decision_decided(envelope, audit_opts))
 
     if intent.state != prior_intent_state do
       _ =
@@ -1023,8 +1029,10 @@ defmodule Bank.Decisions do
         :block -> &Events.approval_rejected/3
       end
 
-    Runtime.emit_audit(event_builder.(prior, successor, actor_id: actor_id))
-    Runtime.emit_audit(Events.decision_decided(successor))
+    audit_opts = [actor_id: actor_id, workspace_id: intent.workspace_id]
+
+    Runtime.emit_audit(event_builder.(prior, successor, audit_opts))
+    Runtime.emit_audit(Events.decision_decided(successor, audit_opts))
     Runtime.emit_audit(Events.intent_state_changed(intent, prior_intent_state, intent.state))
 
     Notifier.approval_queue(

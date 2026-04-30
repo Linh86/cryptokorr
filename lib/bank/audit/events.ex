@@ -39,7 +39,8 @@ defmodule Bank.Audit.Events do
       subject_type: "agent_intent",
       subject_id: intent.id,
       correlation_id: intent.id,
-      after_ref: intent_snapshot(intent)
+      after_ref: intent_snapshot(intent),
+      workspace_id: intent.workspace_id
     }
   end
 
@@ -57,13 +58,20 @@ defmodule Bank.Audit.Events do
       subject_id: intent.id,
       correlation_id: intent.id,
       before_ref: %{state: Atom.to_string(from)},
-      after_ref: %{state: Atom.to_string(to)}
+      after_ref: %{state: Atom.to_string(to)},
+      workspace_id: intent.workspace_id
     }
   end
 
   @doc """
   `trust.assessed` — a new trust assessment is the current claim for
   an intent.
+
+  Options:
+
+    * `:workspace_id` — the parent intent's workspace_id (#158d-b).
+      Carried as a passthrough field on the audit row; not part of
+      the canonical hash.
   """
   @spec trust_assessed(TrustAssessment.t(), keyword()) :: attrs()
   def trust_assessed(%TrustAssessment{} = claim, opts \\ []) do
@@ -78,7 +86,8 @@ defmodule Bank.Audit.Events do
         id: claim.id,
         derived_trust: atom_or_nil(claim.derived_trust),
         confidence: atom_or_nil(claim.confidence)
-      }
+      },
+      workspace_id: Keyword.get(opts, :workspace_id)
     }
   end
 
@@ -98,7 +107,8 @@ defmodule Bank.Audit.Events do
         id: report.id,
         provider: report.provider,
         status: atom_or_nil(report.status)
-      }
+      },
+      workspace_id: Keyword.get(opts, :workspace_id)
     }
   end
 
@@ -129,7 +139,8 @@ defmodule Bank.Audit.Events do
         status: atom_or_nil(report.status),
         current: report.current,
         reason: reason
-      }
+      },
+      workspace_id: Keyword.get(opts, :workspace_id)
     }
   end
 
@@ -138,6 +149,10 @@ defmodule Bank.Audit.Events do
   intent. If this envelope supersedes another (retry, approval
   successor), pass the prior envelope via `:supersedes` so the
   `before_ref` carries the prior outcome.
+
+  Options:
+
+    * `:workspace_id` — parent intent's workspace_id (#158d-b).
   """
   @spec decision_decided(DecisionEnvelope.t(), keyword()) :: attrs()
   def decision_decided(%DecisionEnvelope{} = envelope, opts \\ []) do
@@ -149,7 +164,8 @@ defmodule Bank.Audit.Events do
       subject_id: envelope.id,
       correlation_id: envelope.intent_id,
       before_ref: ref_from_supersedes(envelope.supersedes_id, "decision_envelope"),
-      after_ref: decision_snapshot(envelope)
+      after_ref: decision_snapshot(envelope),
+      workspace_id: Keyword.get(opts, :workspace_id)
     }
   end
 
@@ -171,7 +187,8 @@ defmodule Bank.Audit.Events do
       subject_id: prior.id,
       correlation_id: prior.intent_id,
       before_ref: decision_snapshot(prior),
-      after_ref: decision_snapshot(successor)
+      after_ref: decision_snapshot(successor),
+      workspace_id: Keyword.get(opts, :workspace_id)
     }
   end
 
@@ -193,7 +210,8 @@ defmodule Bank.Audit.Events do
       subject_id: prior.id,
       correlation_id: prior.intent_id,
       before_ref: decision_snapshot(prior),
-      after_ref: decision_snapshot(successor)
+      after_ref: decision_snapshot(successor),
+      workspace_id: Keyword.get(opts, :workspace_id)
     }
   end
 
@@ -217,7 +235,8 @@ defmodule Bank.Audit.Events do
         execution_status: atom_or_nil(plan.execution_status),
         final_outcome: atom_or_nil(plan.final_outcome),
         tx_refs: plan.tx_refs || []
-      }
+      },
+      workspace_id: plan.workspace_id
     }
   end
 
@@ -457,7 +476,8 @@ defmodule Bank.Audit.Events do
       subject_id: delegation.id,
       correlation_id: nil,
       before_ref: maybe_delegation_state_ref(prior_state),
-      after_ref: delegation_snapshot(delegation)
+      after_ref: delegation_snapshot(delegation),
+      workspace_id: delegation.workspace_id
     }
   end
 
@@ -479,7 +499,8 @@ defmodule Bank.Audit.Events do
         decision_id: plan.decision_id,
         execution_status: atom_or_nil(plan.execution_status),
         smart_account_id: plan.smart_account_id
-      }
+      },
+      workspace_id: plan.workspace_id
     }
   end
 
@@ -506,7 +527,8 @@ defmodule Bank.Audit.Events do
         decision_id: plan.decision_id,
         execution_status: atom_or_nil(plan.execution_status),
         smart_account_id: plan.smart_account_id
-      }
+      },
+      workspace_id: plan.workspace_id
     }
   end
 
@@ -543,7 +565,8 @@ defmodule Bank.Audit.Events do
       after_ref: %{
         decision_envelope_id: envelope.id,
         held_reason: atom_or_nil(reason)
-      }
+      },
+      workspace_id: intent.workspace_id
     }
   end
 
