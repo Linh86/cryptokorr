@@ -120,6 +120,9 @@ defmodule Bank.Policies do
     * `:limit` — default #{@default_page_limit}, capped at
       #{@max_page_limit}.
     * `:cursor` — opaque id cursor returned from a prior page.
+    * `:workspace_id` — narrow to one workspace (#158b). When unset,
+      every workspace's rules come back; that legacy path stays
+      open until every caller is on the new path.
   """
   @spec list_rules(map() | keyword(), opts()) :: %{
           entries: [PolicyRule.t()],
@@ -129,10 +132,12 @@ defmodule Bank.Policies do
     filters = to_map(filters)
     limit = opts |> Keyword.get(:limit, @default_page_limit) |> clamp_limit()
     cursor = Keyword.get(opts, :cursor)
+    workspace_id = Keyword.get(opts, :workspace_id)
 
     base =
       PolicyRule
       |> apply_rule_filters(filters)
+      |> scope_rule_to_workspace(workspace_id)
       |> order_by([r], asc: r.inserted_at, asc: r.id)
 
     base =
@@ -174,11 +179,20 @@ defmodule Bank.Policies do
   inserted_at asc)`. Rules with higher priority evaluate first — the
   order matters for tie-breaks inside a single rule type (e.g. two
   `autonomy_tier` rules both matching).
+
+  Options:
+
+    * `:workspace_id` — narrow to one workspace (#158b). Defaults
+      to `nil` (legacy: returns the full active ruleset across
+      workspaces).
   """
-  @spec load_active_ruleset() :: [PolicyRule.t()]
-  def load_active_ruleset do
+  @spec load_active_ruleset(opts()) :: [PolicyRule.t()]
+  def load_active_ruleset(opts \\ []) do
+    workspace_id = Keyword.get(opts, :workspace_id)
+
     PolicyRule
     |> where([r], r.state == :active)
+    |> scope_rule_to_workspace(workspace_id)
     |> order_by([r], desc: r.priority, asc: r.inserted_at, asc: r.id)
     |> Repo.all()
   end
@@ -202,6 +216,7 @@ defmodule Bank.Policies do
       attrs
       |> normalise_attrs()
       |> Map.put_new(:state, :active)
+      |> stamp_workspace_id(opts)
 
     Multi.new()
     |> Multi.insert(:rule, PolicyRule.changeset(%PolicyRule{}, attrs))
@@ -936,6 +951,30 @@ defmodule Bank.Policies do
       {_unknown, _}, q ->
         q
     end)
+  end
+
+  # Optional workspace filter for #158b. See `Bank.Counterparties` for
+  # the same pattern; the no-op default protects legacy callers.
+  defp scope_rule_to_workspace(query, nil), do: query
+
+  defp scope_rule_to_workspace(query, workspace_id) when is_binary(workspace_id),
+    do: where(query, [r], r.workspace_id == ^workspace_id)
+
+  # Caller-supplied `opts[:workspace_id]` is the only sanctioned
+  # source of the workspace scope. We always strip any
+  # `:workspace_id` (atom or string) from `attrs` first — `attrs`
+  # may carry user-controlled body fields, and the workspace
+  # boundary must never be forgeable from a request body. Trusted
+  # internal callers (e.g. `Bank.Demo`) call the schema changeset
+  # directly when they need to set workspace_id without going
+  # through this function.
+  defp stamp_workspace_id(attrs, opts) do
+    stripped = attrs |> Map.delete(:workspace_id) |> Map.delete("workspace_id")
+
+    case Keyword.get(opts, :workspace_id) do
+      nil -> stripped
+      ws_id -> Map.put(stripped, :workspace_id, ws_id)
+    end
   end
 
   defp clamp_limit(limit) when is_integer(limit) and limit > 0, do: min(limit, @max_page_limit)

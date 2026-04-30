@@ -114,6 +114,10 @@ defmodule Bank.Counterparties do
     * `:limit` — default #{@default_page_limit}, capped at
       #{@max_page_limit}
     * `:cursor` — opaque id cursor returned from a prior page
+    * `:workspace_id` — narrow to one workspace (#158b). When unset
+      (the default), every workspace's rows come back — that path
+      stays open for legacy callers that have not been migrated.
+      The NOT NULL flip + drop of the legacy default lands later.
   """
   @spec list_counterparties(map() | keyword(), opts()) :: %{
           entries: [Counterparty.t()],
@@ -123,10 +127,12 @@ defmodule Bank.Counterparties do
     filters = to_map(filters)
     limit = opts |> Keyword.get(:limit, @default_page_limit) |> clamp_limit()
     cursor = Keyword.get(opts, :cursor)
+    workspace_id = Keyword.get(opts, :workspace_id)
 
     base =
       Counterparty
       |> apply_counterparty_filters(filters)
+      |> scope_counterparty_to_workspace(workspace_id)
       |> order_by([c], asc: c.inserted_at, asc: c.id)
 
     base =
@@ -223,11 +229,22 @@ defmodule Bank.Counterparties do
   `attrs` accepts the same keys as `Counterparty.changeset/2`; the
   caller does not supply `id`, `active` (defaults to true), or
   `current_trust_level` (defaults per schema).
+
+  Options:
+
+    * `:workspace_id` — workspace this counterparty belongs to
+      (#158b). When supplied, it overrides any `:workspace_id` in
+      `attrs`. When omitted, the value in `attrs` (if any) is
+      preserved; legacy callers that pass neither end up with a
+      nil `workspace_id` (column is nullable until a future PR).
   """
   @spec create_counterparty(map(), actor_opts()) ::
           {:ok, Counterparty.t()} | {:error, Ecto.Changeset.t()}
   def create_counterparty(attrs, opts \\ []) do
-    attrs = normalise_attrs(attrs)
+    attrs =
+      attrs
+      |> normalise_attrs()
+      |> stamp_workspace_id(opts)
 
     Multi.new()
     |> Multi.insert(:counterparty, Counterparty.changeset(%Counterparty{}, attrs))
@@ -239,6 +256,23 @@ defmodule Bank.Counterparties do
 
       {:error, :counterparty, changeset, _} ->
         {:error, changeset}
+    end
+  end
+
+  # Caller-supplied `opts[:workspace_id]` is the only sanctioned
+  # source of the workspace scope on a fresh insert. We always
+  # strip any `:workspace_id` (atom or string) from `attrs` first
+  # — `attrs` may carry user-controlled body fields, and the
+  # workspace boundary must never be forgeable from a request
+  # body. Trusted internal callers that need to set workspace_id
+  # without going through this function (e.g. `Bank.Demo`) call
+  # the schema changeset directly.
+  defp stamp_workspace_id(attrs, opts) do
+    stripped = attrs |> Map.delete(:workspace_id) |> Map.delete("workspace_id")
+
+    case Keyword.get(opts, :workspace_id) do
+      nil -> stripped
+      ws_id -> Map.put(stripped, :workspace_id, ws_id)
     end
   end
 
@@ -717,6 +751,16 @@ defmodule Bank.Counterparties do
         q
     end)
   end
+
+  # Optional workspace filter for #158b. `nil` (the default) leaves
+  # the query untouched so legacy callers that haven't been migrated
+  # keep returning every workspace's rows. Once every caller passes
+  # `:workspace_id` through, a follow-up PR can require it and drop
+  # the no-op clause.
+  defp scope_counterparty_to_workspace(query, nil), do: query
+
+  defp scope_counterparty_to_workspace(query, workspace_id) when is_binary(workspace_id),
+    do: where(query, [c], c.workspace_id == ^workspace_id)
 
   defp clamp_limit(limit) when is_integer(limit) and limit > 0, do: min(limit, @max_page_limit)
   defp clamp_limit(_), do: @default_page_limit
