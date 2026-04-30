@@ -7,6 +7,8 @@ defmodule BankWeb.ControlLiveTest do
 
   import Phoenix.LiveViewTest
 
+  setup :register_and_log_in_user
+
   alias Bank.Delegations
   alias Bank.Security
   alias Bank.Security.PauseState

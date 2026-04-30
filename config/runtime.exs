@@ -225,6 +225,29 @@ case config_env() do
     :ok
 end
 
+# Bootstrap admin allowlist for the private-alpha approve / reject
+# flow (epic #153, issue #157). Comma-separated list of operator
+# emails — anyone in the list can hit `/admin/access` to approve or
+# reject pending users until role-based authorization (issue #159)
+# replaces this guard. Emails are normalised to lowercase + trimmed
+# at read time so casing/whitespace in the env var is harmless.
+admin_emails =
+  case System.get_env("BANK_ADMIN_EMAILS") do
+    nil ->
+      []
+
+    "" ->
+      []
+
+    raw ->
+      raw
+      |> String.split(",", trim: true)
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+  end
+
+config :bank, :admin_emails, admin_emails
+
 if config_env() == :prod do
   database_url =
     System.get_env("DATABASE_URL") ||

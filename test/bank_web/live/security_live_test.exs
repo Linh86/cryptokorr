@@ -6,6 +6,8 @@ defmodule BankWeb.SecurityLiveTest do
   use BankWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
+
+  setup :register_and_log_in_user
   import Bank.Fixtures
 
   alias Bank.Security

@@ -1,0 +1,341 @@
+defmodule Bank.AccessAdminTest do
+  @moduledoc """
+  Repo-roundtrip behaviour for the admin approve / reject surface
+  added by issue #157.
+
+  Covers:
+    * `can_admin_access?/1` against the BANK_ADMIN_EMAILS allowlist
+    * `list_pending_access/1` filters and classifies
+    * `approve_pending_user/3` matrix: matched / explicit /
+      idempotent / inactive-revival / disabled / unauthorized /
+      self-action
+    * `reject_pending_user/3` matrix: ok / already_disabled /
+      unauthorized / self-action
+  """
+
+  use Bank.DataCase, async: false
+
+  alias Bank.Access
+  alias Bank.Access.AccessInvite
+  alias Bank.Accounts
+  alias Bank.Accounts.User
+  alias Bank.Workspaces
+  alias Bank.Workspaces.Membership
+
+  setup do
+    # Each test opts into the admin allowlist via `put_admins/1`.
+    Application.put_env(:bank, :admin_emails, [])
+    on_exit(fn -> Application.put_env(:bank, :admin_emails, []) end)
+    :ok
+  end
+
+  defp put_admins(emails), do: Application.put_env(:bank, :admin_emails, emails)
+
+  defp create_user(opts \\ []) do
+    email = Keyword.get(opts, :email, "user-#{unique()}@example.com")
+    subject = Keyword.get(opts, :subject, "google-#{unique()}")
+
+    {:ok, user} =
+      Accounts.find_or_create_from_oauth(%{
+        provider: :google,
+        subject: subject,
+        email: email,
+        name: Keyword.get(opts, :name, "User")
+      })
+
+    case Keyword.get(opts, :status) do
+      :disabled ->
+        {:ok, u} = Accounts.disable_user(user)
+        u
+
+      _ ->
+        user
+    end
+  end
+
+  defp create_workspace(slug \\ nil) do
+    slug = slug || "ws-#{unique()}"
+    {:ok, ws} = Workspaces.create_workspace(%{slug: slug, name: "Display #{slug}"})
+    ws
+  end
+
+  defp create_invite!(actor, attrs) do
+    {:ok, invite} = Access.create_invite(Map.new(attrs), actor)
+    invite
+  end
+
+  defp unique, do: System.unique_integer([:positive])
+
+  describe "can_admin_access?/1" do
+    test "is false when admin_emails is empty" do
+      put_admins([])
+      assert Access.can_admin_access?(create_user()) == false
+    end
+
+    test "is true when the user's email is in the allowlist" do
+      user = create_user(email: "Alpha-Admin@Example.com")
+      put_admins(["alpha-admin@example.com"])
+
+      assert Access.can_admin_access?(user)
+    end
+
+    test "lowercase + trim: env var with mixed case still matches" do
+      user = create_user(email: "ops@example.com")
+      put_admins([" OPS@Example.com "])
+
+      assert Access.can_admin_access?(user)
+    end
+
+    test "is false for a disabled user even if their email is in the allowlist" do
+      user = create_user(email: "ex-admin@example.com", status: :disabled)
+      put_admins(["ex-admin@example.com"])
+
+      refute Access.can_admin_access?(user)
+    end
+
+    test "is false for nil and for a user with no email" do
+      assert Access.can_admin_access?(nil) == false
+      assert Access.can_admin_access?(%User{}) == false
+    end
+  end
+
+  describe "list_pending_access/1" do
+    test "returns users with no active membership and not disabled, classified by invite" do
+      ws = create_workspace()
+
+      no_invite_user = create_user(email: "noinvite@example.com")
+
+      domain_user = create_user(email: "alice@customer-corp.com")
+
+      _domain_invite =
+        create_invite!(create_user(),
+          workspace_id: ws.id,
+          invite_type: :domain,
+          domain: "customer-corp.com",
+          role: :viewer
+        )
+
+      # Already a member — should NOT show up.
+      member_user = create_user(email: "member@example.com")
+
+      {:ok, _} =
+        Workspaces.create_membership(%{
+          user_id: member_user.id,
+          workspace_id: ws.id,
+          role: :viewer
+        })
+
+      # Disabled — should NOT show up.
+      disabled_user = create_user(email: "ban@example.com", status: :disabled)
+
+      rows = Access.list_pending_access()
+      ids = Enum.map(rows, & &1.user.id)
+
+      assert no_invite_user.id in ids
+      assert domain_user.id in ids
+      refute member_user.id in ids
+      refute disabled_user.id in ids
+
+      assert classification_for(rows, no_invite_user.id) == :allowlist_missed
+      assert classification_for(rows, domain_user.id) == :domain_match
+    end
+  end
+
+  describe "approve_pending_user/3 — gating" do
+    test "refuses non-admin actor" do
+      put_admins([])
+      actor = create_user(email: "stranger@example.com")
+      target = create_user(email: "victim@example.com")
+
+      assert {:error, :unauthorized} = Access.approve_pending_user(actor, target)
+
+      assert Workspaces.list_active_memberships(target) == []
+    end
+
+    test "refuses self-approval" do
+      put_admins(["self@example.com"])
+      actor = create_user(email: "self@example.com")
+
+      assert {:error, :self_action} = Access.approve_pending_user(actor, actor)
+    end
+
+    test "refuses approving a disabled user" do
+      put_admins(["admin@example.com"])
+      admin = create_user(email: "admin@example.com")
+      target = create_user(email: "ban@example.com", status: :disabled)
+
+      assert {:error, :user_disabled} = Access.approve_pending_user(admin, target)
+    end
+  end
+
+  describe "approve_pending_user/3 — matched domain invite path" do
+    test "creates a membership using the domain invite's workspace and role" do
+      put_admins(["admin@example.com"])
+      admin = create_user(email: "admin@example.com")
+      ws = create_workspace("approve-domain")
+
+      _invite =
+        create_invite!(admin,
+          workspace_id: ws.id,
+          invite_type: :domain,
+          domain: "customer-corp.com",
+          role: :operator
+        )
+
+      target = create_user(email: "alice@customer-corp.com")
+
+      assert {:ok, :membership_created, %Membership{} = m} =
+               Access.approve_pending_user(admin, target)
+
+      assert m.user_id == target.id
+      assert m.workspace_id == ws.id
+      assert m.role == :operator
+      assert m.status == :active
+    end
+
+    test "second approve is :already_member without a duplicate" do
+      put_admins(["admin@example.com"])
+      admin = create_user(email: "admin@example.com")
+      ws = create_workspace("approve-idempotent")
+
+      create_invite!(admin,
+        workspace_id: ws.id,
+        invite_type: :domain,
+        domain: "repeat.example",
+        role: :viewer
+      )
+
+      target = create_user(email: "alice@repeat.example")
+      assert {:ok, :membership_created, _} = Access.approve_pending_user(admin, target)
+      assert {:ok, :already_member, _} = Access.approve_pending_user(admin, target)
+
+      assert length(Workspaces.list_active_memberships(target)) == 1
+    end
+
+    test "approving a user with an inactive membership reactivates it" do
+      put_admins(["admin@example.com"])
+      admin = create_user(email: "admin@example.com")
+      ws = create_workspace("reactivate")
+
+      target = create_user(email: "alice@reactivate.example")
+
+      {:ok, m} =
+        Workspaces.create_membership(%{
+          user_id: target.id,
+          workspace_id: ws.id,
+          role: :viewer,
+          status: :inactive
+        })
+
+      assert m.status == :inactive
+
+      assert {:ok, :membership_reactivated, reactivated} =
+               Access.approve_pending_user(admin, target,
+                 workspace_id: ws.id,
+                 role: :viewer
+               )
+
+      assert reactivated.id == m.id
+      assert reactivated.status == :active
+    end
+  end
+
+  describe "approve_pending_user/3 — explicit-opts path (no matched invite)" do
+    test "creates a membership when admin supplies workspace + role" do
+      put_admins(["admin@example.com"])
+      admin = create_user(email: "admin@example.com")
+      ws = create_workspace("explicit")
+      target = create_user(email: "no-invite@example.com")
+
+      assert {:ok, :membership_created, m} =
+               Access.approve_pending_user(admin, target,
+                 workspace_id: ws.id,
+                 role: :viewer
+               )
+
+      assert m.workspace_id == ws.id
+      assert m.role == :viewer
+    end
+
+    test "rejects when no matched invite and no opts" do
+      put_admins(["admin@example.com"])
+      admin = create_user(email: "admin@example.com")
+      target = create_user(email: "stranded@example.com")
+
+      assert {:error, :workspace_target_required} =
+               Access.approve_pending_user(admin, target)
+    end
+
+    test "rejects when workspace is supplied but role is missing" do
+      put_admins(["admin@example.com"])
+      admin = create_user(email: "admin@example.com")
+      ws = create_workspace("partial-opts")
+      target = create_user(email: "partial@example.com")
+
+      assert {:error, :role_required} =
+               Access.approve_pending_user(admin, target, workspace_id: ws.id)
+    end
+  end
+
+  describe "reject_pending_user/3" do
+    test "flips a pending user to :disabled" do
+      put_admins(["admin@example.com"])
+      admin = create_user(email: "admin@example.com")
+      target = create_user(email: "doomed@example.com")
+
+      assert {:ok, :rejected, disabled} = Access.reject_pending_user(admin, target)
+      assert disabled.status == :disabled
+      assert Accounts.get_user(target.id).status == :disabled
+    end
+
+    test "is idempotent on an already-disabled user" do
+      put_admins(["admin@example.com"])
+      admin = create_user(email: "admin@example.com")
+      target = create_user(email: "ex-doomed@example.com", status: :disabled)
+
+      assert {:ok, :already_disabled, ^target} = Access.reject_pending_user(admin, target)
+      assert Accounts.get_user(target.id).status == :disabled
+    end
+
+    test "refuses non-admin actor" do
+      put_admins([])
+      actor = create_user()
+      target = create_user()
+
+      assert {:error, :unauthorized} = Access.reject_pending_user(actor, target)
+      assert Accounts.get_user(target.id).status != :disabled
+    end
+
+    test "refuses self-rejection" do
+      put_admins(["self@example.com"])
+      actor = create_user(email: "self@example.com")
+
+      assert {:error, :self_action} = Access.reject_pending_user(actor, actor)
+      assert Accounts.get_user(actor.id).status != :disabled
+    end
+
+    test "does not auto-revoke a domain invite even if one matched" do
+      put_admins(["admin@example.com"])
+      admin = create_user(email: "admin@example.com")
+      ws = create_workspace("reject-keeps-invite")
+
+      invite =
+        create_invite!(admin,
+          workspace_id: ws.id,
+          invite_type: :domain,
+          domain: "rejectme.example",
+          role: :viewer
+        )
+
+      target = create_user(email: "alice@rejectme.example")
+      assert {:ok, :rejected, _} = Access.reject_pending_user(admin, target)
+
+      assert Repo.get!(AccessInvite, invite.id).status == :active
+    end
+  end
+
+  defp classification_for(rows, user_id) do
+    Enum.find(rows, fn row -> row.user.id == user_id end)
+    |> Map.get(:classification)
+  end
+end
