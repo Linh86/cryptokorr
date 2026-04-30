@@ -452,6 +452,25 @@ defmodule Bank.DecisionsTest do
                Decisions.dispatch_auto_exec(envelope.id, "sa-auto-nc")
     end
 
+    test "stamps the auto-dispatched plan with the parent intent's workspace_id (#158d)" do
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{slug: "auto-stamp", name: "Auto stamp"})
+
+      intent = agent_intent(workspace_id: ws.id)
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :auto_exec,
+          current: true
+        )
+
+      {:ok, _del} = Delegations.grant("sa-auto-stamp", "del-auto-stamp")
+
+      assert {:ok, plan} = Decisions.dispatch_auto_exec(envelope.id, "sa-auto-stamp")
+      assert plan.workspace_id == ws.id
+    end
+
     test "reuses the manual-path gates: rejects when an active plan already exists" do
       envelope = decision_envelope(outcome: :auto_exec, current: true)
       _existing = execution_plan(decision: envelope, active: true)
