@@ -38,7 +38,37 @@ workspace per installation" pass and is not part of this task.
   still rejects every UPDATE that does not match the narrow
   bypass: workspace-only, prior NULL, every other authoritative
   column unchanged. The session-local flag the backfill arms is
-  scoped to the work block.
+  scoped to the work block — it is **internal to this task only**.
+  Do NOT attempt to UPDATE `audit_events` directly via psql,
+  `Repo.update_all`, or any other path; the trigger will reject
+  it, and any future loosening of the trigger MUST go through a
+  reviewed migration, not this runbook.
+- **No chain / adapter / secrets needed.** This task is
+  Postgres-only. No `chain_adapter` round-trip, no `.env` lookup,
+  no on-chain interaction. Running it does not require the
+  adapter to be up.
+
+## Staging-before-production gate
+
+This runbook applies to **every** environment (test, dev, staging,
+production), but the order matters:
+
+1. Run the dry-run + apply procedure on **staging** first.
+2. Compare staging's dry-run-after-apply (Step 3) — every table
+   should report `scanned == 0` modulo intentional skips
+   (`workspace_blind_subject` and parent-NULL anchors).
+3. Only then promote to production: dry-run, *compare counts to
+   what staging looked like*, then apply.
+
+If production's dry-run output looks meaningfully different from
+staging's (e.g. unexpected `unknown_subject_type`, much larger
+NULL counts than the staging baseline, or skip-reason buckets that
+weren't there in staging), STOP. Do not `--apply`. Open an
+incident referencing this runbook.
+
+The task landing in main does NOT mean any environment's data has
+been backfilled — those are separate steps. Code shipped ≠ data
+clean.
 
 ## Procedure
 
@@ -57,7 +87,23 @@ ecto.migrate` first.
 ### 1. Dry-run
 
 ```sh
-mix bank.workspace_backfill
+mix bank.workspace_backfill | tee /tmp/workspace-backfill-dryrun.log
+```
+
+The `tee` captures the full output before any retry / apply. Save
+the log alongside any incident notes.
+
+Useful narrowing flags (all support dry-run):
+
+```sh
+# Just one table
+mix bank.workspace_backfill --table audit_events
+
+# Cap scanned rows across the whole run (safety on large tables)
+mix bank.workspace_backfill --table audit_events --limit 1000
+
+# Smaller batches for early visibility
+mix bank.workspace_backfill --batch-size 100
 ```
 
 Expected output (counts will vary):
@@ -122,16 +168,27 @@ Read the `skip_reasons` carefully:
 
 ### 2. Apply
 
-When the dry-run looks reasonable, commit:
+Only after the dry-run on this environment looks reasonable AND
+matches the staging baseline (see "Staging-before-production
+gate"), commit:
 
 ```sh
-mix bank.workspace_backfill --apply --batch-size 200
+mix bank.workspace_backfill --apply --batch-size 200 \
+  | tee /tmp/workspace-backfill-apply.log
 ```
 
 `--batch-size 200` keeps each transaction small enough that an
 unexpected lock contention does not stall other writers. Increase
 later if the run is slow against a table with heavy NULL counts;
 keep below 1000 against `audit_events` until the row count is known.
+
+Narrow-apply variants (use only when the dry-run isolates the
+remaining work to one table):
+
+```sh
+mix bank.workspace_backfill --apply --table delegations
+mix bank.workspace_backfill --apply --table audit_events --limit 5000
+```
 
 ### 3. Verify clean
 
@@ -148,6 +205,10 @@ needs filling.
 
 ## Recovery
 
+Always **save the captured `tee` log first** before any retry. If
+you didn't `tee`, copy the terminal scrollback to a file before
+running anything else.
+
 - **Run interrupted partway.** The task is resumable: re-invoke
   with the same arguments. Already-stamped rows are not rescanned
   (idempotent on `WHERE workspace_id IS NULL`).
@@ -155,8 +216,13 @@ needs filling.
   `20260430140000_allow_audit_workspace_backfill` migration is not
   applied. Run `mix ecto.migrate` and retry.
 - **Counts look wrong.** Stop. Open an incident referencing this
-  runbook. Don't `--apply` until the dry-run output matches what
-  staging looked like.
+  runbook with the captured log attached. Don't `--apply` until the
+  dry-run output matches what staging looked like.
+- **Step 3 (verify) reports skipped > 0 that aren't intentional.**
+  Do NOT proceed to `#158e` (NOT NULL flip). The remaining rows
+  signal a parent that still needs filling. Investigate the
+  specific `skip_reasons` bucket; the dry-run output names the
+  parent table.
 
 ## What this task does NOT do
 
@@ -171,3 +237,5 @@ needs filling.
   filter to a SQL `WHERE workspace_id =`. That follow-up can land
   only after this task has actually run on the target environment
   and the legacy NULL tail is verified empty.
+- It does not require any chain or adapter activity — Postgres-
+  only. `chain_adapter` can be down for the duration of the run.
