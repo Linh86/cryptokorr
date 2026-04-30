@@ -40,9 +40,12 @@ which is independent of this smoke.
 - Phoenix running on `:4000`: `mix phx.server` from the repo
   root, with the dev DB migrated (`mix ecto.setup`).
 - `curl` and `jq` available locally.
-- An operator user with at least `:admin` workspace role
-  (any `mix bank.demo.seed` run gives you one — see
-  [`docs/demo.md`](../demo.md)).
+- A clean dev DB. Step 0 creates its own workspace and user from
+  IEx — it does NOT depend on `mix bank.demo.seed` or any
+  pre-existing operator. If you've already run a previous
+  iteration of this runbook on the same DB, see "Recovery"
+  below before starting Step 0 (the `slug` columns are unique
+  and a re-run with the same slug values will fail).
 
 ## Step 0 — bootstrap a management API key
 
@@ -368,9 +371,19 @@ the worker's moduledoc.
 
 ## Recovery
 
+- **Re-running Step 0 on the same DB.** `workspaces.slug` is
+  unique (`workspaces_lower_slug_idx`). Running Step 0 a second
+  time with `slug: "smoke"` will fail at
+  `Bank.Workspaces.create_workspace(...)` with a changeset
+  error. Either:
+    1. `mix ecto.reset` to start from a clean DB (smoke runs
+       non-production data; this is the simplest path), or
+    2. Substitute a unique suffix in the slug each run, e.g.
+       `slug: "smoke-#{System.os_time()}"`. Same goes for the
+       `slug: "other"` workspace in Step 6.
 - **Bootstrap key lost.** Re-run Step 0 in IEx with a fresh
   key name. Manually revoke the lost key by id in IEx if you
-  can identify it from the prefix prefix+audit trail.
+  can identify it from the prefix + audit trail.
 - **Workspace got polluted with smoke data.** Drop and recreate
   the dev DB: `mix ecto.reset`. The smoke is non-production;
   no recovery is needed beyond a fresh DB.
