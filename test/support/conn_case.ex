@@ -118,4 +118,20 @@ defmodule BankWeb.ConnCase do
     attrs = Map.put_new(attrs, :workspace_id, Process.get(:bank_test_workspace_id))
     Bank.Delegations.grant(smart_account_id, delegation_id, attrs)
   end
+
+  @doc """
+  Bumps the file-level user's membership role to `:admin` (#159a).
+  Use as a `describe`-level `setup :upgrade_to_admin_role` for
+  individual blocks that exercise admin-only handle_event callbacks
+  (`pause_runtime`, `archive`, etc.) — keeps the rest of the file's
+  tests on the default operator role so we get coverage of both
+  tiers without creating a second user/workspace per describe.
+  """
+  def upgrade_to_admin_role(%{current_user: user, workspace: workspace} = context) do
+    {:ok, membership} =
+      Bank.Workspaces.get_membership(user, workspace.id)
+      |> Bank.Workspaces.set_role(:admin)
+
+    {:ok, Map.put(context, :membership, membership)}
+  end
 end

@@ -19,7 +19,16 @@ defmodule BankWeb.LiveAuthRBACTest do
   import Phoenix.LiveViewTest
 
   alias Bank.Accounts
+  alias Bank.Security.PauseState
   alias Bank.Workspaces
+
+  setup do
+    # `Bank.Security.PauseState` is a process-resident GenServer
+    # that survives DB sandboxing. Reset it so pause/resume tests
+    # do not leak across each other.
+    PauseState.reset()
+    :ok
+  end
 
   # --- Helpers --------------------------------------------------------------
 
@@ -174,43 +183,79 @@ defmodule BankWeb.LiveAuthRBACTest do
   # --- Action-level admin gates --------------------------------------------
 
   describe "operator on Control/Security cannot perform admin-only actions" do
-    test "pause_runtime is rejected with admin-required flash" do
+    test "pause_runtime is rejected and the runtime stays NOT paused" do
       {conn, _user, _ws} = authed_conn_with_role(:operator)
+      refute Bank.Security.paused?(:global), "precondition: runtime starts un-paused"
+
       {:ok, view, _html} = live(conn, "/security")
-
       result = render_click(view, "pause_runtime")
-      assert result =~ "Admin role required"
 
-      # Sanity: view rendered, runtime banner did not flip to paused.
+      assert result =~ "Admin role required"
       refute result =~ "Runtime paused"
+      # The actual outcome — not just rendered text — must be unchanged.
+      refute Bank.Security.paused?(:global),
+             "operator without admin role must NOT be able to pause the runtime"
     end
 
-    test "resume_runtime is rejected with admin-required flash" do
+    test "resume_runtime is rejected and a paused runtime stays paused" do
+      # Set up a real paused state via an out-of-band actor so the
+      # rejection-doesn't-resume invariant has something to bite on.
+      {:ok, _} = Bank.Security.pause(:global, reason: :operator_requested, actor: :user)
+      assert Bank.Security.paused?(:global)
+
       {conn, _user, _ws} = authed_conn_with_role(:operator)
       {:ok, view, _html} = live(conn, "/")
-
       result = render_click(view, "resume_runtime")
+
       assert result =~ "Admin role required"
+
+      assert Bank.Security.paused?(:global),
+             "operator without admin role must NOT be able to resume the runtime"
     end
 
-    test "revoke_delegation on Control is rejected with admin-required flash" do
-      {conn, _user, _ws} = authed_conn_with_role(:operator)
+    test "revoke_delegation on Control is rejected and the row is unchanged" do
+      {conn, _user, ws} = authed_conn_with_role(:operator)
+
+      {:ok, del} =
+        Bank.Delegations.grant(
+          "sa-rbac-#{System.unique_integer([:positive])}",
+          "del-rbac-#{System.unique_integer([:positive])}",
+          %{workspace_id: ws.id}
+        )
+
+      assert del.state == :active
+
       {:ok, view, _html} = live(conn, "/")
 
-      result = render_click(view, "revoke_delegation", %{"smart-account-id" => "sa-bogus"})
+      result =
+        render_click(view, "revoke_delegation", %{"smart-account-id" => del.smart_account_id})
+
       assert result =~ "Admin role required"
+
+      # Reload the row directly: state must still be `:active`. A
+      # successful revoke would have flipped it to `:revoking`.
+      reloaded = Bank.Repo.get!(Bank.Delegations.Delegation, del.id)
+
+      assert reloaded.state == :active,
+             "operator without admin role must NOT be able to start a revoke"
     end
   end
 
   describe "operator on Counterparty / Policies cannot archive" do
-    test "policies archive_rule is rejected" do
+    test "policies archive_rule is rejected and the rule stays :active" do
       {conn, _user, ws} = authed_conn_with_role(:operator)
       rule = Bank.Fixtures.policy_rule(workspace_id: ws.id)
+      assert rule.state == :active
 
       {:ok, view, _html} = live(conn, "/policies")
-
       result = render_click(view, "archive_rule", %{"rule-id" => rule.id})
+
       assert result =~ "Admin role required"
+
+      reloaded = Bank.Repo.get!(Bank.Policies.PolicyRule, rule.id)
+
+      assert reloaded.state == :active,
+             "operator without admin role must NOT be able to archive a policy rule"
     end
   end
 
@@ -245,6 +290,25 @@ defmodule BankWeb.LiveAuthRBACTest do
       {conn, _user, _ws} = authed_conn_with_role(:operator)
 
       assert {:error, {:redirect, %{to: "/"}}} = live(conn, "/admin/access")
+    end
+
+    test "empty BANK_ADMIN_EMAILS allowlist does NOT authorize a logged-in user" do
+      # Fail-closed regression test: an operator-misconfiguration
+      # that wipes the allowlist must NOT silently grant /admin
+      # access to anyone with a session.
+      original = Application.get_env(:bank, :admin_emails, [])
+      Application.put_env(:bank, :admin_emails, [])
+      on_exit(fn -> Application.put_env(:bank, :admin_emails, original) end)
+
+      {conn, _user, _ws} = authed_conn_with_role(:operator)
+      assert {:error, {:redirect, %{to: "/"}}} = live(conn, "/admin/access")
+
+      # Even an admin-role membership doesn't get them in via this
+      # gate — `:require_admin` is BANK_ADMIN_EMAILS-keyed by design
+      # so workspace admins still need an explicit allowlist entry
+      # for the bootstrap surface.
+      {conn_admin, _user_admin, _ws_admin} = authed_conn_with_role(:admin)
+      assert {:error, {:redirect, %{to: "/"}}} = live(conn_admin, "/admin/access")
     end
   end
 end
