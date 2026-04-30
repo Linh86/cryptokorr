@@ -20,6 +20,7 @@ defmodule Bank.Decisions.ExecutionPlan do
 
   alias Bank.Decisions.DecisionEnvelope
   alias Bank.Intents.AgentIntent
+  alias Bank.Workspaces.Workspace
 
   @execution_statuses [
     :prepared,
@@ -51,6 +52,13 @@ defmodule Bank.Decisions.ExecutionPlan do
     belongs_to :decision, DecisionEnvelope
     belongs_to :intent, AgentIntent
 
+    # Nullable workspace scope (#158a foundation; runtime filter in
+    # #158b). Read-hint column for adapter callbacks that resolve
+    # plans by `execution_plan_id` and need workspace context for
+    # audit. The existing `(decision_id) WHERE active` partial unique
+    # is unchanged.
+    belongs_to :workspace, Workspace
+
     timestamps()
   end
 
@@ -75,7 +83,8 @@ defmodule Bank.Decisions.ExecutionPlan do
       :tx_refs,
       :final_outcome,
       :final_reason,
-      :active
+      :active,
+      :workspace_id
     ])
     |> validate_required([
       :decision_id,
@@ -88,6 +97,7 @@ defmodule Bank.Decisions.ExecutionPlan do
     |> validate_final_outcome_matches_status()
     |> foreign_key_constraint(:decision_id)
     |> foreign_key_constraint(:intent_id)
+    |> foreign_key_constraint(:workspace_id)
     |> unique_constraint(:decision_id,
       name: :execution_plans_decision_active_idx,
       message: "another active plan already exists for this decision"

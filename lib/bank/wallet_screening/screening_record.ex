@@ -27,6 +27,8 @@ defmodule Bank.WalletScreening.ScreeningRecord do
 
   use Bank.Schema
 
+  alias Bank.Workspaces.Workspace
+
   @control_tiers [:hard_block, :challenge, :context, :score_only]
 
   @type t :: %__MODULE__{}
@@ -48,6 +50,12 @@ defmodule Bank.WalletScreening.ScreeningRecord do
     field :score, :decimal
     field :score_version, :string
 
+    # Nullable workspace scope (#158a foundation; runtime filter in
+    # #158b). Wallet-screening hits inherit workspace from the
+    # counterparty / address-label they back; the column lets future
+    # filtered listing avoid a join.
+    belongs_to :workspace, Workspace
+
     timestamps()
   end
 
@@ -68,7 +76,8 @@ defmodule Bank.WalletScreening.ScreeningRecord do
       :last_seen_at,
       :expires_at,
       :score,
-      :score_version
+      :score_version,
+      :workspace_id
     ])
     |> validate_required([
       :chain,
@@ -83,6 +92,7 @@ defmodule Bank.WalletScreening.ScreeningRecord do
     |> validate_length(:address, min: 1, max: 256)
     |> validate_length(:source, min: 1, max: 128)
     |> validate_score_only_constraints()
+    |> foreign_key_constraint(:workspace_id)
     |> unique_constraint(
       [:chain, :normalised_address, :source, :source_record_id],
       name: :screening_records_chain_addr_source_idx

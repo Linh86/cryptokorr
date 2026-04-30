@@ -40,6 +40,7 @@ defmodule Bank.Intents.AgentIntent do
 
   alias Bank.Counterparties.{AddressLabel, Counterparty}
   alias Bank.Decisions.{DecisionEnvelope, TrustAssessment, ExecutionPlan, SimulationReport}
+  alias Bank.Workspaces.Workspace
 
   @kinds [:transfer, :swap, :scheduled_transfer]
   @states [
@@ -84,6 +85,13 @@ defmodule Bank.Intents.AgentIntent do
     belongs_to :target_counterparty, Counterparty
     belongs_to :target_address_label, AddressLabel
 
+    # Nullable workspace scope (#158a foundation; runtime filter in
+    # #158b). The existing `(agent_id, idempotency_key)` unique index
+    # is intentionally NOT lifted to include `workspace_id` here —
+    # that lift happens in a future PR after every caller passes
+    # workspace_id through.
+    belongs_to :workspace, Workspace
+
     has_many :trust_assessments, TrustAssessment, foreign_key: :intent_id
     has_many :simulation_reports, SimulationReport, foreign_key: :intent_id
     has_many :decision_envelopes, DecisionEnvelope, foreign_key: :intent_id
@@ -114,7 +122,8 @@ defmodule Bank.Intents.AgentIntent do
       :notes,
       :schema_version,
       :state,
-      :submitted_at
+      :submitted_at,
+      :workspace_id
     ])
     |> validate_required([
       :agent_id,
@@ -131,6 +140,7 @@ defmodule Bank.Intents.AgentIntent do
     |> validate_target_shape()
     |> foreign_key_constraint(:target_counterparty_id)
     |> foreign_key_constraint(:target_address_label_id)
+    |> foreign_key_constraint(:workspace_id)
     |> unique_constraint([:agent_id, :idempotency_key])
     |> check_constraint(:target_counterparty_id,
       name: :target_shape_valid,

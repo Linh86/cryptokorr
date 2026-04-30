@@ -83,6 +83,8 @@ defmodule Bank.Delegations.Delegation do
 
   use Bank.Schema
 
+  alias Bank.Workspaces.Workspace
+
   @states [:pending, :active, :revoking, :revoke_failed, :revoked, :expired]
   @terminal_states [:revoked, :expired]
 
@@ -116,6 +118,14 @@ defmodule Bank.Delegations.Delegation do
     # the moduledoc above for why.
     field :session_signer_address, :string
 
+    # Nullable workspace scope (#158a foundation; runtime filter in
+    # #158b). Read-hint column so adapter callbacks (which resolve
+    # rows by `smart_account_id`) can later stamp audit events with
+    # the correct workspace without joining through the intent. The
+    # existing `delegations_smart_account_active_idx` partial unique
+    # is intentionally NOT lifted to include `workspace_id` here.
+    belongs_to :workspace, Workspace
+
     timestamps()
   end
 
@@ -145,12 +155,14 @@ defmodule Bank.Delegations.Delegation do
         :revoked_at,
         :expires_at,
         :last_reason,
-        :last_tx_hash
+        :last_tx_hash,
+        :workspace_id
       ] ++ @permission_artifact_fields
     )
     |> validate_required([:smart_account_id, :delegation_id, :state, :chain])
     |> validate_byte_size(:permission_id, 4)
     |> validate_byte_size(:validation_id, 21)
+    |> foreign_key_constraint(:workspace_id)
     |> unique_constraint(:smart_account_id,
       name: :delegations_smart_account_active_idx,
       message: "a non-terminal delegation already exists for this smart account"
