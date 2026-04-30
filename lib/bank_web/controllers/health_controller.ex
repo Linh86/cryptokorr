@@ -38,6 +38,7 @@ defmodule BankWeb.HealthController do
     and the same body shape.
     """,
     tags: ["Health"],
+    security: [],
     responses: [
       ok:
         {"Readiness snapshot", "application/json",
@@ -68,6 +69,7 @@ defmodule BankWeb.HealthController do
     overall `status`. Safe to alert on.
     """,
     tags: ["Health"],
+    security: [],
     responses: [
       ok:
         {"Deep health snapshot", "application/json", BankWeb.OpenApi.Schemas.HealthDeepResponse},

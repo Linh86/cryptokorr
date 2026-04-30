@@ -5,6 +5,8 @@ defmodule BankWeb.API.V1.DecisionControllerTest do
 
   use BankWeb.ConnCase, async: false
 
+  setup :setup_api_key_admin
+
   import Bank.Fixtures
 
   alias Bank.Delegations

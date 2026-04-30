@@ -1,6 +1,8 @@
 defmodule BankWeb.API.V1.AuditControllerTest do
   use BankWeb.ConnCase, async: true
 
+  setup :setup_api_key_admin
+
   alias Bank.Audit
   alias Bank.Fixtures
 

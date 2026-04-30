@@ -9,6 +9,8 @@ defmodule BankWeb.API.V1.IntentControllerTest do
   """
 
   use BankWeb.ConnCase, async: true
+
+  setup :setup_api_key_admin
   use Oban.Testing, repo: Bank.Repo
 
   alias Bank.Audit.AuditEvent

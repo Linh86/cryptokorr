@@ -30,7 +30,7 @@ defmodule BankWeb.ApiSpecTest do
                tags: [%Tag{} | _],
                paths: paths,
                components: %Components{},
-               security: []
+               security: [%{"workspace_api_key" => []}]
              } = ApiSpec.spec()
 
       assert is_map(paths)
@@ -112,23 +112,37 @@ defmodule BankWeb.ApiSpecTest do
     end
   end
 
-  describe "components.securitySchemes — placeholder only" do
-    test "declares operator_bearer as HTTP bearer" do
-      assert %SecurityScheme{type: "http", scheme: "bearer", description: description} =
-               ApiSpec.spec().components.securitySchemes["operator_bearer"]
+  describe "components.securitySchemes — workspace_api_key is the active scheme (#218b)" do
+    test "declares workspace_api_key as HTTP bearer with the cb_<base32> bearerFormat" do
+      assert %SecurityScheme{
+               type: "http",
+               scheme: "bearer",
+               bearerFormat: "cb_<base32>",
+               description: description
+             } = ApiSpec.spec().components.securitySchemes["workspace_api_key"]
 
-      # The wording is load-bearing: the spec must not imply that /v1
-      # endpoints are currently bearer-protected. Later issues will
-      # remove the "not currently enforced" caveat when auth actually
-      # ships.
-      assert description =~ "Not currently enforced"
+      # The wording must reflect the actual enforcement shape so
+      # SDK / tooling consumers don't have to read the docs to
+      # discover the auth scheme.
+      assert description =~ "Workspace-scoped"
+      assert description =~ "Bearer"
+      assert description =~ "401 invalid_credentials"
     end
 
-    test "does not attach any security requirement at the top level" do
-      # `security: []` is the only truthful stance today: no endpoint
-      # requires auth at runtime, so the top-level array stays empty
-      # rather than defaulting into the placeholder scheme.
-      assert ApiSpec.spec().security == []
+    test "operator_bearer is retained as a backwards-compat alias of workspace_api_key" do
+      # Existing tooling that referenced the historical
+      # `operator_bearer` name should keep working — `operator_bearer`
+      # now resolves to the same scheme as `workspace_api_key`.
+      bearer = ApiSpec.spec().components.securitySchemes["operator_bearer"]
+      ws_key = ApiSpec.spec().components.securitySchemes["workspace_api_key"]
+      assert bearer == ws_key
+    end
+
+    test "attaches workspace_api_key as the default at the top level" do
+      # Top-level `security` requires `workspace_api_key` on every
+      # operation by default. Public health operations override
+      # with `security: []` to opt out.
+      assert ApiSpec.spec().security == [%{"workspace_api_key" => []}]
     end
   end
 

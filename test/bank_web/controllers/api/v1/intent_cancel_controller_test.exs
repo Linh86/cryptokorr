@@ -9,6 +9,8 @@ defmodule BankWeb.API.V1.IntentCancelControllerTest do
 
   use BankWeb.ConnCase, async: true
 
+  setup :setup_api_key_admin
+
   import Ecto.Query
 
   alias Bank.Audit.AuditEvent

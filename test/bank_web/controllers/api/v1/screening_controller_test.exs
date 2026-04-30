@@ -1,6 +1,8 @@
 defmodule BankWeb.API.V1.ScreeningControllerTest do
   use BankWeb.ConnCase, async: true
 
+  setup :setup_api_key_admin
+
   alias Bank.WalletScreening
 
   describe "GET /v1/screening/:chain/:address" do

@@ -1,6 +1,8 @@
 defmodule BankWeb.API.V1.TrustAssertionControllerTest do
   use BankWeb.ConnCase, async: true
 
+  setup :setup_api_key_admin
+
   import Ecto.Query, only: [from: 2]
 
   alias Bank.Audit.AuditEvent

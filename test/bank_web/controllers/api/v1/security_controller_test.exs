@@ -5,6 +5,8 @@ defmodule BankWeb.API.V1.SecurityControllerTest do
 
   use BankWeb.ConnCase, async: false
 
+  setup :setup_api_key_admin
+
   alias Bank.Security
   alias Bank.Security.PauseState
 

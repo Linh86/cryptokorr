@@ -241,6 +241,60 @@ defmodule Bank.APIKeysTest do
     end
   end
 
+  # --- verify_key/1 ---------------------------------------------------------
+
+  describe "verify_key/1 (#218b)" do
+    test "returns {:ok, key, workspace} for a valid raw secret",
+         %{workspace: ws, user: user} do
+      {:ok, original, raw} = APIKeys.create_key(ws, user, :operator, "verify-ok")
+
+      assert {:ok, %APIKey{} = key, ^ws} = APIKeys.verify_key(raw)
+      assert key.id == original.id
+      assert key.role == :operator
+    end
+
+    test "rejects malformed wire format with :malformed", %{workspace: _ws, user: _user} do
+      assert {:error, :malformed} = APIKeys.verify_key("not-a-key")
+      assert {:error, :malformed} = APIKeys.verify_key("cb_")
+      # Too short to even split off a prefix.
+      assert {:error, :malformed} = APIKeys.verify_key("cb_short")
+    end
+
+    test "rejects unknown prefix with :not_found",
+         %{workspace: _ws, user: _user} do
+      assert {:error, :not_found} =
+               APIKeys.verify_key("cb_aaaaaaaabbbbbbbbccccccccddddddddeeeeeeee")
+    end
+
+    test "rejects right prefix + wrong secret with :hash_mismatch",
+         %{workspace: ws, user: user} do
+      {:ok, _key, raw} = APIKeys.create_key(ws, user, :viewer, "tampered")
+
+      # Replace the body's TAIL while keeping the prefix intact —
+      # this hits the prefix lookup but fails the hash compare.
+      "cb_" <> body = raw
+      tampered_body = String.slice(body, 0, 8) <> String.duplicate("a", String.length(body) - 8)
+
+      assert {:error, :hash_mismatch} = APIKeys.verify_key("cb_" <> tampered_body)
+    end
+
+    test "rejects revoked keys with :revoked",
+         %{workspace: ws, user: user} do
+      {:ok, key, raw} = APIKeys.create_key(ws, user, :operator, "revoked-verify")
+      {:ok, _} = APIKeys.revoke_key(key, actor: user)
+
+      assert {:error, :revoked} = APIKeys.verify_key(raw)
+    end
+
+    test "rejects expired keys with :expired",
+         %{workspace: ws, user: user} do
+      past = DateTime.utc_now() |> DateTime.add(-1, :hour)
+      {:ok, _key, raw} = APIKeys.create_key(ws, user, :operator, "exp", expires_at: past)
+
+      assert {:error, :expired} = APIKeys.verify_key(raw)
+    end
+  end
+
   # --- secret hygiene -------------------------------------------------------
 
   describe "secret hygiene (no raw secret leaks)" do
