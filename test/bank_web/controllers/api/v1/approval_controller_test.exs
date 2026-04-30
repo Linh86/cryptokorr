@@ -1,5 +1,7 @@
 defmodule BankWeb.API.V1.ApprovalControllerTest do
   use BankWeb.ConnCase, async: false
+
+  setup :setup_api_key_admin
   use Oban.Testing, repo: Bank.Repo
 
   import Bank.Fixtures
@@ -308,7 +310,8 @@ defmodule BankWeb.API.V1.ApprovalControllerTest do
       assert_held_audit(intent.id, successor.id, "runtime_paused")
     end
 
-    test "replay surfaces the held audit row for an approval-driven held intent", %{conn: conn} do
+    test "replay surfaces the held audit row for an approval-driven held intent",
+         %{conn: conn, raw_api_key: raw_api_key} do
       intent = agent_intent()
 
       envelope =
@@ -322,7 +325,12 @@ defmodule BankWeb.API.V1.ApprovalControllerTest do
       # No delegation seeded -> dispatch held.
       post(conn, ~p"/v1/approvals/#{envelope.id}/approve", %{"actor_id" => "op-replay"})
 
-      replay = json_response(get(build_conn(), ~p"/v1/intents/#{intent.id}/replay"), 200)
+      replay_conn =
+        build_conn()
+        |> put_req_header("authorization", "Bearer " <> raw_api_key)
+        |> get(~p"/v1/intents/#{intent.id}/replay")
+
+      replay = json_response(replay_conn, 200)
       audit_event_types = Enum.map(replay["audit"], & &1["event_type"])
 
       assert "intent.auto_exec_held" in audit_event_types

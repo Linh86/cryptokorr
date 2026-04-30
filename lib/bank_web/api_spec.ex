@@ -200,7 +200,7 @@ defmodule BankWeb.ApiSpec do
       tags: tags(),
       paths: paths(),
       components: components(),
-      security: []
+      security: [%{"workspace_api_key" => []}]
     }
   end
 
@@ -388,6 +388,7 @@ defmodule BankWeb.ApiSpec do
   # runtime actually enforces one.
   defp security_schemes do
     %{
+      "workspace_api_key" => SecuritySchemes.workspace_api_key(),
       "operator_bearer" => SecuritySchemes.operator_bearer(),
       "agent_api_key" => SecuritySchemes.agent_api_key()
     }

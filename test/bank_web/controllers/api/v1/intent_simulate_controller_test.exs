@@ -11,6 +11,8 @@ defmodule BankWeb.API.V1.IntentSimulateControllerTest do
   """
 
   use BankWeb.ConnCase, async: false
+
+  setup :setup_api_key_admin
   use Oban.Testing, repo: Bank.Repo
 
   alias Bank.Decisions.SimulationReport

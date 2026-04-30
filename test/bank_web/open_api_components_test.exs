@@ -208,27 +208,34 @@ defmodule BankWeb.OpenApiComponentsTest do
     end
   end
 
-  describe "security schemes — placeholders only" do
-    test "operator_bearer is an HTTP bearer scheme with the not-enforced caveat" do
-      assert %SecurityScheme{type: "http", scheme: "bearer", description: description} =
-               components().securitySchemes["operator_bearer"]
+  describe "security schemes — workspace_api_key is the active scheme (#218b)" do
+    test "workspace_api_key is an HTTP bearer scheme with the cb_<base32> bearerFormat" do
+      assert %SecurityScheme{
+               type: "http",
+               scheme: "bearer",
+               bearerFormat: "cb_<base32>",
+               description: description
+             } = components().securitySchemes["workspace_api_key"]
 
-      assert description =~ "Not currently enforced"
+      assert description =~ "Workspace-scoped"
+      assert description =~ "Bearer"
     end
 
-    test "agent_api_key is an apiKey-in-header scheme with the not-enforced caveat" do
+    test "operator_bearer is retained as a backwards-compat alias" do
+      assert components().securitySchemes["operator_bearer"] ==
+               components().securitySchemes["workspace_api_key"]
+    end
+
+    test "agent_api_key is reserved as a future scheme placeholder" do
       assert %SecurityScheme{
                type: "apiKey",
                in: "header",
-               name: "X-Agent-Key",
-               description: description
+               name: "X-Agent-Key"
              } = components().securitySchemes["agent_api_key"]
-
-      assert description =~ "Not currently enforced"
     end
 
-    test "top-level security stays empty — no operation is marked as requiring auth" do
-      assert ApiSpec.spec().security == []
+    test "top-level security requires workspace_api_key by default" do
+      assert ApiSpec.spec().security == [%{"workspace_api_key" => []}]
     end
   end
 

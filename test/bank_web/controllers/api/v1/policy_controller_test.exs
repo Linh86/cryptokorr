@@ -1,6 +1,8 @@
 defmodule BankWeb.API.V1.PolicyControllerTest do
   use BankWeb.ConnCase, async: true
 
+  setup :setup_api_key_admin
+
   import Ecto.Query, only: [from: 2]
 
   alias Bank.Audit.AuditEvent
@@ -22,7 +24,7 @@ defmodule BankWeb.API.V1.PolicyControllerTest do
       assert b.id in ids
     end
 
-    test "returns a cursor when the page is full", %{conn: conn} do
+    test "returns a cursor when the page is full", %{conn: conn, raw_api_key: raw} do
       Fixtures.policy_rule(rule_type: :amount_limit)
       Fixtures.policy_rule(rule_type: :amount_limit, params: %{"max_per_tx" => "200"})
       Fixtures.policy_rule(rule_type: :amount_limit, params: %{"max_per_tx" => "300"})
@@ -33,8 +35,12 @@ defmodule BankWeb.API.V1.PolicyControllerTest do
       assert length(body["data"]) == 2
       assert is_binary(body["page"]["next_cursor"])
 
-      conn = get(build_conn(), ~p"/v1/policies?limit=2&cursor=#{body["page"]["next_cursor"]}")
-      assert %{"data" => rest} = json_response(conn, 200)
+      conn2 =
+        build_conn()
+        |> put_req_header("authorization", "Bearer " <> raw)
+        |> get(~p"/v1/policies?limit=2&cursor=#{body["page"]["next_cursor"]}")
+
+      assert %{"data" => rest} = json_response(conn2, 200)
       assert length(rest) == 1
     end
 

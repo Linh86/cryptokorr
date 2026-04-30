@@ -174,6 +174,65 @@ defmodule Bank.APIKeys do
   end
 
   @doc """
+  Verify a presented raw API key (#218b).
+
+  Pipeline:
+
+    1. Match the wire format `cb_<body>`. Anything else →
+       `:malformed`. Defends against blind probes that send a
+       random uppercase-base32 or non-base32 string.
+    2. Pull the first 8 chars of the body and look up by `prefix`.
+       Missing → `:not_found`.
+    3. Constant-time compare `:crypto.hash(:sha256, body)` against
+       the row's `secret_hash` via `Plug.Crypto.secure_compare/2`.
+       Mismatch → `:hash_mismatch`. The compare runs even when the
+       hashes are obviously different lengths so the timing remains
+       independent of the row's contents.
+    4. Lifecycle gates: `:revoked` if `revoked_at` is set;
+       `:expired` if `expires_at` is in the past.
+
+  Returns `{:ok, %APIKey{}, %Workspace{}}` on success — workspace
+  is preloaded so the auth plug can populate
+  `conn.assigns.current_scope.workspace` without a second query.
+
+  Callers (the auth plug) MUST map every error variant to the same
+  generic `401` response on the wire — distinguishing `:not_found`
+  from `:hash_mismatch` to the client would let an attacker probe
+  for valid prefixes. The distinct reasons exist purely for server-
+  side logging and tests.
+  """
+  @spec verify_key(String.t()) ::
+          {:ok, APIKey.t(), Bank.Workspaces.Workspace.t()}
+          | {:error, :malformed | :not_found | :hash_mismatch | :revoked | :expired}
+  def verify_key(@namespace <> body) when byte_size(body) > @prefix_chars do
+    prefix = String.slice(body, 0, @prefix_chars)
+
+    case Repo.one(from k in APIKey, where: k.prefix == ^prefix, preload: [:workspace]) do
+      nil ->
+        {:error, :not_found}
+
+      %APIKey{} = key ->
+        presented_hash = :crypto.hash(:sha256, body)
+
+        cond do
+          not Plug.Crypto.secure_compare(presented_hash, key.secret_hash) ->
+            {:error, :hash_mismatch}
+
+          APIKey.revoked?(key) ->
+            {:error, :revoked}
+
+          APIKey.expired?(key, DateTime.utc_now()) ->
+            {:error, :expired}
+
+          true ->
+            {:ok, key, key.workspace}
+        end
+    end
+  end
+
+  def verify_key(_), do: {:error, :malformed}
+
+  @doc """
   List all non-revoked keys for a workspace, newest first. Used
   by the (future) management UI; safe to call now.
   """

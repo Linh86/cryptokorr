@@ -2351,13 +2351,20 @@
     },
     "securitySchemes": {
       "agent_api_key": {
-        "description": "Placeholder for future agent API-key auth on agent-facing endpoints (`POST /v1/intents`, `GET /v1/intents/{id}`, `POST /v1/intents/{id}/simulate`). Not currently enforced on `/v1/` at runtime — declared here so later issues can attach `security: [%{\"agent_api_key\" => []}]` to agent operations without a second components-level change when the auth layer ships.",
+        "description": "Placeholder for a future agent-scoped credential. Not currently enforced — the active scheme is `workspace_api_key`.",
         "in": "header",
         "name": "X-Agent-Key",
         "type": "apiKey"
       },
       "operator_bearer": {
-        "description": "Placeholder for future operator bearer auth. Not currently enforced on `/v1/` at runtime — today the API relies on the operator-console and network-boundary posture described in `docs/security.md`. Declared here so later issues can attach `security: [%{\"operator_bearer\" => []}]` to specific operations without a second components-level change when the auth layer ships.",
+        "bearerFormat": "cb_<base32>",
+        "description": "Workspace-scoped, role-bound API key (#218b). Bearer token of the form `cb_<base32_body>` minted by `Bank.APIKeys.create_key/4`. The token is shown ONCE on creation; only the SHA-256 hash is persisted. Revoked or expired keys are refused with `401 invalid_credentials`. Required on every `/v1` operation except the public health endpoints.",
+        "scheme": "bearer",
+        "type": "http"
+      },
+      "workspace_api_key": {
+        "bearerFormat": "cb_<base32>",
+        "description": "Workspace-scoped, role-bound API key (#218b). Bearer token of the form `cb_<base32_body>` minted by `Bank.APIKeys.create_key/4`. The token is shown ONCE on creation; only the SHA-256 hash is persisted. Revoked or expired keys are refused with `401 invalid_credentials`. Required on every `/v1` operation except the public health endpoints.",
         "scheme": "bearer",
         "type": "http"
       }
@@ -3124,6 +3131,7 @@
             "description": "At least one check is degraded; body mirrors the 200 shape."
           }
         },
+        "security": [],
         "summary": "Readiness probe",
         "tags": [
           "Health"
@@ -3154,6 +3162,7 @@
             "description": "At least one check is degraded; body mirrors the 200 shape."
           }
         },
+        "security": [],
         "summary": "Deep operational-health probe",
         "tags": [
           "Health"
@@ -3783,7 +3792,11 @@
       }
     }
   },
-  "security": [],
+  "security": [
+    {
+      "workspace_api_key": []
+    }
+  ],
   "servers": [
     {
       "description": "Phoenix endpoint; external API lives under `/v1/`.",

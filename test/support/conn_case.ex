@@ -134,4 +134,69 @@ defmodule BankWeb.ConnCase do
 
     {:ok, Map.put(context, :membership, membership)}
   end
+
+  @doc """
+  Setup helper for `/v1` controller tests gated by
+  `BankWeb.Plugs.VerifyAPIKey` (#218b). Mints an API key with the
+  given role and returns a `conn` whose Authorization header is
+  set to `Bearer cb_<...>`.
+
+  Also stashes the workspace id in the process dict so
+  `Bank.Fixtures` stamps every workspace-scoped row to the same
+  workspace by default (consistent with the LiveView path from
+  #158c).
+
+  Returns context updated with `:conn`, `:current_user`,
+  `:workspace`, `:api_key`, and `:raw_api_key`.
+  """
+  def setup_api_key_admin(context), do: setup_api_key_with_role(context, :admin)
+
+  def setup_api_key_operator(context), do: setup_api_key_with_role(context, :operator)
+
+  def setup_api_key_viewer(context), do: setup_api_key_with_role(context, :viewer)
+
+  def setup_api_key_with_role(%{conn: conn} = _context, role)
+      when role in [:viewer, :operator, :admin, :owner] do
+    suffix = System.unique_integer([:positive])
+
+    {:ok, user} =
+      Bank.Accounts.find_or_create_from_oauth(%{
+        provider: :google,
+        subject: "ak-test-#{suffix}",
+        email: "ak-test-#{suffix}@example.com",
+        name: "API Key Test #{suffix}"
+      })
+
+    {:ok, workspace} =
+      Bank.Workspaces.create_workspace(%{
+        slug: "ak-test-ws-#{suffix}",
+        name: "API Key Test WS #{suffix}"
+      })
+
+    # Always grant the user :admin in their workspace so the test
+    # creator has authority to mint any role of API key. This is
+    # the test-side trust-boundary handoff documented on
+    # `Bank.APIKeys.create_key/4`.
+    {:ok, _} =
+      Bank.Workspaces.create_membership(%{
+        user_id: user.id,
+        workspace_id: workspace.id,
+        role: :admin
+      })
+
+    {:ok, api_key, raw_secret} =
+      Bank.APIKeys.create_key(workspace, user, role, "test-key-#{suffix}")
+
+    conn = Plug.Conn.put_req_header(conn, "authorization", "Bearer " <> raw_secret)
+
+    Process.put(:bank_test_workspace_id, workspace.id)
+    ExUnit.Callbacks.on_exit(fn -> Process.delete(:bank_test_workspace_id) end)
+
+    {:ok,
+     conn: conn,
+     current_user: user,
+     workspace: workspace,
+     api_key: api_key,
+     raw_api_key: raw_secret}
+  end
 end

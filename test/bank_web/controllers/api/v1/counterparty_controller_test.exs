@@ -1,6 +1,8 @@
 defmodule BankWeb.API.V1.CounterpartyControllerTest do
   use BankWeb.ConnCase, async: true
 
+  setup :setup_api_key_admin
+
   import Ecto.Query, only: [from: 2]
 
   alias Bank.Audit.AuditEvent
@@ -23,7 +25,7 @@ defmodule BankWeb.API.V1.CounterpartyControllerTest do
       assert b.id in ids
     end
 
-    test "filters by q + active", %{conn: conn} do
+    test "filters by q + active", %{conn: conn, raw_api_key: raw} do
       _match = Fixtures.counterparty(name: "Payroll Inc")
       _miss = Fixtures.counterparty(name: "Unrelated", active: false)
 
@@ -31,8 +33,12 @@ defmodule BankWeb.API.V1.CounterpartyControllerTest do
       assert %{"data" => [cp]} = json_response(conn, 200)
       assert cp["name"] == "Payroll Inc"
 
-      conn = get(build_conn(), ~p"/v1/counterparties?active=false")
-      assert %{"data" => [cp]} = json_response(conn, 200)
+      conn2 =
+        build_conn()
+        |> put_req_header("authorization", "Bearer " <> raw)
+        |> get(~p"/v1/counterparties?active=false")
+
+      assert %{"data" => [cp]} = json_response(conn2, 200)
       assert cp["active"] == false
     end
 

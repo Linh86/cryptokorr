@@ -15,6 +15,26 @@ defmodule BankWeb.Router do
     plug :accepts, ["json"]
   end
 
+  # API key bearer auth (#218b). Reads `Authorization: Bearer
+  # cb_<body>`, verifies via `Bank.APIKeys.verify_key/1`, populates
+  # `conn.assigns.current_scope` so downstream `RequireRole` and
+  # controllers can authorize without re-querying. Health endpoints
+  # stay on the bare `:api` pipeline; everything else under `/v1`
+  # goes through this authenticator.
+  pipeline :api_authenticated do
+    plug BankWeb.Plugs.VerifyAPIKey
+  end
+
+  # Operator-tier role gate (#218b). Composes on top of
+  # `:api_authenticated` for routes that mutate runtime state
+  # (cancel, execute, approve/reject, security pause/resume/revoke,
+  # policy mutations, audit reads). Mirrors the LiveView
+  # `:require_role, :operator` gate from #159a so session- and
+  # key-authenticated callers share one role hierarchy.
+  pipeline :api_operator do
+    plug BankWeb.Plugs.RequireRole, :operator
+  end
+
   # Adapter callback pipeline — shared bearer secret check on top of
   # the JSON API pipeline. In production mTLS is terminated at the
   # ingress; this plug is defense in depth. See
@@ -59,59 +79,79 @@ defmodule BankWeb.Router do
     get "/health/deep", HealthController, :deep
   end
 
-  # External v1 API. Controllers are scaffolded in issue #3; individual
-  # endpoint behaviour is filled in by the engine issues (#5-#12).
+  # External v1 API. Two role-gated blocks under #218b:
+  #
+  #   * authenticated-only — any valid API key reads/writes the
+  #     workspace's data. Reads, drafts, address-book CRUD,
+  #     screening, connect.
+  #   * operator+ — runtime-mutating actions: cancel, execute,
+  #     approval flow, policy CRUD, audit reads, security mutations.
+  #
+  # Health endpoints stay on the bare `:api` pipeline (separate
+  # scope earlier in this router).
   scope "/v1", BankWeb.API.V1, as: :api_v1 do
-    pipe_through :api
+    pipe_through [:api, :api_authenticated]
 
-    # Intents
+    # Intents — submit / read / simulate / replay are
+    # authenticated-only. Cancel is below in the operator+ block.
     post "/intents", IntentController, :create
     get "/intents/:id", IntentController, :show
     post "/intents/:id/simulate", IntentController, :simulate
-    post "/intents/:id/cancel", IntentController, :cancel
     get "/intents/:id/replay", IntentController, :replay
 
-    # Decisions
+    # Decisions — read.
     get "/decisions/:id", DecisionController, :show
-    post "/decisions/:id/execute", DecisionController, :execute
 
-    # Approvals
-    get "/approvals", ApprovalController, :index
-    post "/approvals/:decision_id/approve", ApprovalController, :approve
-    post "/approvals/:decision_id/reject", ApprovalController, :reject
-
-    # Counterparties and address book
+    # Counterparties and address book.
     get "/counterparties", CounterpartyController, :index
     post "/counterparties", CounterpartyController, :create
     patch "/counterparties/:id", CounterpartyController, :update
     post "/counterparties/:id/addresses", CounterpartyController, :add_address
     post "/counterparties/:id/evidence", CounterpartyController, :add_evidence
 
-    # Address labels
+    # Address labels.
     patch "/address_labels/:id", AddressLabelController, :update
 
-    # Trust assertions
+    # Trust assertions.
     post "/trust_assertions", TrustAssertionController, :create
 
-    # Policies
+    # Policies — read.
     get "/policies", PolicyController, :index
+
+    # Wallet screening.
+    get "/screening/:chain/:address", ScreeningController, :show
+
+    # Browser wallet connect (v1.1 scaffolding — see docs/wallet-connect.md).
+    post "/connect/smart_account", ConnectController, :request
+  end
+
+  scope "/v1", BankWeb.API.V1, as: :api_v1_operator do
+    pipe_through [:api, :api_authenticated, :api_operator]
+
+    # Intent mutation that takes the runtime out of an existing
+    # commitment.
+    post "/intents/:id/cancel", IntentController, :cancel
+
+    # Decision execute — operator-only manual dispatch.
+    post "/decisions/:id/execute", DecisionController, :execute
+
+    # Approval flow.
+    get "/approvals", ApprovalController, :index
+    post "/approvals/:decision_id/approve", ApprovalController, :approve
+    post "/approvals/:decision_id/reject", ApprovalController, :reject
+
+    # Policy mutations.
     post "/policies", PolicyController, :create
     post "/policies/:id/revise", PolicyController, :revise
     post "/policies/:id/archive", PolicyController, :archive
 
-    # Wallet screening
-    get "/screening/:chain/:address", ScreeningController, :show
-
-    # Audit
+    # Audit reads — sensitive cross-workspace data.
     get "/audit", AuditController, :index
 
-    # Security
+    # Security mutations.
     post "/security/pause", SecurityController, :pause
     post "/security/resume", SecurityController, :resume
     post "/security/revoke_delegation", SecurityController, :revoke_delegation
-
-    # Browser wallet connect (v1.1 scaffolding — see docs/wallet-connect.md)
-    post "/connect/smart_account", ConnectController, :request
   end
 
   # Internal adapter callback — private network, not part of /v1/.
