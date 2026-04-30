@@ -50,6 +50,14 @@ defmodule Bank.APIKeys.APIKey do
 
   @type t :: %__MODULE__{}
 
+  # Redact `:secret_hash` from the default `inspect/1` output. SHA-
+  # 256 is one-way, so the hash itself is not a credential, but it
+  # IS the value the auth plug looks up by alongside the prefix —
+  # logging the hash bytes alongside the prefix gives an attacker
+  # the exact pair the plug compares against. Belt-and-suspenders
+  # alongside the audit-snapshot allowlist (#218a hygiene contract).
+  @derive {Inspect, except: [:secret_hash]}
+
   schema "api_keys" do
     field :role, Ecto.Enum, values: @roles
     field :name, :string

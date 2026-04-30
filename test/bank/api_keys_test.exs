@@ -264,6 +264,31 @@ defmodule Bank.APIKeysTest do
       end)
     end
 
+    test "inspect/1 redacts secret_hash bytes (`@derive Inspect, except`)",
+         %{workspace: ws, user: user} do
+      {:ok, key, _raw} = APIKeys.create_key(ws, user, :viewer, "redact-inspect")
+
+      # The hash is exactly 32 bytes. Even though SHA-256 is one-
+      # way, the hash + prefix together are the lookup pair the
+      # auth plug will compare against — never echo them in logs.
+      reloaded = Repo.get!(APIKey, key.id)
+      assert byte_size(reloaded.secret_hash) == 32
+
+      inspected = inspect(reloaded)
+
+      refute inspected =~ "secret_hash:",
+             "inspect/1 should not surface the secret_hash field at all"
+
+      # Sanity: hex of any 8 contiguous hash bytes shouldn't appear
+      # either (cheap structural check that no other field leaked
+      # the hash).
+      hex = Base.encode16(reloaded.secret_hash, case: :lower)
+      sample = String.slice(hex, 0, 16)
+
+      refute inspected =~ sample,
+             "inspect/1 leaked hash bytes through some other field"
+    end
+
     test "raw secret is not included in the api_key.created audit event payload",
          %{workspace: ws, user: user} do
       {:ok, key, raw} = APIKeys.create_key(ws, user, :operator, "no-leak")

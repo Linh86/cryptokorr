@@ -77,6 +77,23 @@ defmodule Bank.APIKeys do
 
   Options:
     * `:expires_at` — optional `DateTime` ttl.
+
+  ## Creator privilege — deferred to the management surface
+
+  This context primitive trusts its caller. It does NOT verify
+  that `creator`'s membership role is `>= role` — i.e. an
+  operator could in principle mint an `:admin` key by calling
+  this function directly from IEx or a custom worker. The check
+  belongs at the management entry point (a future
+  `BankWeb.API.V1.APIKeyController` or operator console form),
+  where the controller plug can read `current_scope.role` and
+  refuse a request that would mint a stronger key than the caller
+  holds. There is no management endpoint in #218a, so the
+  enforcement layer simply does not exist yet; the only callers
+  today are the test suite and IEx, both of which are inside the
+  trust boundary. The future PR that adds the management surface
+  MUST enforce `Membership.role_at_least?(creator_role, role)` —
+  this docstring is the contract handoff.
   """
   @spec create_key(
           Workspace.t(),
