@@ -170,6 +170,24 @@ defmodule Bank.Counterparties do
   end
 
   @doc """
+  Workspace-scoped `get_counterparty/1` (#159b). Returns
+  `{:error, :not_found}` for unknown ids AND for ids that belong
+  to a different workspace.
+  """
+  @spec get_counterparty_in_workspace(uuid(), uuid()) ::
+          {:ok, Counterparty.t()} | {:error, :not_found}
+  def get_counterparty_in_workspace(id, workspace_id)
+      when is_binary(id) and is_binary(workspace_id) do
+    case Repo.one(
+           from c in Counterparty,
+             where: c.id == ^id and c.workspace_id == ^workspace_id
+         ) do
+      nil -> {:error, :not_found}
+      %Counterparty{} = cp -> {:ok, cp}
+    end
+  end
+
+  @doc """
   Fetch a counterparty with the preloads that queue / audit / API
   consumers typically need:
 

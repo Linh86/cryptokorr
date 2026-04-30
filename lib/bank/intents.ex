@@ -140,6 +140,26 @@ defmodule Bank.Intents do
   end
 
   @doc """
+  Workspace-scoped variant of `get/1` (#159b). Returns `nil` for
+  intents that do not exist OR that belong to a different
+  workspace — controllers lift to `404 not_found` so a caller in
+  workspace A cannot confirm that an intent id exists in
+  workspace B by status code.
+  """
+  @spec get_in_workspace(String.t(), String.t()) :: AgentIntent.t() | nil
+  def get_in_workspace(id, workspace_id)
+      when is_binary(id) and is_binary(workspace_id) do
+    case Repo.one(
+           from i in AgentIntent,
+             where: i.id == ^id and i.workspace_id == ^workspace_id,
+             preload: [:target_counterparty, :target_address_label]
+         ) do
+      nil -> nil
+      %AgentIntent{} = intent -> intent
+    end
+  end
+
+  @doc """
   Operator pre-execution cancellation.
 
   Accepts an intent id (UUID string) or an already-loaded

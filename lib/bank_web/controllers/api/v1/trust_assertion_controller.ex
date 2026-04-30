@@ -35,6 +35,8 @@ defmodule BankWeb.API.V1.TrustAssertionController do
 
   @idempotency_key_ref %Reference{"$ref": "#/components/parameters/IdempotencyKey"}
   @request_id_in_ref %Reference{"$ref": "#/components/parameters/RequestIdIn"}
+  @unauthorized_ref %Reference{"$ref": "#/components/responses/Unauthorized"}
+  @forbidden_ref %Reference{"$ref": "#/components/responses/Forbidden"}
   @not_found_ref %Reference{"$ref": "#/components/responses/NotFound"}
   @unprocessable_ref %Reference{"$ref": "#/components/responses/UnprocessableEntity"}
 
@@ -59,16 +61,21 @@ defmodule BankWeb.API.V1.TrustAssertionController do
       201 =>
         {"New trust assertion", "application/json",
          BankWeb.OpenApi.Schemas.IssueTrustAssertionResponse},
+      401 => @unauthorized_ref,
+      403 => @forbidden_ref,
       404 => @not_found_ref,
       422 => @unprocessable_ref
     }
   )
 
   def create(conn, params) do
+    workspace_id = conn.assigns.current_scope.workspace.id
+
     with {:ok, {subject_type, subject_id}} <- parse_subject(params),
          {:ok, level} <- parse_level(params),
          {:ok, expires_at} <- parse_expires_at(params),
-         {:ok, scope} <- parse_scope(params) do
+         {:ok, scope} <- parse_scope(params),
+         :ok <- ensure_subject_in_workspace(subject_type, subject_id, workspace_id) do
       attrs = %{
         level: level,
         scope: scope,
@@ -165,6 +172,58 @@ defmodule BankWeb.API.V1.TrustAssertionController do
       hint: hint,
       retryable: false
     }
+  end
+
+  # Workspace scoping for the trust-assertion subject (#159b).
+  # An operator in workspace A must not be able to issue a trust
+  # assertion against a counterparty / address-label in workspace
+  # B. Both subject types are reachable via
+  # `Bank.Counterparties.get_counterparty_in_workspace/2` (direct)
+  # or via the counterparty FK on `address_labels` (one extra
+  # join). Cross-workspace ids return 404 — same shape as a
+  # genuinely-unknown id so a caller cannot probe across tenants.
+  defp ensure_subject_in_workspace("counterparty", subject_id, workspace_id) do
+    case Counterparties.get_counterparty_in_workspace(subject_id, workspace_id) do
+      {:ok, _cp} ->
+        :ok
+
+      {:error, :not_found} ->
+        {:error,
+         %{
+           status: :not_found,
+           code: "not_found",
+           message: "no active counterparty with id=#{subject_id}",
+           hint: "check the subject or confirm it is not archived",
+           retryable: false
+         }}
+    end
+  end
+
+  defp ensure_subject_in_workspace("address_label", subject_id, workspace_id) do
+    import Ecto.Query
+
+    query =
+      from(l in Bank.Counterparties.AddressLabel,
+        join: c in Bank.Counterparties.Counterparty,
+        on: l.counterparty_id == c.id,
+        where: l.id == ^subject_id and c.workspace_id == ^workspace_id,
+        select: l.id
+      )
+
+    case Bank.Repo.one(query) do
+      nil ->
+        {:error,
+         %{
+           status: :not_found,
+           code: "not_found",
+           message: "no active address_label with id=#{subject_id}",
+           hint: "check the subject or confirm it is not retired",
+           retryable: false
+         }}
+
+      _id ->
+        :ok
+    end
   end
 
   # --- response shaping ------------------------------------------------

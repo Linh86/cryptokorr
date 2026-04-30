@@ -10,13 +10,18 @@ defmodule BankWeb.API.V1.AuditControllerTest do
     setup do
       intent = Fixtures.agent_intent()
 
+      # Audit events must carry the workspace_id passthrough so the
+      # `/v1/audit` controller's workspace stamping (#159b) doesn't
+      # filter them out. The fixtures' agent_intent gets workspace_id
+      # from the process-dict slot setup_api_key_admin populated.
       {:ok, e1} =
         Audit.append_event(%{
           actor: :runtime,
           event_type: "intent.submitted",
           subject_type: "agent_intent",
           subject_id: intent.id,
-          correlation_id: intent.id
+          correlation_id: intent.id,
+          workspace_id: intent.workspace_id
         })
 
       {:ok, e2} =
@@ -25,7 +30,8 @@ defmodule BankWeb.API.V1.AuditControllerTest do
           event_type: "decision.decided",
           subject_type: "decision_envelope",
           subject_id: Ecto.UUID.generate(),
-          correlation_id: intent.id
+          correlation_id: intent.id,
+          workspace_id: intent.workspace_id
         })
 
       %{intent: intent, e1: e1, e2: e2}
@@ -65,14 +71,16 @@ defmodule BankWeb.API.V1.AuditControllerTest do
     end
 
     test "limit + cursor paginates", %{conn: conn, intent: intent} do
-      # extra events
+      # extra events — stamp workspace_id so the controller's
+      # #159b filter does not drop them.
       for _ <- 1..3 do
         Audit.append_event(%{
           actor: :runtime,
           event_type: "execution.prepared",
           subject_type: "execution_plan",
           subject_id: Ecto.UUID.generate(),
-          correlation_id: intent.id
+          correlation_id: intent.id,
+          workspace_id: intent.workspace_id
         })
       end
 

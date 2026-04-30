@@ -34,6 +34,8 @@ defmodule BankWeb.API.V1.CounterpartyController do
   @id_ref %Reference{"$ref": "#/components/schemas/Id"}
   @request_id_in_ref %Reference{"$ref": "#/components/parameters/RequestIdIn"}
   @idempotency_key_ref %Reference{"$ref": "#/components/parameters/IdempotencyKey"}
+  @unauthorized_ref %Reference{"$ref": "#/components/responses/Unauthorized"}
+  @forbidden_ref %Reference{"$ref": "#/components/responses/Forbidden"}
   @not_found_ref %Reference{"$ref": "#/components/responses/NotFound"}
   @conflict_ref %Reference{"$ref": "#/components/responses/Conflict"}
   @unprocessable_ref %Reference{"$ref": "#/components/responses/UnprocessableEntity"}
@@ -88,14 +90,24 @@ defmodule BankWeb.API.V1.CounterpartyController do
       200 =>
         {"Counterparty list", "application/json",
          BankWeb.OpenApi.Schemas.CounterpartyListResponse},
+      401 => @unauthorized_ref,
       422 => @unprocessable_ref
     }
   )
 
   def index(conn, params) do
+    workspace_id = conn.assigns.current_scope.workspace.id
+
     with {:ok, filters} <- parse_filters(params),
          {:ok, opts} <- parse_list_opts(params) do
-      page = Counterparties.list_counterparties(filters, opts)
+      # Always scope to the caller's workspace — never honor a
+      # query-string workspace_id (#159b). The context's
+      # `list_counterparties/2` already supports this opt.
+      page =
+        Counterparties.list_counterparties(
+          filters,
+          Keyword.put(opts, :workspace_id, workspace_id)
+        )
 
       conn
       |> put_status(:ok)
@@ -118,17 +130,27 @@ defmodule BankWeb.API.V1.CounterpartyController do
     responses: %{
       201 =>
         {"Counterparty detail", "application/json", BankWeb.OpenApi.Schemas.CounterpartyResponse},
+      401 => @unauthorized_ref,
+      403 => @forbidden_ref,
       422 => @unprocessable_ref
     }
   )
 
   def create(conn, params) do
+    workspace_id = conn.assigns.current_scope.workspace.id
+
     attrs =
       params
       |> Map.take(["name", "ownership_context", "notes"])
       |> Map.put("created_by", "user")
 
-    case Counterparties.create_counterparty(attrs, actor_opts(conn)) do
+    # Stamp workspace_id from current_scope via the trusted opts
+    # channel — never from request params. The context's
+    # `stamp_workspace_id/2` strips any body-supplied workspace_id
+    # defensively (#159b).
+    opts = Keyword.put(actor_opts(conn), :workspace_id, workspace_id)
+
+    case Counterparties.create_counterparty(attrs, opts) do
       {:ok, cp} ->
         {:ok, loaded} = Counterparties.get_counterparty_with_preloads(cp.id)
 
@@ -155,14 +177,18 @@ defmodule BankWeb.API.V1.CounterpartyController do
     responses: %{
       200 =>
         {"Counterparty detail", "application/json", BankWeb.OpenApi.Schemas.CounterpartyResponse},
+      401 => @unauthorized_ref,
+      403 => @forbidden_ref,
       404 => @not_found_ref,
       422 => @unprocessable_ref
     }
   )
 
   def update(conn, %{"id" => id} = params) do
+    workspace_id = conn.assigns.current_scope.workspace.id
+
     with {:ok, uuid} <- cast_uuid(id, "id"),
-         {:ok, cp} <- fetch_counterparty(uuid) do
+         {:ok, cp} <- fetch_counterparty(uuid, workspace_id) do
       attrs = Map.take(params, ["name", "ownership_context", "notes", "active"])
 
       case Counterparties.update_counterparty(cp, attrs, actor_opts(conn)) do
@@ -198,6 +224,8 @@ defmodule BankWeb.API.V1.CounterpartyController do
     responses: %{
       201 =>
         {"New address label", "application/json", BankWeb.OpenApi.Schemas.AddressLabelResponse},
+      401 => @unauthorized_ref,
+      403 => @forbidden_ref,
       404 => @not_found_ref,
       409 => @conflict_ref,
       422 => @unprocessable_ref
@@ -205,8 +233,10 @@ defmodule BankWeb.API.V1.CounterpartyController do
   )
 
   def add_address(conn, %{"id" => id} = params) do
+    workspace_id = conn.assigns.current_scope.workspace.id
+
     with {:ok, uuid} <- cast_uuid(id, "id"),
-         {:ok, cp} <- fetch_counterparty(uuid) do
+         {:ok, cp} <- fetch_counterparty(uuid, workspace_id) do
       attrs = Map.take(params, ["chain", "address", "alias", "role", "verified"])
 
       case Counterparties.attach_address(cp, attrs, actor_opts(conn)) do
@@ -262,6 +292,8 @@ defmodule BankWeb.API.V1.CounterpartyController do
     responses: %{
       201 =>
         {"New evidence artifact", "application/json", BankWeb.OpenApi.Schemas.EvidenceResponse},
+      401 => @unauthorized_ref,
+      403 => @forbidden_ref,
       404 => @not_found_ref,
       409 => @conflict_ref,
       422 => @unprocessable_ref
@@ -269,8 +301,10 @@ defmodule BankWeb.API.V1.CounterpartyController do
   )
 
   def add_evidence(conn, %{"id" => id} = params) do
+    workspace_id = conn.assigns.current_scope.workspace.id
+
     with {:ok, uuid} <- cast_uuid(id, "id"),
-         {:ok, cp} <- fetch_counterparty(uuid) do
+         {:ok, cp} <- fetch_counterparty(uuid, workspace_id) do
       attrs = Map.take(params, ["kind", "content_uri", "source", "weight", "payload_hash"])
 
       case Counterparties.pin_evidence(cp, attrs, actor_opts(conn)) do
@@ -390,12 +424,15 @@ defmodule BankWeb.API.V1.CounterpartyController do
     end
   end
 
-  defp fetch_counterparty(id) do
-    case Counterparties.get_counterparty(id) do
+  defp fetch_counterparty(id, workspace_id) when is_binary(workspace_id) do
+    case Counterparties.get_counterparty_in_workspace(id, workspace_id) do
       {:ok, cp} ->
         {:ok, cp}
 
       {:error, :not_found} ->
+        # Cross-workspace ids return :not_found — same response
+        # shape as a genuinely-unknown id so a caller cannot
+        # confirm a row exists in a sibling tenant (#159b).
         {:error,
          %{
            status: :not_found,

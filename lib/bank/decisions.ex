@@ -618,10 +618,50 @@ defmodule Bank.Decisions do
     end
   end
 
+  @doc """
+  Workspace-scoped `get_envelope/1` (#159b). Joins the envelope's
+  parent intent and matches `intent.workspace_id`. Returns
+  `:not_found` for missing ids AND for ids whose intent belongs
+  to a different workspace.
+  """
+  @spec get_envelope_in_workspace(String.t(), String.t()) ::
+          {:ok, DecisionEnvelope.t()} | {:error, :not_found}
+  def get_envelope_in_workspace(id, workspace_id)
+      when is_binary(id) and is_binary(workspace_id) do
+    case Repo.one(
+           from e in DecisionEnvelope,
+             join: i in AgentIntent,
+             on: e.intent_id == i.id,
+             where: e.id == ^id and i.workspace_id == ^workspace_id
+         ) do
+      nil -> {:error, :not_found}
+      envelope -> {:ok, envelope}
+    end
+  end
+
   @doc "Fetch a decision envelope with its execution plans preloaded."
   @spec get_envelope_with_plans(String.t()) :: {:ok, DecisionEnvelope.t()} | {:error, :not_found}
   def get_envelope_with_plans(id) when is_binary(id) do
     case Repo.get(DecisionEnvelope, id) |> Repo.preload(:execution_plans) do
+      nil -> {:error, :not_found}
+      envelope -> {:ok, envelope}
+    end
+  end
+
+  @doc """
+  Workspace-scoped `get_envelope_with_plans/1` (#159b).
+  """
+  @spec get_envelope_with_plans_in_workspace(String.t(), String.t()) ::
+          {:ok, DecisionEnvelope.t()} | {:error, :not_found}
+  def get_envelope_with_plans_in_workspace(id, workspace_id)
+      when is_binary(id) and is_binary(workspace_id) do
+    case Repo.one(
+           from e in DecisionEnvelope,
+             join: i in AgentIntent,
+             on: e.intent_id == i.id,
+             where: e.id == ^id and i.workspace_id == ^workspace_id,
+             preload: [:execution_plans]
+         ) do
       nil -> {:error, :not_found}
       envelope -> {:ok, envelope}
     end

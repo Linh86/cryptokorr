@@ -175,6 +175,24 @@ defmodule Bank.Policies do
   end
 
   @doc """
+  Workspace-scoped `get_rule/1` (#159b). Returns
+  `{:error, :not_found}` for unknown ids AND for ids that belong
+  to a different workspace.
+  """
+  @spec get_rule_in_workspace(uuid(), uuid()) ::
+          {:ok, PolicyRule.t()} | {:error, :not_found}
+  def get_rule_in_workspace(id, workspace_id)
+      when is_binary(id) and is_binary(workspace_id) do
+    case Repo.one(
+           from r in PolicyRule,
+             where: r.id == ^id and r.workspace_id == ^workspace_id
+         ) do
+      nil -> {:error, :not_found}
+      %PolicyRule{} = rule -> {:ok, rule}
+    end
+  end
+
+  @doc """
   Load the current active rule set, sorted `(priority desc,
   inserted_at asc)`. Rules with higher priority evaluate first — the
   order matters for tie-breaks inside a single rule type (e.g. two

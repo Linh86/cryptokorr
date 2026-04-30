@@ -56,6 +56,8 @@ defmodule BankWeb.API.V1.ApprovalController do
   @id_ref %Reference{"$ref": "#/components/schemas/Id"}
   @request_id_in_ref %Reference{"$ref": "#/components/parameters/RequestIdIn"}
   @idempotency_key_ref %Reference{"$ref": "#/components/parameters/IdempotencyKey"}
+  @unauthorized_ref %Reference{"$ref": "#/components/responses/Unauthorized"}
+  @forbidden_ref %Reference{"$ref": "#/components/responses/Forbidden"}
   @not_found_ref %Reference{"$ref": "#/components/responses/NotFound"}
   @conflict_ref %Reference{"$ref": "#/components/responses/Conflict"}
   @unprocessable_ref %Reference{"$ref": "#/components/responses/UnprocessableEntity"}
@@ -80,12 +82,15 @@ defmodule BankWeb.API.V1.ApprovalController do
     responses: %{
       200 =>
         {"Pending approval queue", "application/json",
-         BankWeb.OpenApi.Schemas.ApprovalQueueResponse}
+         BankWeb.OpenApi.Schemas.ApprovalQueueResponse},
+      401 => @unauthorized_ref,
+      403 => @forbidden_ref
     }
   )
 
   def index(conn, _params) do
-    decisions = Decisions.list_pending_approvals()
+    workspace_id = conn.assigns.current_scope.workspace.id
+    decisions = Decisions.list_pending_approvals(workspace_id: workspace_id)
     json(conn, %{decisions: Enum.map(decisions, &summarize/1)})
   end
 
@@ -105,6 +110,8 @@ defmodule BankWeb.API.V1.ApprovalController do
       200 =>
         {"Successor envelope + dispatch", "application/json",
          BankWeb.OpenApi.Schemas.ApprovalActionResponse},
+      401 => @unauthorized_ref,
+      403 => @forbidden_ref,
       404 => @not_found_ref,
       409 => @conflict_ref,
       422 => @unprocessable_ref
@@ -128,6 +135,8 @@ defmodule BankWeb.API.V1.ApprovalController do
       200 =>
         {"Successor envelope + dispatch", "application/json",
          BankWeb.OpenApi.Schemas.ApprovalActionResponse},
+      401 => @unauthorized_ref,
+      403 => @forbidden_ref,
       404 => @not_found_ref,
       409 => @conflict_ref,
       422 => @unprocessable_ref
@@ -137,18 +146,24 @@ defmodule BankWeb.API.V1.ApprovalController do
   def reject(conn, params), do: handle_action(conn, params, :reject)
 
   defp handle_action(conn, %{"decision_id" => id} = params, action) do
+    workspace_id = conn.assigns.current_scope.workspace.id
+
     case extract_actor_id(params) do
       {:ok, actor_id} ->
         opts =
           [actor_id: actor_id]
           |> maybe_put(:reason, Map.get(params, "reason"))
 
-        case apply_action(action, id, opts) do
-          {:ok, successor, dispatch} ->
-            conn
-            |> put_status(:ok)
-            |> json(success_body(successor, dispatch))
-
+        # Verify the decision belongs to the caller's workspace
+        # before applying the action. Cross-workspace ids return
+        # `:not_found` (rendered as 404) so a caller in workspace A
+        # cannot probe for decision ids in workspace B (#159b).
+        with {:ok, _envelope} <- Decisions.get_envelope_in_workspace(id, workspace_id),
+             {:ok, successor, dispatch} <- apply_action(action, id, opts) do
+          conn
+          |> put_status(:ok)
+          |> json(success_body(successor, dispatch))
+        else
           {:error, reason} ->
             render_action_error(conn, reason)
         end
