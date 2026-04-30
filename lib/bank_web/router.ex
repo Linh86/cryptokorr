@@ -88,75 +88,68 @@ defmodule BankWeb.Router do
     get "/health/deep", HealthController, :deep
   end
 
-  # External v1 API. Two role-gated blocks under #218b:
+  # External v1 API. Three role-gated blocks (#159b refines the
+  # split that #218b introduced):
   #
-  #   * authenticated-only — any valid API key reads/writes the
-  #     workspace's data. Reads, drafts, address-book CRUD,
-  #     screening, connect.
-  #   * operator+ — runtime-mutating actions: cancel, execute,
-  #     approval flow, policy CRUD, audit reads, security mutations.
+  #   * viewer+ — read-only inspection: intent/decision/policy
+  #     show, replay, list, screening lookup, audit (audit reads
+  #     are workspace-scoped via the read-hint column from #158d-b).
+  #   * operator+ — state-advancing actions: intent submit /
+  #     simulate / cancel, decision execute, approval flow,
+  #     counterparty / address-label / trust-assertion CRUD,
+  #     connect dispatch.
+  #   * admin+ — governance / kill-switch: policy create / revise
+  #     / archive, security pause / resume / revoke, API key
+  #     management.
   #
   # Health endpoints stay on the bare `:api` pipeline (separate
   # scope earlier in this router).
   #
-  # ## Per-controller workspace scoping is intentionally deferred
+  # ## Per-controller workspace scoping
   #
-  # `VerifyAPIKey` populates `conn.assigns.current_scope.workspace`
-  # so each controller / context CAN scope its query to the key's
-  # workspace, but #218b does NOT retrofit every existing
-  # controller to enforce that filter. Most controllers were
-  # written for a single-workspace world and look up rows by id
-  # without a workspace_id `WHERE`. A subsequent PR walks each
-  # controller and adds `workspace_id: current_scope.workspace.id`
-  # to every read/write — the auth surface is the prerequisite,
-  # the per-route filter is the next layer.
+  # Each `/v1` controller action that takes a resource id MUST
+  # filter or look up the resource scoped by
+  # `current_scope.workspace.id`. Cross-workspace ids return
+  # `404 not_found` rather than `403 forbidden` so the response
+  # cannot confirm a row exists in a sibling tenant. The shared
+  # `BankWeb.Controllers.WorkspaceScope.not_found_for_workspace_mismatch/1`
+  # convention is documented in each scoped getter on the
+  # context (see #159b's per-context `*_in_workspace/2` helpers).
   #
-  # Until that PR lands, an attacker with an API key for workspace
-  # A who knows or guesses an id from workspace B may receive that
-  # row's data on a `GET` controller that does not yet scope. The
-  # auth gate prevents anonymous access; the scoping gap is a
-  # known follow-up.
+  # Globally-scoped routes (intentionally NOT workspace-filtered)
+  # are explicitly named:
+  #   * `GET /v1/screening/:chain/:address` — wallet screening is
+  #     reference data keyed by `(chain, address)`, not workspace.
+  #   * `POST /v1/security/{pause,resume,revoke_delegation}` —
+  #     deployment-global kill switches; affect every workspace.
+  #     The admin-tier role gate guards them.
   scope "/v1", BankWeb.API.V1, as: :api_v1 do
     pipe_through [:api, :api_authenticated]
 
-    # Intents — submit / read / simulate / replay are
-    # authenticated-only. Cancel is below in the operator+ block.
-    post "/intents", IntentController, :create
+    # Intent reads — viewer-readable.
     get "/intents/:id", IntentController, :show
-    post "/intents/:id/simulate", IntentController, :simulate
     get "/intents/:id/replay", IntentController, :replay
 
-    # Decisions — read.
+    # Decision reads — viewer-readable.
     get "/decisions/:id", DecisionController, :show
 
-    # Counterparties and address book.
+    # Counterparty list — viewer-readable.
     get "/counterparties", CounterpartyController, :index
-    post "/counterparties", CounterpartyController, :create
-    patch "/counterparties/:id", CounterpartyController, :update
-    post "/counterparties/:id/addresses", CounterpartyController, :add_address
-    post "/counterparties/:id/evidence", CounterpartyController, :add_evidence
 
-    # Address labels.
-    patch "/address_labels/:id", AddressLabelController, :update
-
-    # Trust assertions.
-    post "/trust_assertions", TrustAssertionController, :create
-
-    # Policies — read.
+    # Policy list — viewer-readable.
     get "/policies", PolicyController, :index
 
-    # Wallet screening.
+    # Wallet screening read — viewer-readable. Reference data,
+    # globally scoped (NOT workspace-filtered).
     get "/screening/:chain/:address", ScreeningController, :show
-
-    # Browser wallet connect (v1.1 scaffolding — see docs/wallet-connect.md).
-    post "/connect/smart_account", ConnectController, :request
   end
 
   scope "/v1", BankWeb.API.V1, as: :api_v1_operator do
     pipe_through [:api, :api_authenticated, :api_operator]
 
-    # Intent mutation that takes the runtime out of an existing
-    # commitment.
+    # Intent state-advancing actions.
+    post "/intents", IntentController, :create
+    post "/intents/:id/simulate", IntentController, :simulate
     post "/intents/:id/cancel", IntentController, :cancel
 
     # Decision execute — operator-only manual dispatch.
@@ -167,26 +160,43 @@ defmodule BankWeb.Router do
     post "/approvals/:decision_id/approve", ApprovalController, :approve
     post "/approvals/:decision_id/reject", ApprovalController, :reject
 
-    # Policy mutations.
+    # Counterparty CRUD — policy-impacting catalog edits.
+    post "/counterparties", CounterpartyController, :create
+    patch "/counterparties/:id", CounterpartyController, :update
+    post "/counterparties/:id/addresses", CounterpartyController, :add_address
+    post "/counterparties/:id/evidence", CounterpartyController, :add_evidence
+
+    # Address labels.
+    patch "/address_labels/:id", AddressLabelController, :update
+
+    # Trust assertions — manual trust overrides feed decisioning.
+    post "/trust_assertions", TrustAssertionController, :create
+
+    # Audit reads — operator+ for sensitivity (audit can replay
+    # business-impactful state).
+    get "/audit", AuditController, :index
+
+    # Browser wallet connect (v1.1 scaffolding — see docs/wallet-connect.md).
+    post "/connect/smart_account", ConnectController, :request
+  end
+
+  scope "/v1", BankWeb.API.V1, as: :api_v1_admin do
+    pipe_through [:api, :api_authenticated, :api_admin]
+
+    # Policy CRUD — governance-level. Rules drive decisioning and
+    # cannot be changed casually by an on-call operator.
     post "/policies", PolicyController, :create
     post "/policies/:id/revise", PolicyController, :revise
     post "/policies/:id/archive", PolicyController, :archive
 
-    # Audit reads — sensitive cross-workspace data.
-    get "/audit", AuditController, :index
-
-    # Security mutations.
+    # Security kill-switches — global, deployment-wide. Admin-only
+    # because pause halts every workspace's runtime, not just the
+    # caller's.
     post "/security/pause", SecurityController, :pause
     post "/security/resume", SecurityController, :resume
     post "/security/revoke_delegation", SecurityController, :revoke_delegation
-  end
 
-  # API key management (#218c). Admin-tier surface — admins and
-  # owners only. The creator-privilege check inside `create/2`
-  # additionally refuses minting a key stronger than the caller.
-  scope "/v1", BankWeb.API.V1, as: :api_v1_admin do
-    pipe_through [:api, :api_authenticated, :api_admin]
-
+    # API key management (#218c). Admin-only — credential issuance.
     get "/api_keys", APIKeyController, :index
     post "/api_keys", APIKeyController, :create
     delete "/api_keys/:id", APIKeyController, :delete

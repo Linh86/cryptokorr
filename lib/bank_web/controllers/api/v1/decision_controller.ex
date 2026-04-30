@@ -18,6 +18,8 @@ defmodule BankWeb.API.V1.DecisionController do
   @id_ref %Reference{"$ref": "#/components/schemas/Id"}
   @request_id_in_ref %Reference{"$ref": "#/components/parameters/RequestIdIn"}
   @idempotency_key_ref %Reference{"$ref": "#/components/parameters/IdempotencyKey"}
+  @unauthorized_ref %Reference{"$ref": "#/components/responses/Unauthorized"}
+  @forbidden_ref %Reference{"$ref": "#/components/responses/Forbidden"}
   @not_found_ref %Reference{"$ref": "#/components/responses/NotFound"}
   @conflict_ref %Reference{"$ref": "#/components/responses/Conflict"}
   @unprocessable_ref %Reference{"$ref": "#/components/responses/UnprocessableEntity"}
@@ -45,14 +47,17 @@ defmodule BankWeb.API.V1.DecisionController do
       200 =>
         {"Decision envelope detail", "application/json",
          BankWeb.OpenApi.Schemas.DecisionShowResponse},
+      401 => @unauthorized_ref,
       404 => @not_found_ref,
       422 => @unprocessable_ref
     }
   )
 
   def show(conn, %{"id" => id}) do
+    workspace_id = conn.assigns.current_scope.workspace.id
+
     with {:ok, uuid} <- cast_uuid(id),
-         {:ok, envelope} <- Decisions.get_envelope_with_plans(uuid) do
+         {:ok, envelope} <- Decisions.get_envelope_with_plans_in_workspace(uuid, workspace_id) do
       conn
       |> put_status(:ok)
       |> json(%{
@@ -112,6 +117,8 @@ defmodule BankWeb.API.V1.DecisionController do
       202 =>
         {"Execution plan enqueued", "application/json",
          BankWeb.OpenApi.Schemas.ExecuteDecisionResponse},
+      401 => @unauthorized_ref,
+      403 => @forbidden_ref,
       404 => @not_found_ref,
       409 => @conflict_ref,
       422 => @unprocessable_ref,
@@ -122,9 +129,11 @@ defmodule BankWeb.API.V1.DecisionController do
   def execute(conn, %{"id" => id} = params) do
     smart_account_id = Map.get(params, "smart_account_id")
     reason = Map.get(params, "reason", "manual_confirm")
+    workspace_id = conn.assigns.current_scope.workspace.id
 
     with {:ok, uuid} <- cast_uuid(id),
-         :ok <- require_smart_account_id(smart_account_id) do
+         :ok <- require_smart_account_id(smart_account_id),
+         {:ok, _envelope} <- Decisions.get_envelope_in_workspace(uuid, workspace_id) do
       case Decisions.request_manual_execution(uuid, smart_account_id,
              reason: reason,
              actor_id: nil
@@ -200,7 +209,16 @@ defmodule BankWeb.API.V1.DecisionController do
           })
       end
     else
-      {:error, envelope} -> render_error(conn, envelope)
+      # Cross-workspace or genuinely-unknown id from
+      # `get_envelope_in_workspace/2` collapses to 404 — same shape
+      # so a caller cannot probe across tenants (#159b).
+      {:error, :not_found} ->
+        conn
+        |> put_status(:not_found)
+        |> json(%{error: %{code: "not_found", message: "decision envelope not found"}})
+
+      {:error, envelope} ->
+        render_error(conn, envelope)
     end
   end
 

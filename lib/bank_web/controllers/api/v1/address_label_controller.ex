@@ -19,8 +19,10 @@ defmodule BankWeb.API.V1.AddressLabelController do
   use BankWeb, :controller
   use OpenApiSpex.ControllerSpecs
 
+  import Ecto.Query
+
   alias Bank.Counterparties
-  alias Bank.Counterparties.AddressLabel
+  alias Bank.Counterparties.{AddressLabel, Counterparty}
   alias Bank.Repo
   alias BankWeb.API.V1.CounterpartyJSON
   alias OpenApiSpex.{Parameter, Reference}
@@ -28,6 +30,8 @@ defmodule BankWeb.API.V1.AddressLabelController do
   @id_ref %Reference{"$ref": "#/components/schemas/Id"}
   @request_id_in_ref %Reference{"$ref": "#/components/parameters/RequestIdIn"}
   @idempotency_key_ref %Reference{"$ref": "#/components/parameters/IdempotencyKey"}
+  @unauthorized_ref %Reference{"$ref": "#/components/responses/Unauthorized"}
+  @forbidden_ref %Reference{"$ref": "#/components/responses/Forbidden"}
   @not_found_ref %Reference{"$ref": "#/components/responses/NotFound"}
   @conflict_ref %Reference{"$ref": "#/components/responses/Conflict"}
   @unprocessable_ref %Reference{"$ref": "#/components/responses/UnprocessableEntity"}
@@ -56,6 +60,8 @@ defmodule BankWeb.API.V1.AddressLabelController do
       200 =>
         {"Updated address label", "application/json",
          BankWeb.OpenApi.Schemas.AddressLabelResponse},
+      401 => @unauthorized_ref,
+      403 => @forbidden_ref,
       404 => @not_found_ref,
       409 => @conflict_ref,
       422 => @unprocessable_ref
@@ -63,8 +69,10 @@ defmodule BankWeb.API.V1.AddressLabelController do
   )
 
   def update(conn, %{"id" => id} = params) do
+    workspace_id = conn.assigns.current_scope.workspace.id
+
     with {:ok, uuid} <- cast_uuid(id),
-         {:ok, label} <- fetch_label(uuid) do
+         {:ok, label} <- fetch_label(uuid, workspace_id) do
       attrs = Map.take(params, ["alias", "role", "verified", "retired"])
 
       case Counterparties.update_address_label(label, attrs, actor_opts(conn)) do
@@ -109,8 +117,19 @@ defmodule BankWeb.API.V1.AddressLabelController do
     end
   end
 
-  defp fetch_label(id) do
-    case Repo.get(AddressLabel, id) do
+  # Workspace scoping (#159b): the label is scoped via its parent
+  # counterparty's `workspace_id`. Cross-workspace ids return
+  # `:not_found` rather than `:forbidden` so a caller cannot probe
+  # for label ids in another tenant.
+  defp fetch_label(id, workspace_id) when is_binary(workspace_id) do
+    query =
+      from(l in AddressLabel,
+        join: c in Counterparty,
+        on: l.counterparty_id == c.id,
+        where: l.id == ^id and c.workspace_id == ^workspace_id
+      )
+
+    case Repo.one(query) do
       nil ->
         {:error,
          %{

@@ -29,6 +29,8 @@ defmodule BankWeb.API.V1.ConnectController do
 
   @idempotency_key_ref %Reference{"$ref": "#/components/parameters/IdempotencyKey"}
   @request_id_in_ref %Reference{"$ref": "#/components/parameters/RequestIdIn"}
+  @unauthorized_ref %Reference{"$ref": "#/components/responses/Unauthorized"}
+  @forbidden_ref %Reference{"$ref": "#/components/responses/Forbidden"}
   @unprocessable_ref %Reference{"$ref": "#/components/responses/UnprocessableEntity"}
 
   # --- POST /v1/connect/smart_account -------------------------------------
@@ -55,6 +57,8 @@ defmodule BankWeb.API.V1.ConnectController do
       202 =>
         {"Connect accepted (audited and enqueued for adapter dispatch)", "application/json",
          BankWeb.OpenApi.Schemas.ConnectSmartAccountResponse},
+      401 => @unauthorized_ref,
+      403 => @forbidden_ref,
       422 => @unprocessable_ref
     }
   )

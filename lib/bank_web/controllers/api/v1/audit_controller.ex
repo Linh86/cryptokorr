@@ -38,6 +38,8 @@ defmodule BankWeb.API.V1.AuditController do
 
   @id_ref %Reference{"$ref": "#/components/schemas/Id"}
   @request_id_in_ref %Reference{"$ref": "#/components/parameters/RequestIdIn"}
+  @unauthorized_ref %Reference{"$ref": "#/components/responses/Unauthorized"}
+  @forbidden_ref %Reference{"$ref": "#/components/responses/Forbidden"}
   @unprocessable_ref %Reference{"$ref": "#/components/responses/UnprocessableEntity"}
 
   @audit_query_params [
@@ -118,14 +120,22 @@ defmodule BankWeb.API.V1.AuditController do
     parameters: [@request_id_in_ref | @audit_query_params],
     responses: %{
       200 => {"Audit events page", "application/json", BankWeb.OpenApi.Schemas.AuditListResponse},
+      401 => @unauthorized_ref,
+      403 => @forbidden_ref,
       422 => @unprocessable_ref
     }
   )
 
   def index(conn, params) do
+    workspace_id = conn.assigns.current_scope.workspace.id
+
     with {:ok, filters} <- parse_filters(params),
          {:ok, opts} <- parse_opts(params) do
-      page = Audit.list_events(filters, opts)
+      # Stamp the workspace from the authenticated current_scope —
+      # NOT from the query string. A `?workspace_id=` query param
+      # would otherwise let an admin in workspace A scrape audit
+      # events from workspace B (#159b).
+      page = Audit.list_events(Map.put(filters, :workspace_id, workspace_id), opts)
 
       conn
       |> put_status(:ok)

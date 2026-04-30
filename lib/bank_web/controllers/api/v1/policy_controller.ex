@@ -37,6 +37,8 @@ defmodule BankWeb.API.V1.PolicyController do
   @id_ref %Reference{"$ref": "#/components/schemas/Id"}
   @request_id_in_ref %Reference{"$ref": "#/components/parameters/RequestIdIn"}
   @idempotency_key_ref %Reference{"$ref": "#/components/parameters/IdempotencyKey"}
+  @unauthorized_ref %Reference{"$ref": "#/components/responses/Unauthorized"}
+  @forbidden_ref %Reference{"$ref": "#/components/responses/Forbidden"}
   @not_found_ref %Reference{"$ref": "#/components/responses/NotFound"}
   @conflict_ref %Reference{"$ref": "#/components/responses/Conflict"}
   @unprocessable_ref %Reference{"$ref": "#/components/responses/UnprocessableEntity"}
@@ -95,14 +97,19 @@ defmodule BankWeb.API.V1.PolicyController do
     parameters: [@request_id_in_ref | @list_query_params],
     responses: %{
       200 => {"Policy rule list", "application/json", BankWeb.OpenApi.Schemas.PolicyListResponse},
+      401 => @unauthorized_ref,
       422 => @unprocessable_ref
     }
   )
 
   def index(conn, params) do
+    workspace_id = conn.assigns.current_scope.workspace.id
+
     with {:ok, filters} <- parse_filters(params),
          {:ok, opts} <- parse_list_opts(params) do
-      page = Policies.list_rules(filters, opts)
+      # Workspace-scope the listing so a viewer in workspace A
+      # cannot enumerate workspace B's policy ids (#159b).
+      page = Policies.list_rules(filters, Keyword.put(opts, :workspace_id, workspace_id))
 
       conn
       |> put_status(:ok)
@@ -125,6 +132,8 @@ defmodule BankWeb.API.V1.PolicyController do
       {"Create policy body", "application/json", BankWeb.OpenApi.Schemas.CreatePolicyRequest},
     responses: %{
       201 => {"New policy rule", "application/json", BankWeb.OpenApi.Schemas.PolicyResponse},
+      401 => @unauthorized_ref,
+      403 => @forbidden_ref,
       422 => @unprocessable_ref
     }
   )
@@ -163,6 +172,8 @@ defmodule BankWeb.API.V1.PolicyController do
     responses: %{
       201 =>
         {"Successor policy rule", "application/json", BankWeb.OpenApi.Schemas.PolicyResponse},
+      401 => @unauthorized_ref,
+      403 => @forbidden_ref,
       404 => @not_found_ref,
       409 => @conflict_ref,
       422 => @unprocessable_ref
@@ -170,8 +181,10 @@ defmodule BankWeb.API.V1.PolicyController do
   )
 
   def revise(conn, %{"id" => id} = params) do
+    workspace_id = conn.assigns.current_scope.workspace.id
+
     with {:ok, uuid} <- cast_uuid(id, "id"),
-         {:ok, rule} <- fetch_rule(uuid),
+         {:ok, rule} <- fetch_rule(uuid, workspace_id),
          {:ok, attrs} <- parse_revise_attrs(params) do
       case Policies.revise_rule(rule, attrs, actor_opts(conn)) do
         {:ok, successor} ->
@@ -207,14 +220,18 @@ defmodule BankWeb.API.V1.PolicyController do
     parameters: [@policy_id_param, @idempotency_key_ref, @request_id_in_ref],
     responses: %{
       200 => {"Archived policy rule", "application/json", BankWeb.OpenApi.Schemas.PolicyResponse},
+      401 => @unauthorized_ref,
+      403 => @forbidden_ref,
       404 => @not_found_ref,
       409 => @conflict_ref
     }
   )
 
   def archive(conn, %{"id" => id}) do
+    workspace_id = conn.assigns.current_scope.workspace.id
+
     with {:ok, uuid} <- cast_uuid(id, "id"),
-         {:ok, rule} <- fetch_rule(uuid) do
+         {:ok, rule} <- fetch_rule(uuid, workspace_id) do
       case Policies.archive_rule(rule, actor_opts(conn)) do
         {:ok, archived} ->
           conn
@@ -400,12 +417,15 @@ defmodule BankWeb.API.V1.PolicyController do
     end
   end
 
-  defp fetch_rule(id) do
-    case Policies.get_rule(id) do
+  defp fetch_rule(id, workspace_id) when is_binary(workspace_id) do
+    case Policies.get_rule_in_workspace(id, workspace_id) do
       {:ok, rule} ->
         {:ok, rule}
 
       {:error, :not_found} ->
+        # Cross-workspace ids return :not_found — same shape as
+        # genuinely-unknown so a caller cannot probe across
+        # tenants (#159b).
         {:error,
          %{
            status: :not_found,

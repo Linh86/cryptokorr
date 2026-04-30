@@ -34,6 +34,8 @@ defmodule BankWeb.API.V1.IntentController do
 
   @idempotency_key_ref %Reference{"$ref": "#/components/parameters/IdempotencyKey"}
   @request_id_in_ref %Reference{"$ref": "#/components/parameters/RequestIdIn"}
+  @unauthorized_ref %Reference{"$ref": "#/components/responses/Unauthorized"}
+  @forbidden_ref %Reference{"$ref": "#/components/responses/Forbidden"}
   @not_found_ref %Reference{"$ref": "#/components/responses/NotFound"}
   @conflict_ref %Reference{"$ref": "#/components/responses/Conflict"}
   @unprocessable_ref %Reference{"$ref": "#/components/responses/UnprocessableEntity"}
@@ -74,13 +76,20 @@ defmodule BankWeb.API.V1.IntentController do
     responses: %{
       202 =>
         {"Intent accepted", "application/json", BankWeb.OpenApi.Schemas.IntentSubmitResponse},
+      401 => @unauthorized_ref,
+      403 => @forbidden_ref,
       409 => @conflict_ref,
       422 => @unprocessable_ref
     }
   )
 
   def create(conn, params) do
-    case Intents.submit(params) do
+    workspace_id = conn.assigns.current_scope.workspace.id
+
+    # Pass `workspace_id` via the trusted `opts` channel — never from
+    # request params. `Intents.submit/2`'s `stamp_workspace_id/2`
+    # strips any body-supplied `workspace_id` defensively (#159b).
+    case Intents.submit(params, workspace_id: workspace_id) do
       {:ok, %{intent: intent, replay?: replay?}} ->
         conn
         |> put_status(:accepted)
@@ -138,13 +147,16 @@ defmodule BankWeb.API.V1.IntentController do
     parameters: [@intent_id_param, @request_id_in_ref],
     responses: %{
       200 => {"Intent detail", "application/json", BankWeb.OpenApi.Schemas.IntentShowResponse},
+      401 => @unauthorized_ref,
       404 => @not_found_ref
     }
   )
 
   def show(conn, %{"id" => id}) do
+    workspace_id = conn.assigns.current_scope.workspace.id
+
     with {:ok, uuid} <- cast_uuid(id),
-         %_{} = intent <- Intents.get(uuid) do
+         %_{} = intent <- Intents.get_in_workspace(uuid, workspace_id) do
       conn
       |> put_status(:ok)
       |> json(IntentJSON.show(%{intent: intent}))
@@ -182,6 +194,8 @@ defmodule BankWeb.API.V1.IntentController do
       200 =>
         {"Simulation report", "application/json",
          BankWeb.OpenApi.Schemas.IntentSimulationResponse},
+      401 => @unauthorized_ref,
+      403 => @forbidden_ref,
       404 => @not_found_ref,
       409 => @conflict_ref,
       422 => @unprocessable_ref
@@ -189,11 +203,22 @@ defmodule BankWeb.API.V1.IntentController do
   )
 
   def simulate(conn, %{"id" => id} = params) do
-    with {:ok, _uuid} <- cast_uuid(id),
+    workspace_id = conn.assigns.current_scope.workspace.id
+
+    with {:ok, uuid} <- cast_uuid(id),
+         %_{} <- Intents.get_in_workspace(uuid, workspace_id),
          {:ok, reason} <- cast_simulate_reason(params) do
       handle_simulate(conn, id, reason)
     else
       :error ->
+        conn
+        |> put_status(:not_found)
+        |> json(not_found_envelope(id))
+
+      nil ->
+        # Intent does not exist OR belongs to another workspace —
+        # 404 either way so cross-workspace probes do not get a
+        # different status than genuinely-missing ids (#159b).
         conn
         |> put_status(:not_found)
         |> json(not_found_envelope(id))
@@ -320,6 +345,8 @@ defmodule BankWeb.API.V1.IntentController do
     responses: %{
       200 =>
         {"Intent cancelled", "application/json", BankWeb.OpenApi.Schemas.IntentCancelResponse},
+      401 => @unauthorized_ref,
+      403 => @forbidden_ref,
       404 => @not_found_ref,
       409 => @conflict_ref,
       422 => @unprocessable_ref
@@ -327,11 +354,20 @@ defmodule BankWeb.API.V1.IntentController do
   )
 
   def cancel(conn, %{"id" => id} = params) do
-    with {:ok, _uuid} <- cast_uuid(id),
+    workspace_id = conn.assigns.current_scope.workspace.id
+
+    with {:ok, uuid} <- cast_uuid(id),
+         %_{} <- Intents.get_in_workspace(uuid, workspace_id),
          {:ok, reason} <- cast_cancel_reason(params) do
       handle_cancel(conn, id, reason)
     else
       :error ->
+        conn
+        |> put_status(:not_found)
+        |> json(not_found_envelope(id))
+
+      nil ->
+        # Cross-workspace or missing — 404 either way (#159b).
         conn
         |> put_status(:not_found)
         |> json(not_found_envelope(id))
@@ -423,11 +459,14 @@ defmodule BankWeb.API.V1.IntentController do
     parameters: [@intent_id_param, @request_id_in_ref],
     responses: %{
       200 => {"Replay bundle", "application/json", BankWeb.OpenApi.Schemas.IntentReplayResponse},
+      401 => @unauthorized_ref,
       404 => @not_found_ref
     }
   )
 
   def replay(conn, %{"id" => id}) do
+    workspace_id = conn.assigns.current_scope.workspace.id
+
     case Ecto.UUID.cast(id) do
       :error ->
         conn
@@ -435,16 +474,27 @@ defmodule BankWeb.API.V1.IntentController do
         |> json(not_found_envelope(id))
 
       {:ok, intent_id} ->
-        case Audit.replay(intent_id) do
-          {:ok, bundle} ->
-            conn
-            |> put_status(:ok)
-            |> json(AuditJSON.replay(%{bundle: bundle}))
-
-          {:error, :not_found} ->
+        case Intents.get_in_workspace(intent_id, workspace_id) do
+          nil ->
+            # Workspace miss → 404 before we ever touch the audit
+            # replay so we never leak a sibling workspace's audit
+            # bundle (#159b).
             conn
             |> put_status(:not_found)
             |> json(not_found_envelope(intent_id))
+
+          %_{} ->
+            case Audit.replay(intent_id) do
+              {:ok, bundle} ->
+                conn
+                |> put_status(:ok)
+                |> json(AuditJSON.replay(%{bundle: bundle}))
+
+              {:error, :not_found} ->
+                conn
+                |> put_status(:not_found)
+                |> json(not_found_envelope(intent_id))
+            end
         end
     end
   end
