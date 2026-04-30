@@ -187,6 +187,62 @@ defmodule Bank.AccessTest do
     end
   end
 
+  describe "create_invite/2 — lazy expiry consistency" do
+    test "re-issuing for a slot with a lazily-expired exact-email invite expires the stale row and succeeds" do
+      ws = create_workspace()
+      past = DateTime.add(DateTime.utc_now(), -3600, :second)
+
+      {:ok, stale} =
+        create_invite(ws, %{
+          invite_type: :exact_email,
+          email: "alice@example.com",
+          expires_at: past
+        })
+
+      # The stale row is still `:active` in the DB but past its
+      # deadline — `list_active_invites/1` filters it out.
+      assert [] = Access.list_active_invites(ws)
+
+      assert {:ok, %AccessInvite{status: :active, id: new_id}} =
+               create_invite(ws, %{
+                 invite_type: :exact_email,
+                 email: "alice@example.com"
+               })
+
+      assert %AccessInvite{status: :expired} = Bank.Repo.reload(stale)
+      refute new_id == stale.id
+      assert [%AccessInvite{id: ^new_id}] = Access.list_active_invites(ws)
+    end
+
+    test "re-issuing for a slot with a lazily-expired domain invite expires the stale row and succeeds" do
+      ws = create_workspace()
+      past = DateTime.add(DateTime.utc_now(), -3600, :second)
+
+      {:ok, stale} =
+        create_invite(ws, %{
+          invite_type: :domain,
+          domain: "partner.io",
+          expires_at: past
+        })
+
+      assert {:ok, %AccessInvite{status: :active}} =
+               create_invite(ws, %{invite_type: :domain, domain: "partner.io"})
+
+      assert %AccessInvite{status: :expired} = Bank.Repo.reload(stale)
+    end
+
+    test "an unexpired active invite still blocks re-issue" do
+      ws = create_workspace()
+
+      {:ok, _} = create_invite(ws, %{invite_type: :exact_email, email: "alice@example.com"})
+
+      assert {:error, changeset} =
+               create_invite(ws, %{invite_type: :exact_email, email: "alice@example.com"})
+
+      assert Enum.any?(changeset.errors, fn {_, {msg, _}} -> msg =~ "has already been taken" end)
+    end
+  end
+
   describe "find_matching_invite_for_user/1" do
     test "returns nil for a disabled user" do
       ws = create_workspace()

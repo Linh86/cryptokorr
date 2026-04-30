@@ -82,10 +82,20 @@ defmodule Bank.Access do
   @spec create_invite(map(), User.t()) ::
           {:ok, AccessInvite.t()} | {:error, Ecto.Changeset.t()}
   def create_invite(attrs, %User{} = invited_by) when is_map(attrs) do
+    changeset = AccessInvite.create_changeset(%AccessInvite{}, attrs, invited_by)
+
+    # Lazy expiry leaves stale rows with `status: :active` but past
+    # `expires_at`. The partial unique index treats them as occupying
+    # the slot, while `list_active_invites/1` filters them out — so
+    # the operator UI says "no active invite" while the DB blocks the
+    # re-issue. Eagerly transition any stale row matching the same
+    # slot before we insert. The index `WHERE` cannot reference
+    # `now()` (Postgres requires IMMUTABLE expressions there), so we
+    # have to do it here.
+    if changeset.valid?, do: expire_stale_active_invites_for(changeset)
+
     # TODO #161: emit `access_invite.created` audit event.
-    %AccessInvite{}
-    |> AccessInvite.create_changeset(attrs, invited_by)
-    |> Repo.insert()
+    Repo.insert(changeset)
   end
 
   @doc """
@@ -290,37 +300,49 @@ defmodule Bank.Access do
   defp apply_exact_match(user, workspace_id, %AccessInvite{} = invite) do
     now = DateTime.utc_now()
 
-    Repo.transaction(fn ->
+    {membership, outcome_tag} =
       case Workspaces.get_membership(user, workspace_id) do
+        %Membership{} = m ->
+          {m, :exact_match_already_member}
+
         nil ->
-          {:ok, membership} =
-            Workspaces.create_membership(%{
-              user_id: user.id,
-              workspace_id: workspace_id,
-              role: invite.role
-            })
+          # NOTE: not wrapped in `Repo.transaction` on purpose. A
+          # constraint violation inside an open transaction puts
+          # Postgres into an aborted state and any subsequent SQL
+          # (the invite update below, the re-fetch on the race path)
+          # fails. The two operations are individually safe and the
+          # race-recovery path needs working SQL afterwards.
+          case Workspaces.create_membership(%{
+                 user_id: user.id,
+                 workspace_id: workspace_id,
+                 role: invite.role
+               }) do
+            {:ok, m} ->
+              {m, :exact_match_accepted}
 
-          {:ok, _} =
-            invite
-            |> AccessInvite.accept_changeset(user, now)
-            |> Repo.update()
-
-          {:exact_match_accepted, membership}
-
-        %Membership{} = membership ->
-          # User is already a member — accept the invite anyway so
-          # the row reflects the fact it has been consumed.
-          {:ok, _} =
-            invite
-            |> AccessInvite.accept_changeset(user, now)
-            |> Repo.update()
-
-          {:exact_match_already_member, membership}
+            {:error, %Ecto.Changeset{} = changeset} ->
+              if unique_constraint_violation?(changeset) do
+                # A concurrent OAuth callback inserted the membership
+                # before us; the `(user_id, workspace_id)` unique
+                # index caught the race. Re-fetch and treat the
+                # outcome as "already member" — the membership is
+                # there, just not from us.
+                {Workspaces.get_membership(user, workspace_id), :exact_match_already_member}
+              else
+                # Genuinely unexpected — surface it rather than
+                # silently swallow it as "already member".
+                raise "Bank.Access.apply_exact_match: failed to create membership: " <>
+                        inspect(changeset.errors)
+              end
+          end
       end
-    end)
-    |> case do
-      {:ok, outcome} -> outcome
-    end
+
+    {:ok, _} =
+      invite
+      |> AccessInvite.accept_changeset(user, now)
+      |> Repo.update()
+
+    {outcome_tag, membership}
   end
 
   defp apply_domain_match(user, %AccessInvite{} = invite) do
@@ -332,5 +354,60 @@ defmodule Bank.Access do
       |> Repo.update()
 
     {:domain_match_pending, updated}
+  end
+
+  defp expire_stale_active_invites_for(%Ecto.Changeset{} = changeset) do
+    workspace_id = Ecto.Changeset.get_field(changeset, :workspace_id)
+
+    case Ecto.Changeset.get_field(changeset, :invite_type) do
+      :exact_email ->
+        email = Ecto.Changeset.get_field(changeset, :email)
+
+        if is_binary(workspace_id) and is_binary(email),
+          do: expire_stale_active_email_invites(workspace_id, email)
+
+      :domain ->
+        domain = Ecto.Changeset.get_field(changeset, :domain)
+
+        if is_binary(workspace_id) and is_binary(domain),
+          do: expire_stale_active_domain_invites(workspace_id, domain)
+
+      _ ->
+        :ok
+    end
+
+    :ok
+  end
+
+  defp expire_stale_active_email_invites(workspace_id, email_lower) do
+    now = DateTime.utc_now()
+
+    from(i in AccessInvite,
+      where: i.workspace_id == ^workspace_id,
+      where: i.invite_type == :exact_email,
+      where: i.status == :active,
+      where: not is_nil(i.expires_at) and i.expires_at <= ^now,
+      where: fragment("lower(?)", i.email) == ^email_lower
+    )
+    |> Repo.update_all(set: [status: :expired, updated_at: now])
+  end
+
+  defp expire_stale_active_domain_invites(workspace_id, domain_lower) do
+    now = DateTime.utc_now()
+
+    from(i in AccessInvite,
+      where: i.workspace_id == ^workspace_id,
+      where: i.invite_type == :domain,
+      where: i.status == :active,
+      where: not is_nil(i.expires_at) and i.expires_at <= ^now,
+      where: fragment("lower(?)", i.domain) == ^domain_lower
+    )
+    |> Repo.update_all(set: [status: :expired, updated_at: now])
+  end
+
+  defp unique_constraint_violation?(%Ecto.Changeset{errors: errors}) do
+    Enum.any?(errors, fn
+      {_, {msg, _}} -> msg =~ "has already been taken"
+    end)
   end
 end
