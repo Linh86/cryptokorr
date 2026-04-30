@@ -338,12 +338,25 @@ defmodule Bank.APIKeys do
   defp do_touch(%APIKey{id: id} = api_key) do
     now = DateTime.utc_now()
 
-    case Repo.update_all(
-           from(k in APIKey, where: k.id == ^id),
-           set: [last_used_at: now, updated_at: now]
-         ) do
+    # Defense-in-depth (#218d review): filter the UPDATE on
+    # `revoked_at IS NULL` AND `expires_at IS NULL OR expires_at >
+    # now`. The plug only invokes touch AFTER `verify_key/1`
+    # returns OK, so in theory the in-memory struct already
+    # passed those checks — but a TOCTOU window exists where a
+    # key gets revoked between verify and touch. The DB-level
+    # filter closes that window: a touch on a revoked / expired
+    # key is a no-op and reports `:no_match` to the caller (which
+    # the plug logs and ignores).
+    update_query =
+      from(k in APIKey,
+        where:
+          k.id == ^id and is_nil(k.revoked_at) and
+            (is_nil(k.expires_at) or k.expires_at > ^now)
+      )
+
+    case Repo.update_all(update_query, set: [last_used_at: now, updated_at: now]) do
       {1, _} -> {:ok, %APIKey{api_key | last_used_at: now, updated_at: now}}
-      {0, _} -> {:error, :not_found}
+      {0, _} -> {:error, :no_match}
     end
   rescue
     error -> {:error, error}

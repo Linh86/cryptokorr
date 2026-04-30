@@ -346,6 +346,37 @@ defmodule Bank.APIKeysTest do
       assert DateTime.compare(new_ts, stale) == :gt
     end
 
+    test "is a no-op on a key revoked between verify and touch (TOCTOU race)",
+         %{workspace: ws, user: user} do
+      {:ok, key, _raw} = APIKeys.create_key(ws, user, :viewer, "toctou")
+      assert is_nil(key.last_used_at)
+
+      # Simulate the race: the in-memory struct from verify_key/1
+      # shows revoked_at=nil, but a parallel actor revokes the key
+      # before touch lands.
+      {:ok, _} = APIKeys.revoke_key(key, actor: user)
+
+      # Touch invoked with the stale (pre-revoke) struct. The
+      # DB-level filter MUST refuse the bump.
+      assert {:error, :no_match} = APIKeys.touch_last_used(key)
+
+      reloaded = Bank.Repo.get!(APIKey, key.id)
+
+      assert is_nil(reloaded.last_used_at),
+             "revoked key MUST NOT have last_used_at advanced (TOCTOU race close)"
+    end
+
+    test "is a no-op on a key whose expires_at is in the past",
+         %{workspace: ws, user: user} do
+      past = DateTime.add(DateTime.utc_now(), -3600, :second)
+      {:ok, key, _raw} = APIKeys.create_key(ws, user, :viewer, "expired", expires_at: past)
+      assert is_nil(key.last_used_at)
+
+      assert {:error, :no_match} = APIKeys.touch_last_used(key)
+      reloaded = Bank.Repo.get!(APIKey, key.id)
+      assert is_nil(reloaded.last_used_at)
+    end
+
     test "concurrent calls are safe (no Ecto.StaleEntryError)",
          %{workspace: ws, user: user} do
       # `update_all` is the right tool here precisely because

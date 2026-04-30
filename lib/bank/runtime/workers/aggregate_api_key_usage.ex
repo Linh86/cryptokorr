@@ -19,13 +19,30 @@ defmodule Bank.Runtime.Workers.AggregateAPIKeyUsage do
 
   ## Idempotency
 
-  The job is scheduled by `Oban.Plugins.Cron` with a daily
-  schedule (see `config/config.exs`). Each invocation computes
-  the window `[yesterday-00:00 UTC, today-00:00 UTC)` and emits
-  events only for keys whose `last_used_at` falls in that range
-  AND for which an `api_key.used` event with the same
-  `window_start` does not already exist. A re-run within the
-  same window is therefore a no-op.
+  Three layers protect against duplicate audit rows:
+
+  1. **Cron scheduling**: `Oban.Plugins.Cron` inserts at most one
+     job per crontab firing (`30 0 * * *`).
+  2. **Oban `unique:` constraint** on `(worker, args)` over the
+     default `unique_states`
+     (`available, scheduled, executing, retryable`) — prevents a
+     second job for the same args while the first is still
+     active.
+  3. **Per-key DB pre-check** via `Bank.APIKeys.used_event_exists?/2`
+     before each `Audit.append_event/1` call.
+
+  ### Queue concurrency MUST stay at 1
+
+  Layer 3 (the per-key pre-check) is NOT atomic at the SQL level —
+  there is no unique constraint on
+  `(audit_events.subject_id, after_ref->>window_start)` for
+  `api_key.used`. If two workers ran the same window
+  simultaneously, both could see "no existing event" and both
+  insert. The `:api_key_usage` queue is configured with
+  concurrency `1` in `config/config.exs` to serialize jobs and
+  close that race. Bumping the queue concurrency without first
+  adding a SQL-level unique constraint would silently regress
+  idempotency.
 
   An explicit `args.window_start` / `args.window_end` override is
   supported for tests and for back-fill operator runs.
