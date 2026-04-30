@@ -833,6 +833,66 @@ defmodule Bank.Audit.Events do
   end
 
   @doc """
+  `api_key.rotated` — operator atomically replaced an active API
+  key (#220).
+
+  ONE event captures the full transition:
+
+    * `subject_id` = the NEW key id (forward-looking — this is the
+      live credential going forward; querying its history starts
+      here).
+    * `before_ref` = old key snapshot at the moment of rotation
+      (id, prefix, role, name, expires_at, workspace_id,
+      created_by_user_id, plus a `revoked_at` flag so replay sees
+      the old key's terminal state without a paired
+      `api_key.revoked` row).
+    * `after_ref` = new key snapshot, same allowlist as
+      `api_key_snapshot/1` (no raw secret, no secret_hash).
+
+  ## Actor attribution
+
+  Mirrors `api_key.created`: `actor_id` is the human user who
+  initiated the rotation. When the rotate request was itself
+  authenticated by an API key (machine caller), the controller
+  resolves the calling key's `created_by_user_id` and passes that
+  here, so every issued key remains chained back to a real human.
+
+  ## Workspace stamping
+
+  Both old and new keys share `workspace_id` by construction —
+  rotation cannot cross workspaces. The audit envelope rides on
+  the new key's `workspace_id`.
+
+  ## Secret hygiene
+
+  Neither `before_ref` nor `after_ref` contains the raw secret or
+  `secret_hash`. The hard-coded snapshot allowlist enforces this.
+  """
+  @spec api_key_rotated(APIKey.t(), APIKey.t(), keyword()) :: attrs()
+  def api_key_rotated(%APIKey{} = old_key, %APIKey{} = new_key, opts \\ []) do
+    actor_id =
+      case Keyword.get(opts, :actor) do
+        %User{id: id} -> id
+        nil -> new_key.created_by_user_id
+        id when is_binary(id) -> id
+      end
+
+    %{
+      actor: Keyword.get(opts, :actor_role, :user),
+      actor_id: actor_id,
+      event_type: "api_key.rotated",
+      subject_type: "api_key",
+      subject_id: new_key.id,
+      correlation_id: new_key.id,
+      before_ref:
+        api_key_snapshot(old_key)
+        |> Map.put(:revoked_at, old_key.revoked_at),
+      after_ref: api_key_snapshot(new_key),
+      workspace_id: new_key.workspace_id
+    }
+  end
+
+  @doc """
   `api_key.used` — daily aggregate emitted by
   `Bank.Runtime.Workers.AggregateAPIKeyUsage` (#218d).
 

@@ -163,6 +163,96 @@ defmodule Bank.APIKeys do
   end
 
   @doc """
+  Atomically rotate an API key (#220).
+
+  In a single transaction:
+
+    1. Conditionally revoke the OLD key with an `update_all` whose
+       `WHERE` clause carries `revoked_at IS NULL`. If 0 rows are
+       affected (the key was already revoked, or another rotation
+       won the race), the transaction is rolled back with
+       `{:error, :already_revoked}` — concurrent rotates cannot
+       produce two replacement keys.
+    2. Insert the new key with the same `workspace_id`, `role`,
+       `name`, and `expires_at` as the old key. The new key's
+       `created_by_user_id` is the rotating actor (or falls back
+       to the old key's creator if no actor is supplied — same
+       behavior as `revoke_key/2`'s actor handling).
+    3. Append the `api_key.rotated` audit event linking old → new.
+
+  No grace period: the old key is immediately unusable. Operators
+  who need overlap should `create_key + revoke_key` manually
+  (the existing duplicate-name policy supports this — see
+  `BankWeb.API.V1.APIKeyController` moduledoc).
+
+  ## Returns
+
+    * `{:ok, new_key, raw_secret}` — `raw_secret` shown ONCE on
+      the wire, same hygiene contract as `create_key/4`.
+    * `{:error, :already_revoked}` — old key was already revoked
+      (or revoked between the controller's `get_workspace_key/2`
+      and this call).
+    * `{:error, %Ecto.Changeset{}}` — new-key insert validation
+      failure (extremely rare since fields are copied from the
+      validated old row).
+
+  ## Race contract
+
+  Two concurrent rotate calls on the same active key both enter
+  the transaction. Postgres serializes the conditional UPDATE: at
+  most one sees `1` row affected; the loser sees `0` and rolls
+  back with `:already_revoked`. The winner proceeds to insert the
+  new row and emit the audit event. The system invariant — at
+  most one active replacement per rotation — holds.
+  """
+  @spec rotate_key(APIKey.t(), Bank.Accounts.User.t(), keyword()) ::
+          {:ok, APIKey.t(), String.t()}
+          | {:error, :already_revoked | Ecto.Changeset.t()}
+  def rotate_key(%APIKey{} = old_key, %Bank.Accounts.User{} = actor, opts \\ []) do
+    raw_secret = generate_secret()
+    {prefix, _rest} = split_for_storage(raw_secret)
+    now = DateTime.utc_now()
+
+    new_attrs = %{
+      workspace_id: old_key.workspace_id,
+      created_by_user_id: actor.id,
+      role: old_key.role,
+      name: old_key.name,
+      prefix: prefix,
+      secret_hash: hash_secret(raw_secret),
+      expires_at: Keyword.get(opts, :expires_at, old_key.expires_at)
+    }
+
+    Repo.transaction(fn ->
+      with {:ok, revoked_old} <- claim_revoke(old_key, now),
+           {:ok, new_key} <-
+             %APIKey{} |> APIKey.create_changeset(new_attrs) |> Repo.insert(),
+           {:ok, _event} <-
+             Audit.append_event(
+               Bank.Audit.Events.api_key_rotated(revoked_old, new_key, actor: actor)
+             ) do
+        {new_key, raw_secret}
+      else
+        {:error, reason} -> Repo.rollback(reason)
+      end
+    end)
+    |> case do
+      {:ok, {new_key, raw_secret}} -> {:ok, new_key, raw_secret}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp claim_revoke(%APIKey{id: id} = old_key, %DateTime{} = now) do
+    update_query =
+      from(k in APIKey, where: k.id == ^id and is_nil(k.revoked_at))
+
+    case Repo.update_all(update_query, set: [revoked_at: now, updated_at: now]) do
+      {1, _} -> {:ok, %APIKey{old_key | revoked_at: now, updated_at: now}}
+      {0, _} -> {:error, :already_revoked}
+    end
+  end
+
+  @doc """
   Fetch an API key by id. Returns `{:ok, key}` or `{:error, :not_found}`.
   """
   @spec get_key(String.t()) :: {:ok, APIKey.t()} | {:error, :not_found}

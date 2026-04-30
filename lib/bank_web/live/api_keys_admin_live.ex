@@ -45,10 +45,13 @@ defmodule BankWeb.APIKeysAdminLive do
 
     * `#api-keys-page` — wrapper for tests / E2E selectors.
     * `#api-key-create-form` — the create form.
-    * `#api-key-name`, `#api-key-role` — form input ids.
-    * `#api-key-raw-secret` — one-time raw-secret panel.
+    * `#api-key-name`, `#api-key-role`, `#api-key-expires-at` —
+      form input ids.
+    * `#api-key-raw-secret` — one-time raw-secret panel (reused
+      by both create and rotate).
     * `#api-key-list` — list wrapper.
     * `#api-key-row-<id>` — per-row anchor.
+    * `#api-key-rotate-<id>` — per-row rotate button (#220).
     * `#api-key-revoke-<id>` — per-row revoke button.
   """
 
@@ -68,7 +71,7 @@ defmodule BankWeb.APIKeysAdminLive do
          |> assign(:page_title, "API keys")
          |> assign(:raw_key, nil)
          |> assign(:create_error, nil)
-         |> assign_form(%{"name" => "", "role" => "viewer"})
+         |> assign_form(%{"name" => "", "role" => "viewer", "expires_at" => ""})
          |> load_keys()}
 
       _ ->
@@ -87,12 +90,14 @@ defmodule BankWeb.APIKeysAdminLive do
     with {:ok, role} <- parse_role(params),
          :ok <- enforce_creator_role(caller_role, role),
          {:ok, name} <- parse_name(params),
-         {:ok, key, raw_secret} <- APIKeys.create_key(workspace, creator, role, name) do
+         {:ok, expires_at} <- parse_expires_at(params),
+         opts = if(expires_at, do: [expires_at: expires_at], else: []),
+         {:ok, key, raw_secret} <- APIKeys.create_key(workspace, creator, role, name, opts) do
       {:noreply,
        socket
        |> assign(:raw_key, %{prefix: key.prefix, secret: raw_secret, name: key.name})
        |> assign(:create_error, nil)
-       |> assign_form(%{"name" => "", "role" => "viewer"})
+       |> assign_form(%{"name" => "", "role" => "viewer", "expires_at" => ""})
        |> load_keys()
        |> put_flash(:info, "API key created — copy the raw secret below before dismissing.")}
     else
@@ -143,6 +148,51 @@ defmodule BankWeb.APIKeysAdminLive do
 
       {:error, _other} ->
         {:noreply, put_flash(socket, :error, "Failed to revoke the key.")}
+    end
+  end
+
+  def handle_event("rotate", %{"id" => id}, socket) do
+    workspace_id = socket.assigns.current_scope.workspace.id
+    caller_role = socket.assigns.current_scope.role
+    actor = socket.assigns.current_scope.user
+
+    with {:ok, old_key} <- APIKeys.get_workspace_key(workspace_id, id),
+         # Creator-privilege parity with `create`: an admin caller
+         # cannot rotate an `:owner` key — otherwise rotation becomes
+         # a back-door for refreshing a credential the caller could
+         # not mint.
+         :ok <- enforce_creator_role(caller_role, old_key.role),
+         {:ok, new_key, raw_secret} <- APIKeys.rotate_key(old_key, actor) do
+      {:noreply,
+       socket
+       |> assign(:raw_key, %{
+         prefix: new_key.prefix,
+         secret: raw_secret,
+         name: new_key.name
+       })
+       |> load_keys()
+       |> put_flash(
+         :info,
+         "Rotated #{old_key.name} (#{old_key.prefix}) — copy the new raw secret below before dismissing."
+       )}
+    else
+      {:error, :not_found} ->
+        {:noreply, put_flash(socket, :error, "API key not found.")}
+
+      {:error, :forbidden_role_above_creator} ->
+        {:noreply,
+         put_flash(socket, :error, "You cannot rotate a key whose role exceeds your own.")}
+
+      {:error, :already_revoked} ->
+        # Old key was revoked between the page render and this
+        # click — the row should refresh into a "Revoked" state.
+        {:noreply,
+         socket
+         |> load_keys()
+         |> put_flash(:error, "Cannot rotate a revoked key.")}
+
+      {:error, _other} ->
+        {:noreply, put_flash(socket, :error, "Failed to rotate the key.")}
     end
   end
 
@@ -218,7 +268,7 @@ defmodule BankWeb.APIKeysAdminLive do
             for={@form}
             phx-change="validate"
             phx-submit="create"
-            class="grid grid-cols-1 gap-3 md:grid-cols-3"
+            class="grid grid-cols-1 gap-3 md:grid-cols-4"
           >
             <.input
               id="api-key-name"
@@ -234,6 +284,12 @@ defmodule BankWeb.APIKeysAdminLive do
               label="Role"
               options={role_options(@current_scope)}
               required
+            />
+            <.input
+              id="api-key-expires-at"
+              field={@form[:expires_at]}
+              type="datetime-local"
+              label="Expires at (optional)"
             />
             <div class="flex items-end">
               <button type="submit" class="btn btn-primary btn-sm">Create</button>
@@ -279,8 +335,17 @@ defmodule BankWeb.APIKeysAdminLive do
                   <div class="text-xs text-base-content/70">
                     {render_status(assigns, key)}
                   </div>
-                  <div class="text-right">
+                  <div class="flex justify-end gap-2">
                     <%= if is_nil(key.revoked_at) do %>
+                      <button
+                        id={"api-key-rotate-" <> key.id}
+                        phx-click="rotate"
+                        phx-value-id={key.id}
+                        data-confirm={"Rotate #{key.name}? The old secret stops working immediately."}
+                        class="btn btn-sm btn-outline"
+                      >
+                        Rotate
+                      </button>
                       <button
                         id={"api-key-revoke-" <> key.id}
                         phx-click="revoke"
@@ -348,6 +413,42 @@ defmodule BankWeb.APIKeysAdminLive do
   end
 
   defp parse_name(_), do: {:error, "name is required"}
+
+  # Empty / missing → no expiry. The HTML `datetime-local` input
+  # emits values as `YYYY-MM-DDTHH:MM` (local time, no zone, no
+  # seconds), which `DateTime.from_iso8601/1` does NOT accept.
+  # Append `:00Z` so the value is interpreted as UTC — operators
+  # who need a different zone can persist via the `/v1/api_keys`
+  # API directly with a fully-qualified ISO8601 timestamp.
+  defp parse_expires_at(%{"expires_at" => v}) when is_binary(v) do
+    case String.trim(v) do
+      "" ->
+        {:ok, nil}
+
+      trimmed ->
+        normalised =
+          if String.match?(trimmed, ~r/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/) do
+            trimmed <> ":00Z"
+          else
+            trimmed
+          end
+
+        with {:ok, dt, _} <- DateTime.from_iso8601(normalised),
+             :gt <- DateTime.compare(dt, DateTime.utc_now()) do
+          {:ok, dt}
+        else
+          # Mirrors the controller-side past-rejection. Auth path
+          # already refuses expired keys at use-time; we refuse here
+          # too so the operator does not mint an immediately-broken
+          # key by mistake.
+          :eq -> {:error, "expires_at must be in the future"}
+          :lt -> {:error, "expires_at must be in the future"}
+          _ -> {:error, "expires_at is not a valid datetime"}
+        end
+    end
+  end
+
+  defp parse_expires_at(_), do: {:ok, nil}
 
   defp enforce_creator_role(creator_role, requested_role) do
     if Membership.role_at_least?(creator_role, requested_role) do

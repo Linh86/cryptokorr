@@ -349,6 +349,200 @@ defmodule BankWeb.API.V1.APIKeyControllerTest do
     end
   end
 
+  # --- POST /v1/api_keys/:id/rotate ---------------------------------------
+
+  describe "POST /v1/api_keys/:id/rotate" do
+    test "201 returns the new entity + raw_key (shown once); old key revoked",
+         %{conn: conn, workspace: ws, current_user: user} do
+      {:ok, old, _old_raw} = APIKeys.create_key(ws, user, :operator, "ci-runner")
+
+      conn = post(conn, ~p"/v1/api_keys/#{old.id}/rotate")
+      body = json_response(conn, 201)
+
+      assert %{"data" => entity, "raw_key" => raw_key} = body
+      assert entity["id"] != old.id
+      assert entity["role"] == "operator"
+      assert entity["name"] == "ci-runner"
+      assert String.starts_with?(raw_key, "cb_")
+
+      # Old key is now revoked in the DB.
+      reloaded_old = Bank.Repo.get!(APIKey, old.id)
+      assert %DateTime{} = reloaded_old.revoked_at
+
+      # New key is in the workspace.
+      assert {:ok, new} = APIKeys.get_key(entity["id"])
+      assert new.workspace_id == ws.id
+      assert is_nil(new.revoked_at)
+    end
+
+    test "old raw key fails auth immediately after rotate (401)",
+         %{conn: conn, workspace: ws, current_user: user} do
+      {:ok, old, old_raw} = APIKeys.create_key(ws, user, :operator, "no-grace")
+
+      _ = post(conn, ~p"/v1/api_keys/#{old.id}/rotate") |> json_response(201)
+
+      conn2 =
+        build_conn()
+        |> put_req_header("authorization", "Bearer " <> old_raw)
+        |> get(~p"/v1/api_keys")
+
+      assert %{"error" => %{"code" => "invalid_credentials"}} = json_response(conn2, 401)
+    end
+
+    test "new raw key authenticates and can list keys",
+         %{conn: conn, workspace: ws, current_user: user} do
+      {:ok, old, _old_raw} = APIKeys.create_key(ws, user, :admin, "swap-mgmt")
+
+      body =
+        conn
+        |> post(~p"/v1/api_keys/#{old.id}/rotate")
+        |> json_response(201)
+
+      conn2 =
+        build_conn()
+        |> put_req_header("authorization", "Bearer " <> body["raw_key"])
+        |> get(~p"/v1/api_keys")
+
+      assert %{"data" => _} = json_response(conn2, 200)
+    end
+
+    test "201 emits api_key.rotated audit event with workspace_id, no secret leak",
+         %{conn: conn, workspace: ws, current_user: user} do
+      {:ok, old, _} = APIKeys.create_key(ws, user, :viewer, "audited-rotate")
+
+      body =
+        conn
+        |> post(~p"/v1/api_keys/#{old.id}/rotate")
+        |> json_response(201)
+
+      new_id = body["data"]["id"]
+
+      %{events: events} = Audit.list_events(%{event_type: "api_key.rotated"})
+      [event] = Enum.filter(events, &(&1.subject_id == new_id))
+
+      assert event.workspace_id == ws.id
+      assert event.before_ref["id"] == old.id
+      assert event.after_ref["id"] == new_id
+
+      sanitized = event |> Map.from_struct() |> Map.drop([:__meta__, :workspace])
+      json = Jason.encode!(sanitized)
+
+      refute json =~ "cb_"
+      refute json =~ "secret_hash"
+    end
+
+    test "404 when id is unknown", %{conn: conn} do
+      conn = post(conn, ~p"/v1/api_keys/#{Ecto.UUID.generate()}/rotate")
+      assert %{"error" => %{"code" => "not_found"}} = json_response(conn, 404)
+    end
+
+    test "404 (NOT 403) for cross-workspace rotation",
+         %{conn: conn, current_user: user_a} do
+      {:ok, ws_b} = Workspaces.create_workspace(%{slug: "rot-iso", name: "Other"})
+
+      {:ok, _} =
+        Workspaces.create_membership(%{user_id: user_a.id, workspace_id: ws_b.id, role: :admin})
+
+      {:ok, key_b, _} = APIKeys.create_key(ws_b, user_a, :operator, "from-b")
+
+      conn = post(conn, ~p"/v1/api_keys/#{key_b.id}/rotate")
+      assert %{"error" => %{"code" => "not_found"}} = json_response(conn, 404)
+
+      # WS-B's key is still untouched.
+      reloaded = Bank.Repo.get!(APIKey, key_b.id)
+      assert is_nil(reloaded.revoked_at)
+    end
+
+    test "422 already_revoked when target is already revoked",
+         %{conn: conn, workspace: ws, current_user: user} do
+      {:ok, key, _} = APIKeys.create_key(ws, user, :operator, "stale")
+      {:ok, _} = APIKeys.revoke_key(key, actor: user)
+
+      conn = post(conn, ~p"/v1/api_keys/#{key.id}/rotate")
+      assert %{"error" => %{"code" => "already_revoked"}} = json_response(conn, 422)
+    end
+
+    test "401 missing_authorization without bearer", %{workspace: ws, current_user: user} do
+      {:ok, key, _} = APIKeys.create_key(ws, user, :operator, "guarded")
+
+      conn = build_conn() |> post(~p"/v1/api_keys/#{key.id}/rotate")
+      assert %{"error" => %{"code" => "missing_authorization"}} = json_response(conn, 401)
+    end
+
+    test "403 insufficient_role for an operator key",
+         %{workspace: ws, current_user: user} do
+      {:ok, key, _} = APIKeys.create_key(ws, user, :operator, "target")
+      {:ok, _, op_raw} = APIKeys.create_key(ws, user, :operator, "operator-attempt")
+
+      conn =
+        build_conn()
+        |> put_req_header("authorization", "Bearer " <> op_raw)
+        |> post(~p"/v1/api_keys/#{key.id}/rotate")
+
+      assert %{"error" => %{"code" => "insufficient_role"}} = json_response(conn, 403)
+    end
+
+    test "403 forbidden_role_above_creator when admin tries to rotate an owner key (#220 P2)",
+         %{conn: conn, workspace: ws} do
+      # The default admin caller (`setup_api_key_admin`) cannot mint
+      # an owner key via create. Without parity on rotate, the same
+      # admin could refresh an owner credential via this path —
+      # closes that escalation chain.
+      {:ok, owner_user} =
+        Bank.Accounts.find_or_create_from_oauth(%{
+          provider: :google,
+          subject: "owner-rotate",
+          email: "owner-rotate@example.com",
+          name: "Owner Rotate"
+        })
+
+      {:ok, _} =
+        Workspaces.create_membership(%{
+          user_id: owner_user.id,
+          workspace_id: ws.id,
+          role: :owner
+        })
+
+      {:ok, owner_key, _} = APIKeys.create_key(ws, owner_user, :owner, "owner-creds")
+
+      conn = post(conn, ~p"/v1/api_keys/#{owner_key.id}/rotate")
+      assert %{"error" => %{"code" => "forbidden_role_above_creator"}} = json_response(conn, 403)
+
+      # Owner key must remain active — refused rotate cannot revoke
+      # the old key.
+      reloaded = Bank.Repo.get!(APIKey, owner_key.id)
+      assert is_nil(reloaded.revoked_at)
+    end
+  end
+
+  # --- POST /v1/api_keys (with expires_at via UI / body) --------------------
+
+  describe "POST /v1/api_keys with expires_at (UI exposure backfill, #220)" do
+    test "422 invalid_expires_at when expires_at is in the past (#220 P2)",
+         %{conn: conn} do
+      conn =
+        post(conn, ~p"/v1/api_keys", %{
+          "role" => "viewer",
+          "name" => "past-ttl",
+          "expires_at" => "2000-01-01T00:00:00Z"
+        })
+
+      assert %{"error" => %{"code" => "invalid_expires_at"}} = json_response(conn, 422)
+    end
+
+    test "honours an empty-string expires_at as nil (UI sends '')",
+         %{conn: conn} do
+      conn =
+        post(conn, ~p"/v1/api_keys", %{
+          "role" => "viewer",
+          "name" => "no-ttl",
+          "expires_at" => ""
+        })
+
+      assert %{"data" => %{"expires_at" => nil}} = json_response(conn, 201)
+    end
+  end
+
   # --- helpers --------------------------------------------------------------
 
   defp get_authorization(conn) do

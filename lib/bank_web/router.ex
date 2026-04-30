@@ -213,9 +213,11 @@ defmodule BankWeb.Router do
     post "/security/resume", SecurityController, :resume
     post "/security/revoke_delegation", SecurityController, :revoke_delegation
 
-    # API key management (#218c). Admin-only — credential issuance.
+    # API key management (#218c, rotation #220). Admin-only —
+    # credential issuance.
     get "/api_keys", APIKeyController, :index
     post "/api_keys", APIKeyController, :create
+    post "/api_keys/:id/rotate", APIKeyController, :rotate
     delete "/api_keys/:id", APIKeyController, :delete
   end
 
