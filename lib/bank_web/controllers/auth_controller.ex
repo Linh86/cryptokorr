@@ -26,6 +26,14 @@ defmodule BankWeb.AuthController do
   starts a session — they just see the pending-access screen
   (issue #157). `:disabled` users get a flash and no session.
 
+  ## Invite consumption
+
+  Between the identity upsert and the scope re-resolution we call
+  `Bank.Access.apply_invites_for_user/1` (issue #156). An active
+  exact-email invite turns into a fresh membership; an active
+  domain invite stays pending. The scope resolution that follows
+  picks up any newly created membership without a second login.
+
   ## Logging hygiene
 
   This controller never logs `params` (which carry the auth code)
@@ -37,6 +45,7 @@ defmodule BankWeb.AuthController do
 
   use BankWeb, :controller
 
+  alias Bank.Access
   alias Bank.Accounts
   alias Bank.Accounts.OAuthProvider
   alias Bank.Workspaces
@@ -121,6 +130,11 @@ defmodule BankWeb.AuthController do
     case Accounts.find_or_create_from_oauth(claims) do
       {:ok, user} ->
         if Accounts.session_allowed?(user) do
+          # Apply any active invite for this user before resolving
+          # scope so a brand-new exact-email invite turns into the
+          # workspace landing on the very first login (#156).
+          _ = Access.apply_invites_for_user(user)
+
           resolution = Workspaces.resolve_scope(user)
 
           conn
