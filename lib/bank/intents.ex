@@ -418,7 +418,7 @@ defmodule Bank.Intents do
     case Repo.transaction(multi) do
       {:ok, %{report: report} = changes} ->
         updated_intent = Map.get(changes, :intent, intent)
-        emit_simulate_audits(report, reason, refreshed?, opts)
+        emit_simulate_audits(report, reason, refreshed?, opts, intent.workspace_id)
 
         {:ok,
          %{
@@ -459,16 +459,16 @@ defmodule Bank.Intents do
     )
   end
 
-  defp emit_simulate_audits(report, reason, refreshed?, opts) do
+  defp emit_simulate_audits(report, reason, refreshed?, opts, workspace_id) do
     audit_opts =
-      []
+      [workspace_id: workspace_id]
       |> maybe_put_actor(opts)
       |> maybe_put_actor_id(opts)
 
     _ = Runtime.emit_audit(AuditEvents.simulation_requested(report, reason, audit_opts))
 
     if refreshed? do
-      _ = Runtime.emit_audit(AuditEvents.simulation_produced(report))
+      _ = Runtime.emit_audit(AuditEvents.simulation_produced(report, workspace_id: workspace_id))
     end
 
     :ok

@@ -140,17 +140,20 @@ defmodule BankWeb.SecurityLive do
   # then we union and sort. Capped small — this is a "is the runtime
   # safe right now?" view, not a forensic timeline.
   #
-  # Workspace-scoping rule (#158c):
+  # Workspace-scoping rule (#158c, refined by #158d-b):
   #
   #   * `security.paused` / `security.resumed` stay runtime-global
   #     (correlation_id is `nil` per `Bank.Audit` docs). Every
   #     workspace's operators need visibility into a global pause.
-  #   * `delegation.*` events have a delegation as their subject.
-  #     Today the audit envelope does not stamp `workspace_id` on
-  #     these rows, so we cannot filter at the query layer; instead
-  #     we filter post-query against the workspace's own delegation
-  #     ids so an operator never sees another workspace's
-  #     delegation transitions on their security dashboard.
+  #   * `delegation.*` events from #158d-b onward carry `workspace_id`
+  #     via the audit envelope passthrough, but events written
+  #     before #158d-b have `workspace_id IS NULL`. A query-layer
+  #     `WHERE workspace_id = ?` would silently drop the legacy
+  #     tail. We keep the post-query filter against the workspace's
+  #     own delegation ids — it is robust to both stamped and
+  #     legacy events. Once a backfill closes the legacy tail (a
+  #     future PR), the query can switch to `WHERE workspace_id`
+  #     directly.
   defp load_safety_events(workspace_delegations) do
     delegation_ids =
       workspace_delegations
