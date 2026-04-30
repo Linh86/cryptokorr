@@ -6,6 +6,8 @@ defmodule BankWeb.PoliciesLiveTest do
   use BankWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
+
+  setup :register_and_log_in_user
   import Bank.Fixtures
 
   # --- Mount / render -------------------------------------------------------

@@ -7,6 +7,8 @@ defmodule BankWeb.QueueLiveTest do
 
   import Phoenix.LiveViewTest
 
+  setup :register_and_log_in_user
+
   alias Bank.Security.PauseState
 
   import Bank.Fixtures

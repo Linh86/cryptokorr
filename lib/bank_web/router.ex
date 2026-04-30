@@ -153,20 +153,35 @@ defmodule BankWeb.Router do
   # Issue #13 replaced the default landing page with the
   # connection/delegation dashboard; #14, #15, #16, and #44 added the
   # action queue, counterparty/policy management, audit / replay /
-  # security console, and the intents explorer respectively.
+  # security console, and the intents explorer respectively. #157
+  # wraps the lot in a `live_session` so the on_mount hook can refuse
+  # anonymous and pending users at the LiveView boundary.
   scope "/", BankWeb do
     pipe_through :browser
 
-    live "/", ControlLive
-    live "/dashboard", DashboardLive
-    live "/intents", IntentsLive
-    live "/queue", QueueLive
-    live "/counterparties", CounterpartiesLive
-    live "/counterparties/:id", CounterpartyDetailLive
-    live "/policies", PoliciesLive
-    live "/audit", AuditLive
-    live "/audit/replay/:intent_id", IntentReplayLive
-    live "/security", SecurityLive
+    live_session :operator, on_mount: {BankWeb.LiveAuth, :require_workspace} do
+      live "/", ControlLive
+      live "/dashboard", DashboardLive
+      live "/intents", IntentsLive
+      live "/queue", QueueLive
+      live "/counterparties", CounterpartiesLive
+      live "/counterparties/:id", CounterpartyDetailLive
+      live "/policies", PoliciesLive
+      live "/audit", AuditLive
+      live "/audit/replay/:intent_id", IntentReplayLive
+      live "/security", SecurityLive
+    end
+  end
+
+  # Admin surface — bootstrap private-alpha approve / reject (#157).
+  # Gated by `Bank.Access.can_admin_access?/1` (BANK_ADMIN_EMAILS
+  # allowlist) until role-based authz lands in #159.
+  scope "/admin", BankWeb do
+    pipe_through :browser
+
+    live_session :admin, on_mount: {BankWeb.LiveAuth, :require_admin} do
+      live "/access", AccessAdminLive, :index
+    end
   end
 
   # Enable LiveDashboard in development

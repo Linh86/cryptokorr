@@ -108,3 +108,8 @@ config :bank, Bank.Stablecoins.Providers.Jupiter,
 # in-process stub instead of calling Google.
 config :bank, Bank.Accounts.OAuthProvider, provider: Bank.Accounts.OAuthProvider.Stub
 config :bank, Bank.Accounts.OAuthProvider.Stub, %{}
+
+# Bootstrap admin allowlist (epic #153, issue #157). Empty by
+# default so tests explicitly opt in via `Application.put_env/3` per
+# case.
+config :bank, :admin_emails, []

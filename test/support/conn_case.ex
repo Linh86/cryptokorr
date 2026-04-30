@@ -35,4 +35,49 @@ defmodule BankWeb.ConnCase do
     Bank.DataCase.setup_sandbox(tags)
     {:ok, conn: Phoenix.ConnTest.build_conn()}
   end
+
+  @doc """
+  Test setup helper for routes gated by
+  `BankWeb.LiveAuth.:require_workspace` (#157). Inserts a fresh
+  user with a single active workspace membership and returns a
+  `conn` whose session points at that user.
+
+  Test files that need to mount an operator LiveView (`/`,
+  `/dashboard`, ...) opt in by adding
+  `setup :register_and_log_in_user` near the top of the file.
+  Returns `{:ok, %{conn: conn, current_user: user, workspace:
+  workspace}}` so individual tests can pattern-match on the setup
+  map when they need the user / workspace ids.
+  """
+  def register_and_log_in_user(%{conn: conn} = _context) do
+    suffix = System.unique_integer([:positive])
+
+    {:ok, user} =
+      Bank.Accounts.find_or_create_from_oauth(%{
+        provider: :google,
+        subject: "test-user-#{suffix}",
+        email: "test-user-#{suffix}@example.com",
+        name: "Test User #{suffix}"
+      })
+
+    {:ok, workspace} =
+      Bank.Workspaces.create_workspace(%{
+        slug: "test-ws-#{suffix}",
+        name: "Test workspace #{suffix}"
+      })
+
+    {:ok, _} =
+      Bank.Workspaces.create_membership(%{
+        user_id: user.id,
+        workspace_id: workspace.id,
+        role: :operator
+      })
+
+    conn =
+      conn
+      |> Plug.Test.init_test_session(%{})
+      |> Plug.Conn.put_session(:user_id, user.id)
+
+    {:ok, conn: conn, current_user: user, workspace: workspace}
+  end
 end

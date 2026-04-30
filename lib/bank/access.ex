@@ -1,7 +1,7 @@
 defmodule Bank.Access do
   @moduledoc """
-  Invite-only allowlist + pending access semantics (epic #153,
-  issue #156).
+  Invite-only allowlist + pending access semantics + admin
+  approve/reject flow (epic #153, issues #156 + #157).
 
   This context owns the `access_invites` table and the rules that
   decide whether an OAuth-authenticated user crosses the line from
@@ -26,18 +26,36 @@ defmodule Bank.Access do
       other workspace's id.
     * A `:disabled` user is never admitted, regardless of invite.
 
+  ## Admin approve / reject (issue #157)
+
+    * `list_pending_access/1` — users with no active membership and
+      not `:disabled`. Each row is classified (`:domain_match`,
+      `:allowlist_missed`, `:exact_match_pending`) so the operator
+      console can render context inline.
+    * `approve_pending_user/3` — bootstrap-admin grants membership.
+      Uses the matching domain invite for `workspace_id` / `role`
+      defaults; falls back to explicit opts when no invite exists.
+      Idempotent (`:already_member` for an existing active membership;
+      `:membership_reactivated` for a revived inactive one).
+    * `reject_pending_user/3` — flips the user to `:disabled` so
+      future logins are refused at the session boundary. Audit
+      history is preserved untouched.
+    * `can_admin_access?/1` — bootstrap admin guard backed by the
+      `:bank, :admin_emails` config (`BANK_ADMIN_EMAILS` env). This
+      is a temporary alpha-only gate that #159 replaces with a real
+      role-based authorization matrix.
+
   ## What this context is NOT
 
     * It does not start a session — that is the auth controller.
     * It does not enforce role-based authorization on subsequent
       requests — that is issue #159.
-    * It does not implement the admin approve/reject UI — that is
-      issue #157, which reads from this module.
 
   ## Audit
 
   Invite-related audit events (`access_invite.created`,
-  `access_invite.accepted`, `access_invite.revoked`) are deferred to
+  `access_invite.accepted`, `access_invite.revoked`,
+  `access.admin_approved`, `access.admin_rejected`) are deferred to
   issue #161 to keep this module small and the OAuth callback path
   free of `Bank.Audit.Envelope` plumbing. The hooks live as TODOs
   in the relevant functions.
@@ -46,6 +64,7 @@ defmodule Bank.Access do
   import Ecto.Query
 
   alias Bank.Access.AccessInvite
+  alias Bank.Accounts
   alias Bank.Accounts.User
   alias Bank.Repo
   alias Bank.Workspaces
@@ -59,6 +78,35 @@ defmodule Bank.Access do
           | {:exact_match_accepted, Membership.t()}
           | {:exact_match_already_member, Membership.t()}
           | {:domain_match_pending, AccessInvite.t()}
+
+  @type pending_classification ::
+          :exact_match_pending | :domain_match | :allowlist_missed
+
+  @type pending_row :: %{
+          required(:user) => User.t(),
+          required(:classification) => pending_classification(),
+          required(:invite) => AccessInvite.t() | nil
+        }
+
+  @type approve_outcome ::
+          :membership_created
+          | :already_member
+          | :membership_reactivated
+
+  @type approve_result ::
+          {:ok, approve_outcome(), Membership.t()}
+          | {:error,
+             :unauthorized
+             | :self_action
+             | :user_disabled
+             | :workspace_target_required
+             | :role_required
+             | term()}
+
+  @type reject_result ::
+          {:ok, :rejected, User.t()}
+          | {:ok, :already_disabled, User.t()}
+          | {:error, :unauthorized | :self_action | term()}
 
   # --- Public surface -------------------------------------------------------
 
@@ -409,5 +457,270 @@ defmodule Bank.Access do
     Enum.any?(errors, fn
       {_, {msg, _}} -> msg =~ "has already been taken"
     end)
+  end
+
+  # --- Admin (issue #157) -------------------------------------------------
+
+  @doc """
+  The lowercased + trimmed list of operator emails allowed to use
+  the admin approve / reject surface during private alpha. Sourced
+  from the `:bank, :admin_emails` config (set from
+  `BANK_ADMIN_EMAILS` in `config/runtime.exs`).
+  """
+  @spec admin_emails() :: [String.t()]
+  def admin_emails do
+    :bank
+    |> Application.get_env(:admin_emails, [])
+    |> List.wrap()
+    |> Enum.map(&normalise_email/1)
+    |> Enum.reject(fn entry -> entry in [nil, ""] end)
+  end
+
+  @doc """
+  Whether `user` is allowed to use the admin approve / reject
+  surface. Backed by the `BANK_ADMIN_EMAILS` allowlist; this is a
+  bootstrap-only guard that issue #159 replaces with role-based
+  authorization once a workspace has stable owners.
+
+  Returns `false` for `nil`, anonymous, or `:disabled` users.
+  """
+  @spec can_admin_access?(User.t() | nil) :: boolean()
+  def can_admin_access?(nil), do: false
+  def can_admin_access?(%User{status: :disabled}), do: false
+
+  def can_admin_access?(%User{email: email}) when is_binary(email) do
+    case normalise_email(email) do
+      "" -> false
+      nil -> false
+      addr -> addr in admin_emails()
+    end
+  end
+
+  def can_admin_access?(_), do: false
+
+  @doc """
+  Rows the admin /access page renders. A user is in the result iff:
+
+    * their `status` is not `:disabled`, AND
+    * they have zero active memberships.
+
+  Each row carries a classification — `:domain_match` (a live domain
+  invite is waiting), `:exact_match_pending` (a live exact-email
+  invite is somehow still active despite the apply path; corner
+  case), or `:allowlist_missed` (no live invite at all). The
+  matching invite, when there is one, is included so the UI can
+  show the workspace and role.
+
+  Newest sign-ins first (most recent `last_login_at` then
+  `inserted_at`). Capped at `opts[:limit]` (default 100, max 500).
+  """
+  @spec list_pending_access(keyword()) :: [pending_row()]
+  def list_pending_access(opts \\ []) do
+    limit = Keyword.get(opts, :limit, 100) |> max(1) |> min(500)
+
+    pending_users =
+      from(u in User,
+        left_join: m in Membership,
+        on: m.user_id == u.id and m.status == :active,
+        where: u.status != :disabled and is_nil(m.id),
+        order_by: [
+          desc_nulls_last: u.last_login_at,
+          desc: u.inserted_at
+        ],
+        limit: ^limit
+      )
+      |> Repo.all()
+
+    Enum.map(pending_users, &classify_pending/1)
+  end
+
+  @doc """
+  Classify one user (by re-running the invite-matching read path).
+  Useful from the pending-access screen, which has only the current
+  user in scope.
+  """
+  @spec classify_pending(User.t()) :: pending_row()
+  def classify_pending(%User{} = user) do
+    case find_matching_invite_for_user(user) do
+      %AccessInvite{invite_type: :exact_email} = invite ->
+        %{user: user, classification: :exact_match_pending, invite: invite}
+
+      %AccessInvite{invite_type: :domain} = invite ->
+        %{user: user, classification: :domain_match, invite: invite}
+
+      nil ->
+        %{user: user, classification: :allowlist_missed, invite: nil}
+    end
+  end
+
+  @doc """
+  Admin-driven approve. Grants the target user a workspace
+  membership.
+
+  Resolution order for the target workspace + role:
+
+    1. Explicit `opts[:workspace_id]` and `opts[:role]` — used as-is
+       if both are supplied.
+    2. The matching domain invite returned by
+       `find_matching_invite_for_user/1` — used to fill in either
+       missing field.
+    3. Otherwise, returns `{:error, :workspace_target_required}` or
+       `{:error, :role_required}` so the caller can prompt the
+       admin for the missing piece.
+
+  Idempotent:
+
+    * Existing active membership for `(target, workspace)` →
+      `{:ok, :already_member, _}`.
+    * Existing inactive membership → reactivated;
+      `{:ok, :membership_reactivated, _}`.
+    * No membership → fresh insert; `{:ok, :membership_created, _}`.
+    * Concurrent admin click that loses the unique-`(user_id,
+      workspace_id)` race → re-fetches the membership and reports
+      `:already_member` (matches the apply-invites race-handling
+      from #264).
+
+  Refuses self-approval (`{:error, :self_action}`) and refuses
+  approving a `:disabled` user (`{:error, :user_disabled}`). The
+  matched domain invite is left `:active` — domain invites are
+  cohort-shaped, not single-use.
+  """
+  @spec approve_pending_user(User.t(), User.t(), keyword()) :: approve_result()
+  def approve_pending_user(actor, target, opts \\ [])
+
+  def approve_pending_user(%User{id: same_id}, %User{id: same_id}, _opts),
+    do: {:error, :self_action}
+
+  def approve_pending_user(%User{} = actor, %User{} = target, opts) do
+    # Reload the target inside the function so a caller acting on a
+    # stale list snapshot still sees current status. The
+    # `:user_disabled` and `:already_member` paths both depend on
+    # values that may have changed since the LiveView last rendered.
+    case Accounts.get_user(target.id) do
+      nil ->
+        {:error, :not_found}
+
+      %User{} = current ->
+        cond do
+          not can_admin_access?(actor) -> {:error, :unauthorized}
+          current.status == :disabled -> {:error, :user_disabled}
+          true -> do_approve(current, opts)
+        end
+    end
+  end
+
+  defp do_approve(%User{} = target, opts) do
+    matching = find_matching_invite_for_user(target)
+
+    workspace_id =
+      Keyword.get(opts, :workspace_id) ||
+        (matching && matching.workspace_id)
+
+    role = Keyword.get(opts, :role) || (matching && matching.role)
+
+    cond do
+      is_nil(workspace_id) -> {:error, :workspace_target_required}
+      is_nil(role) -> {:error, :role_required}
+      true -> upsert_membership(target, workspace_id, role)
+    end
+  end
+
+  defp upsert_membership(%User{} = target, workspace_id, role) do
+    case Workspaces.get_membership(target, workspace_id) do
+      %Membership{status: :active} = m ->
+        {:ok, :already_member, m}
+
+      %Membership{status: :inactive} = m ->
+        case Workspaces.set_status(m, :active) do
+          {:ok, reactivated} ->
+            # TODO #161: emit `access.admin_approved`.
+            {:ok, :membership_reactivated, reactivated}
+
+          err ->
+            err
+        end
+
+      nil ->
+        case Workspaces.create_membership(%{
+               user_id: target.id,
+               workspace_id: workspace_id,
+               role: role
+             }) do
+          {:ok, m} ->
+            # TODO #161: emit `access.admin_approved`.
+            {:ok, :membership_created, m}
+
+          {:error, %Ecto.Changeset{} = changeset} ->
+            # Same race shape as `apply_exact_match`: a concurrent
+            # admin click won the unique-`(user_id, workspace_id)`
+            # insert before us. Re-fetch and report idempotently.
+            if unique_constraint_violation?(changeset) do
+              case Workspaces.get_membership(target, workspace_id) do
+                %Membership{status: :active} = m ->
+                  {:ok, :already_member, m}
+
+                %Membership{} = m ->
+                  case Workspaces.set_status(m, :active) do
+                    {:ok, reactivated} ->
+                      {:ok, :membership_reactivated, reactivated}
+
+                    err ->
+                      err
+                  end
+
+                nil ->
+                  {:error, changeset}
+              end
+            else
+              {:error, changeset}
+            end
+        end
+    end
+  end
+
+  @doc """
+  Admin-driven reject. Flips the target user to `:disabled` so
+  subsequent OAuth callbacks refuse a session and the
+  `FetchCurrentUser` plug clears any live session on the next
+  request.
+
+  Idempotent: rejecting an already-disabled user returns
+  `{:ok, :already_disabled, user}`. Audit history is preserved —
+  `access.invite_matched` and `access.allowlist_missed` rows from
+  the invite flow stay intact. Domain invites are NOT auto-revoked;
+  one rejected user does not revoke the cohort invite.
+
+  Refuses self-rejection (`{:error, :self_action}`).
+  """
+  @spec reject_pending_user(User.t(), User.t(), keyword()) :: reject_result()
+  def reject_pending_user(actor, target, opts \\ [])
+
+  def reject_pending_user(%User{id: same_id}, %User{id: same_id}, _opts),
+    do: {:error, :self_action}
+
+  def reject_pending_user(%User{} = actor, %User{} = target, _opts) do
+    case Accounts.get_user(target.id) do
+      nil ->
+        {:error, :not_found}
+
+      %User{} = current ->
+        cond do
+          not can_admin_access?(actor) ->
+            {:error, :unauthorized}
+
+          current.status == :disabled ->
+            {:ok, :already_disabled, current}
+
+          true ->
+            case Accounts.disable_user(current) do
+              {:ok, disabled} ->
+                # TODO #161: emit `access.admin_rejected`.
+                {:ok, :rejected, disabled}
+
+              err ->
+                err
+            end
+        end
+    end
   end
 end
