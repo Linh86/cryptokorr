@@ -18,6 +18,8 @@ defmodule Bank.APIKeysTest do
 
   use Bank.DataCase, async: false
 
+  import Ecto.Query, only: [from: 2]
+
   alias Bank.APIKeys
   alias Bank.APIKeys.APIKey
   alias Bank.Audit
@@ -292,6 +294,136 @@ defmodule Bank.APIKeysTest do
       {:ok, _key, raw} = APIKeys.create_key(ws, user, :operator, "exp", expires_at: past)
 
       assert {:error, :expired} = APIKeys.verify_key(raw)
+    end
+  end
+
+  # --- touch_last_used / list_keys_used_between (#218d) -------------------
+
+  describe "touch_last_used/2" do
+    test "advances last_used_at on a key with no prior usage",
+         %{workspace: ws, user: user} do
+      {:ok, key, _raw} = APIKeys.create_key(ws, user, :viewer, "fresh")
+      assert is_nil(key.last_used_at)
+
+      assert {:ok, %APIKey{last_used_at: %DateTime{}}} =
+               APIKeys.touch_last_used(key)
+    end
+
+    test "is a no-op when last_used_at is within the throttle window",
+         %{workspace: ws, user: user} do
+      {:ok, key, _raw} = APIKeys.create_key(ws, user, :viewer, "throttled")
+      now = DateTime.utc_now()
+
+      Bank.Repo.update_all(
+        from(k in APIKey, where: k.id == ^key.id),
+        set: [last_used_at: now]
+      )
+
+      key = Bank.Repo.get!(APIKey, key.id)
+
+      # Ten-second threshold; the row was just touched, so the
+      # call returns the existing timestamp unchanged.
+      assert {:ok, returned} = APIKeys.touch_last_used(key, 10)
+      assert returned.last_used_at == key.last_used_at
+    end
+
+    test "advances last_used_at when prior usage is older than the threshold",
+         %{workspace: ws, user: user} do
+      {:ok, key, _raw} = APIKeys.create_key(ws, user, :viewer, "stale")
+
+      stale = DateTime.add(DateTime.utc_now(), -3600, :second)
+
+      Bank.Repo.update_all(
+        from(k in APIKey, where: k.id == ^key.id),
+        set: [last_used_at: stale]
+      )
+
+      key = Bank.Repo.get!(APIKey, key.id)
+
+      assert {:ok, %APIKey{last_used_at: %DateTime{} = new_ts}} =
+               APIKeys.touch_last_used(key, 60)
+
+      assert DateTime.compare(new_ts, stale) == :gt
+    end
+
+    test "concurrent calls are safe (no Ecto.StaleEntryError)",
+         %{workspace: ws, user: user} do
+      # `update_all` is the right tool here precisely because
+      # `Repo.update/1` would race on the optimistic-lock-style
+      # `updated_at` check. Pin the contract with a small
+      # parallel batch.
+      {:ok, key, _raw} = APIKeys.create_key(ws, user, :viewer, "concurrent")
+
+      results =
+        1..5
+        |> Task.async_stream(fn _ -> APIKeys.touch_last_used(key, 60) end,
+          ordered: false,
+          max_concurrency: 5
+        )
+        |> Enum.map(fn {:ok, result} -> result end)
+
+      for result <- results, do: assert(match?({:ok, _}, result))
+    end
+  end
+
+  describe "list_keys_used_between/2 and used_event_exists?/2" do
+    test "list returns only keys whose last_used_at falls in the half-open window",
+         %{workspace: ws, user: user} do
+      {:ok, k_in, _} = APIKeys.create_key(ws, user, :viewer, "in")
+      {:ok, k_before, _} = APIKeys.create_key(ws, user, :viewer, "before")
+      {:ok, k_after, _} = APIKeys.create_key(ws, user, :viewer, "after")
+      {:ok, k_unused, _} = APIKeys.create_key(ws, user, :viewer, "unused")
+
+      window_start = ~U[2026-04-30 00:00:00.000000Z]
+      window_end = ~U[2026-05-01 00:00:00.000000Z]
+
+      Bank.Repo.update_all(
+        from(k in APIKey, where: k.id == ^k_in.id),
+        set: [last_used_at: ~U[2026-04-30 12:00:00.000000Z]]
+      )
+
+      Bank.Repo.update_all(
+        from(k in APIKey, where: k.id == ^k_before.id),
+        set: [last_used_at: ~U[2026-04-29 23:59:59.999999Z]]
+      )
+
+      Bank.Repo.update_all(
+        from(k in APIKey, where: k.id == ^k_after.id),
+        set: [last_used_at: ~U[2026-05-01 00:00:00.000001Z]]
+      )
+
+      ids = APIKeys.list_keys_used_between(window_start, window_end) |> Enum.map(& &1.id)
+
+      assert k_in.id in ids
+      refute k_before.id in ids
+      refute k_after.id in ids
+      refute k_unused.id in ids
+    end
+
+    test "used_event_exists? matches on (subject_id, after_ref.window_start)",
+         %{workspace: ws, user: user} do
+      {:ok, key, _raw} = APIKeys.create_key(ws, user, :viewer, "exists")
+      window_start = ~U[2026-04-30 00:00:00.000000Z]
+      window_start_iso = DateTime.to_iso8601(window_start)
+
+      refute APIKeys.used_event_exists?(key.id, window_start_iso)
+
+      attrs =
+        Bank.Audit.Events.api_key_used(key, %{
+          window_start: window_start,
+          window_end: ~U[2026-05-01 00:00:00.000000Z],
+          last_used_at: ~U[2026-04-30 12:00:00.000000Z]
+        })
+
+      {:ok, _event} = Bank.Audit.append_event(attrs)
+
+      assert APIKeys.used_event_exists?(key.id, window_start_iso)
+
+      # A different window for the same key still returns false.
+      refute APIKeys.used_event_exists?(
+               key.id,
+               DateTime.to_iso8601(~U[2026-05-01 00:00:00.000000Z])
+             )
     end
   end
 

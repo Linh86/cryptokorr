@@ -832,6 +832,57 @@ defmodule Bank.Audit.Events do
     }
   end
 
+  @doc """
+  `api_key.used` — daily aggregate emitted by
+  `Bank.Runtime.Workers.AggregateAPIKeyUsage` (#218d).
+
+  This event is intentionally NOT per-request. Each row reports
+  that a single API key was used at least once in
+  `[window_start, window_end)`. Per-request emission would be
+  thousands of audit rows per workspace per day and the integrity
+  pipeline (#161) is not a metrics surface.
+
+  Workspace stamping: rides on the audit envelope passthrough
+  from `api_key.workspace_id` (same as create / revoke).
+
+  Actor attribution: `:agent`. The API key is a service-account-
+  style credential; the audit row's `actor_id` is the api_key id
+  itself (the human who created it is captured via the
+  `created_by_user_id` link on the row, not on the audit event).
+  """
+  @spec api_key_used(APIKey.t(), %{
+          required(:window_start) => DateTime.t(),
+          required(:window_end) => DateTime.t(),
+          required(:last_used_at) => DateTime.t() | nil
+        }) :: attrs()
+  def api_key_used(%APIKey{} = api_key, %{
+        window_start: %DateTime{} = window_start,
+        window_end: %DateTime{} = window_end,
+        last_used_at: last_used_at
+      }) do
+    %{
+      actor: :agent,
+      actor_id: api_key.id,
+      event_type: "api_key.used",
+      subject_type: "api_key",
+      subject_id: api_key.id,
+      correlation_id: api_key.id,
+      after_ref: %{
+        id: api_key.id,
+        prefix: api_key.prefix,
+        role: atom_or_nil(api_key.role),
+        window_start: DateTime.to_iso8601(window_start),
+        window_end: DateTime.to_iso8601(window_end),
+        last_used_at:
+          case last_used_at do
+            %DateTime{} = dt -> DateTime.to_iso8601(dt)
+            nil -> nil
+          end
+      },
+      workspace_id: api_key.workspace_id
+    }
+  end
+
   # --- snapshot builders ------------------------------------------------
 
   defp api_key_snapshot(%APIKey{} = api_key) do

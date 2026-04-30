@@ -79,10 +79,21 @@ config :bank, Oban,
     executions_run: 5,
     executions_confirm: 10,
     security_revoke: 3,
-    delegations_grant: 3
+    delegations_grant: 3,
+    # API key usage aggregation (#218d). One concurrent job is
+    # plenty — the daily cron schedules at most one job per day
+    # and operator-driven backfill jobs are explicit.
+    api_key_usage: 1
   ],
   plugins: [
-    {Oban.Plugins.Pruner, max_age: 60 * 60 * 24 * 7}
+    {Oban.Plugins.Pruner, max_age: 60 * 60 * 24 * 7},
+    # Daily aggregation of API key usage (#218d). Runs at 00:30
+    # UTC and emits `api_key.used` audit rows for every key whose
+    # `last_used_at` falls in the prior calendar day.
+    {Oban.Plugins.Cron,
+     crontab: [
+       {"30 0 * * *", Bank.Runtime.Workers.AggregateAPIKeyUsage}
+     ]}
   ]
 
 # Bank.AdapterClient: connection to the TypeScript chain adapter is
