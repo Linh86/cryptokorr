@@ -893,6 +893,68 @@ defmodule Bank.Audit.Events do
   end
 
   @doc """
+  `api_key.rate_limited` — the rate-limit plug refused a request
+  because the per-key counter exceeded the window quota (#221, first
+  slice).
+
+  Emitted at MOST ONCE per (api_key, window) — the plug calls
+  `Bank.RateLimit.claim_audit/2` and only proceeds if the claim
+  succeeds. Without that dedupe, a bursty bot would generate one
+  audit row per refused request, drowning the integrity log in
+  noise.
+
+  ## Actor
+
+  `:agent` with `actor_id = api_key.id`. Same convention as
+  `api_key.used`: the calling key is the responsible party for
+  service-account-style traffic, even though it ultimately maps
+  back to a human via `created_by_user_id`.
+
+  ## after_ref shape
+
+  Hard-coded allowlist — explicitly excludes the raw key,
+  `secret_hash`, and any Authorization header bytes. The fields
+  recorded are the same `id` / `prefix` / `role` triple used by
+  `api_key.used`, plus the window bounds, the configured `limit`,
+  and the `retry_after_seconds` returned to the client. Operators
+  reading replay can answer "which key, when, and how badly was it
+  over" without correlating against any other source.
+  """
+  @spec api_key_rate_limited(APIKey.t(), %{
+          required(:window_start) => integer(),
+          required(:window_end) => integer(),
+          required(:limit) => pos_integer(),
+          required(:retry_after_seconds) => pos_integer()
+        }) :: attrs()
+  def api_key_rate_limited(%APIKey{} = api_key, %{
+        window_start: window_start_unix,
+        window_end: window_end_unix,
+        limit: limit,
+        retry_after_seconds: retry_after
+      })
+      when is_integer(window_start_unix) and is_integer(window_end_unix) and
+             is_integer(limit) and is_integer(retry_after) do
+    %{
+      actor: :agent,
+      actor_id: api_key.id,
+      event_type: "api_key.rate_limited",
+      subject_type: "api_key",
+      subject_id: api_key.id,
+      correlation_id: api_key.id,
+      after_ref: %{
+        id: api_key.id,
+        prefix: api_key.prefix,
+        role: atom_or_nil(api_key.role),
+        window_start: window_start_unix |> DateTime.from_unix!() |> DateTime.to_iso8601(),
+        window_end: window_end_unix |> DateTime.from_unix!() |> DateTime.to_iso8601(),
+        limit: limit,
+        retry_after_seconds: retry_after
+      },
+      workspace_id: api_key.workspace_id
+    }
+  end
+
+  @doc """
   `api_key.used` — daily aggregate emitted by
   `Bank.Runtime.Workers.AggregateAPIKeyUsage` (#218d).
 

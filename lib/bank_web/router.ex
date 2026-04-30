@@ -23,6 +23,11 @@ defmodule BankWeb.Router do
   # goes through this authenticator.
   pipeline :api_authenticated do
     plug BankWeb.Plugs.VerifyAPIKey
+    # Rate limit AFTER verify so the bucket is keyed by api_key.id
+    # rather than IP. Auth failures from VerifyAPIKey already 401
+    # and never reach this plug; auth-failure lockout is a separate
+    # threat model deferred to a follow-up slice (#221).
+    plug BankWeb.Plugs.RateLimit
   end
 
   # Operator-tier role gate (#218b). Composes on top of

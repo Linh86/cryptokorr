@@ -18,6 +18,8 @@ defmodule Bank.Application do
       Bank.WalletScreening.FeedHealth,
       # Node-local health tracking for stablecoin quote providers.
       Bank.Stablecoins.ProviderHealth,
+      # Per-key rate-limit buckets for /v1 (#221).
+      Bank.RateLimit,
       # Delegation state is now durable in Postgres (see Bank.Delegations).
       # Background workers for runtime orchestration (see Bank.Runtime).
       {Oban, Application.fetch_env!(:bank, Oban)},
