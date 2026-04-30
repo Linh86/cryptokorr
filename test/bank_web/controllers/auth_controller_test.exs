@@ -22,6 +22,8 @@ defmodule BankWeb.AuthControllerTest do
   alias Bank.Access.AccessInvite
   alias Bank.Accounts
   alias Bank.Accounts.User
+  alias Bank.Audit
+  alias Bank.Audit.AuditEvent
   alias Bank.Workspaces
 
   @stub Bank.Accounts.OAuthProvider.Stub
@@ -458,6 +460,67 @@ defmodule BankWeb.AuthControllerTest do
       assert redirected_to(conn2) == ~p"/login"
       assert Phoenix.Flash.get(conn2.assigns.flash, :error) =~ "disabled"
       assert get_session(conn2, :user_id) == nil
+    end
+  end
+
+  describe "auth audit emission (#161)" do
+    defp login_event(filters) do
+      Audit.list_events(filters, limit: 10).events
+    end
+
+    test "auth.login_succeeded fires for a fresh OAuth callback", %{conn: conn} do
+      put_stub(%{claims: claims_for("audit-fresh", "audit-fresh@example.com", "Fresh")})
+
+      conn = get(conn, ~p"/auth/google")
+      state = get_session(conn, :oauth_state)
+      conn = get(conn, ~p"/auth/google/callback?code=stub-code&state=#{state}")
+
+      user = Accounts.get_user(get_session(conn, :user_id))
+
+      assert [%AuditEvent{} = event] =
+               login_event(%{event_type: "auth.login_succeeded", subject_id: user.id})
+
+      assert event.actor == :user
+      assert event.actor_id == user.id
+      assert event.subject_type == "user"
+      assert event.correlation_id == user.id
+      assert event.after_ref["email"] == "audit-fresh@example.com"
+      assert event.after_ref["provider"] == "google"
+    end
+
+    test "auth.login_denied fires when a disabled user attempts login", %{conn: conn} do
+      sub = "disabled-audit"
+      put_stub(%{claims: claims_for(sub, "disabled-audit@example.com")})
+
+      # First login as :pending_access to create the user.
+      conn = get(conn, ~p"/auth/google")
+      state = get_session(conn, :oauth_state)
+      conn = get(conn, ~p"/auth/google/callback?code=stub-code&state=#{state}")
+      user = Accounts.get_user(get_session(conn, :user_id))
+
+      # Disable + re-attempt login.
+      {:ok, _} = Accounts.disable_user(user)
+      put_stub(%{claims: claims_for(sub, "disabled-audit@example.com")})
+      conn2 = get(build_conn(), ~p"/auth/google")
+      state2 = get_session(conn2, :oauth_state)
+      conn2 = get(conn2, ~p"/auth/google/callback?code=stub-code&state=#{state2}")
+
+      assert redirected_to(conn2) == ~p"/login"
+      assert get_session(conn2, :user_id) == nil
+
+      assert [%AuditEvent{} = event] =
+               login_event(%{event_type: "auth.login_denied", subject_id: user.id})
+
+      assert event.actor == :user
+      assert event.actor_id == user.id
+      assert event.after_ref["status"] == "disabled"
+      assert event.after_ref["reason"] == "disabled"
+    end
+
+    test "no auth.login_succeeded for a callback that fails OAuth state validation", %{conn: conn} do
+      conn = get(conn, ~p"/auth/google/callback?code=stub-code&state=tampered")
+      assert redirected_to(conn) == ~p"/login"
+      assert [] = login_event(%{event_type: "auth.login_succeeded"})
     end
   end
 

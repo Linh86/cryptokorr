@@ -16,11 +16,14 @@ defmodule Bank.Audit.Events do
   `subject_type`, `subject_id`, `correlation_id`, and references.
   """
 
+  alias Bank.Access.AccessInvite
+  alias Bank.Accounts.User
   alias Bank.Counterparties.{AddressLabel, Counterparty, EvidenceArtifact, TrustAssertion}
   alias Bank.Decisions.{DecisionEnvelope, TrustAssessment, ExecutionPlan, SimulationReport}
   alias Bank.Delegations.Delegation
   alias Bank.Intents.AgentIntent
   alias Bank.Policies.PolicyRule
+  alias Bank.Workspaces.Membership
 
   @type attrs :: map()
 
@@ -544,7 +547,220 @@ defmodule Bank.Audit.Events do
     }
   end
 
+  # --- Access / auth events (issue #161) -------------------------------
+
+  @doc """
+  `auth.login_succeeded` — an OAuth callback completed and a session
+  was started for the user.
+
+  Correlation is the user id so the per-user trace (login → invite
+  match → admin approve → membership) is one filter away.
+  """
+  @spec auth_login_succeeded(User.t(), keyword()) :: attrs()
+  def auth_login_succeeded(%User{} = user, opts \\ []) do
+    %{
+      actor: Keyword.get(opts, :actor, :user),
+      actor_id: user.id,
+      event_type: "auth.login_succeeded",
+      subject_type: "user",
+      subject_id: user.id,
+      correlation_id: user.id,
+      after_ref: %{
+        email: user.email,
+        provider: atom_or_nil(user.provider),
+        status: atom_or_nil(user.status)
+      }
+    }
+  end
+
+  @doc """
+  `auth.login_denied` — the OAuth callback identified a real user but
+  refused to start a session (today: `:disabled` users only). The
+  reason is recorded so the admin console can answer "why was X
+  refused?".
+  """
+  @spec auth_login_denied(User.t(), atom() | String.t(), keyword()) :: attrs()
+  def auth_login_denied(%User{} = user, reason, opts \\ []) do
+    %{
+      actor: Keyword.get(opts, :actor, :user),
+      actor_id: user.id,
+      event_type: "auth.login_denied",
+      subject_type: "user",
+      subject_id: user.id,
+      correlation_id: user.id,
+      after_ref: %{
+        email: user.email,
+        status: atom_or_nil(user.status),
+        reason: atom_or_nil(reason)
+      }
+    }
+  end
+
+  @doc """
+  `access.invite_created` — operator issued a fresh invite. Subject +
+  correlation are both the invite id; this is an invite-lifecycle
+  event, queryable independently of any user trace.
+  """
+  @spec access_invite_created(AccessInvite.t(), User.t(), keyword()) :: attrs()
+  def access_invite_created(%AccessInvite{} = invite, %User{} = invited_by, opts \\ []) do
+    %{
+      actor: Keyword.get(opts, :actor, :user),
+      actor_id: invited_by.id,
+      event_type: "access.invite_created",
+      subject_type: "access_invite",
+      subject_id: invite.id,
+      correlation_id: invite.id,
+      after_ref: invite_snapshot(invite)
+    }
+  end
+
+  @doc """
+  `access.invite_revoked` — operator revoked an active invite. The
+  before / after refs pin the status transition so replay can show
+  the exact moment the invite became unusable.
+  """
+  @spec access_invite_revoked(AccessInvite.t(), User.t(), keyword()) :: attrs()
+  def access_invite_revoked(%AccessInvite{} = invite, %User{} = revoked_by, opts \\ []) do
+    %{
+      actor: Keyword.get(opts, :actor, :user),
+      actor_id: revoked_by.id,
+      event_type: "access.invite_revoked",
+      subject_type: "access_invite",
+      subject_id: invite.id,
+      correlation_id: invite.id,
+      before_ref: %{status: "active"},
+      after_ref: %{
+        status: atom_or_nil(invite.status),
+        revoked_at: invite.revoked_at,
+        revoked_by_user_id: revoked_by.id
+      }
+    }
+  end
+
+  @doc """
+  `access.allowlist_matched` — an active invite was matched on a
+  successful login.
+
+  `match_type` is one of `:exact_email_accepted` (the invite was
+  consumed and a membership was created or already existed) or
+  `:domain_matched` (the invite stays active, `matched_at` is now
+  stamped). Subject is the invite; correlation is the user so the
+  per-user trace surfaces the match.
+  """
+  @spec access_allowlist_matched(AccessInvite.t(), User.t(), atom(), keyword()) :: attrs()
+  def access_allowlist_matched(%AccessInvite{} = invite, %User{} = user, match_type, opts \\ [])
+      when match_type in [:exact_email_accepted, :domain_matched] do
+    %{
+      actor: Keyword.get(opts, :actor, :user),
+      actor_id: user.id,
+      event_type: "access.allowlist_matched",
+      subject_type: "access_invite",
+      subject_id: invite.id,
+      correlation_id: user.id,
+      before_ref: %{status: "active"},
+      after_ref: %{
+        match_type: Atom.to_string(match_type),
+        invite_type: atom_or_nil(invite.invite_type),
+        status: atom_or_nil(invite.status),
+        workspace_id: invite.workspace_id,
+        role: atom_or_nil(invite.role),
+        accepted_at: invite.accepted_at,
+        matched_at: invite.matched_at
+      }
+    }
+  end
+
+  @doc """
+  `access.allowlist_missed` — login completed but no active invite
+  matched. Recorded once per `apply_invites_for_user/1` call that
+  returned no matches; the audit consumer can dedup by `subject_id`
+  if they only want unique users.
+  """
+  @spec access_allowlist_missed(User.t(), keyword()) :: attrs()
+  def access_allowlist_missed(%User{} = user, opts \\ []) do
+    %{
+      actor: Keyword.get(opts, :actor, :user),
+      actor_id: user.id,
+      event_type: "access.allowlist_missed",
+      subject_type: "user",
+      subject_id: user.id,
+      correlation_id: user.id,
+      after_ref: %{
+        email: user.email,
+        no_matching_invites: true
+      }
+    }
+  end
+
+  @doc """
+  `access.admin_approved` — bootstrap admin approved a pending user
+  into a workspace. Emitted only on real state transitions
+  (`:membership_created`, `:membership_reactivated`); the
+  `:already_member` outcome is a no-op and produces no event.
+
+  `prior_status` is `nil` for a fresh insert and `:inactive` for a
+  reactivated row — that lets replay distinguish the two flows.
+  """
+  @spec access_admin_approved(Membership.t(), User.t(), atom() | nil, keyword()) :: attrs()
+  def access_admin_approved(%Membership{} = membership, %User{} = admin, prior_status, opts \\ [])
+      when is_atom(prior_status) do
+    %{
+      actor: Keyword.get(opts, :actor, :user),
+      actor_id: admin.id,
+      event_type: "access.admin_approved",
+      subject_type: "membership",
+      subject_id: membership.id,
+      correlation_id: membership.user_id,
+      before_ref: %{status: atom_or_nil(prior_status)},
+      after_ref: %{
+        status: atom_or_nil(membership.status),
+        role: atom_or_nil(membership.role),
+        workspace_id: membership.workspace_id,
+        user_id: membership.user_id
+      }
+    }
+  end
+
+  @doc """
+  `access.admin_rejected` — bootstrap admin disabled a pending user.
+  Emitted only on a real state transition; the `:already_disabled`
+  outcome is a no-op and produces no event.
+
+  `prior_status` is the user's status before the flip
+  (`:pending_access` or `:active`).
+  """
+  @spec access_admin_rejected(User.t(), User.t(), atom(), keyword()) :: attrs()
+  def access_admin_rejected(%User{} = target, %User{} = admin, prior_status, opts \\ [])
+      when is_atom(prior_status) do
+    %{
+      actor: Keyword.get(opts, :actor, :user),
+      actor_id: admin.id,
+      event_type: "access.admin_rejected",
+      subject_type: "user",
+      subject_id: target.id,
+      correlation_id: target.id,
+      before_ref: %{status: Atom.to_string(prior_status)},
+      after_ref: %{
+        status: atom_or_nil(target.status),
+        email: target.email
+      }
+    }
+  end
+
   # --- snapshot builders ------------------------------------------------
+
+  defp invite_snapshot(%AccessInvite{} = invite) do
+    %{
+      id: invite.id,
+      invite_type: atom_or_nil(invite.invite_type),
+      email: invite.email,
+      domain: invite.domain,
+      role: atom_or_nil(invite.role),
+      status: atom_or_nil(invite.status),
+      workspace_id: invite.workspace_id,
+      expires_at: invite.expires_at
+    }
+  end
 
   defp intent_snapshot(%AgentIntent{} = intent) do
     %{

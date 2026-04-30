@@ -48,6 +48,8 @@ defmodule BankWeb.AuthController do
   alias Bank.Access
   alias Bank.Accounts
   alias Bank.Accounts.OAuthProvider
+  alias Bank.Audit
+  alias Bank.Audit.Events
   alias Bank.Workspaces
   alias BankWeb.Plugs.FetchCurrentUser
 
@@ -137,6 +139,8 @@ defmodule BankWeb.AuthController do
 
           resolution = Workspaces.resolve_scope(user)
 
+          safe_audit(Events.auth_login_succeeded(user))
+
           conn
           |> renew_session()
           |> put_session(FetchCurrentUser.session_key(), user.id)
@@ -144,6 +148,8 @@ defmodule BankWeb.AuthController do
           |> redirect(to: post_login_path(user, resolution))
         else
           Logger.warning("AuthController: refused session for disabled user")
+
+          safe_audit(Events.auth_login_denied(user, :disabled))
 
           conn
           |> put_flash(
@@ -159,6 +165,18 @@ defmodule BankWeb.AuthController do
         conn
         |> put_flash(:error, "Could not complete sign-in. Please try again.")
         |> redirect(to: ~p"/login")
+    end
+  end
+
+  # Audit failure must never block a redirect — swallow + log.
+  defp safe_audit(attrs) do
+    case Audit.append_event(attrs) do
+      {:ok, _event} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("AuthController: audit emission failed: #{inspect(reason)}")
+        :ok
     end
   end
 
