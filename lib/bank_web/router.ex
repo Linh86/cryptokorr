@@ -89,6 +89,24 @@ defmodule BankWeb.Router do
   #
   # Health endpoints stay on the bare `:api` pipeline (separate
   # scope earlier in this router).
+  #
+  # ## Per-controller workspace scoping is intentionally deferred
+  #
+  # `VerifyAPIKey` populates `conn.assigns.current_scope.workspace`
+  # so each controller / context CAN scope its query to the key's
+  # workspace, but #218b does NOT retrofit every existing
+  # controller to enforce that filter. Most controllers were
+  # written for a single-workspace world and look up rows by id
+  # without a workspace_id `WHERE`. A subsequent PR walks each
+  # controller and adds `workspace_id: current_scope.workspace.id`
+  # to every read/write — the auth surface is the prerequisite,
+  # the per-route filter is the next layer.
+  #
+  # Until that PR lands, an attacker with an API key for workspace
+  # A who knows or guesses an id from workspace B may receive that
+  # row's data on a `GET` controller that does not yet scope. The
+  # auth gate prevents anonymous access; the scoping gap is a
+  # known follow-up.
   scope "/v1", BankWeb.API.V1, as: :api_v1 do
     pipe_through [:api, :api_authenticated]
 

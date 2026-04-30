@@ -38,6 +38,15 @@ defmodule BankWeb.Plugs.VerifyAPIKey do
   `:hash_mismatch`, `:revoked`, `:expired`) collapse to
   `invalid_credentials` on the wire. Distinct internal reasons are
   preserved in `Logger.warning` for operator triage.
+
+  ## Workspace scoping handoff
+
+  This plug populates `current_scope.workspace` so downstream code
+  CAN scope queries to the key's workspace. Whether each
+  controller actually uses that to add a `workspace_id` filter is
+  a separate retrofit (#218b's router carries the deferral note —
+  see `lib/bank_web/router.ex`). The plug's contract here is
+  identity, not query enforcement.
   """
 
   import Plug.Conn
