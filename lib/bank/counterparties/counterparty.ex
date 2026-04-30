@@ -9,6 +9,7 @@ defmodule Bank.Counterparties.Counterparty do
   use Bank.Schema
 
   alias Bank.Counterparties.{AddressLabel, EvidenceArtifact, TrustAssertion}
+  alias Bank.Workspaces.Workspace
 
   @trust_levels [:trusted, :sensitive, :unknown, :conflicted]
   @actors [:user, :agent, :runtime, :adapter]
@@ -22,6 +23,11 @@ defmodule Bank.Counterparties.Counterparty do
     field :active, :boolean, default: true
     field :current_trust_level, Ecto.Enum, values: @trust_levels
     field :created_by, Ecto.Enum, values: @actors
+
+    # Nullable workspace scope — added by #158a as a foundation for
+    # the runtime filter that lands in #158b. Existing rows stay
+    # NULL until backfilled; new callers pass `workspace_id` through.
+    belongs_to :workspace, Workspace
 
     has_many :address_labels, AddressLabel
 
@@ -50,9 +56,11 @@ defmodule Bank.Counterparties.Counterparty do
       :notes,
       :active,
       :current_trust_level,
-      :created_by
+      :created_by,
+      :workspace_id
     ])
     |> validate_required([:name, :created_by])
     |> validate_length(:name, min: 1, max: 255)
+    |> foreign_key_constraint(:workspace_id)
   end
 end

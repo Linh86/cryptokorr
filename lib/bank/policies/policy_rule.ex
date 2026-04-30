@@ -14,6 +14,8 @@ defmodule Bank.Policies.PolicyRule do
 
   use Bank.Schema
 
+  alias Bank.Workspaces.Workspace
+
   @states [:draft, :active, :superseded, :archived]
   @rule_types [
     :amount_limit,
@@ -40,6 +42,10 @@ defmodule Bank.Policies.PolicyRule do
 
     belongs_to :supersedes, __MODULE__, foreign_key: :supersedes_id
 
+    # Nullable workspace scope (#158a foundation; runtime filter in
+    # #158b). Successor rules carry the prior row's workspace_id.
+    belongs_to :workspace, Workspace
+
     timestamps()
   end
 
@@ -57,11 +63,13 @@ defmodule Bank.Policies.PolicyRule do
       :params,
       :priority,
       :created_by,
-      :supersedes_id
+      :supersedes_id,
+      :workspace_id
     ])
     |> validate_required([:rule_type, :created_by])
     |> validate_number(:version, greater_than_or_equal_to: 1)
     |> foreign_key_constraint(:supersedes_id)
+    |> foreign_key_constraint(:workspace_id)
   end
 
   @doc """
@@ -78,6 +86,7 @@ defmodule Bank.Policies.PolicyRule do
       |> Map.put(:version, (prior.version || 1) + 1)
       |> Map.put(:supersedes_id, prior.id)
       |> Map.put_new(:state, :active)
+      |> Map.put_new(:workspace_id, prior.workspace_id)
 
     changeset(%__MODULE__{}, attrs)
   end

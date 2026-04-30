@@ -32,13 +32,19 @@ defmodule Bank.Demo do
   seeded data — the test suite asserts that on every row the seeder
   produces.
 
-  ## Workspace placeholder (#155)
+  ## Demo workspace (#155 / #158a)
 
-  Until issue #155 lands the `workspaces` / `memberships` tables,
-  every seeded row is implicitly scoped to `workspace_slug/0` —
-  `"sandbox-demo"`. Each `seed_*` / `upsert_*` helper carries a
-  `# TODO #155` marker pointing at the exact line where
-  `workspace_id:` will need to be set on the changeset.
+  `seed/0` bootstraps a `Bank.Workspaces.Workspace` with slug
+  `"sandbox-demo"` (`workspace_slug/0`). Every row the seeder
+  creates that lives on a workspace-scoped table sets
+  `workspace_id` to that workspace via `demo_workspace_id/0`.
+  Re-running `seed/0` is idempotent on the workspace row (the
+  bootstrap is a get-or-create) and on every seeded row.
+
+  Tables that are workspace-derived (e.g. `address_labels` joins
+  through `counterparty_id`; `decision_envelopes` joins through
+  `intent_id`) inherit scope through the FK chain and don't carry
+  their own `workspace_id` column.
 
   See `docs/demo.md` for the operator-facing instructions.
   """
@@ -54,6 +60,8 @@ defmodule Bank.Demo do
   alias Bank.Intents.AgentIntent
   alias Bank.Policies.PolicyRule
   alias Bank.Repo
+  alias Bank.Workspaces
+  alias Bank.Workspaces.Workspace
 
   @demo_workspace_slug "sandbox-demo"
   @sandbox_prefix "[Sandbox] "
@@ -79,13 +87,30 @@ defmodule Bank.Demo do
   @reset_envs [:dev, :test, :staging]
 
   @doc """
-  The placeholder workspace slug every seeded row is implicitly scoped
-  to until issue #155 ships the `workspaces` table. Human-readable so
-  operator dashboards, audit trails, and `mix bank.demo.reset` output
-  can refer to the same handle.
+  The slug of the demo workspace every seeded row is scoped to.
+  Human-readable so operator dashboards, audit trails, and
+  `mix bank.demo.reset` output can refer to the same handle.
+
+  The matching workspace row is bootstrapped by `seed/0` (see
+  `ensure_demo_workspace!/0`); querying for its id is
+  `demo_workspace_id/0`.
   """
   @spec workspace_slug() :: String.t()
   def workspace_slug, do: @demo_workspace_slug
+
+  @doc """
+  Look up the demo workspace's id, returning `nil` when the workspace
+  has not yet been bootstrapped (i.e. `seed/0` has not run on this
+  database). Callers within the seeder use the bootstrap-and-return
+  variant `ensure_demo_workspace!/0`.
+  """
+  @spec demo_workspace_id() :: Ecto.UUID.t() | nil
+  def demo_workspace_id do
+    case Workspaces.get_workspace_by_slug(@demo_workspace_slug) do
+      %Workspace{id: id} -> id
+      nil -> nil
+    end
+  end
 
   @doc """
   Populate the demo dataset. Idempotent: running it twice leaves the
@@ -96,6 +121,7 @@ defmodule Bank.Demo do
     Logger.info("Bank.Demo: seeding demo dataset (workspace=#{@demo_workspace_slug})")
 
     Repo.transaction(fn ->
+      _ws_id = ensure_demo_workspace!()
       counterparties = seed_counterparties()
       _labels = seed_address_labels(counterparties)
       _rules = seed_policy_rules()
@@ -105,6 +131,26 @@ defmodule Bank.Demo do
     end)
 
     :ok
+  end
+
+  # Idempotent demo workspace bootstrap. Called from `seed/0` before
+  # any workspace-scoped row is upserted so the demo rows reference
+  # a real workspace from #155 onwards. Re-running `seed/0` is a
+  # no-op against this row.
+  defp ensure_demo_workspace! do
+    case Workspaces.get_workspace_by_slug(@demo_workspace_slug) do
+      %Workspace{id: id} ->
+        id
+
+      nil ->
+        {:ok, %Workspace{id: id}} =
+          Workspaces.create_workspace(%{
+            slug: @demo_workspace_slug,
+            name: "Sandbox Demo"
+          })
+
+        id
+    end
   end
 
   @doc """
@@ -236,13 +282,13 @@ defmodule Bank.Demo do
         {:ok, cp}
 
       nil ->
-        # TODO #155: set workspace_id once the `workspaces` schema lands.
         %Counterparty{}
         |> Counterparty.changeset(%{
           name: name,
           created_by: :user,
           current_trust_level: trust,
-          notes: note
+          notes: note,
+          workspace_id: demo_workspace_id()
         })
         |> Repo.insert()
     end
@@ -280,7 +326,10 @@ defmodule Bank.Demo do
         {:ok, label}
 
       nil ->
-        # TODO #155: scope to the demo workspace.
+        # `address_labels` is workspace-derived through its
+        # counterparty FK — no `workspace_id` column on the table
+        # itself. The original `# TODO #155` here is resolved by the
+        # counterparty's workspace_id (set above).
         %AddressLabel{}
         |> AddressLabel.changeset(%{
           counterparty_id: counterparty.id,
@@ -341,13 +390,12 @@ defmodule Bank.Demo do
         {:ok, rule}
 
       nil ->
-        # TODO #155: scope to the demo workspace once policy rules
-        # gain a `workspace_id` column.
         %PolicyRule{}
         |> PolicyRule.changeset(
           attrs
           |> Map.put(:state, :active)
           |> Map.put(:created_by, :user)
+          |> Map.put(:workspace_id, demo_workspace_id())
         )
         |> Repo.insert()
     end
@@ -361,14 +409,14 @@ defmodule Bank.Demo do
         {:ok, d}
 
       nil ->
-        # TODO #155: attach to the demo workspace.
         %Delegation{}
         |> Delegation.changeset(%{
           smart_account_id: @smart_account_id,
           delegation_id: @delegation_id,
           state: :active,
           chain: @chain,
-          granted_at: DateTime.utc_now()
+          granted_at: DateTime.utc_now(),
+          workspace_id: demo_workspace_id()
         })
         |> Repo.insert()
     end
@@ -529,7 +577,6 @@ defmodule Bank.Demo do
         {:ok, intent}
 
       nil ->
-        # TODO #155: scope to the demo workspace.
         %AgentIntent{}
         |> AgentIntent.changeset(%{
           agent_id: @demo_agent_id,
@@ -543,7 +590,8 @@ defmodule Bank.Demo do
           target_counterparty_id: counterparty.id,
           target_address_label_id: label && label.id,
           submitted_at: DateTime.utc_now(),
-          state: scenario.intent_state
+          state: scenario.intent_state,
+          workspace_id: demo_workspace_id()
         })
         |> Repo.insert()
     end
@@ -560,7 +608,10 @@ defmodule Bank.Demo do
         {:ok, d}
 
       nil ->
-        # TODO #155: scope to the demo workspace.
+        # `decision_envelopes` is workspace-derived through its
+        # `intent_id` FK (intent.workspace_id). The original
+        # `# TODO #155` here is resolved by the intent's
+        # workspace_id (set above).
         %DecisionEnvelope{}
         |> DecisionEnvelope.changeset(%{
           intent_id: intent.id,
@@ -590,7 +641,6 @@ defmodule Bank.Demo do
         {:ok, plan}
 
       nil ->
-        # TODO #155: scope to the demo workspace.
         %ExecutionPlan{}
         |> ExecutionPlan.changeset(%{
           decision_id: decision.id,
@@ -602,7 +652,8 @@ defmodule Bank.Demo do
           signing_requirements: %{"delegation_id" => @delegation_id, "scope" => %{}},
           tx_refs: if(scenario.tx_hash, do: [scenario.tx_hash], else: []),
           final_outcome: scenario.final_status,
-          final_reason: if(scenario.final_status == :confirmed, do: "sandbox_seed", else: nil)
+          final_reason: if(scenario.final_status == :confirmed, do: "sandbox_seed", else: nil),
+          workspace_id: demo_workspace_id()
         })
         |> Repo.insert()
     end

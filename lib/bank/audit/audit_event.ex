@@ -32,6 +32,8 @@ defmodule Bank.Audit.AuditEvent do
 
   use Bank.Schema
 
+  alias Bank.Workspaces.Workspace
+
   # Insert-only: no `updated_at` column.
   @timestamps_opts [type: :utc_datetime_usec, updated_at: false]
 
@@ -51,6 +53,13 @@ defmodule Bank.Audit.AuditEvent do
     field :after_ref, :map
     field :payload_hash, :string
     field :schema_version, :string, default: "1"
+
+    # Nullable workspace scope (#158a foundation; runtime filter in
+    # #158b). Read hint only — `workspace_id` is intentionally NOT
+    # part of `Bank.Audit.Envelope.@canonical_fields`, so existing
+    # event hashes are unaffected and emitters that omit it write
+    # nil.
+    belongs_to :workspace, Workspace
 
     timestamps()
   end
@@ -73,7 +82,8 @@ defmodule Bank.Audit.AuditEvent do
       :before_ref,
       :after_ref,
       :payload_hash,
-      :schema_version
+      :schema_version,
+      :workspace_id
     ])
     |> validate_required([
       :actor,
@@ -82,6 +92,7 @@ defmodule Bank.Audit.AuditEvent do
       :subject_id,
       :payload_hash
     ])
+    |> foreign_key_constraint(:workspace_id)
     |> put_default_ts()
   end
 

@@ -139,6 +139,75 @@ defmodule Bank.DemoTest do
     end
   end
 
+  describe "workspace bootstrap (#158a)" do
+    test "seed/0 creates the sandbox-demo workspace if it does not exist" do
+      assert Bank.Workspaces.get_workspace_by_slug("sandbox-demo") == nil
+
+      :ok = Demo.seed()
+
+      assert %Bank.Workspaces.Workspace{slug: "sandbox-demo", id: id} =
+               Bank.Workspaces.get_workspace_by_slug("sandbox-demo")
+
+      assert Demo.demo_workspace_id() == id
+    end
+
+    test "seed/0 is idempotent — running it twice keeps a single sandbox workspace row" do
+      :ok = Demo.seed()
+      :ok = Demo.seed()
+
+      ws_count = Bank.Repo.aggregate(Bank.Workspaces.Workspace, :count)
+      assert ws_count == 1
+    end
+
+    test "seeded workspace-scoped rows carry the demo workspace id" do
+      :ok = Demo.seed()
+      ws_id = Demo.demo_workspace_id()
+      assert is_binary(ws_id)
+
+      ids = Demo.identifiers()
+
+      counterparties =
+        Counterparty
+        |> where([c], c.name in ^ids.counterparty_names)
+        |> Repo.all()
+
+      assert Enum.all?(counterparties, &(&1.workspace_id == ws_id)),
+             "every seeded counterparty should be scoped to the demo workspace"
+
+      rules = Repo.all(PolicyRule)
+
+      assert Enum.all?(rules, &(&1.workspace_id == ws_id)),
+             "every seeded policy rule should be scoped to the demo workspace"
+
+      [delegation] =
+        Delegation
+        |> where(smart_account_id: ^ids.smart_account_id)
+        |> Repo.all()
+
+      assert delegation.workspace_id == ws_id
+
+      intents =
+        AgentIntent
+        |> where([i], i.agent_id in ^ids.agent_ids)
+        |> Repo.all()
+
+      assert Enum.all?(intents, &(&1.workspace_id == ws_id)),
+             "every seeded intent should be scoped to the demo workspace"
+
+      plans =
+        ExecutionPlan
+        |> where([p], p.intent_id in ^Enum.map(intents, & &1.id))
+        |> Repo.all()
+
+      assert Enum.all?(plans, &(&1.workspace_id == ws_id)),
+             "every seeded execution plan should be scoped to the demo workspace"
+    end
+
+    test "demo_workspace_id/0 returns nil before seed is run" do
+      assert Demo.demo_workspace_id() == nil
+    end
+  end
+
   describe "secret hygiene" do
     test "no seeded row contains anything that looks like a private key, API key, bearer secret, or env-sourced URL" do
       :ok = Demo.seed()
