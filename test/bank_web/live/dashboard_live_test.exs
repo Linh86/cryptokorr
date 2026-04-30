@@ -121,7 +121,7 @@ defmodule BankWeb.DashboardLiveTest do
 
   describe "delegation readiness" do
     test "shows active delegation", %{conn: conn} do
-      {:ok, _del} = Delegations.grant("sa_dash", "del_dash")
+      {:ok, _del} = grant_delegation("sa_dash", "del_dash")
 
       {:ok, _view, html} = live(conn, "/dashboard")
 
@@ -129,7 +129,7 @@ defmodule BankWeb.DashboardLiveTest do
     end
 
     test "shows execution ready when delegation active and not paused", %{conn: conn} do
-      {:ok, _del} = Delegations.grant("sa_ready", "del_ready")
+      {:ok, _del} = grant_delegation("sa_ready", "del_ready")
 
       {:ok, _view, html} = live(conn, "/dashboard")
 
@@ -138,7 +138,7 @@ defmodule BankWeb.DashboardLiveTest do
     end
 
     test "shows revoking delegation in attention banner", %{conn: conn} do
-      {:ok, _del} = Delegations.grant("sa_rev", "del_rev")
+      {:ok, _del} = grant_delegation("sa_rev", "del_rev")
       {:ok, _del} = Delegations.record_revoke_requested("sa_rev")
 
       {:ok, _view, html} = live(conn, "/dashboard")
@@ -151,8 +151,8 @@ defmodule BankWeb.DashboardLiveTest do
 
   describe "multi-account delegations" do
     test "stat card shows fraction when multiple delegations attached", %{conn: conn} do
-      {:ok, _d1} = Delegations.grant("sa_a", "del_a")
-      {:ok, _d2} = Delegations.grant("sa_b", "del_b")
+      {:ok, _d1} = grant_delegation("sa_a", "del_a")
+      {:ok, _d2} = grant_delegation("sa_b", "del_b")
 
       {:ok, _view, html} = live(conn, "/dashboard")
 
@@ -160,8 +160,8 @@ defmodule BankWeb.DashboardLiveTest do
     end
 
     test "readiness stays ready if at least one delegation is executable", %{conn: conn} do
-      {:ok, _d1} = Delegations.grant("sa_ready", "del_ready")
-      {:ok, _d2} = Delegations.grant("sa_rev", "del_rev")
+      {:ok, _d1} = grant_delegation("sa_ready", "del_ready")
+      {:ok, _d2} = grant_delegation("sa_rev", "del_rev")
       {:ok, _} = Delegations.record_revoke_requested("sa_rev")
 
       {:ok, _view, html} = live(conn, "/dashboard")

@@ -64,7 +64,10 @@ defmodule BankWeb.DashboardLive do
   # --- State loading --------------------------------------------------------
 
   defp load_state(socket) do
-    delegations = Delegations.list_active()
+    workspace_id = socket.assigns.current_scope.workspace.id
+    scope_opts = [workspace_id: workspace_id]
+
+    delegations = Delegations.list_active(scope_opts)
     paused? = Security.paused?(:global)
 
     executable_count =
@@ -75,9 +78,9 @@ defmodule BankWeb.DashboardLive do
 
     execution_ready? = executable_count > 0
 
-    pending_approvals = Decisions.count_pending_approvals()
-    active_executions = Decisions.count_active_executions()
-    recent_decisions = Decisions.list_recent_decisions(8)
+    pending_approvals = Decisions.count_pending_approvals(scope_opts)
+    active_executions = Decisions.count_active_executions(scope_opts)
+    recent_decisions = Decisions.list_recent_decisions(8, scope_opts)
 
     attention_items =
       build_attention_items(paused?, delegations, pending_approvals, active_executions)

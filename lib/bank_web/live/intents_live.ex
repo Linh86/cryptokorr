@@ -96,18 +96,23 @@ defmodule BankWeb.IntentsLive do
   defp load_state(socket) do
     kind_filter = socket.assigns.kind_filter
     search = socket.assigns.search
+    workspace_id = socket.assigns.current_scope.workspace.id
 
     intents =
       Intents.list(
         state: socket.assigns.state_filter,
         kind: kind_filter,
         search: search,
-        limit: 100
+        limit: 100,
+        workspace_id: workspace_id
       )
 
     socket
     |> assign(:intents, intents)
-    |> assign(:counts, Intents.counts_by_state(kind: kind_filter, search: search))
+    |> assign(
+      :counts,
+      Intents.counts_by_state(kind: kind_filter, search: search, workspace_id: workspace_id)
+    )
     |> assign(:total_in_view, length(intents))
   end
 

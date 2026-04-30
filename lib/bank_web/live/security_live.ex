@@ -110,7 +110,9 @@ defmodule BankWeb.SecurityLive do
   # --- State loading --------------------------------------------------------
 
   defp load_state(socket) do
-    delegations = Delegations.list_active()
+    delegations =
+      Delegations.list_active(workspace_id: socket.assigns.current_scope.workspace.id)
+
     paused? = Security.paused?(:global)
     pause_snapshot = Security.snapshot()
 
@@ -137,6 +139,12 @@ defmodule BankWeb.SecurityLive do
   # individually because `Bank.Audit.list_events/2` does exact match;
   # then we union and sort. Capped small — this is a "is the runtime
   # safe right now?" view, not a forensic timeline.
+  #
+  # Intentionally NOT workspace-scoped (#158c): `security.paused` /
+  # `security.resumed` are runtime-global events (correlation_id is
+  # `nil` per `Bank.Audit` docs) — every workspace's operators need
+  # visibility into them. Splitting global vs workspace-scoped event
+  # surfaces is a future refinement.
   defp load_safety_events do
     @safety_event_types
     |> Enum.flat_map(fn type ->

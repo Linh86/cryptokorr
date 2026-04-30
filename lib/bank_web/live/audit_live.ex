@@ -151,7 +151,10 @@ defmodule BankWeb.AuditLive do
   # --- State loading ------------------------------------------------------
 
   defp load_events(socket) do
-    filters = filter_query(socket.assigns.filters)
+    filters =
+      socket.assigns.filters
+      |> filter_query()
+      |> Map.put(:workspace_id, socket.assigns.current_scope.workspace.id)
 
     opts = [limit: @page_limit, order: :desc]
 
