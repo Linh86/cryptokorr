@@ -67,7 +67,10 @@ defmodule BankWeb.PoliciesLive do
   def handle_event("save_rule", %{"rule" => params}, socket) do
     attrs = build_rule_attrs(params)
 
-    case Policies.create_rule(attrs, actor: :user) do
+    case Policies.create_rule(attrs,
+           actor: :user,
+           workspace_id: socket.assigns.current_scope.workspace.id
+         ) do
       {:ok, _rule} ->
         {:noreply,
          socket
@@ -166,7 +169,12 @@ defmodule BankWeb.PoliciesLive do
         state -> %{state: String.to_existing_atom(state)}
       end
 
-    %{entries: entries} = Policies.list_rules(filters, limit: 100)
+    %{entries: entries} =
+      Policies.list_rules(filters,
+        limit: 100,
+        workspace_id: socket.assigns.current_scope.workspace.id
+      )
+
     assign(socket, :rules, entries)
   end
 

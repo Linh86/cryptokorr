@@ -78,6 +78,28 @@ defmodule BankWeb.ConnCase do
       |> Plug.Test.init_test_session(%{})
       |> Plug.Conn.put_session(:user_id, user.id)
 
+    # Stash the workspace id in the process dict so `Bank.Fixtures`
+    # can stamp `workspace_id` on every workspace-scoped row by
+    # default (#158c). The on_exit cleanup keeps tests isolated even
+    # in non-async cases. Tests that need cross-workspace fixtures
+    # pass `workspace_id:` explicitly to override.
+    Process.put(:bank_test_workspace_id, workspace.id)
+    ExUnit.Callbacks.on_exit(fn -> Process.delete(:bank_test_workspace_id) end)
+
     {:ok, conn: conn, current_user: user, workspace: workspace}
+  end
+
+  @doc """
+  Test wrapper around `Bank.Delegations.grant/3` that defaults
+  `:workspace_id` from the process-dict slot
+  `register_and_log_in_user/1` populates (#158c). Tests that bypass
+  the LiveView wiring path use this so the resulting row has the
+  same workspace scope every other fixture sets.
+
+  Pass `workspace_id:` in `attrs` to override.
+  """
+  def grant_delegation(smart_account_id, delegation_id, attrs \\ %{}) do
+    attrs = Map.put_new(attrs, :workspace_id, Process.get(:bank_test_workspace_id))
+    Bank.Delegations.grant(smart_account_id, delegation_id, attrs)
   end
 end

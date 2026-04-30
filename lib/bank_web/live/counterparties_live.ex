@@ -53,7 +53,10 @@ defmodule BankWeb.CounterpartiesLive do
       |> Map.new()
       |> Map.put("created_by", "user")
 
-    case Counterparties.create_counterparty(attrs, actor: :user) do
+    case Counterparties.create_counterparty(attrs,
+           actor: :user,
+           workspace_id: socket.assigns.current_scope.workspace.id
+         ) do
       {:ok, _cp} ->
         {:noreply,
          socket
@@ -75,7 +78,12 @@ defmodule BankWeb.CounterpartiesLive do
         do: %{},
         else: %{active: true}
 
-    %{entries: entries} = Counterparties.list_counterparties(filters, limit: 100)
+    %{entries: entries} =
+      Counterparties.list_counterparties(filters,
+        limit: 100,
+        workspace_id: socket.assigns.current_scope.workspace.id
+      )
+
     assign(socket, :counterparties, entries)
   end
 

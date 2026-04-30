@@ -181,18 +181,45 @@ defmodule Bank.Counterparties do
 
   Returns `{:ok, cp}` or `{:error, :not_found}`. A preloaded
   `Counterparty` is safe to hand straight to the JSON renderer.
+
+  Options:
+
+    * `:workspace_id` — narrow to one workspace (#158c). When set,
+      a counterparty whose `workspace_id` does not match returns
+      `{:error, :not_found}` so the LiveView treats a cross-workspace
+      url as a 404 rather than leaking another workspace's data.
+      When unset (legacy), the row is returned regardless of its
+      workspace_id; legacy nil-workspace rows continue to load. The
+      legacy default goes away with #158e (NOT NULL flip).
   """
-  @spec get_counterparty_with_preloads(uuid()) ::
+  @spec get_counterparty_with_preloads(uuid(), opts()) ::
           {:ok, Counterparty.t()} | {:error, :not_found}
-  def get_counterparty_with_preloads(id) when is_binary(id) do
+  def get_counterparty_with_preloads(id, opts \\ []) when is_binary(id) do
+    workspace_id = Keyword.get(opts, :workspace_id)
+
     case Repo.get(Counterparty, id) do
       nil ->
         {:error, :not_found}
 
       %Counterparty{} = cp ->
-        {:ok, preload_counterparty(cp)}
+        if workspace_match?(cp, workspace_id) do
+          {:ok, preload_counterparty(cp)}
+        else
+          # Treat a cross-workspace counterparty as not found so the
+          # response shape is identical to a missing id — the UI
+          # cannot distinguish "exists in another workspace" from
+          # "does not exist", which is what we want.
+          {:error, :not_found}
+        end
     end
   end
+
+  defp workspace_match?(_cp, nil), do: true
+
+  defp workspace_match?(%Counterparty{workspace_id: ws_id}, ws_id) when is_binary(ws_id),
+    do: true
+
+  defp workspace_match?(_cp, _other), do: false
 
   @doc """
   Apply the standard preload set (active labels + effective trust

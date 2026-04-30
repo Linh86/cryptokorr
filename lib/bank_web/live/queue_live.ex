@@ -140,10 +140,13 @@ defmodule BankWeb.QueueLive do
   # --- State loading --------------------------------------------------------
 
   defp load_state(socket) do
-    pending_approvals = Decisions.list_pending_approvals()
-    held = Decisions.list_held_decisions()
-    blocked = Decisions.list_blocked_decisions()
-    active_executions = Decisions.list_active_executions()
+    workspace_id = socket.assigns.current_scope.workspace.id
+    scope_opts = [workspace_id: workspace_id]
+
+    pending_approvals = Decisions.list_pending_approvals(scope_opts)
+    held = Decisions.list_held_decisions(scope_opts)
+    blocked = Decisions.list_blocked_decisions(20, scope_opts)
+    active_executions = Decisions.list_active_executions(scope_opts)
 
     socket
     |> assign(:pending_approvals, pending_approvals)

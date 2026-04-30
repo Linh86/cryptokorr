@@ -3,6 +3,16 @@ defmodule Bank.Fixtures do
   Minimal fixture helpers for data-layer tests. Each helper builds a
   valid row of the given kind with optional overrides, so a test only
   has to spell out the attribute under test.
+
+  ## Workspace scope (#158c)
+
+  Helpers that target workspace-scoped tables (counterparties,
+  policy_rules, agent_intents, delegations, execution_plans,
+  audit_events) default `workspace_id` to the value
+  `BankWeb.ConnCase.register_and_log_in_user/1` stashes in the
+  process dictionary. Pass `:workspace_id` explicitly to override
+  (e.g. for cross-workspace isolation tests). Pass
+  `workspace_id: nil` to deliberately create a legacy unscoped row.
   """
 
   alias Bank.Audit.AuditEvent
@@ -12,6 +22,11 @@ defmodule Bank.Fixtures do
   alias Bank.Intents.AgentIntent
   alias Bank.Policies.PolicyRule
   alias Bank.Repo
+
+  # Defaulted from `Process.get(:bank_test_workspace_id)`, which
+  # `BankWeb.ConnCase.register_and_log_in_user/1` sets per test (#158c).
+  # `nil` is the legacy default for tests that don't set up auth.
+  defp default_workspace_id, do: Process.get(:bank_test_workspace_id)
 
   def counterparty(attrs \\ %{}) do
     attrs = to_map(attrs)
@@ -23,7 +38,8 @@ defmodule Bank.Fixtures do
           %{
             name: "Acme #{unique_int()}",
             created_by: :user,
-            current_trust_level: :unknown
+            current_trust_level: :unknown,
+            workspace_id: default_workspace_id()
           },
           attrs
         )
@@ -119,6 +135,7 @@ defmodule Bank.Fixtures do
       |> Map.put_new(:params, %{"max" => "100"})
       |> Map.put_new(:created_by, :user)
       |> Map.put_new(:state, :active)
+      |> Map.put_new(:workspace_id, default_workspace_id())
 
     {:ok, rule} =
       %PolicyRule{}
@@ -145,6 +162,7 @@ defmodule Bank.Fixtures do
       |> Map.put_new(:amount, Decimal.new("10.5"))
       |> Map.put_new(:target_counterparty_id, counterparty.id)
       |> Map.put_new(:submitted_at, monotonic_now())
+      |> Map.put_new(:workspace_id, default_workspace_id())
 
     {:ok, intent} =
       %AgentIntent{}
@@ -232,6 +250,7 @@ defmodule Bank.Fixtures do
       |> Map.put_new(:asset, "USDC")
       |> Map.put_new(:smart_account_id, "sa-#{unique_int()}")
       |> Map.put_new(:execution_status, :prepared)
+      |> Map.put_new(:workspace_id, default_workspace_id())
 
     {:ok, plan} =
       %ExecutionPlan{}
@@ -250,6 +269,7 @@ defmodule Bank.Fixtures do
       |> Map.put_new(:state, :active)
       |> Map.put_new(:chain, "base")
       |> Map.put_new(:granted_at, monotonic_now())
+      |> Map.put_new(:workspace_id, default_workspace_id())
 
     {:ok, delegation} =
       %Delegation{}
@@ -268,6 +288,7 @@ defmodule Bank.Fixtures do
       |> Map.put_new(:subject_type, "agent_intent")
       |> Map.put_new(:subject_id, Ecto.UUID.generate())
       |> Map.put_new(:payload_hash, random_hex(64))
+      |> Map.put_new(:workspace_id, default_workspace_id())
 
     {:ok, event} =
       %AuditEvent{}

@@ -74,7 +74,7 @@ defmodule BankWeb.ControlLiveTest do
   describe "with active delegation" do
     setup do
       {:ok, del} =
-        Delegations.grant("sa_main", "del_main", %{
+        grant_delegation("sa_main", "del_main", %{
           scope: %{"asset" => "USDC"},
           expires_at: ~U[2030-01-01 00:00:00Z]
         })
@@ -125,7 +125,8 @@ defmodule BankWeb.ControlLiveTest do
           smart_account_id: "sa_pending",
           delegation_id: "del_pending",
           state: :pending,
-          chain: "base"
+          chain: "base",
+          workspace_id: Process.get(:bank_test_workspace_id)
         })
         |> Bank.Repo.insert()
 
@@ -150,7 +151,7 @@ defmodule BankWeb.ControlLiveTest do
 
   describe "with revoking delegation" do
     setup do
-      {:ok, _del} = Delegations.grant("sa_revoking", "del_revoking")
+      {:ok, _del} = grant_delegation("sa_revoking", "del_revoking")
       {:ok, _del} = Delegations.record_revoke_requested("sa_revoking")
       :ok
     end
@@ -184,7 +185,7 @@ defmodule BankWeb.ControlLiveTest do
     end
 
     test "pause with active delegation shows action guidance", %{conn: conn} do
-      {:ok, _del} = Delegations.grant("sa_paused", "del_paused")
+      {:ok, _del} = grant_delegation("sa_paused", "del_paused")
       {:ok, :paused} = Security.pause(:global)
 
       {:ok, _view, html} = live(conn, "/")
@@ -207,7 +208,7 @@ defmodule BankWeb.ControlLiveTest do
 
   describe "revoke_delegation event" do
     setup do
-      {:ok, _del} = Delegations.grant("sa_revoke", "del_revoke")
+      {:ok, _del} = grant_delegation("sa_revoke", "del_revoke")
       :ok
     end
 
@@ -279,8 +280,8 @@ defmodule BankWeb.ControlLiveTest do
 
   describe "multiple delegations" do
     setup do
-      {:ok, d1} = Delegations.grant("sa_primary", "del_primary")
-      {:ok, d2} = Delegations.grant("sa_secondary", "del_secondary")
+      {:ok, d1} = grant_delegation("sa_primary", "del_primary")
+      {:ok, d2} = grant_delegation("sa_secondary", "del_secondary")
       %{primary: d1, secondary: d2}
     end
 
@@ -334,7 +335,7 @@ defmodule BankWeb.ControlLiveTest do
 
   describe "account selector absent for single delegation" do
     setup do
-      {:ok, _del} = Delegations.grant("sa_solo", "del_solo")
+      {:ok, _del} = grant_delegation("sa_solo", "del_solo")
       :ok
     end
 

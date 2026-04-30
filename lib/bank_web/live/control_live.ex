@@ -151,7 +151,8 @@ defmodule BankWeb.ControlLive do
   # --- State loading -------------------------------------------------------
 
   defp load_state(socket) do
-    delegations = Delegations.list_active()
+    workspace_id = socket.assigns.current_scope.workspace.id
+    delegations = Delegations.list_active(workspace_id: workspace_id)
     paused? = Security.paused?(:global)
 
     current = Map.get(socket.assigns, :selected_smart_account_id)

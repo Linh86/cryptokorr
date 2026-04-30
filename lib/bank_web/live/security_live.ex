@@ -110,7 +110,9 @@ defmodule BankWeb.SecurityLive do
   # --- State loading --------------------------------------------------------
 
   defp load_state(socket) do
-    delegations = Delegations.list_active()
+    delegations =
+      Delegations.list_active(workspace_id: socket.assigns.current_scope.workspace.id)
+
     paused? = Security.paused?(:global)
     pause_snapshot = Security.snapshot()
 
@@ -122,7 +124,7 @@ defmodule BankWeb.SecurityLive do
 
     execution_ready? = not paused? and executable_count > 0
 
-    safety_events = load_safety_events()
+    safety_events = load_safety_events(delegations)
 
     socket
     |> assign(:paused, paused?)
@@ -137,15 +139,44 @@ defmodule BankWeb.SecurityLive do
   # individually because `Bank.Audit.list_events/2` does exact match;
   # then we union and sort. Capped small — this is a "is the runtime
   # safe right now?" view, not a forensic timeline.
-  defp load_safety_events do
+  #
+  # Workspace-scoping rule (#158c):
+  #
+  #   * `security.paused` / `security.resumed` stay runtime-global
+  #     (correlation_id is `nil` per `Bank.Audit` docs). Every
+  #     workspace's operators need visibility into a global pause.
+  #   * `delegation.*` events have a delegation as their subject.
+  #     Today the audit envelope does not stamp `workspace_id` on
+  #     these rows, so we cannot filter at the query layer; instead
+  #     we filter post-query against the workspace's own delegation
+  #     ids so an operator never sees another workspace's
+  #     delegation transitions on their security dashboard.
+  defp load_safety_events(workspace_delegations) do
+    delegation_ids =
+      workspace_delegations
+      |> Enum.map(& &1.id)
+      |> MapSet.new()
+
     @safety_event_types
     |> Enum.flat_map(fn type ->
       %{events: events} = Audit.list_events(%{event_type: type}, limit: 10, order: :desc)
       events
     end)
+    |> Enum.filter(&visible_to_workspace?(&1, delegation_ids))
     |> Enum.sort_by(& &1.ts, {:desc, DateTime})
     |> Enum.take(15)
   end
+
+  # `security.*` rows are runtime-global and always visible.
+  # `delegation.*` rows are visible only when the subject_id (the
+  # delegation's UUID) belongs to the current workspace.
+  defp visible_to_workspace?(%{event_type: "security." <> _}, _ids), do: true
+
+  defp visible_to_workspace?(%{event_type: "delegation." <> _, subject_id: id}, ids)
+       when is_binary(id),
+       do: MapSet.member?(ids, id)
+
+  defp visible_to_workspace?(_event, _ids), do: false
 
   # --- Render ----------------------------------------------------------------
 
