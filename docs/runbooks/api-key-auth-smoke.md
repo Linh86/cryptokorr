@@ -351,6 +351,235 @@ the queue concurrency above 1 without first adding a SQL-level
 unique constraint would silently regress that idempotency — see
 the worker's moduledoc.
 
+## Step 10 — rotate + `api_key.rotated` audit
+
+Mint a key earmarked for rotation, then exercise the atomic
+rotate flow. The old `raw_key` MUST stop working at the moment
+the rotate completes (no grace period in v0.1).
+
+```sh
+# Mint a fresh operator key.
+ROTATE_RESPONSE=$(curl -sS -X POST http://localhost:4000/v1/api_keys \
+  -H "Authorization: Bearer $ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"role": "operator", "name": "smoke-rotate"}')
+
+OLD_ID=$(echo "$ROTATE_RESPONSE" | jq -r '.data.id')
+OLD_KEY=$(echo "$ROTATE_RESPONSE" | jq -r '.raw_key')
+
+# Rotate it. The response carries a fresh raw_key shown ONCE.
+ROTATED=$(curl -sS -X POST http://localhost:4000/v1/api_keys/$OLD_ID/rotate \
+  -H "Authorization: Bearer $ADMIN_KEY")
+
+NEW_KEY=$(echo "$ROTATED" | jq -r '.raw_key')
+echo "$ROTATED" | jq '.data | {id, prefix, role, name}'
+# → { "id": "<new uuid>", "prefix": "<new prefix>", ... }
+
+# Old key fails IMMEDIATELY.
+curl -sS -o /dev/null -w "%{http_code}\n" \
+  http://localhost:4000/v1/policies \
+  -H "Authorization: Bearer $OLD_KEY"
+# → 401
+
+# New key works.
+curl -sS -o /dev/null -w "%{http_code}\n" \
+  http://localhost:4000/v1/policies \
+  -H "Authorization: Bearer $NEW_KEY"
+# → 200
+```
+
+Confirm the audit row:
+
+```sh
+curl -sS "http://localhost:4000/v1/audit?event_type=api_key.rotated" \
+  -H "Authorization: Bearer $ADMIN_KEY" | jq '.data[0]'
+```
+
+The `before_ref` carries the old key's `id` / `prefix` /
+`revoked_at`; the `after_ref` carries the new key's `id` /
+`prefix` / `role` / `name`. The raw secret appears in NEITHER —
+hygiene confirmed by tests in
+[`test/bank/api_keys_test.exs`](../../test/bank/api_keys_test.exs)
+under `describe "rotate_key/3 (#220)"`.
+
+Trying to rotate a key that has already been revoked is a
+deterministic 422 — verifies the race-safety contract:
+
+```sh
+# Re-rotating the OLD id (already revoked by the rotate above).
+curl -sS -o /dev/null -w "%{http_code}\n" \
+  -X POST http://localhost:4000/v1/api_keys/$OLD_ID/rotate \
+  -H "Authorization: Bearer $ADMIN_KEY"
+# → 422
+
+# Body: {"error": {"code": "already_revoked"}}
+```
+
+An `:admin` caller cannot rotate an `:owner` key — the same
+`forbidden_role_above_creator` gate that protects `create`
+applies (mint an owner key in IEx first if you need to exercise
+this in smoke; it's not part of the default flow).
+
+## Step 11 — over-limit 429 + `api_key.rate_limited` audit
+
+The plug refuses requests once a key exceeds its per-window
+budget. Default is `60 requests / 60 seconds per key`. Lower
+the threshold at runtime to exercise the trip without firing
+60+ requests:
+
+```elixir
+# In IEx
+Application.put_env(:bank, Bank.RateLimit,
+  requests_per_window: 3,
+  window_seconds: 60
+)
+
+# Reset any in-flight buckets so the new threshold applies cleanly.
+Bank.RateLimit.reset()
+```
+
+Now fire four requests in rapid succession:
+
+```sh
+for i in 1 2 3 4; do
+  curl -sS -o /dev/null -w "Request $i: %{http_code}\n" \
+    http://localhost:4000/v1/policies \
+    -H "Authorization: Bearer $NEW_KEY"
+done
+# Request 1: 200
+# Request 2: 200
+# Request 3: 200
+# Request 4: 429
+```
+
+Inspect the `Retry-After` header on the 429:
+
+```sh
+curl -sS -i http://localhost:4000/v1/policies \
+  -H "Authorization: Bearer $NEW_KEY" \
+  | head -20
+# HTTP/1.1 429 Too Many Requests
+# retry-after: <seconds>
+# content-type: application/json
+# ...
+# {"error":{"code":"rate_limited"}}
+```
+
+Confirm the audit row — exactly ONE row per (key, window),
+even after a long burst of refused requests:
+
+```sh
+curl -sS "http://localhost:4000/v1/audit?event_type=api_key.rate_limited" \
+  -H "Authorization: Bearer $ADMIN_KEY" | jq '.data[0]'
+```
+
+The `after_ref` carries `id` / `prefix` / `role` / `window_start`
+/ `window_end` / `limit` / `retry_after_seconds`. NEVER the raw
+key, `secret_hash`, or Authorization header — hygiene tests in
+[`test/bank_web/plugs/rate_limit_test.exs`](../../test/bank_web/plugs/rate_limit_test.exs)
+JSON-scan the audit row for those substrings on every run.
+
+Restore the dev threshold before continuing:
+
+```elixir
+# In IEx
+Application.put_env(:bank, Bank.RateLimit,
+  requests_per_window: 60,
+  window_seconds: 60
+)
+
+Bank.RateLimit.reset()
+```
+
+Auth failures and revoked keys still 401 — they never reach
+the rate-limit plug, so a 429 cannot mask a 401. Step 12 covers
+the auth-failure side.
+
+## Step 12 — failed auth + `api_key.denied` audit
+
+Every reject path of `BankWeb.Plugs.VerifyAPIKey` emits a
+`api_key.denied` audit row, deduped per (prefix-or-id, reason,
+minute) so a brute-force probe cannot flood storage. Each of
+the five audit reasons is observable by sending a request that
+trips the corresponding internal verify_key/1 path:
+
+```sh
+# 1. Missing header → reason="missing".
+curl -sS -o /dev/null -w "%{http_code}\n" \
+  http://localhost:4000/v1/policies
+# → 401
+
+# 2. Wrong scheme → reason="missing".
+curl -sS -o /dev/null -w "%{http_code}\n" \
+  -H "Authorization: Basic abc" \
+  http://localhost:4000/v1/policies
+# → 401
+
+# 3. Garbage non-`cb_` token → reason="malformed".
+curl -sS -o /dev/null -w "%{http_code}\n" \
+  -H "Authorization: Bearer not-a-cb-token" \
+  http://localhost:4000/v1/policies
+# → 401
+
+# 4. Unknown prefix → reason="invalid_credentials".
+curl -sS -o /dev/null -w "%{http_code}\n" \
+  -H "Authorization: Bearer cb_aaaaaaaabbbbbbbbccccccccddddddd" \
+  http://localhost:4000/v1/policies
+# → 401
+
+# 5. Revoked key (re-using the viewer key revoked in Step 7) →
+#    reason="revoked".
+curl -sS -o /dev/null -w "%{http_code}\n" \
+  -H "Authorization: Bearer $VIEWER_KEY" \
+  http://localhost:4000/v1/policies
+# → 401
+```
+
+For `expired`, mint a key with `expires_at` set to the past via
+the API, then attempt to use it:
+
+```sh
+PAST_TTL_KEY=$(curl -sS -X POST http://localhost:4000/v1/api_keys \
+  -H "Authorization: Bearer $ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"role": "viewer", "name": "smoke-expired", "expires_at": "2000-01-01T00:00:00Z"}')
+```
+
+> The controller now refuses past-expires_at on create with a 422
+> (`invalid_expires_at`). To exercise the `expired` reject in
+> smoke, set `expires_at` to a few seconds in the future, wait,
+> then send a request — or stamp the column to a past time
+> directly via `Bank.Repo.update_all` in IEx.
+
+Inspect the audit rows:
+
+```sh
+curl -sS "http://localhost:4000/v1/audit?event_type=api_key.denied" \
+  -H "Authorization: Bearer $ADMIN_KEY" | jq '.data[] | {reason: .after_ref.reason, prefix: .after_ref.prefix, subject_id, workspace_id}'
+```
+
+Each row's `after_ref` allowlists `reason` / `prefix` /
+`api_key_id` only. NEVER raw bearer tokens, `secret_hash`, or
+Authorization header bytes — hygiene tests in
+[`test/bank_web/plugs/verify_api_key_test.exs`](../../test/bank_web/plugs/verify_api_key_test.exs)
+under `describe "api_key.denied audit event"` JSON-scan each
+denial class.
+
+Subject identity:
+
+  * Known key (`hash_mismatch` / `revoked` / `expired`):
+    `subject_id` = key UUID, `workspace_id` stamped.
+  * Prefix parsed but no row (`invalid_credentials` via
+    `:not_found`): `subject_id` = `"prefix:" <> prefix`,
+    `workspace_id` = `null`.
+  * No parseable prefix (`missing` / `malformed`):
+    `subject_id` = `"anonymous"`, `workspace_id` = `null`.
+
+Repeated rejects of the SAME (prefix-or-id, reason) within a
+minute collapse to ONE audit row — verified by burst tests.
+This is intentional: a misconfigured client retrying for an
+hour produces 60 rows, not thousands.
+
 ## What this smoke does NOT exercise
 
 - **Chain / adapter / Base Sepolia / `.env` secrets.** None of
