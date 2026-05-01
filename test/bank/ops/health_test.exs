@@ -163,6 +163,67 @@ defmodule Bank.Ops.HealthTest do
       assert length(Health.stuck_plan_details(now: now, limit: 3)) == 3
     end
 
+    test "with `:workspace_id` filter, sibling-tenant rows do NOT consume the limit budget (#305 review fix)" do
+      # Pre-fix the DB query had no `workspace_id` predicate, so the
+      # caller's post-fetch `Enum.filter` could only see rows that
+      # survived the per-status `LIMIT` — a 12-row pile from
+      # another workspace silently hid the current workspace's stuck
+      # row. Pin the corrected behavior: the workspace filter is
+      # applied INSIDE the DB query, before the limit.
+      now = DateTime.utc_now()
+      twenty_min_ago = DateTime.add(now, -20 * 60, :second)
+      twenty_one_min_ago = DateTime.add(now, -21 * 60, :second)
+
+      {:ok, sibling_ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "sibling-starve-#{System.unique_integer([:positive])}",
+          name: "Sibling"
+        })
+
+      {:ok, current_ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "current-#{System.unique_integer([:positive])}",
+          name: "Current"
+        })
+
+      # 12 OLDER sibling-workspace rows that pre-fix would have
+      # filled the limit budget and starved the current workspace.
+      for _ <- 1..12 do
+        stale_plan(:prepared, twenty_one_min_ago, workspace_id: sibling_ws.id)
+      end
+
+      current_plan = stale_plan(:prepared, twenty_min_ago, workspace_id: current_ws.id)
+
+      details =
+        Health.stuck_plan_details(
+          now: now,
+          limit: 10,
+          workspace_id: current_ws.id
+        )
+
+      ids = Enum.map(details, & &1.id)
+      assert current_plan.id in ids
+      assert Enum.all?(details, &(&1.workspace_id == current_ws.id))
+    end
+
+    test "without `:workspace_id`, the cluster-wide scan still returns sibling rows (no regression)" do
+      now = DateTime.utc_now()
+      twenty_min_ago = DateTime.add(now, -20 * 60, :second)
+
+      {:ok, sibling_ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "sibling-#{System.unique_integer([:positive])}",
+          name: "Sibling"
+        })
+
+      sibling = stale_plan(:prepared, twenty_min_ago, workspace_id: sibling_ws.id)
+
+      details = Health.stuck_plan_details(now: now)
+
+      ids = Enum.map(details, & &1.id)
+      assert sibling.id in ids
+    end
+
     test "selects oldest stuck rows deterministically when more than :limit match (#230 P2 Finding B)" do
       # Pre-fix the per-status query had no `order_by`, so `LIMIT N`
       # returned an arbitrary slice and a younger row could be

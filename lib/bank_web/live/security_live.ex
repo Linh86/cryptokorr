@@ -366,14 +366,15 @@ defmodule BankWeb.SecurityLive do
 
     risk_summary = Enum.frequencies_by(delegations, & &1.state)
 
-    # Stuck-plan detector rows (#229/#230). `stuck_plan_details/1`
-    # is workspace-agnostic at the context level, so we filter by
-    # workspace AFTER fetch — stale rows from sibling tenants would
-    # otherwise leak into the operator console.
+    # Stuck-plan detector rows (#229/#230). The `:workspace_id`
+    # option pushes the workspace filter down into the per-status
+    # DB query BEFORE `order_by` / `limit`, so sibling-tenant rows
+    # cannot starve the current workspace's slot in the limit
+    # budget. Post-fetch filtering would have hidden a
+    # current-workspace row whenever 10+ older sibling rows were
+    # in flight (Finding A on #305 review).
     stuck_plans =
-      [limit: 10]
-      |> Bank.Ops.Health.stuck_plan_details()
-      |> Enum.filter(&(&1.workspace_id == workspace_id))
+      Bank.Ops.Health.stuck_plan_details(limit: 10, workspace_id: workspace_id)
 
     filters = socket.assigns[:safety_filters] || @default_safety_filters
     safety_events = load_safety_events(delegations, workspace_id, filters)
@@ -585,7 +586,7 @@ defmodule BankWeb.SecurityLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} active_page={:security}>
+    <Layouts.app flash={@flash} current_scope={@current_scope} active_page={:security}>
       <%!-- Page header --%>
       <div class="flex items-center justify-between mb-6">
         <div>

@@ -205,6 +205,14 @@ defmodule Bank.Ops.Health do
       `#{@scan_batch_default}` so a degraded run does not flood
       the audit pipeline.
     * `:now` — clock override for tests.
+    * `:workspace_id` — narrow the per-status DB query to one
+      workspace (`SecurityLive` operator card). Default `nil`
+      preserves the cluster-wide scan used by
+      `ScanStuckPlans` and `/v1/health/deep`. The filter is
+      pushed down INSIDE the per-status query and applied
+      BEFORE `order_by` / `limit`, so it cannot be silently
+      starved by sibling-tenant rows competing for the same
+      `:limit` budget.
   """
   @spec stuck_plan_details(keyword()) :: [
           %{
@@ -220,6 +228,7 @@ defmodule Bank.Ops.Health do
     thresholds = resolve_thresholds(opts)
     limit = Keyword.get(opts, :limit, @scan_batch_default)
     now = Keyword.get(opts, :now, DateTime.utc_now())
+    workspace_id = Keyword.get(opts, :workspace_id)
 
     # Run one query per status so the per-status cutoff is applied
     # at the DB level. The status set is small (4 entries) so the
@@ -237,20 +246,20 @@ defmodule Bank.Ops.Health do
         # the cap selects the worst-stuck rows of that status, not an
         # arbitrary slice. The outer `Enum.take(limit)` (post-merge
         # across all statuses) preserves the same ordering.
-        from(p in ExecutionPlan,
-          where:
-            p.execution_status == ^status and
-              p.updated_at < ^cutoff and
-              p.active == true,
-          select: %{
-            id: p.id,
-            workspace_id: p.workspace_id,
-            execution_status: p.execution_status,
-            updated_at: p.updated_at
-          },
-          order_by: [asc: p.updated_at, asc: p.id],
-          limit: ^limit
+        ExecutionPlan
+        |> where(
+          [p],
+          p.execution_status == ^status and p.updated_at < ^cutoff and p.active == true
         )
+        |> apply_workspace_filter(workspace_id)
+        |> select([p], %{
+          id: p.id,
+          workspace_id: p.workspace_id,
+          execution_status: p.execution_status,
+          updated_at: p.updated_at
+        })
+        |> order_by([p], asc: p.updated_at, asc: p.id)
+        |> limit(^limit)
         |> Repo.all()
         |> Enum.map(fn row ->
           stuck_for = DateTime.diff(now, row.updated_at, :second)
@@ -303,6 +312,12 @@ defmodule Bank.Ops.Health do
             e.subject_id == ^plan_id and
             fragment("?->>'window_start' = ?", e.after_ref, ^window_start_iso)
     )
+  end
+
+  defp apply_workspace_filter(query, nil), do: query
+
+  defp apply_workspace_filter(query, workspace_id) when is_binary(workspace_id) do
+    where(query, [p], p.workspace_id == ^workspace_id)
   end
 
   defp resolve_thresholds(opts) do
