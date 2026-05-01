@@ -369,5 +369,81 @@ defmodule BankWeb.Plugs.RateLimitTest do
       assert n >= 1
       assert n <= 60
     end
+
+    test "workspace-stage rejection still consumes one per-key unit (documented side effect)" do
+      # Per-key=4, workspace=2. Three legitimate requests fit
+      # under per-key but workspace exhausts at 2. The 3rd request
+      # is workspace-rejected — yet its per-key counter HAS
+      # incremented. Subsequent requests therefore hit the per-key
+      # ceiling at request 5 (per-key=5 > 4) instead of waiting
+      # until request 6 if workspace rejects didn't consume per-key
+      # units. This pins the documented side effect from the plug
+      # moduledoc ("Counter side effect on workspace-stage
+      # rejection").
+      original = Application.get_env(:bank, Bank.RateLimit)
+
+      Application.put_env(
+        :bank,
+        Bank.RateLimit,
+        Keyword.merge(original,
+          requests_per_window: 4,
+          window_seconds: 60,
+          workspace_requests_per_window: 2,
+          workspace_window_seconds: 60
+        )
+      )
+
+      RateLimit.reset()
+      on_exit(fn -> Application.put_env(:bank, Bank.RateLimit, original) end)
+
+      suffix = System.unique_integer([:positive])
+
+      {:ok, user} =
+        Bank.Accounts.find_or_create_from_oauth(%{
+          provider: :google,
+          subject: "rl-side-#{suffix}",
+          email: "rl-side-#{suffix}@example.com",
+          name: "RL Side"
+        })
+
+      {:ok, ws} =
+        Workspaces.create_workspace(%{slug: "rl-side-#{suffix}", name: "RL Side"})
+
+      {:ok, _} =
+        Workspaces.create_membership(%{user_id: user.id, workspace_id: ws.id, role: :admin})
+
+      {:ok, _key, raw} = APIKeys.create_key(ws, user, :viewer, "side-effect")
+
+      conn =
+        Phoenix.ConnTest.build_conn()
+        |> Plug.Conn.put_req_header("authorization", "Bearer " <> raw)
+
+      # Reqs 1-2 succeed (per-key 1-2, workspace 1-2).
+      assert get(conn, ~p"/v1/counterparties").status == 200
+      assert get(conn, ~p"/v1/counterparties").status == 200
+
+      # Req 3: per-key 3 (ok), workspace 3 (over=3>2) → 429 workspace.
+      # Per-key counter advances to 3.
+      c3 = get(conn, ~p"/v1/counterparties")
+      assert c3.status == 429
+      %{events: events_3} = Audit.list_events(%{event_type: "api_key.rate_limited"})
+      assert Enum.any?(events_3, &(&1.after_ref["scope"] == "workspace"))
+
+      # Reqs 4-5: per-key 4-5 (5 > 4) → 429 per-key on req 5.
+      # If workspace rejection had NOT consumed a per-key unit, req 5
+      # would hit per-key=4 (ok) and 429 from workspace again. But
+      # because req 3 consumed a per-key unit, req 5 hits per-key=5
+      # which trips per-key first.
+      _ = get(conn, ~p"/v1/counterparties")
+      _ = get(conn, ~p"/v1/counterparties")
+
+      %{events: events_after} = Audit.list_events(%{event_type: "api_key.rate_limited"})
+
+      # We should now see BOTH a workspace-scope event (from req 3)
+      # AND a key-scope event (from req 5+) — confirming the per-key
+      # counter advanced during a workspace-stage rejection.
+      assert Enum.any?(events_after, &(&1.after_ref["scope"] == "workspace"))
+      assert Enum.any?(events_after, &(&1.after_ref["scope"] == "key"))
+    end
   end
 end

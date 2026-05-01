@@ -28,6 +28,20 @@ defmodule BankWeb.Plugs.RateLimit do
   key prefixes (`<uuid>` vs `"workspace:" <> <uuid>`) prevent
   collision.
 
+  ### Counter side effect on workspace-stage rejection
+
+  `Bank.RateLimit.check/3` increments the bucket atomically before
+  evaluating the threshold (the standard `:ets.update_counter/4`
+  pattern). When the per-key check passes but the workspace check
+  trips, the per-key counter HAS already been incremented for that
+  request — the calling key "spent" one unit of its per-key budget
+  on a request the workspace bucket then refused. This is bounded
+  (one extra unit per workspace-rejected request, all caps reset
+  at the next window) and is the price of the noisy-key-first
+  ordering documented above. The audit row carries
+  `after_ref.scope == "workspace"` so operators can correlate the
+  spent per-key unit against a workspace trip.
+
   ## Configuration
 
       config :bank, Bank.RateLimit,
