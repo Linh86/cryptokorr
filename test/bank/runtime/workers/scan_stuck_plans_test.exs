@@ -131,6 +131,40 @@ defmodule Bank.Runtime.Workers.ScanStuckPlansTest do
       refute json =~ "Authorization"
     end
 
+    test "uses real `now` for the threshold check, not the rounded `window_start` (#230 P2 Finding A)" do
+      # Pre-fix the worker passed `window_start` (the 5-min aligned
+      # bucket) as `now` into `Health.stuck_plan_details/1`, which
+      # delayed detection by up to one bucket. A plan that became
+      # stuck at 12:33:30 with a 10-min threshold (cutoff 12:23:30)
+      # should be detected at 12:34, but the buggy worker would
+      # evaluate at 12:30 (cutoff 12:20) and miss it.
+      now = DateTime.from_naive!(~N[2026-05-01 12:34:00], "Etc/UTC")
+      window_start = Health.detection_window_start(now)
+
+      assert window_start == DateTime.from_naive!(~N[2026-05-01 12:30:00], "Etc/UTC")
+
+      # Plan went stuck at 12:23:30 — past the 10-min threshold for
+      # `:prepared` (cutoff 12:24:00). The buggy code evaluated
+      # against a 12:20 cutoff and would have missed this row.
+      borderline =
+        stale_plan(:prepared, DateTime.from_naive!(~N[2026-05-01 12:23:30], "Etc/UTC"))
+
+      assert :ok =
+               perform_job(ScanStuckPlans, %{
+                 "now" => DateTime.to_iso8601(now),
+                 "window_start" => DateTime.to_iso8601(window_start)
+               })
+
+      assert Repo.aggregate(
+               from(e in AuditEvent,
+                 where:
+                   e.event_type == "ops.stuck_plan_detected" and
+                     e.subject_id == ^borderline.id
+               ),
+               :count
+             ) == 1
+    end
+
     test "fires the [:bank, :ops, :stuck_plan, :detected] telemetry event per emit" do
       now = DateTime.utc_now()
       window_iso = now |> Health.detection_window_start() |> DateTime.to_iso8601()

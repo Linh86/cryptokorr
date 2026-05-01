@@ -230,6 +230,13 @@ defmodule Bank.Ops.Health do
       |> Enum.flat_map(fn {status, threshold_seconds} ->
         cutoff = DateTime.add(now, -threshold_seconds, :second)
 
+        # Deterministic ordering: oldest stuck rows first, with id as
+        # tiebreaker so two rows with identical `updated_at` cannot
+        # be silently dropped by `LIMIT` based on Postgres row order.
+        # The per-status `LIMIT ^limit` runs after the `ORDER BY` so
+        # the cap selects the worst-stuck rows of that status, not an
+        # arbitrary slice. The outer `Enum.take(limit)` (post-merge
+        # across all statuses) preserves the same ordering.
         from(p in ExecutionPlan,
           where:
             p.execution_status == ^status and
@@ -241,6 +248,7 @@ defmodule Bank.Ops.Health do
             execution_status: p.execution_status,
             updated_at: p.updated_at
           },
+          order_by: [asc: p.updated_at, asc: p.id],
           limit: ^limit
         )
         |> Repo.all()
@@ -254,7 +262,14 @@ defmodule Bank.Ops.Health do
       end)
 
     rows
-    |> Enum.sort_by(& &1.updated_at, {:asc, DateTime})
+    |> Enum.sort_by(&{&1.updated_at, &1.id}, fn
+      {a_ts, a_id}, {b_ts, b_id} ->
+        case DateTime.compare(a_ts, b_ts) do
+          :lt -> true
+          :gt -> false
+          :eq -> a_id <= b_id
+        end
+    end)
     |> Enum.take(limit)
   end
 
