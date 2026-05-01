@@ -55,6 +55,7 @@ defmodule BankWeb.Plugs.VerifyAPIKey do
 
   alias Bank.APIKeys
   alias Bank.Audit
+  alias Bank.RateLimit
 
   # Dedupe window for `api_key.denied` emission (#222). 60s
   # collapses brute-force probes to one row per minute per
@@ -86,7 +87,14 @@ defmodule BankWeb.Plugs.VerifyAPIKey do
     else
       {:error, scheme_error}
       when scheme_error in [:missing_authorization, :invalid_authorization_scheme] ->
-        emit_denied(:missing, presented_or_nil(conn))
+        # Missing / wrong-scheme attempts are NOT subject to the
+        # auth-failure lockout (#221, second slice). Random
+        # crawlers, health checks, and unauthenticated browsers
+        # all hit this branch; locking out their IPs would create
+        # a large false-positive surface. The deduped
+        # `api_key.denied` event is still emitted so operators
+        # can observe attempt rates.
+        emit_denied(:missing, presented_or_nil(conn), nil, nil)
         halt_with(conn, Atom.to_string(scheme_error))
 
       {:error, verify_error}
@@ -95,8 +103,21 @@ defmodule BankWeb.Plugs.VerifyAPIKey do
           "BankWeb.Plugs.VerifyAPIKey: rejecting from #{peer_for_log(conn)} (#{verify_error})"
         )
 
-        emit_denied(audit_reason(verify_error), presented_or_nil(conn))
-        halt_with(conn, "invalid_credentials")
+        # One DB lookup shared between the per-attempt audit
+        # emit and the auth-failure bucket key.
+        {prefix, api_key} = APIKeys.lookup_for_audit(presented_or_nil(conn))
+        reason = audit_reason(verify_error)
+
+        case maybe_check_auth_failure(verify_error, prefix, api_key, conn) do
+          :ok ->
+            emit_denied(reason, nil, prefix, api_key)
+            halt_with(conn, "invalid_credentials")
+
+          {:error, :rate_limited, retry_after, bucket} ->
+            emit_denied(reason, nil, prefix, api_key)
+            emit_auth_failure_limited(bucket, prefix, api_key, retry_after)
+            halt_429(conn, retry_after)
+        end
     end
   end
 
@@ -173,9 +194,13 @@ defmodule BankWeb.Plugs.VerifyAPIKey do
   # have, deduped per (prefix-or-id, reason, minute). A bursty
   # probe collapses to one row per pattern per minute, keeping the
   # audit log readable.
-  defp emit_denied(reason, presented) do
-    {prefix, api_key} = APIKeys.lookup_for_audit(presented)
-
+  #
+  # `prefix` and `api_key` are passed in by callers that already
+  # ran `APIKeys.lookup_for_audit/1` (the verify_error branch
+  # shares one lookup with the auth-failure bucket — #221 second
+  # slice). The missing/scheme path passes `nil, nil` because no
+  # bearer was even parseable.
+  defp emit_denied(reason, _presented, prefix, api_key) do
     dedupe_key =
       case api_key do
         %APIKeys.APIKey{id: id} -> {:denied, {:id, id}, reason}
@@ -210,5 +235,144 @@ defmodule BankWeb.Plugs.VerifyAPIKey do
       Logger.warning("BankWeb.Plugs.VerifyAPIKey: emit_denied raised: #{inspect(error)}")
 
       :ok
+  end
+
+  # --- Auth-failure lockout (#221, second slice) -------------------
+
+  # Returns `:ok` when the request is under the auth-failure
+  # threshold (caller proceeds to 401), or
+  # `{:error, :rate_limited, retry_after, bucket}` when the bucket
+  # has tripped (caller proceeds to 429 + audit).
+  #
+  # `:missing` / `:invalid_authorization_scheme` rejects never
+  # reach this function — they're filtered above. The five
+  # branches here cover `:malformed`, `:not_found`, `:hash_mismatch`,
+  # `:revoked`, and `:expired`.
+  defp maybe_check_auth_failure(verify_error, prefix, api_key, conn) do
+    cfg = Application.get_env(:bank, Bank.RateLimit, [])
+
+    if Keyword.get(cfg, :auth_failure_enabled?, true) do
+      bucket = auth_failure_bucket(verify_error, prefix, api_key, conn)
+      max_req = Keyword.fetch!(cfg, :auth_failure_per_window)
+      window = Keyword.fetch!(cfg, :auth_failure_window_seconds)
+
+      case RateLimit.check(bucket.bucket_key, max_req, window) do
+        :ok ->
+          :ok
+
+        {:error, :rate_limited, retry_after} ->
+          {:error, :rate_limited, retry_after,
+           Map.merge(bucket, %{
+             window_seconds: window,
+             limit: max_req,
+             retry_after_seconds: retry_after
+           })}
+      end
+    else
+      :ok
+    end
+  rescue
+    error ->
+      # Defense in depth: a fault in the lockout path must NEVER
+      # block the existing 401 behavior. Fall through to :ok so
+      # the caller continues to the existing reject response.
+      Logger.warning(
+        "BankWeb.Plugs.VerifyAPIKey: maybe_check_auth_failure raised: #{inspect(error)}"
+      )
+
+      :ok
+  end
+
+  # The bucket-key string is what `Bank.RateLimit.check/3`
+  # increments. Distinct prefixes ("auth_fail:id:" / "auth_fail:
+  # prefix:" / "auth_fail:ip:") prevent collision with the
+  # success-path counters from the first slice.
+  defp auth_failure_bucket(verify_error, prefix, api_key, conn) do
+    cond do
+      match?(%APIKeys.APIKey{}, api_key) ->
+        # `:hash_mismatch` / `:revoked` / `:expired` — the row
+        # was found, so attribution is unambiguous.
+        %{
+          bucket_kind: :id,
+          bucket_id: api_key.id,
+          bucket_key: "auth_fail:id:" <> api_key.id
+        }
+
+      verify_error == :not_found and is_binary(prefix) ->
+        # Prefix parsed but no row matched — bucket by the safe
+        # 8-char prefix string.
+        %{
+          bucket_kind: :prefix,
+          bucket_id: prefix,
+          bucket_key: "auth_fail:prefix:" <> prefix
+        }
+
+      true ->
+        # `:malformed` — no prefix, no row. Bucket by source IP.
+        ip = peer_for_log(conn)
+
+        %{
+          bucket_kind: :ip,
+          bucket_id: ip,
+          bucket_key: "auth_fail:ip:" <> ip
+        }
+    end
+  end
+
+  # Emits `api_key.auth_failure_limited`. Deduped per
+  # (bucket_key, lockout-window) so a sustained attack against the
+  # same bucket produces ONE row per window, not one per refused
+  # request.
+  defp emit_auth_failure_limited(bucket, prefix, api_key, retry_after) do
+    cfg = Application.get_env(:bank, Bank.RateLimit, [])
+    window = Keyword.fetch!(cfg, :auth_failure_window_seconds)
+    limit = Keyword.fetch!(cfg, :auth_failure_per_window)
+
+    now = System.system_time(:second)
+    window_start = div(now, window) * window
+
+    if Bank.Audit.DedupeWindow.claim({:auth_fail_limited, bucket.bucket_key}, window) do
+      attrs =
+        Audit.Events.api_key_auth_failure_limited(%{
+          bucket_kind: bucket.bucket_kind,
+          bucket_id: bucket.bucket_id,
+          prefix: prefix,
+          api_key: api_key,
+          window_start: window_start,
+          window_end: window_start + window,
+          limit: limit,
+          retry_after_seconds: retry_after
+        })
+
+      case Audit.append_event(attrs) do
+        {:ok, _} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning(
+            "BankWeb.Plugs.VerifyAPIKey: api_key.auth_failure_limited audit append failed: " <>
+              inspect(reason)
+          )
+
+          :ok
+      end
+    else
+      :ok
+    end
+  rescue
+    error ->
+      Logger.warning(
+        "BankWeb.Plugs.VerifyAPIKey: emit_auth_failure_limited raised: #{inspect(error)}"
+      )
+
+      :ok
+  end
+
+  defp halt_429(conn, retry_after_seconds) do
+    conn
+    |> put_resp_header("retry-after", Integer.to_string(retry_after_seconds))
+    |> put_resp_content_type("application/json")
+    |> send_resp(:too_many_requests, Jason.encode!(%{error: %{code: "rate_limited"}}))
+    |> halt()
   end
 end

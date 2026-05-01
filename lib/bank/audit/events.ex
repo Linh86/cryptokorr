@@ -977,6 +977,95 @@ defmodule Bank.Audit.Events do
   end
 
   @doc """
+  `api_key.auth_failure_limited` — the per-bucket auth-failure
+  threshold tripped (#221, second slice).
+
+  Emitted at MOST ONCE per `(bucket_key, window)` slot via
+  `Bank.Audit.DedupeWindow.claim/2`. The bucket key is one of:
+
+    * `"auth_fail:id:" <> api_key.id` — the row was found but
+      hash compare / revocation / expiry failed.
+    * `"auth_fail:prefix:" <> prefix` — prefix parsed but no row
+      matched (`:not_found`).
+    * `"auth_fail:ip:" <> remote_ip` — token was malformed; bucket
+      by source IP because there is no per-key identity to
+      attribute the attempt to.
+
+  This event fires IN ADDITION to the existing per-attempt
+  `api_key.denied` (which has its own 60s dedupe). Operators
+  querying `api_key.auth_failure_limited` see only events where a
+  threshold was crossed, NOT every individual rejected attempt.
+
+  ## Subject identity
+
+    * Known key (id bucket) → `subject_id = api_key.id`,
+      `workspace_id` stamped.
+    * Prefix-only bucket → `subject_id = "prefix:" <> prefix`,
+      `workspace_id` nil.
+    * IP bucket → `subject_id = "ip:" <> ip`, `workspace_id` nil.
+
+  ## Secret hygiene
+
+  `after_ref` is a hard-coded allowlist: `bucket_kind`,
+  `bucket_key` (already public-safe — see above), `prefix`
+  (when known), `api_key_id` (when known), `limit`, `window`,
+  `retry_after_seconds`. NEVER raw bearer, `secret_hash`, or
+  Authorization header bytes.
+  """
+  @spec api_key_auth_failure_limited(
+          %{
+            required(:bucket_kind) => :id | :prefix | :ip,
+            required(:bucket_id) => String.t(),
+            required(:prefix) => String.t() | nil,
+            required(:api_key) => APIKey.t() | nil,
+            required(:window_start) => integer(),
+            required(:window_end) => integer(),
+            required(:limit) => pos_integer(),
+            required(:retry_after_seconds) => pos_integer()
+          },
+          keyword()
+        ) :: attrs()
+  def api_key_auth_failure_limited(meta, _opts \\ []) do
+    %{
+      bucket_kind: bucket_kind,
+      bucket_id: bucket_id,
+      prefix: prefix,
+      api_key: api_key,
+      window_start: window_start_unix,
+      window_end: window_end_unix,
+      limit: limit,
+      retry_after_seconds: retry_after
+    } = meta
+
+    {subject_id, workspace_id, api_key_id} =
+      case {bucket_kind, api_key} do
+        {:id, %APIKey{} = k} -> {k.id, k.workspace_id, k.id}
+        {:prefix, _} -> {"prefix:" <> bucket_id, nil, nil}
+        {:ip, _} -> {"ip:" <> bucket_id, nil, nil}
+        _ -> {"anonymous", nil, nil}
+      end
+
+    %{
+      actor: :runtime,
+      actor_id: nil,
+      event_type: "api_key.auth_failure_limited",
+      subject_type: "api_key",
+      subject_id: subject_id,
+      after_ref: %{
+        bucket_kind: Atom.to_string(bucket_kind),
+        bucket_id: bucket_id,
+        prefix: prefix,
+        api_key_id: api_key_id,
+        window_start: window_start_unix |> DateTime.from_unix!() |> DateTime.to_iso8601(),
+        window_end: window_end_unix |> DateTime.from_unix!() |> DateTime.to_iso8601(),
+        limit: limit,
+        retry_after_seconds: retry_after
+      },
+      workspace_id: workspace_id
+    }
+  end
+
+  @doc """
   `api_key.rate_limited` — the rate-limit plug refused a request
   because the per-key counter exceeded the window quota (#221, first
   slice).
