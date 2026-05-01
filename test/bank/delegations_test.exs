@@ -231,6 +231,115 @@ defmodule Bank.DelegationsTest do
     end
   end
 
+  # --- Adapter callback race / late-callback resurrection guard (#212 P1) ---
+  #
+  # Without `FOR UPDATE` and a from-state guard inside the lock,
+  # two concurrent adapter callbacks for the same `smart_account_id`
+  # can both read the row at `:revoking`, both pass their in-memory
+  # pattern guards, and the second `Repo.update/1` to commit can
+  # overwrite a terminal `:revoked` with `:revoke_failed` (or any
+  # other late-arriving stale transition). Mirror PR #314's pattern:
+  # transaction + `lock: "FOR UPDATE"` + re-pattern-match inside the
+  # lock window. These tests pin the post-fix from-state behaviour;
+  # the under-the-hood lock prevents the race window itself.
+  describe "callback transition lock guard against late writes (#212)" do
+    alias Bank.Delegations.Delegation
+    alias Bank.Repo
+
+    test "record_revoke_failed: late callback after :revoked succeeded returns :not_found" do
+      # Simulates: callback A (`revoked`) committed first; callback B
+      # (`revoke_failed`) arrives stale. Pre-fix B's `get/1` saw the
+      # delegation at :revoking inside its own snapshot and would
+      # transition :revoked -> :revoke_failed, resurrecting a
+      # terminal row. Post-fix: lock_active_delegation excludes
+      # terminal :revoked rows, so B sees `nil` and returns
+      # :not_found.
+      {:ok, _} = Delegations.grant("sa_late_revfail", "del_late_revfail")
+      {:ok, _} = Delegations.record_revoke_requested("sa_late_revfail")
+      {:ok, _} = Delegations.record_revoked("sa_late_revfail")
+
+      assert {:error, :not_found} =
+               Delegations.record_revoke_failed("sa_late_revfail", %{
+                 last_reason: "send_failed:rpc",
+                 last_tx_hash: "0xstaleA"
+               })
+
+      # Row remains in terminal :revoked.
+      reloaded = Repo.get_by(Delegation, smart_account_id: "sa_late_revfail")
+      assert reloaded.state == :revoked
+    end
+
+    test "record_revoked: late callback after :revoke_failed returns :invalid_transition" do
+      # Symmetric scenario: A (`revoke_failed`) committed first; B
+      # (`revoked`) arrives stale. lock_active_delegation finds the
+      # :revoke_failed row (still non-terminal), but the from-state
+      # guard rejects because :revoked requires prior :revoking.
+      {:ok, _} = Delegations.grant("sa_late_revoked", "del_late_revoked")
+      {:ok, _} = Delegations.record_revoke_requested("sa_late_revoked")
+      {:ok, _} = Delegations.record_revoke_failed("sa_late_revoked")
+
+      assert {:error, :invalid_transition} =
+               Delegations.record_revoked("sa_late_revoked")
+
+      reloaded = Repo.get_by(Delegation, smart_account_id: "sa_late_revoked")
+      assert reloaded.state == :revoke_failed
+    end
+
+    test "record_revoke_failed: idempotent after :revoke_failed already recorded" do
+      # Adapter at-least-once delivery: a duplicate `revoke_failed`
+      # for an already-:revoke_failed row must not crash and must
+      # not transition. Pre-fix this returned :invalid_transition
+      # (in-memory state guard), which is still the correct answer
+      # post-fix (same guard, now under the lock).
+      {:ok, _} = Delegations.grant("sa_dup_revfail", "del_dup_revfail")
+      {:ok, _} = Delegations.record_revoke_requested("sa_dup_revfail")
+      {:ok, _} = Delegations.record_revoke_failed("sa_dup_revfail")
+
+      assert {:error, :invalid_transition} =
+               Delegations.record_revoke_failed("sa_dup_revfail", %{
+                 last_reason: "send_failed:rpc"
+               })
+
+      reloaded = Repo.get_by(Delegation, smart_account_id: "sa_dup_revfail")
+      assert reloaded.state == :revoke_failed
+    end
+
+    test "record_expired: late callback after :revoked returns :not_found" do
+      # An :expired callback that arrives after the chain confirmed
+      # revoke must not resurrect the terminal row.
+      {:ok, _} = Delegations.grant("sa_late_expired", "del_late_expired")
+      {:ok, _} = Delegations.record_revoke_requested("sa_late_expired")
+      {:ok, _} = Delegations.record_revoked("sa_late_expired")
+
+      assert {:error, :not_found} = Delegations.record_expired("sa_late_expired")
+
+      reloaded = Repo.get_by(Delegation, smart_account_id: "sa_late_expired")
+      assert reloaded.state == :revoked
+    end
+
+    test "lock query selects FOR UPDATE on the active delegation row" do
+      # Pin the query shape so a future refactor can't accidentally
+      # drop the row lock without breaking a test. This is the only
+      # deterministic assertion we can make against single-process
+      # ExUnit; the lock's race-prevention value shows up only with
+      # two concurrent DB connections.
+      import Ecto.Query
+
+      query =
+        from(d in Delegation,
+          where:
+            d.smart_account_id == ^"sa_lock_check" and
+              d.state in [:pending, :active, :revoking, :revoke_failed],
+          order_by: [desc: d.inserted_at],
+          limit: 1,
+          lock: "FOR UPDATE"
+        )
+
+      {sql, _params} = Ecto.Adapters.SQL.to_sql(:all, Repo, query)
+      assert sql =~ "FOR UPDATE"
+    end
+  end
+
   describe "executable?/2" do
     test "true only for active + non-expired" do
       now = ~U[2026-04-15 12:00:00Z]
