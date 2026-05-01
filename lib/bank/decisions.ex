@@ -1702,13 +1702,11 @@ defmodule Bank.Decisions do
              # and the operator can `request_manual_execution/3` for
              # the same decision again. The terminal-state-derived
              # filter on `count_active_executions/1` agrees with
-             # this — both signals are now consistent for manual
-             # aborts. Adapter-driven terminal transitions
-             # (`apply_execution_callback`'s `confirmed` / `reverted`
-             # / `aborted` paths) deliberately leave `active: true`
-             # for now; aligning them is a follow-up that needs to
-             # weigh against the existing replay tests pinning the
-             # `active: true, terminal_status` shape.
+             # this — both signals are now consistent. Adapter-driven
+             # terminal transitions (`apply_execution_callback`'s
+             # `confirmed` / `reverted` / `aborted` paths) flip the
+             # same flag for the same reason; both code paths share
+             # the symmetric "terminal → !active" invariant.
              active: false
            })
            |> Repo.update(),
@@ -1779,7 +1777,7 @@ defmodule Bank.Decisions do
     plan
     |> ExecutionPlan.progress_changeset(
       attrs_with_tx_refs(
-        %{execution_status: :confirmed, final_outcome: :confirmed},
+        %{execution_status: :confirmed, final_outcome: :confirmed, active: false},
         params
       )
     )
@@ -1793,7 +1791,8 @@ defmodule Bank.Decisions do
         %{
           execution_status: :reverted,
           final_outcome: :reverted,
-          final_reason: Map.get(params, "reason")
+          final_reason: Map.get(params, "reason"),
+          active: false
         },
         params
       )
@@ -1806,7 +1805,8 @@ defmodule Bank.Decisions do
     |> ExecutionPlan.progress_changeset(%{
       execution_status: :aborted,
       final_outcome: :aborted,
-      final_reason: Map.get(params, "reason")
+      final_reason: Map.get(params, "reason"),
+      active: false
     })
     |> Repo.update()
   end

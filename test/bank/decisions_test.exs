@@ -825,4 +825,103 @@ defmodule Bank.DecisionsTest do
       :count
     )
   end
+
+  # --- Adapter-driven terminal transitions flip `active: false` (#230) ----
+
+  describe "apply_execution_callback/1 terminal transitions release the active slot" do
+    alias Bank.Decisions.ExecutionPlan
+
+    test "execution.confirmed flips active: false" do
+      intent = agent_intent(state: :executing)
+      envelope = decision_envelope(intent: intent)
+      plan = execution_plan(decision: envelope, execution_status: :signing, active: true)
+
+      assert {:ok, _result} =
+               Decisions.apply_execution_callback(%{
+                 "kind" => "execution.confirmed",
+                 "execution_plan_id" => plan.id
+               })
+
+      reloaded = Bank.Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :confirmed
+      assert reloaded.final_outcome == :confirmed
+      assert reloaded.active == false
+    end
+
+    test "execution.reverted flips active: false; request_manual_execution succeeds afterward" do
+      # Setup an executing intent + active plan; adapter callback
+      # `execution.reverted` arrives. Pre-fix the row stayed
+      # `active: true, :reverted` — the next
+      # `request_manual_execution/3` was blocked by the partial
+      # unique index. Pin the corrected behavior.
+      intent = agent_intent(state: :executing)
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :auto_exec,
+          state: :decided,
+          current: true
+        )
+
+      plan =
+        execution_plan(
+          decision: envelope,
+          execution_status: :broadcasting,
+          active: true,
+          smart_account_id: "sa_revert_retry"
+        )
+
+      assert {:ok, _result} =
+               Decisions.apply_execution_callback(%{
+                 "kind" => "execution.reverted",
+                 "execution_plan_id" => plan.id,
+                 "reason" => "chain_revert:out_of_gas"
+               })
+
+      reloaded = Bank.Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :reverted
+      assert reloaded.final_outcome == :reverted
+      assert reloaded.active == false
+
+      # Bring the intent back to :decided so the manual request
+      # gates pass (the callback transitioned it to :blocked).
+      {:ok, _} =
+        Bank.Repo.get!(AgentIntent, intent.id)
+        |> AgentIntent.current_pointer_changeset(%{state: :decided})
+        |> Bank.Repo.update()
+
+      # Now grant a delegation for the smart account so the manual
+      # request's other gates pass.
+      {:ok, _del} = Delegations.grant("sa_revert_retry", "del_revert_retry")
+
+      assert {:ok, new_plan} =
+               Decisions.request_manual_execution(envelope.id, "sa_revert_retry",
+                 reason: "post_adapter_revert_retry"
+               )
+
+      assert new_plan.id != plan.id
+      assert new_plan.execution_status == :prepared
+      assert new_plan.active == true
+    end
+
+    test "execution.aborted flips active: false" do
+      intent = agent_intent(state: :executing)
+      envelope = decision_envelope(intent: intent)
+      plan = execution_plan(decision: envelope, execution_status: :broadcasting, active: true)
+
+      assert {:ok, _result} =
+               Decisions.apply_execution_callback(%{
+                 "kind" => "execution.aborted",
+                 "execution_plan_id" => plan.id,
+                 "reason" => "adapter_aborted:dropped"
+               })
+
+      reloaded = Bank.Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :aborted
+      assert reloaded.final_outcome == :aborted
+      assert reloaded.final_reason == "adapter_aborted:dropped"
+      assert reloaded.active == false
+    end
+  end
 end
