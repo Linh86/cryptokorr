@@ -30,9 +30,13 @@ defmodule BankWeb.SecurityLive do
 
   use BankWeb, :live_view
 
+  alias Bank.Accounts
+  alias Bank.APIKeys
   alias Bank.Audit
   alias Bank.Delegations
   alias Bank.Security
+  alias Bank.Workspaces
+  alias Bank.Workspaces.Workspace
 
   # Audit event types that belong on the safety timeline.
   @safety_event_types [
@@ -113,6 +117,95 @@ defmodule BankWeb.SecurityLive do
     {:noreply, socket |> load_state() |> put_flash(:info, "Console refreshed")}
   end
 
+  # --- Agent-key pause / resume (#231-c) -----------------------------------
+
+  def handle_event("pause_agent_keys", params, socket) do
+    with :ok <- BankWeb.LiveAuth.authorize_action(socket, :admin) do
+      reason = clean_reason(Map.get(params, "reason"))
+      actor = socket.assigns.current_scope.user
+      # Workspace from current_scope (NEVER from form params) so a
+      # hostile request cannot pause a workspace the operator is
+      # not a member of.
+      workspace = socket.assigns.current_scope.workspace
+
+      case APIKeys.pause_workspace(workspace, actor, reason: reason) do
+        {:ok, :paused, _} ->
+          {:noreply,
+           socket
+           |> load_state()
+           |> put_flash(
+             :info,
+             "Agent keys paused. All /v1 traffic for this workspace is refused."
+           )}
+
+        {:ok, :already_paused, _} ->
+          {:noreply,
+           socket
+           |> load_state()
+           |> put_flash(:info, "Agent keys are already paused.")}
+
+        {:error, %Ecto.Changeset{} = changeset} ->
+          message = changeset_message(changeset, "Pause failed")
+          {:noreply, put_flash(socket, :error, message)}
+
+        {:error, reason} ->
+          {:noreply, put_flash(socket, :error, "Pause failed: #{inspect(reason)}")}
+      end
+    else
+      {:error, {:insufficient_role, _}} ->
+        {:noreply, put_flash(socket, :error, "Admin role required to pause agent keys.")}
+    end
+  end
+
+  def handle_event("resume_agent_keys", _params, socket) do
+    with :ok <- BankWeb.LiveAuth.authorize_action(socket, :admin) do
+      actor = socket.assigns.current_scope.user
+      workspace = socket.assigns.current_scope.workspace
+
+      case APIKeys.resume_workspace(workspace, actor) do
+        {:ok, :resumed, _} ->
+          {:noreply,
+           socket
+           |> load_state()
+           |> put_flash(:info, "Agent keys resumed. /v1 traffic for this workspace is restored.")}
+
+        {:ok, :already_unpaused, _} ->
+          {:noreply,
+           socket
+           |> load_state()
+           |> put_flash(:info, "Agent keys were not paused.")}
+
+        {:error, reason} ->
+          {:noreply, put_flash(socket, :error, "Resume failed: #{inspect(reason)}")}
+      end
+    else
+      {:error, {:insufficient_role, _}} ->
+        {:noreply, put_flash(socket, :error, "Admin role required to resume agent keys.")}
+    end
+  end
+
+  defp clean_reason(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp clean_reason(_), do: nil
+
+  defp changeset_message(changeset, fallback) do
+    case changeset.errors do
+      [{:agent_keys_paused_reason, {msg, _}} | _] ->
+        "#{fallback}: reason #{msg}"
+
+      [{field, {msg, _}} | _] ->
+        "#{fallback}: #{field} #{msg}"
+
+      [] ->
+        fallback
+    end
+  end
+
   # --- PubSub handlers ------------------------------------------------------
 
   @impl true
@@ -125,8 +218,15 @@ defmodule BankWeb.SecurityLive do
   # --- State loading --------------------------------------------------------
 
   defp load_state(socket) do
-    delegations =
-      Delegations.list_active(workspace_id: socket.assigns.current_scope.workspace.id)
+    workspace_id = socket.assigns.current_scope.workspace.id
+
+    # Re-fetch the workspace from DB so the agent-keys pause panel
+    # always reflects the latest state. `current_scope.workspace` is
+    # mount-frozen and won't reflect a fresh pause/resume.
+    workspace = Workspaces.get_workspace(workspace_id) || socket.assigns.current_scope.workspace
+    paused_by = paused_by_user(workspace)
+
+    delegations = Delegations.list_active(workspace_id: workspace_id)
 
     paused? = Security.paused?(:global)
     pause_snapshot = Security.snapshot()
@@ -144,11 +244,19 @@ defmodule BankWeb.SecurityLive do
     socket
     |> assign(:paused, paused?)
     |> assign(:pause_snapshot, pause_snapshot)
+    |> assign(:agent_keys_workspace, workspace)
+    |> assign(:agent_keys_paused, Workspace.agent_keys_paused?(workspace))
+    |> assign(:agent_keys_paused_by, paused_by)
     |> assign(:delegations, delegations)
     |> assign(:executable_count, executable_count)
     |> assign(:execution_ready, execution_ready?)
     |> assign(:safety_events, safety_events)
   end
+
+  defp paused_by_user(%Workspace{agent_keys_paused_by_user_id: nil}), do: nil
+
+  defp paused_by_user(%Workspace{agent_keys_paused_by_user_id: id}) when is_binary(id),
+    do: Accounts.get_user(id)
 
   # Pulls the most recent safety events. We pass each safety event_type
   # individually because `Bank.Audit.list_events/2` does exact match;
@@ -224,9 +332,15 @@ defmodule BankWeb.SecurityLive do
 
       <%!-- Main grid --%>
       <div class="mt-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <%!-- Left column: runtime + delegations --%>
+        <%!-- Left column: runtime + agent keys + delegations --%>
         <div class="lg:col-span-2 space-y-6">
           <.runtime_card paused={@paused} pause_snapshot={@pause_snapshot} />
+          <.agent_keys_card
+            workspace={@agent_keys_workspace}
+            paused={@agent_keys_paused}
+            paused_by={@agent_keys_paused_by}
+            current_role={@current_scope.role}
+          />
           <.delegations_card delegations={@delegations} />
         </div>
 
@@ -407,6 +521,127 @@ defmodule BankWeb.SecurityLive do
           class="btn btn-success btn-soft btn-sm gap-1.5"
         >
           <.icon name="hero-play" class="size-3.5" /> Resume runtime
+        </.button>
+      </footer>
+    </section>
+    """
+  end
+
+  # --- Component: agent-keys pause card (#231-c) ---------------------------
+
+  attr :workspace, :map, required: true
+  attr :paused, :boolean, required: true
+  attr :paused_by, :map, default: nil
+  attr :current_role, :atom, required: true
+
+  defp agent_keys_card(assigns) do
+    ~H"""
+    <section
+      id="agent-keys-pause-panel"
+      class="rounded-xl border border-base-300 bg-base-100 shadow-sm overflow-hidden"
+    >
+      <header class="px-6 py-4 border-b border-base-300 flex items-center justify-between">
+        <h2 class="text-sm font-semibold flex items-center gap-1.5">
+          <.icon name="hero-key" class="size-4" /> Agent keys (workspace)
+        </h2>
+        <span
+          :if={@paused}
+          id="agent-keys-paused-badge"
+          class="badge badge-warning badge-sm"
+        >
+          Paused
+        </span>
+        <span :if={!@paused} class="badge badge-success badge-sm">Active</span>
+      </header>
+
+      <div class="px-6 py-5">
+        <p :if={!@paused} class="text-sm text-base-content/70">
+          API keys for <span class="font-mono">{@workspace.slug}</span>
+          authenticate normally. Pausing rejects every <code>/v1</code>
+          request from this workspace's keys with <code>401 invalid_credentials</code>.
+          Existing browser sessions are unaffected.
+        </p>
+
+        <div :if={@paused} class="space-y-3">
+          <p class="text-sm text-base-content/70">
+            Every <code>/v1</code> request from this workspace's API keys is
+            being refused. Browser session admins can resume from this
+            console.
+          </p>
+          <dl class="grid grid-cols-2 gap-4 text-sm">
+            <div>
+              <dt class="text-[0.65rem] uppercase tracking-wider text-base-content/40 mb-0.5">
+                Paused at
+              </dt>
+              <dd id="agent-keys-paused-since" class="font-mono text-base-content/80">
+                {format_datetime(@workspace.agent_keys_paused_at)}
+              </dd>
+            </div>
+            <div :if={@workspace.agent_keys_paused_reason}>
+              <dt class="text-[0.65rem] uppercase tracking-wider text-base-content/40 mb-0.5">
+                Reason
+              </dt>
+              <dd id="agent-keys-paused-reason" class="font-mono text-base-content/80 break-words">
+                {@workspace.agent_keys_paused_reason}
+              </dd>
+            </div>
+            <div :if={@paused_by}>
+              <dt class="text-[0.65rem] uppercase tracking-wider text-base-content/40 mb-0.5">
+                Paused by
+              </dt>
+              <dd id="agent-keys-paused-by" class="font-mono text-base-content/80">
+                {@paused_by.email}
+              </dd>
+            </div>
+          </dl>
+        </div>
+      </div>
+
+      <%!-- Footer: action gate is admin-only. The mount-level role
+        gate is :require_role, :operator, so non-admins SEE the
+        panel read-only. handle_event still re-checks `:admin` so a
+        hostile event from a non-admin connection is refused with a
+        flash. --%>
+      <footer
+        :if={@current_role in [:admin, :owner]}
+        class="px-6 py-4 border-t border-base-300 bg-base-200/20"
+      >
+        <form
+          :if={!@paused}
+          id="agent-keys-pause-form"
+          phx-submit="pause_agent_keys"
+          class="flex flex-col gap-3 sm:flex-row sm:items-end"
+        >
+          <label class="form-control flex-1">
+            <span class="label-text text-xs uppercase tracking-wider text-base-content/60">
+              Reason (optional)
+            </span>
+            <input
+              type="text"
+              name="reason"
+              maxlength="256"
+              placeholder="e.g. credential leak under investigation"
+              class="input input-bordered input-sm w-full"
+            />
+          </label>
+          <.button
+            id="agent-keys-pause-submit"
+            type="submit"
+            data-confirm="Pause all agent keys for this workspace? Every /v1 API request will fail until resumed."
+            class="btn btn-warning btn-soft btn-sm gap-1.5"
+          >
+            <.icon name="hero-pause" class="size-3.5" /> Pause agent keys
+          </.button>
+        </form>
+
+        <.button
+          :if={@paused}
+          id="agent-keys-resume"
+          phx-click="resume_agent_keys"
+          data-confirm="Resume agent keys for this workspace?"
+          class="btn btn-success btn-soft btn-sm gap-1.5"
+        >
+          <.icon name="hero-play" class="size-3.5" /> Resume agent keys
         </.button>
       </footer>
     </section>
