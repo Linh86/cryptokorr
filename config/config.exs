@@ -96,6 +96,15 @@ config :bank, Oban,
      ]}
   ]
 
+# Per-key rate limit for /v1 (#221, first slice). Defaults to 1 RPS
+# sustained per key (60 requests / 60 second window). Operators can
+# tune downward via runtime config when product calibration data
+# arrives. Per-workspace, chain-action, and auth-failure caps land
+# in subsequent slices.
+config :bank, Bank.RateLimit,
+  requests_per_window: 60,
+  window_seconds: 60
+
 # Bank.AdapterClient: connection to the TypeScript chain adapter is
 # configured per-environment. dev/test set local defaults below;
 # production must provide ADAPTER_BASE_URL, ADAPTER_DISPATCH_SECRET

@@ -113,3 +113,11 @@ config :bank, Bank.Accounts.OAuthProvider.Stub, %{}
 # default so tests explicitly opt in via `Application.put_env/3` per
 # case.
 config :bank, :admin_emails, []
+
+# Rate limit (#221) — high default in test env so ordinary controller
+# tests that fire many requests against the same api_key do not
+# accidentally trip the limiter. Tests that exercise rate-limit
+# behavior override this via `Application.put_env/3` per case.
+config :bank, Bank.RateLimit,
+  requests_per_window: 10_000,
+  window_seconds: 60
