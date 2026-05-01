@@ -117,7 +117,8 @@ defmodule Bank.Decisions.ExecutionPlan do
       :adapter_ref,
       :nonce,
       :final_outcome,
-      :final_reason
+      :final_reason,
+      :active
     ])
     |> validate_final_outcome_matches_status()
   end

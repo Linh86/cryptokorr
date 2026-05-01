@@ -464,9 +464,20 @@ defmodule BankWeb.API.V1.SecurityController do
              actor: :user,
              actor_id: actor.id
            ) do
-        {:ok, discriminator, plan, _intent_transition}
-        when discriminator in [:aborted, :already_terminal] ->
+        {:ok, :aborted, plan, _intent_transition} ->
           conn |> put_status(:ok) |> json(%{status: "aborted", data: abort_state(plan)})
+
+        {:ok, :already_terminal, plan, _intent_transition} ->
+          # Idempotent re-call. Don't lie about top-level `status`:
+          # if the plan was already `:confirmed` or `:reverted` (or
+          # already `:aborted`), the caller still gets a 200, but the
+          # top-level `status` reflects the no-op nature so a client
+          # cannot mistake a confirmed plan for a freshly-aborted
+          # one. The actual terminal state is in
+          # `data.execution_status`.
+          conn
+          |> put_status(:ok)
+          |> json(%{status: "already_terminal", data: abort_state(plan)})
 
         {:error, :not_found} ->
           conn

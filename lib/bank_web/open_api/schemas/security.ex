@@ -321,15 +321,29 @@ defmodule BankWeb.OpenApi.Schemas.AbortExecutionResponse do
     `aborted` and the `execution.aborted` audit row has been
     appended.
 
-    The same body shape is returned for a fresh abort and for an
-    idempotent re-call against an already-terminal plan, so callers
-    can safely retry on partial network failures without branching
-    on the response code.
+    Top-level `status` discriminates between a fresh abort and an
+    idempotent re-call against an already-terminal plan:
+
+      * `"aborted"` — the call performed the transition.
+      * `"already_terminal"` — the plan was already in
+        `:aborted`, `:confirmed`, or `:reverted` when the call
+        landed; no second audit row was emitted. Callers MUST
+        read `data.execution_status` to learn the actual terminal
+        state — it may be `confirmed` or `reverted`, NOT `aborted`,
+        in this branch.
+
+    Both branches return `200` so callers can safely retry on
+    partial network failures without branching on the response
+    code; the `status` discriminator carries the truth.
     """,
     type: :object,
     required: [:status, :data],
     properties: %{
-      status: %Schema{type: :string, enum: ["aborted"], example: "aborted"},
+      status: %Schema{
+        type: :string,
+        enum: ["aborted", "already_terminal"],
+        example: "aborted"
+      },
       data: %Schema{
         type: :object,
         required: [:execution_plan_id, :decision_id, :execution_status, :workspace_id],
@@ -339,11 +353,10 @@ defmodule BankWeb.OpenApi.Schemas.AbortExecutionResponse do
           execution_status: %Schema{
             type: :string,
             description:
-              "Terminal status of the plan after the call. Always one of " <>
-                "`aborted`, `confirmed`, or `reverted` — `confirmed` and " <>
-                "`reverted` only when an operator re-issues `abort` against " <>
-                "a plan that already terminated through the adapter callback " <>
-                "path.",
+              "Terminal status of the plan after the call. `aborted` for a " <>
+                "fresh abort; `aborted`, `confirmed`, or `reverted` in the " <>
+                "`already_terminal` branch depending on the prior terminal " <>
+                "transition.",
             example: "aborted"
           },
           final_outcome: %Schema{

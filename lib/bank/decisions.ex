@@ -1441,6 +1441,126 @@ defmodule Bank.Decisions do
 
   def apply_execution_callback(_), do: {:error, :unknown_kind}
 
+  # --- Worker dispatch claim / revert (#230 P1 race fix) -------------------
+
+  @typedoc """
+  Outcome of `claim_plan_for_dispatch/1`. The `:cancel` shape is
+  modeled on Oban's worker `{:cancel, reason}` so the worker can
+  re-emit it directly.
+  """
+  @type claim_result ::
+          {:ok, ExecutionPlan.t()}
+          | {:cancel, {:not_prepared, atom()}}
+          | {:cancel, :not_found}
+          | {:error, Ecto.Changeset.t()}
+
+  @doc """
+  Atomically claim an execution plan for adapter dispatch (#230 P1).
+
+  Locks the plan row `FOR UPDATE` and transitions
+  `:prepared → :signing` only if the **current DB row** is still
+  `:prepared`. Any other state — `:aborted` from an operator,
+  `:signing` / `:broadcasting` / `:pending_confirmation` from a
+  parallel claim or an adapter callback that already landed,
+  `:confirmed` / `:reverted` — collapses to `{:cancel, {:not_prepared,
+  status}}` and the caller MUST NOT proceed to call the adapter.
+
+  Background: `RunExecution` previously read a `:prepared` plan
+  without a lock, called the adapter, and only then transitioned
+  `:prepared → :signing`. An operator's `abort_plan/3` could land
+  between the read and the post-dispatch update, leaving the abort
+  silently clobbered when the worker wrote `:signing`. Per the
+  parent epic guardrail "abort beats dispatch", the worker now
+  claims first and dispatches second.
+
+  Lifecycle of an abort-vs-dispatch race:
+
+    * Operator and worker both target the same `:prepared` plan.
+    * Whichever transaction acquires the row lock first wins.
+    * If abort wins → row is `:aborted`. The worker's claim sees
+      `:aborted` and cancels without an adapter call.
+    * If claim wins → row is `:signing`. The operator's
+      `abort_plan/3` sees `:signing`, returns
+      `{:error, {:not_safe_to_abort, :signing}}`. The adapter
+      runs to completion via `RunExecution`.
+
+  After a successful claim the caller is expected to dispatch and
+  either (a) advance to `:broadcasting` via the adapter callback or
+  (b) call `revert_claim/1` to flip `:signing → :prepared` so a
+  retry can re-attempt. Adapter 4xx still goes through the existing
+  `mark_plan_aborted` path — `:signing → :aborted` is allowed
+  because the plan was dispatched but rejected.
+  """
+  @spec claim_plan_for_dispatch(ExecutionPlan.t()) :: claim_result()
+  def claim_plan_for_dispatch(%ExecutionPlan{id: id}) do
+    Repo.transaction(fn ->
+      case Repo.one(from p in ExecutionPlan, where: p.id == ^id, lock: "FOR UPDATE") do
+        nil ->
+          Repo.rollback(:not_found)
+
+        %ExecutionPlan{execution_status: :prepared} = locked ->
+          case locked
+               |> ExecutionPlan.progress_changeset(%{execution_status: :signing})
+               |> Repo.update() do
+            {:ok, claimed} -> Repo.preload(claimed, :intent)
+            {:error, %Ecto.Changeset{} = cs} -> Repo.rollback(cs)
+          end
+
+        %ExecutionPlan{execution_status: status} ->
+          Repo.rollback({:not_prepared, status})
+      end
+    end)
+    |> case do
+      {:ok, %ExecutionPlan{} = claimed} -> {:ok, claimed}
+      {:error, :not_found} -> {:cancel, :not_found}
+      {:error, {:not_prepared, _} = reason} -> {:cancel, reason}
+      {:error, %Ecto.Changeset{} = cs} -> {:error, cs}
+    end
+  end
+
+  @doc """
+  Revert a previously-claimed dispatch when the adapter call could
+  not complete (#230 P1).
+
+  Guarded transition `:signing → :prepared` so a retry job can
+  re-claim. If the row is no longer `:signing` (e.g. an
+  `execution.broadcast` callback already landed, or an
+  adapter-rejection abort moved it to `:aborted`), the revert is a
+  no-op — terminal rows MUST NOT be resurrected. Returns
+  `{:ok, :reverted}` on the happy path or
+  `{:ok, {:no_revert, status}}` when the guard short-circuited.
+  """
+  @spec revert_claim(ExecutionPlan.t()) ::
+          {:ok, :reverted}
+          | {:ok, {:no_revert, atom()}}
+          | {:error, :not_found}
+          | {:error, Ecto.Changeset.t()}
+  def revert_claim(%ExecutionPlan{id: id}) do
+    Repo.transaction(fn ->
+      case Repo.one(from p in ExecutionPlan, where: p.id == ^id, lock: "FOR UPDATE") do
+        nil ->
+          Repo.rollback(:not_found)
+
+        %ExecutionPlan{execution_status: :signing} = locked ->
+          case locked
+               |> ExecutionPlan.progress_changeset(%{execution_status: :prepared})
+               |> Repo.update() do
+            {:ok, _} -> :reverted
+            {:error, %Ecto.Changeset{} = cs} -> Repo.rollback(cs)
+          end
+
+        %ExecutionPlan{execution_status: status} ->
+          {:no_revert, status}
+      end
+    end)
+    |> case do
+      {:ok, :reverted} -> {:ok, :reverted}
+      {:ok, {:no_revert, status}} -> {:ok, {:no_revert, status}}
+      {:error, :not_found} -> {:error, :not_found}
+      {:error, %Ecto.Changeset{} = cs} -> {:error, cs}
+    end
+  end
+
   # --- Operator manual abort (#230) ---------------------------------------
 
   @typedoc """
@@ -1576,7 +1696,20 @@ defmodule Bank.Decisions do
            |> ExecutionPlan.progress_changeset(%{
              execution_status: :aborted,
              final_outcome: :aborted,
-             final_reason: reason_str
+             final_reason: reason_str,
+             # Flip `active: false` so the partial unique index
+             # `execution_plans_decision_active_idx` releases the slot
+             # and the operator can `request_manual_execution/3` for
+             # the same decision again. The terminal-state-derived
+             # filter on `count_active_executions/1` agrees with
+             # this — both signals are now consistent for manual
+             # aborts. Adapter-driven terminal transitions
+             # (`apply_execution_callback`'s `confirmed` / `reverted`
+             # / `aborted` paths) deliberately leave `active: true`
+             # for now; aligning them is a follow-up that needs to
+             # weigh against the existing replay tests pinning the
+             # `active: true, terminal_status` shape.
+             active: false
            })
            |> Repo.update(),
          intent_transition =

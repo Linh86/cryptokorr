@@ -358,7 +358,7 @@
         "type": "object"
       },
       "AbortExecutionResponse": {
-        "description": "Synchronous terminal-state response. Unlike\n`revoke_delegation` (which is a `202` chain-side receipt),\nabort is a DB-only state-machine flip that completes inside\nthe request — by the time `200` returns, the plan row is\n`aborted` and the `execution.aborted` audit row has been\nappended.\n\nThe same body shape is returned for a fresh abort and for an\nidempotent re-call against an already-terminal plan, so callers\ncan safely retry on partial network failures without branching\non the response code.\n",
+        "description": "Synchronous terminal-state response. Unlike\n`revoke_delegation` (which is a `202` chain-side receipt),\nabort is a DB-only state-machine flip that completes inside\nthe request — by the time `200` returns, the plan row is\n`aborted` and the `execution.aborted` audit row has been\nappended.\n\nTop-level `status` discriminates between a fresh abort and an\nidempotent re-call against an already-terminal plan:\n\n  * `\"aborted\"` — the call performed the transition.\n  * `\"already_terminal\"` — the plan was already in\n    `:aborted`, `:confirmed`, or `:reverted` when the call\n    landed; no second audit row was emitted. Callers MUST\n    read `data.execution_status` to learn the actual terminal\n    state — it may be `confirmed` or `reverted`, NOT `aborted`,\n    in this branch.\n\nBoth branches return `200` so callers can safely retry on\npartial network failures without branching on the response\ncode; the `status` discriminator carries the truth.\n",
         "properties": {
           "data": {
             "properties": {
@@ -369,7 +369,7 @@
                 "$ref": "#/components/schemas/Id"
               },
               "execution_status": {
-                "description": "Terminal status of the plan after the call. Always one of `aborted`, `confirmed`, or `reverted` — `confirmed` and `reverted` only when an operator re-issues `abort` against a plan that already terminated through the adapter callback path.",
+                "description": "Terminal status of the plan after the call. `aborted` for a fresh abort; `aborted`, `confirmed`, or `reverted` in the `already_terminal` branch depending on the prior terminal transition.",
                 "example": "aborted",
                 "type": "string"
               },
@@ -399,7 +399,8 @@
           },
           "status": {
             "enum": [
-              "aborted"
+              "aborted",
+              "already_terminal"
             ],
             "example": "aborted",
             "type": "string"

@@ -440,7 +440,7 @@ defmodule BankWeb.API.V1.SecurityControllerTest do
       assert body["error"]["details"]["execution_status"] == "signing"
     end
 
-    test "idempotent re-abort returns 200 with same shape, no second audit row",
+    test "idempotent re-abort returns 200 already_terminal, no second audit row",
          %{conn: conn, workspace: ws} do
       intent = agent_intent(state: :decided, workspace_id: ws.id)
       envelope = decision_envelope(intent: intent)
@@ -453,7 +453,9 @@ defmodule BankWeb.API.V1.SecurityControllerTest do
         post(conn, ~p"/v1/security/abort_execution", %{"execution_plan_id" => plan.id})
 
       body = json_response(conn, 200)
-      assert body["status"] == "aborted"
+      # Top-level status now signals "no-op" so a client cannot
+      # mistake an idempotent re-call for a fresh abort.
+      assert body["status"] == "already_terminal"
       assert body["data"]["execution_status"] == "aborted"
 
       assert Bank.Repo.aggregate(
@@ -462,6 +464,40 @@ defmodule BankWeb.API.V1.SecurityControllerTest do
                ),
                :count
              ) == 1
+    end
+
+    test "already-:confirmed plan returns 200 already_terminal with execution_status: confirmed (no lie)",
+         %{conn: conn, workspace: ws} do
+      # Pre-fix the controller replied `{"status":"aborted",
+      # "data":{"execution_status":"confirmed"}}` for an already-
+      # confirmed plan, which mis-stated the top-level status. Pin
+      # the corrected behavior.
+      intent = agent_intent(state: :executed, workspace_id: ws.id)
+      envelope = decision_envelope(intent: intent)
+
+      plan =
+        execution_plan(
+          decision: envelope,
+          workspace_id: ws.id,
+          execution_status: :confirmed,
+          final_outcome: :confirmed
+        )
+
+      conn =
+        post(conn, ~p"/v1/security/abort_execution", %{"execution_plan_id" => plan.id})
+
+      body = json_response(conn, 200)
+      assert body["status"] == "already_terminal"
+      assert body["data"]["execution_status"] == "confirmed"
+      assert body["data"]["final_outcome"] == "confirmed"
+
+      # No `execution.aborted` audit row from this no-op call.
+      assert Bank.Repo.aggregate(
+               from(e in Bank.Audit.AuditEvent,
+                 where: e.event_type == "execution.aborted" and e.subject_id == ^plan.id
+               ),
+               :count
+             ) == 0
     end
 
     test "operator-tier key gets 403 insufficient_role",

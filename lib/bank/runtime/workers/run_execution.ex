@@ -64,6 +64,7 @@ defmodule Bank.Runtime.Workers.RunExecution do
 
   alias Bank.AdapterClient
   alias Bank.Audit.Events
+  alias Bank.Decisions
   alias Bank.Decisions.{DecisionEnvelope, ExecutionPlan}
   alias Bank.Delegations
   alias Bank.Intents.AgentIntent
@@ -77,14 +78,45 @@ defmodule Bank.Runtime.Workers.RunExecution do
     with {:ok, envelope} <- load_envelope(decision_id),
          {:ok, plan} <- load_active_plan(envelope),
          :ok <- verify_delegation(plan),
-         :ok <- verify_not_paused(plan) do
-      dispatch_and_progress(envelope, plan)
+         :ok <- verify_not_paused(plan),
+         {:ok, claimed} <- claim_or_cancel(plan) do
+      dispatch_and_progress(envelope, claimed)
     end
   end
 
   def perform(%Oban.Job{args: args}) do
     Logger.error("RunExecution: malformed args: #{inspect(args)}")
     {:cancel, :malformed_args}
+  end
+
+  # Atomically transition the plan `:prepared → :signing` BEFORE any
+  # adapter call (#230 P1). Closes the abort-vs-dispatch race: an
+  # operator's `Decisions.abort_plan/3` that wins the row lock leaves
+  # the plan `:aborted`; the claim then sees a non-`:prepared` status
+  # and cancels without calling the adapter.
+  defp claim_or_cancel(%ExecutionPlan{} = plan) do
+    case Decisions.claim_plan_for_dispatch(plan) do
+      {:ok, claimed} ->
+        {:ok, claimed}
+
+      {:cancel, {:not_prepared, status}} ->
+        Logger.info(
+          "RunExecution: plan #{plan.id} no longer :prepared at claim time (#{status}); cancelling"
+        )
+
+        {:cancel, {:already_dispatched, status}}
+
+      {:cancel, :not_found} ->
+        Logger.warning("RunExecution: plan #{plan.id} disappeared at claim time")
+        {:cancel, :not_found}
+
+      {:error, changeset} ->
+        Logger.error(
+          "RunExecution: claim update failed for plan #{plan.id}: #{inspect(changeset.errors)}"
+        )
+
+        {:error, changeset}
+    end
   end
 
   # --- Gates --------------------------------------------------------------
@@ -181,71 +213,115 @@ defmodule Bank.Runtime.Workers.RunExecution do
 
   # --- Dispatch -----------------------------------------------------------
 
-  defp dispatch_and_progress(%DecisionEnvelope{} = envelope, %ExecutionPlan{} = plan) do
-    case AdapterClient.dispatch_transfer(plan) do
+  # `claimed` is the plan struct post-`:prepared → :signing` claim,
+  # with `intent` preloaded by `Decisions.claim_plan_for_dispatch/1`.
+  # The adapter receives this struct because its `execution_status`
+  # reflects the committed DB state. Audits use `:prepared` as the
+  # `prior_status` because that was the row's state immediately
+  # before the claim transaction committed.
+  defp dispatch_and_progress(
+         %DecisionEnvelope{} = envelope,
+         %ExecutionPlan{} = claimed
+       ) do
+    case AdapterClient.dispatch_transfer(claimed) do
       {:ok, _} ->
-        progress_after_dispatch(plan, envelope)
+        progress_after_dispatch(claimed, envelope)
 
       {:error, :adapter_unavailable} ->
-        Logger.warning("RunExecution: adapter unavailable for plan #{plan.id}; retrying via Oban")
+        revert_after_adapter_failure(claimed, :adapter_unavailable)
+
+        Logger.warning(
+          "RunExecution: adapter unavailable for plan #{claimed.id}; reverted claim; retrying via Oban"
+        )
 
         {:error, :adapter_unavailable}
 
       {:error, {:adapter_error, status, _body}} ->
+        revert_after_adapter_failure(claimed, {:adapter_error, status})
+
         Logger.warning(
-          "RunExecution: adapter 5xx #{status} for plan #{plan.id}; retrying via Oban"
+          "RunExecution: adapter 5xx #{status} for plan #{claimed.id}; reverted claim; retrying via Oban"
         )
 
         {:error, {:adapter_error, status}}
 
       {:error, {:adapter_rejected, status, body}} ->
         Logger.warning(
-          "RunExecution: adapter rejected plan #{plan.id} (HTTP #{status}): #{inspect(body)}"
+          "RunExecution: adapter rejected plan #{claimed.id} (HTTP #{status}): #{inspect(body)}"
         )
 
-        abort_for_adapter_rejection(plan, status, body)
+        abort_for_adapter_rejection(claimed, status, body)
 
       {:error, {:target_not_resolvable, cause}} ->
         Logger.warning(
-          "RunExecution: plan #{plan.id} has unresolvable target (#{cause}); aborting"
+          "RunExecution: plan #{claimed.id} has unresolvable target (#{cause}); aborting"
         )
 
-        abort_for_target(plan, cause)
+        abort_for_target(claimed, cause)
 
       {:error, :invalid_response} ->
         Logger.error(
-          "RunExecution: adapter returned 2xx with unexpected body for plan #{plan.id}"
+          "RunExecution: adapter returned 2xx with unexpected body for plan #{claimed.id}"
         )
 
-        abort_for_adapter_rejection(plan, 200, "invalid_response")
+        abort_for_adapter_rejection(claimed, 200, "invalid_response")
     end
   end
 
-  defp progress_after_dispatch(%ExecutionPlan{} = plan, %DecisionEnvelope{} = _envelope) do
-    prior_status = plan.execution_status
-    prior_intent_state = plan.intent.state
+  # Best-effort revert after a non-rejection adapter failure
+  # (`:adapter_unavailable` or 5xx). Guarded `:signing → :prepared`
+  # in `Decisions.revert_claim/1` ensures terminal rows are not
+  # resurrected — if a callback or operator abort already raced in
+  # while the adapter call was in flight, the revert short-circuits
+  # to `{:no_revert, status}` and the plan keeps its newer state.
+  defp revert_after_adapter_failure(%ExecutionPlan{} = claimed, _adapter_error) do
+    case Decisions.revert_claim(claimed) do
+      {:ok, :reverted} ->
+        :ok
+
+      {:ok, {:no_revert, status}} ->
+        Logger.info("RunExecution: revert skipped for plan #{claimed.id} — already at #{status}")
+
+        :ok
+
+      {:error, reason} ->
+        Logger.error("RunExecution: revert failed for plan #{claimed.id}: #{inspect(reason)}")
+
+        :ok
+    end
+  end
+
+  # Plan is already `:signing` post-claim. Advance the parent intent
+  # `:decided → :executing` (when applicable) and emit the
+  # dispatched side effects with `prior_status: :prepared` so the
+  # audit trail still reflects the original transition. `claimed`
+  # carries `intent` preloaded by
+  # `Decisions.claim_plan_for_dispatch/1`.
+  defp progress_after_dispatch(
+         %ExecutionPlan{intent: intent} = claimed,
+         %DecisionEnvelope{} = _envelope
+       ) do
+    prior_intent_state = intent && intent.state
 
     result =
       Repo.transaction(fn ->
-        {:ok, updated_plan} =
-          plan
-          |> ExecutionPlan.progress_changeset(%{execution_status: :signing})
-          |> Repo.update()
-
-        intent_transition = advance_intent_to_executing(plan.intent, updated_plan)
-        {updated_plan, intent_transition}
+        intent_transition = advance_intent_to_executing(intent, claimed)
+        {claimed, intent_transition}
       end)
 
     case result do
       {:ok, {updated_plan, intent_transition}} ->
-        emit_dispatched_side_effects(updated_plan, prior_status, intent_transition,
+        emit_dispatched_side_effects(updated_plan, :prepared, intent_transition,
           prior_intent_state: prior_intent_state
         )
 
         :ok
 
       {:error, reason} ->
-        Logger.error("RunExecution: progress txn failed for plan #{plan.id}: #{inspect(reason)}")
+        Logger.error(
+          "RunExecution: progress txn failed for plan #{claimed.id}: #{inspect(reason)}"
+        )
+
         {:error, reason}
     end
   end

@@ -633,6 +633,10 @@ defmodule Bank.DecisionsTest do
       assert exec_audit.before_ref == %{"execution_status" => "prepared"}
       assert exec_audit.after_ref["execution_status"] == "aborted"
       assert exec_audit.after_ref["final_outcome"] == "aborted"
+      # `final_reason` MUST be on `after_ref` so audit replay /
+      # incident review can attribute the abort. Pre-#230 patch this
+      # was missing from `Events.execution_transition/3`.
+      assert exec_audit.after_ref["final_reason"] == "operator_requested"
     end
 
     test "is idempotent on already-terminal :aborted plan (no second audit row)",
@@ -740,6 +744,53 @@ defmodule Bank.DecisionsTest do
 
       reloaded_intent = Bank.Repo.get!(AgentIntent, intent.id)
       assert reloaded_intent.state == :blocked
+    end
+
+    test "manual abort flips `active: false` so request_manual_execution can replace the plan",
+         %{workspace: ws, actor: user} do
+      # Same decision setup as the happy path. After abort we should
+      # be able to call `request_manual_execution/3` for the same
+      # decision (with all gates satisfied) and have it create a
+      # fresh plan — the partial unique index
+      # `execution_plans_decision_active_idx` would otherwise reject
+      # the second insert because it requires `active: true` to be
+      # exclusive per decision.
+      intent = agent_intent(state: :decided, workspace_id: ws.id)
+      envelope = decision_envelope(intent: intent, current: true, state: :decided)
+      plan = execution_plan(decision: envelope, workspace_id: ws.id)
+
+      assert {:ok, :aborted, aborted_plan, _} =
+               Decisions.abort_plan(plan.id, ws, actor_id: user.id)
+
+      assert aborted_plan.active == false
+
+      # `count_active_executions/1` should not include the aborted plan.
+      # (The terminal-state filter and the `active: false` flag now
+      # agree for manual aborts.)
+      reloaded = Bank.Repo.get!(Bank.Decisions.ExecutionPlan, plan.id)
+      assert reloaded.active == false
+      assert reloaded.execution_status == :aborted
+
+      # Now grant a delegation so `request_manual_execution/3`'s gates
+      # pass, then attempt the retry. It should succeed and insert a
+      # new active plan.
+      {:ok, _del} = Bank.Delegations.grant("sa-retry-after-abort", "del-retry-after-abort")
+
+      # Bring the intent back to :decided so the manual execution path
+      # accepts it (manual abort moved the parent intent to :blocked).
+      {:ok, _} =
+        intent
+        |> Bank.Intents.AgentIntent.current_pointer_changeset(%{state: :decided})
+        |> Bank.Repo.update()
+
+      assert {:ok, new_plan} =
+               Decisions.request_manual_execution(envelope.id, "sa-retry-after-abort",
+                 reason: "post_abort_retry"
+               )
+
+      assert new_plan.id != plan.id
+      assert new_plan.execution_status == :prepared
+      assert new_plan.active == true
     end
 
     test "audit JSON contains no raw bearer / secret_hash / Authorization",
