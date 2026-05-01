@@ -401,6 +401,122 @@ defmodule BankWeb.DashboardLiveTest do
     end
   end
 
+  # --- Attention-banner item ids and links (#229 follow-up) ----------------
+
+  describe "attention-banner item ids and links" do
+    test "runtime paused → row has stable id and link to /security#runtime-card",
+         %{conn: conn} do
+      {:ok, :paused} = Security.pause(:global)
+
+      {:ok, view, _html} = live(conn, "/dashboard")
+
+      assert has_element?(view, "#attention-runtime-paused", "Runtime is paused")
+
+      assert has_element?(
+               view,
+               ~s|#attention-runtime-paused a[href="/security#runtime-card"]|
+             )
+    end
+
+    test "pending approvals → row has stable id and link to /queue#pending-approvals-section",
+         %{conn: conn} do
+      intent = agent_intent()
+
+      _envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      {:ok, view, _html} = live(conn, "/dashboard")
+
+      assert has_element?(view, "#attention-pending-approvals", "awaiting approval")
+
+      assert has_element?(
+               view,
+               ~s|#attention-pending-approvals a[href="/queue#pending-approvals-section"]|
+             )
+    end
+
+    test "active executions → row has stable id and link to /queue#active-executions-section",
+         %{conn: conn, workspace: ws} do
+      _plan = execution_plan(execution_status: :prepared, workspace_id: ws.id)
+
+      {:ok, view, _html} = live(conn, "/dashboard")
+
+      assert has_element?(view, "#attention-active-executions", "in flight")
+
+      assert has_element?(
+               view,
+               ~s|#attention-active-executions a[href="/queue#active-executions-section"]|
+             )
+    end
+
+    test "delegation revoking (1) → row has stable id and link to /security#delegations-card",
+         %{conn: conn} do
+      {:ok, _del} = grant_delegation("sa_rev_one", "del_rev_one")
+      {:ok, _del} = Bank.Delegations.record_revoke_requested("sa_rev_one")
+
+      {:ok, view, _html} = live(conn, "/dashboard")
+
+      assert has_element?(
+               view,
+               "#attention-delegation-revoking",
+               "Delegation revocation in flight"
+             )
+
+      assert has_element?(
+               view,
+               ~s|#attention-delegation-revoking a[href="/security#delegations-card"]|
+             )
+    end
+
+    test "delegation revoking (multiple) → same id, pluralized text, same link",
+         %{conn: conn} do
+      for n <- 1..2 do
+        sa = "sa_rev_many_#{n}"
+        del = "del_rev_many_#{n}"
+        {:ok, _} = grant_delegation(sa, del)
+        {:ok, _} = Bank.Delegations.record_revoke_requested(sa)
+      end
+
+      {:ok, view, _html} = live(conn, "/dashboard")
+
+      assert has_element?(
+               view,
+               "#attention-delegation-revoking",
+               "Delegation revocations in flight (2)"
+             )
+
+      assert has_element?(
+               view,
+               ~s|#attention-delegation-revoking a[href="/security#delegations-card"]|
+             )
+    end
+
+    test "delegation revoke_failed → row has stable id and link to /security#delegations-card",
+         %{conn: conn} do
+      {:ok, _del} = grant_delegation("sa_rf", "del_rf")
+      {:ok, _del} = Bank.Delegations.record_revoke_requested("sa_rf")
+      {:ok, _del} = Bank.Delegations.record_revoke_failed("sa_rf", %{revoke_error: "rpc_timeout"})
+
+      {:ok, view, _html} = live(conn, "/dashboard")
+
+      assert has_element?(
+               view,
+               "#attention-delegation-revoke-failed",
+               "Delegation revoke failed"
+             )
+
+      assert has_element?(
+               view,
+               ~s|#attention-delegation-revoke-failed a[href="/security#delegations-card"]|
+             )
+    end
+  end
+
   # --- Layouts.app current_scope (admin nav visibility, mirrors #308) ------
 
   describe "layout current_scope wiring" do

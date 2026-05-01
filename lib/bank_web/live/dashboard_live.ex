@@ -141,7 +141,12 @@ defmodule BankWeb.DashboardLive do
     items =
       if paused?,
         do: [
-          %{severity: :warning, text: "Runtime is paused — no new executions will proceed"}
+          %{
+            id: "attention-runtime-paused",
+            severity: :warning,
+            text: "Runtime is paused — no new executions will proceed",
+            link: "/security#runtime-card"
+          }
           | items
         ],
         else: items
@@ -175,11 +180,24 @@ defmodule BankWeb.DashboardLive do
     items =
       cond do
         revoking_count == 1 ->
-          [%{severity: :warning, text: "Delegation revocation in flight"} | items]
+          [
+            %{
+              id: "attention-delegation-revoking",
+              severity: :warning,
+              text: "Delegation revocation in flight",
+              link: "/security#delegations-card"
+            }
+            | items
+          ]
 
         revoking_count > 1 ->
           [
-            %{severity: :warning, text: "Delegation revocations in flight (#{revoking_count})"}
+            %{
+              id: "attention-delegation-revoking",
+              severity: :warning,
+              text: "Delegation revocations in flight (#{revoking_count})",
+              link: "/security#delegations-card"
+            }
             | items
           ]
 
@@ -194,8 +212,10 @@ defmodule BankWeb.DashboardLive do
         revoke_failed_count == 1 ->
           [
             %{
+              id: "attention-delegation-revoke-failed",
               severity: :error,
-              text: "Delegation revoke failed on-chain — operator retry required"
+              text: "Delegation revoke failed on-chain — operator retry required",
+              link: "/security#delegations-card"
             }
             | items
           ]
@@ -203,9 +223,11 @@ defmodule BankWeb.DashboardLive do
         revoke_failed_count > 1 ->
           [
             %{
+              id: "attention-delegation-revoke-failed",
               severity: :error,
               text:
-                "#{revoke_failed_count} delegations in revoke_failed — operator retry required"
+                "#{revoke_failed_count} delegations in revoke_failed — operator retry required",
+              link: "/security#delegations-card"
             }
             | items
           ]
@@ -217,13 +239,27 @@ defmodule BankWeb.DashboardLive do
     items =
       if pending_approvals > 0,
         do: [
-          %{severity: :info, text: "#{pending_approvals} decision(s) awaiting approval"} | items
+          %{
+            id: "attention-pending-approvals",
+            severity: :info,
+            text: "#{pending_approvals} decision(s) awaiting approval",
+            link: "/queue#pending-approvals-section"
+          }
+          | items
         ],
         else: items
 
     items =
       if active_executions > 0,
-        do: [%{severity: :info, text: "#{active_executions} execution(s) in flight"} | items],
+        do: [
+          %{
+            id: "attention-active-executions",
+            severity: :info,
+            text: "#{active_executions} execution(s) in flight",
+            link: "/queue#active-executions-section"
+          }
+          | items
+        ],
         else: items
 
     items =
