@@ -99,8 +99,15 @@ config :bank, Oban,
 # Per-key rate limit for /v1 (#221, first slice). Defaults to 1 RPS
 # sustained per key (60 requests / 60 second window). Operators can
 # tune downward via runtime config when product calibration data
-# arrives. Per-workspace and chain-action caps land in subsequent
-# slices.
+# arrives. Chain-action stricter caps land in a subsequent slice.
+#
+# Per-workspace rate limit (#221, third slice) — collective ceiling
+# across all keys in a workspace. Default 10× the per-key budget so
+# a workspace with up to 10 quietly-busy keys is uncapped while
+# malicious or misconfigured workspaces with many runaway keys hit
+# a deterministic ceiling. Sits in the same plug AFTER the per-key
+# check so a single noisy key trips its own bucket first and does
+# not poison quiet keys in the same workspace.
 #
 # Auth-failure lockout (#221, second slice). Independently tunable
 # from the success-path bucket. Default ceiling is 10 failed auth
@@ -112,6 +119,8 @@ config :bank, Oban,
 config :bank, Bank.RateLimit,
   requests_per_window: 60,
   window_seconds: 60,
+  workspace_requests_per_window: 600,
+  workspace_window_seconds: 60,
   auth_failure_per_window: 10,
   auth_failure_window_seconds: 300,
   auth_failure_enabled?: true
