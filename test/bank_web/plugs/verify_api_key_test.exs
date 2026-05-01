@@ -593,6 +593,31 @@ defmodule BankWeb.Plugs.VerifyAPIKeyTest do
       assert list_auth_failure_limited_events() == []
     end
 
+    test "wrong-scheme attempts are NOT subject to lockout" do
+      # Sibling branch to the missing-header path: a non-Bearer
+      # Authorization header (Basic, Digest, opaque garbage)
+      # short-circuits at `extract_bearer/1` and bypasses the
+      # auth-failure bucket. Same false-positive rationale —
+      # password managers, legacy clients, and browsers
+      # occasionally emit non-Bearer headers and must not trigger
+      # IP-level lockouts.
+      for _ <- 1..100 do
+        c =
+          Phoenix.ConnTest.build_conn()
+          |> Plug.Conn.put_req_header("authorization", "Basic dXNlcjpwYXNz")
+          |> VerifyAPIKey.call(VerifyAPIKey.init([]))
+
+        assert c.status == 401
+
+        assert %{"error" => %{"code" => "invalid_authorization_scheme"}} =
+                 Jason.decode!(c.resp_body)
+      end
+
+      # No auth_failure_limited events emitted — wrong-scheme
+      # attempts never enter the lockout path.
+      assert list_auth_failure_limited_events() == []
+    end
+
     test "revoked attempts count as auth failures" do
       {_ws, user, key, raw} = ws_user_key(:operator)
       {:ok, _} = APIKeys.revoke_key(key, actor: user)
