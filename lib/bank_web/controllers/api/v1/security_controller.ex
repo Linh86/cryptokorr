@@ -11,12 +11,20 @@ defmodule BankWeb.API.V1.SecurityController do
     * `POST /v1/security/revoke_delegation`  — submit delegation
       revocation via the chain adapter; final state change is delivered
       through `security:events` and audit
+    * `POST /v1/security/pause_agent_keys`   — workspace-wide pause
+      for agent-key auth (#231-b). Refuses every `/v1` request from
+      this workspace's API keys until resumed.
+    * `POST /v1/security/resume_agent_keys`  — resume workspace-wide
+      agent-key auth.
   """
 
   use BankWeb, :controller
   use OpenApiSpex.ControllerSpecs
 
+  alias Bank.Accounts
+  alias Bank.APIKeys
   alias Bank.Security
+  alias Bank.Workspaces.Workspace
   alias OpenApiSpex.Reference
 
   @idempotency_key_ref %Reference{"$ref": "#/components/parameters/IdempotencyKey"}
@@ -186,6 +194,115 @@ defmodule BankWeb.API.V1.SecurityController do
     end
   end
 
+  # --- POST /v1/security/pause_agent_keys (#231-b) -----------------------
+
+  operation(:pause_agent_keys,
+    summary: "Pause workspace-wide agent-key auth",
+    description: """
+    Refuses every `/v1` request from this workspace's API keys with
+    `401 invalid_credentials` until resumed. Operates on the calling
+    key's workspace (taken from `current_scope.workspace.id`); a
+    `workspace_id` field in the request body is silently ignored.
+
+    Idempotent: calling on an already-paused workspace returns the
+    same `200` payload as the original pause (no second audit row).
+
+    ## Bootstrap caveat (load-bearing)
+
+    Once paused, every API key in this workspace returns
+    `401 invalid_credentials` from `/v1` — including the calling
+    key. Resume MUST come from a non-API-key path:
+
+      * the LiveView Security console at `/security` (Google OAuth
+        session, signed-in admin operator), or
+      * `Bank.APIKeys.resume_workspace/3` from IEx.
+
+    There is no API-side resume bypass. Deployments that authenticate
+    only via API keys (CI / IEx-only) lose access; document this in
+    your pause runbook.
+    """,
+    tags: ["Security"],
+    parameters: [@idempotency_key_ref, @request_id_in_ref],
+    request_body:
+      {"Pause body", "application/json", BankWeb.OpenApi.Schemas.AgentKeysPauseRequest},
+    responses: %{
+      200 =>
+        {"Workspace agent-key pause state", "application/json",
+         BankWeb.OpenApi.Schemas.AgentKeysPauseStateResponse},
+      401 => @unauthorized_ref,
+      403 => @forbidden_ref,
+      429 => @too_many_requests_ref,
+      422 => @unprocessable_ref
+    }
+  )
+
+  def pause_agent_keys(conn, params) do
+    scope = conn.assigns.current_scope
+    reason = clean_reason(Map.get(params, "reason"))
+
+    with {:ok, actor} <- resolve_creator(scope),
+         {:ok, _result, paused} <- APIKeys.pause_workspace(scope.workspace, actor, reason: reason) do
+      conn
+      |> put_status(:ok)
+      |> json(%{data: pause_state(paused)})
+    else
+      {:error, :no_creator_user} ->
+        conn
+        |> put_status(:forbidden)
+        |> json(%{error: %{code: "creator_user_unavailable"}})
+
+      {:error, %Ecto.Changeset{} = changeset} ->
+        conn
+        |> put_status(:unprocessable_entity)
+        |> json(%{error: changeset_error(changeset)})
+    end
+  end
+
+  # --- POST /v1/security/resume_agent_keys (#231-b) ----------------------
+
+  operation(:resume_agent_keys,
+    summary: "Resume workspace-wide agent-key auth",
+    description: """
+    Clears the workspace pause set by `pause_agent_keys`.
+
+    > **Bootstrap note:** if this workspace's API keys are currently
+    > paused, calls to this endpoint return `401 invalid_credentials`
+    > because `VerifyAPIKey` short-circuits before the controller.
+    > Use the LiveView Security console at `/security` or
+    > `Bank.APIKeys.resume_workspace/3` from IEx instead.
+
+    Idempotent: calling on an unpaused workspace returns the same
+    `200` payload as the original resume (no second audit row).
+    """,
+    tags: ["Security"],
+    parameters: [@idempotency_key_ref, @request_id_in_ref],
+    responses: %{
+      200 =>
+        {"Workspace agent-key pause state (now unpaused)", "application/json",
+         BankWeb.OpenApi.Schemas.AgentKeysPauseStateResponse},
+      401 => @unauthorized_ref,
+      403 => @forbidden_ref,
+      429 => @too_many_requests_ref,
+      422 => @unprocessable_ref
+    }
+  )
+
+  def resume_agent_keys(conn, _params) do
+    scope = conn.assigns.current_scope
+
+    with {:ok, actor} <- resolve_creator(scope),
+         {:ok, _result, resumed} <- APIKeys.resume_workspace(scope.workspace, actor) do
+      conn
+      |> put_status(:ok)
+      |> json(%{data: pause_state(resumed)})
+    else
+      {:error, :no_creator_user} ->
+        conn
+        |> put_status(:forbidden)
+        |> json(%{error: %{code: "creator_user_unavailable"}})
+    end
+  end
+
   # --- Helpers ------------------------------------------------------------
 
   defp parse_scope(%{"scope" => "counterparty:" <> id}), do: {:counterparty, id}
@@ -193,4 +310,57 @@ defmodule BankWeb.API.V1.SecurityController do
 
   defp scope_json(:global), do: "global"
   defp scope_json({:counterparty, id}), do: "counterparty:#{id}"
+
+  # Empty / whitespace-only reason → nil (matches the LiveView pattern).
+  defp clean_reason(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp clean_reason(_), do: nil
+
+  # The audit `actor_id` is the calling user. When the request is
+  # itself authenticated by an API key, `current_scope.user == nil`
+  # and we resolve the human creator via `created_by_user_id`. Same
+  # pattern as `BankWeb.API.V1.APIKeyController.resolve_creator/1`.
+  defp resolve_creator(%{user: %Bank.Accounts.User{} = user}), do: {:ok, user}
+
+  defp resolve_creator(%{api_key: %Bank.APIKeys.APIKey{} = api_key}) do
+    case Accounts.get_user(api_key.created_by_user_id) do
+      %Bank.Accounts.User{} = user -> {:ok, user}
+      _ -> {:error, :no_creator_user}
+    end
+  end
+
+  defp resolve_creator(_), do: {:error, :no_creator_user}
+
+  defp pause_state(%Workspace{} = ws) do
+    paused? = Workspace.agent_keys_paused?(ws)
+
+    %{
+      workspace_id: ws.id,
+      paused: paused?,
+      agent_keys_paused_at: ws.agent_keys_paused_at,
+      paused_by_user_id: ws.agent_keys_paused_by_user_id,
+      reason: ws.agent_keys_paused_reason
+    }
+  end
+
+  # Surface the FIRST validation error in a stable wire shape. The
+  # only validation today is `validate_length(:agent_keys_paused_reason,
+  # max: 256)` from `Workspace.pause_changeset/2`.
+  defp changeset_error(%Ecto.Changeset{errors: errors}) do
+    case errors do
+      [{:agent_keys_paused_reason, {_msg, _}} | _] ->
+        %{code: "invalid_reason", message: "reason must be 256 characters or fewer"}
+
+      [{field, {msg, _}} | _] ->
+        %{code: "invalid_body", message: "#{field}: #{msg}"}
+
+      [] ->
+        %{code: "invalid_body"}
+    end
+  end
 end

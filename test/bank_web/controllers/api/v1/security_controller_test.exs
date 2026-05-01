@@ -102,4 +102,191 @@ defmodule BankWeb.API.V1.SecurityControllerTest do
       assert body["smart_account_id"] == "sa_test"
     end
   end
+
+  # --- POST /v1/security/pause_agent_keys (#231-b) ------------------------
+
+  describe "POST /v1/security/pause_agent_keys" do
+    alias Bank.APIKeys
+    alias Bank.Audit
+    alias Bank.Workspaces.Workspace
+
+    test "admin pauses own workspace and response carries the new state",
+         %{conn: conn, workspace: ws, current_user: user} do
+      conn =
+        post(conn, ~p"/v1/security/pause_agent_keys", %{
+          "reason" => "credential leak smoke"
+        })
+
+      body = json_response(conn, 200)
+
+      assert %{
+               "data" => %{
+                 "workspace_id" => ws_id,
+                 "paused" => true,
+                 "agent_keys_paused_at" => paused_at,
+                 "paused_by_user_id" => paused_by,
+                 "reason" => "credential leak smoke"
+               }
+             } = body
+
+      assert ws_id == ws.id
+      assert is_binary(paused_at)
+      assert paused_by == user.id
+
+      reloaded = Bank.Repo.get!(Workspace, ws.id)
+      assert %DateTime{} = reloaded.agent_keys_paused_at
+      assert reloaded.agent_keys_paused_reason == "credential leak smoke"
+      assert reloaded.agent_keys_paused_by_user_id == user.id
+
+      # Audit row was emitted with the human actor_id (not the
+      # api_key id).
+      %{events: events} = Audit.list_events(%{event_type: "agent_keys.paused"})
+      [event] = Enum.filter(events, &(&1.workspace_id == ws.id))
+      assert event.actor == :user
+      assert event.actor_id == user.id
+    end
+
+    test "BOOTSTRAP — second pause via HTTP fails 401 because the calling key is now paused",
+         %{conn: conn, workspace: ws} do
+      # First HTTP pause succeeds (current_scope.workspace was unpaused
+      # at auth time).
+      first = post(conn, ~p"/v1/security/pause_agent_keys", %{"reason" => "first"})
+      assert json_response(first, 200)["data"]["paused"] == true
+
+      # The same conn's API key is now in a paused workspace, so
+      # `VerifyAPIKey` short-circuits BEFORE the controller. Second
+      # call returns 401 — pin the bootstrap caveat documented on
+      # the operation spec.
+      second =
+        post(conn, ~p"/v1/security/pause_agent_keys", %{"reason" => "second-different"})
+
+      assert %{"error" => %{"code" => "invalid_credentials"}} = json_response(second, 401)
+
+      # Workspace state still carries the FIRST call's metadata.
+      reloaded = Bank.Repo.get!(Workspace, ws.id)
+      assert reloaded.agent_keys_paused_reason == "first"
+
+      # Exactly ONE `agent_keys.paused` audit row.
+      %{events: events} = Audit.list_events(%{event_type: "agent_keys.paused"})
+      ws_events = Enum.filter(events, &(&1.workspace_id == ws.id))
+      assert length(ws_events) == 1
+    end
+
+    test "request body workspace_id is silently ignored — current_scope wins",
+         %{conn: conn, workspace: ws, current_user: user, raw_api_key: _raw} do
+      # Forge another workspace and try to pass it in the body.
+      {:ok, other_ws} = Bank.Workspaces.create_workspace(%{slug: "ws-forge", name: "Forge"})
+
+      conn =
+        post(conn, ~p"/v1/security/pause_agent_keys", %{
+          "workspace_id" => other_ws.id,
+          "reason" => "smoke"
+        })
+
+      body = json_response(conn, 200)
+
+      assert body["data"]["workspace_id"] == ws.id
+      assert body["data"]["workspace_id"] != other_ws.id
+      assert body["data"]["paused_by_user_id"] == user.id
+
+      # The forged workspace is unaffected.
+      reloaded_other = Bank.Repo.get!(Workspace, other_ws.id)
+      refute Workspace.agent_keys_paused?(reloaded_other)
+    end
+
+    test "operator-tier key gets 403 insufficient_role when unpaused",
+         %{workspace: ws, current_user: user} do
+      {:ok, _, op_raw} = APIKeys.create_key(ws, user, :operator, "op-pause-attempt")
+
+      conn =
+        build_conn()
+        |> put_req_header("authorization", "Bearer " <> op_raw)
+        |> post(~p"/v1/security/pause_agent_keys", %{})
+
+      assert %{"error" => %{"code" => "insufficient_role"}} = json_response(conn, 403)
+    end
+
+    test "missing auth returns 401", %{workspace: _ws} do
+      conn = build_conn() |> post(~p"/v1/security/pause_agent_keys", %{})
+      assert %{"error" => %{"code" => "missing_authorization"}} = json_response(conn, 401)
+    end
+
+    test "reason longer than 256 chars returns 422 invalid_reason", %{conn: conn} do
+      reason = String.duplicate("x", 257)
+
+      conn = post(conn, ~p"/v1/security/pause_agent_keys", %{"reason" => reason})
+
+      assert %{"error" => %{"code" => "invalid_reason"}} = json_response(conn, 422)
+    end
+
+    test "audit JSON contains NO raw bearer / Authorization / secret_hash",
+         %{conn: conn, raw_api_key: raw} do
+      _ = post(conn, ~p"/v1/security/pause_agent_keys", %{"reason" => "smoke"})
+
+      %{events: events} = Audit.list_events(%{event_type: "agent_keys.paused"})
+      [event] = events
+
+      sanitized = event |> Map.from_struct() |> Map.drop([:__meta__, :workspace])
+      json = Jason.encode!(sanitized)
+
+      refute json =~ raw
+      refute json =~ "secret_hash"
+      refute json =~ "Bearer "
+    end
+  end
+
+  # --- POST /v1/security/resume_agent_keys (#231-b) -----------------------
+
+  describe "POST /v1/security/resume_agent_keys" do
+    alias Bank.APIKeys
+    alias Bank.Audit
+    alias Bank.Workspaces.Workspace
+
+    test "BOOTSTRAP — paused workspace's API key cannot resume via /v1 (returns 401)",
+         %{conn: conn, workspace: ws, current_user: user} do
+      # The verify_key/1 short-circuit is the gate: a paused
+      # workspace's keys never reach the controller, so resume MUST
+      # come from a non-API-key path. Pin this contract.
+      {:ok, :paused, _} = APIKeys.pause_workspace(ws, user, reason: "lock me out")
+
+      conn = post(conn, ~p"/v1/security/resume_agent_keys", %{})
+
+      assert %{"error" => %{"code" => "invalid_credentials"}} = json_response(conn, 401)
+
+      # Resume did NOT happen.
+      reloaded = Bank.Repo.get!(Workspace, ws.id)
+      assert %DateTime{} = reloaded.agent_keys_paused_at
+    end
+
+    test "idempotent resume on unpaused workspace returns 200 with paused: false",
+         %{conn: conn, workspace: ws} do
+      conn = post(conn, ~p"/v1/security/resume_agent_keys", %{})
+
+      body = json_response(conn, 200)
+
+      assert body["data"]["workspace_id"] == ws.id
+      assert body["data"]["paused"] == false
+      assert is_nil(body["data"]["agent_keys_paused_at"])
+
+      # No audit row emitted on a no-op resume.
+      %{events: events} = Audit.list_events(%{event_type: "agent_keys.resumed"})
+      assert Enum.filter(events, &(&1.workspace_id == ws.id)) == []
+    end
+
+    test "operator-tier key gets 403", %{workspace: ws, current_user: user} do
+      {:ok, _, op_raw} = APIKeys.create_key(ws, user, :operator, "op-resume-attempt")
+
+      conn =
+        build_conn()
+        |> put_req_header("authorization", "Bearer " <> op_raw)
+        |> post(~p"/v1/security/resume_agent_keys", %{})
+
+      assert %{"error" => %{"code" => "insufficient_role"}} = json_response(conn, 403)
+    end
+
+    test "missing auth returns 401" do
+      conn = build_conn() |> post(~p"/v1/security/resume_agent_keys", %{})
+      assert %{"error" => %{"code" => "missing_authorization"}} = json_response(conn, 401)
+    end
+  end
 end

@@ -150,6 +150,98 @@ defmodule BankWeb.OpenApi.Schemas.RevokeDelegationRequest do
   })
 end
 
+defmodule BankWeb.OpenApi.Schemas.AgentKeysPauseRequest do
+  @moduledoc "Body for `POST /v1/security/pause_agent_keys` (#231-b)."
+
+  require OpenApiSpex
+  alias OpenApiSpex.Schema
+
+  OpenApiSpex.schema(%{
+    title: "AgentKeysPauseRequest",
+    description: """
+    Request body for `pause_agent_keys`. Only the optional `reason`
+    field is read — `workspace_id` from the body is silently
+    ignored; the workspace is taken from the calling key's
+    `current_scope`. `reason` is capped at 256 characters by the
+    schema CHECK; longer values return `422 invalid_reason`.
+    """,
+    type: :object,
+    properties: %{
+      reason: %Schema{
+        type: :string,
+        maxLength: 256,
+        description: """
+        Optional operator-supplied reason persisted to both the
+        workspace row and the `agent_keys.paused` audit event.
+        Empty/whitespace-only is treated as `nil`.
+        """,
+        example: "credential leak under investigation"
+      }
+    }
+  })
+end
+
+defmodule BankWeb.OpenApi.Schemas.AgentKeysPauseStateResponse do
+  @moduledoc """
+  Response body for `POST /v1/security/pause_agent_keys` and
+  `POST /v1/security/resume_agent_keys` (#231-b).
+
+  ## Bootstrap caveat (load-bearing)
+
+  Once `paused: true`, every API key in this workspace returns
+  `401 invalid_credentials` from `/v1` — including the key that
+  just made the pause call. Resume MUST come from a non-API-key
+  path: the LiveView Security console at `/security` (Google OAuth
+  session) or `Bank.APIKeys.resume_workspace/3` from IEx. There
+  is no API-side resume bypass.
+  """
+
+  require OpenApiSpex
+  alias OpenApiSpex.{Reference, Schema}
+
+  OpenApiSpex.schema(%{
+    title: "AgentKeysPauseStateResponse",
+    description: """
+    Workspace agent-key pause state. Returned by both pause and
+    resume on `200`. Idempotent re-call returns the same payload
+    as the original transition.
+
+    `paused` is the boolean source of truth; the timestamp /
+    user / reason fields are populated only when `paused: true`.
+
+    ## Bootstrap caveat (load-bearing)
+
+    Once paused, every API key in this workspace returns
+    `401 invalid_credentials` from `/v1` — including the key that
+    just made the pause call. Resume MUST come from a non-API-key
+    path: the LiveView Security console at `/security` (Google
+    OAuth session) or `Bank.APIKeys.resume_workspace/3` from IEx.
+    There is no API-side resume bypass.
+    """,
+    type: :object,
+    required: [:data],
+    properties: %{
+      data: %Schema{
+        type: :object,
+        required: [:workspace_id, :paused],
+        properties: %{
+          workspace_id: %Reference{"$ref": "#/components/schemas/Id"},
+          paused: %Schema{type: :boolean, example: true},
+          agent_keys_paused_at: %Reference{"$ref": "#/components/schemas/Timestamp"},
+          paused_by_user_id: %Reference{"$ref": "#/components/schemas/Id"},
+          reason: %Schema{
+            type: :string,
+            description:
+              "Operator-supplied reason recorded at pause time. Null when " <>
+                "`paused: false` or when no reason was supplied.",
+            example: "credential leak under investigation"
+          }
+        }
+      }
+    }
+  })
+end
+
 defmodule BankWeb.OpenApi.Schemas.RevokeDelegationResponse do
   @moduledoc "Response body for `POST /v1/security/revoke_delegation`."
 

@@ -244,6 +244,14 @@ defmodule BankWeb.Router do
     post "/security/pause", SecurityController, :pause
     post "/security/resume", SecurityController, :resume
     post "/security/revoke_delegation", SecurityController, :revoke_delegation
+
+    # Workspace-wide agent-key pause (#231-b). Wire shape lives in
+    # `BankWeb.OpenApi.Schemas.AgentKeysPauseStateResponse`. Bootstrap
+    # caveat: once paused, this workspace's API keys 401 — including
+    # the calling key — so resume MUST come from the LiveView at
+    # `/security` or IEx. Documented on the operation specs.
+    post "/security/pause_agent_keys", SecurityController, :pause_agent_keys
+    post "/security/resume_agent_keys", SecurityController, :resume_agent_keys
   end
 
   # Internal adapter callback — private network, not part of /v1/.
