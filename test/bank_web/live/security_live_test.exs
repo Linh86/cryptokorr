@@ -552,6 +552,27 @@ defmodule BankWeb.SecurityLiveTest do
       assert html =~ ~s(href="/security")
       assert html =~ "bg-primary/10 text-primary"
     end
+
+    test "Layouts.app receives current_scope so admin nav can render (#305 review fix)",
+         %{conn: conn, current_user: user} do
+      # Pre-fix `<Layouts.app>` was rendered without `current_scope`,
+      # so `admin_visible?/1` always evaluated to `false` and the
+      # sidebar's admin-only `/admin/api_keys` nav link was hidden
+      # for legitimate admin users on /security. Pin the corrected
+      # wiring: when the calling user is on the `BANK_ADMIN_EMAILS`
+      # allowlist, the admin link appears.
+      original_admin_emails = Application.get_env(:bank, :admin_emails)
+
+      try do
+        Application.put_env(:bank, :admin_emails, [user.email])
+
+        {:ok, _view, html} = live(conn, "/security")
+
+        assert html =~ ~s(href="/admin/api_keys")
+      after
+        Application.put_env(:bank, :admin_emails, original_admin_emails)
+      end
+    end
   end
 
   # --- Agent-key pause panel (#231-c) -------------------------------------
@@ -749,6 +770,38 @@ defmodule BankWeb.SecurityLiveTest do
       {:ok, view, _html} = live(conn, "/security")
 
       assert has_element?(view, "#stuck-plans-empty")
+    end
+
+    test "current-workspace stuck plan is not starved by 10+ older sibling-workspace rows (#305 review fix)",
+         %{conn: conn, workspace: ws} do
+      # Pre-fix the LiveView fetched `stuck_plan_details(limit: 10)`
+      # globally and post-filtered by workspace; 10+ older sibling
+      # rows would consume the limit and silently hide the current
+      # workspace's row. With the DB-side workspace filter, the
+      # current row is rendered regardless of sibling volume.
+      {:ok, sibling_ws} =
+        Bank.Workspaces.create_workspace(%{slug: "sibling-starve-test", name: "Sibling"})
+
+      for _ <- 1..12 do
+        plan =
+          Bank.Fixtures.execution_plan(execution_status: :prepared, workspace_id: sibling_ws.id)
+
+        twenty_one_min_ago = DateTime.utc_now() |> DateTime.add(-21 * 60, :second)
+
+        {1, _} =
+          Bank.Repo.update_all(
+            from(p in Bank.Decisions.ExecutionPlan, where: p.id == ^plan.id),
+            set: [updated_at: twenty_one_min_ago]
+          )
+      end
+
+      current_plan = stuck_prepared_plan(ws.id)
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      refute has_element?(view, "#stuck-plans-empty")
+      assert has_element?(view, "#stuck-plan-#{current_plan.id}")
+      assert has_element?(view, "#abort-plan-btn-#{current_plan.id}")
     end
   end
 
