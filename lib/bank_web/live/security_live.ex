@@ -6,8 +6,12 @@ defmodule BankWeb.SecurityLive do
   consolidates the three safety levers in one place:
 
     * **Runtime pause / resume** — halts new `executing` transitions.
-    * **Delegation status** — current grants and revoke action.
-    * **Recent safety events** — pause/resume/revoke audit slice.
+    * **Workspace agent-key pause / resume** — refuses every `/v1`
+      API request from the workspace's keys (#231-a).
+    * **Delegation status + risk summary** — per-state counts and
+      revoke action for every active delegation in the workspace.
+    * **Recent safety events** — pause/resume/revoke + workspace
+      agent-key pause audit slice (#231-e).
 
   ## Design decisions
 
@@ -39,12 +43,19 @@ defmodule BankWeb.SecurityLive do
   alias Bank.Workspaces.Workspace
 
   # Audit event types that belong on the safety timeline.
+  #
+  # `agent_keys.paused` / `agent_keys.resumed` events (#231-a)
+  # carry `subject_id = workspace.id`, so `visible_to_workspace?/3`
+  # gates them on workspace identity rather than the
+  # delegation-id allowlist used for `delegation.*`.
   @safety_event_types [
     "security.paused",
     "security.resumed",
     "delegation.revoke_requested",
     "delegation.revoked",
-    "delegation.state_changed"
+    "delegation.state_changed",
+    "agent_keys.paused",
+    "agent_keys.resumed"
   ]
 
   @impl true
@@ -239,7 +250,9 @@ defmodule BankWeb.SecurityLive do
 
     execution_ready? = not paused? and executable_count > 0
 
-    safety_events = load_safety_events(delegations)
+    risk_summary = Enum.frequencies_by(delegations, & &1.state)
+
+    safety_events = load_safety_events(delegations, workspace_id)
 
     socket
     |> assign(:paused, paused?)
@@ -250,6 +263,7 @@ defmodule BankWeb.SecurityLive do
     |> assign(:delegations, delegations)
     |> assign(:executable_count, executable_count)
     |> assign(:execution_ready, execution_ready?)
+    |> assign(:risk_summary, risk_summary)
     |> assign(:safety_events, safety_events)
   end
 
@@ -277,7 +291,7 @@ defmodule BankWeb.SecurityLive do
   #     legacy events. Once a backfill closes the legacy tail (a
   #     future PR), the query can switch to `WHERE workspace_id`
   #     directly.
-  defp load_safety_events(workspace_delegations) do
+  defp load_safety_events(workspace_delegations, workspace_id) do
     delegation_ids =
       workspace_delegations
       |> Enum.map(& &1.id)
@@ -288,7 +302,7 @@ defmodule BankWeb.SecurityLive do
       %{events: events} = Audit.list_events(%{event_type: type}, limit: 10, order: :desc)
       events
     end)
-    |> Enum.filter(&visible_to_workspace?(&1, delegation_ids))
+    |> Enum.filter(&visible_to_workspace?(&1, delegation_ids, workspace_id))
     |> Enum.sort_by(& &1.ts, {:desc, DateTime})
     |> Enum.take(15)
   end
@@ -296,13 +310,21 @@ defmodule BankWeb.SecurityLive do
   # `security.*` rows are runtime-global and always visible.
   # `delegation.*` rows are visible only when the subject_id (the
   # delegation's UUID) belongs to the current workspace.
-  defp visible_to_workspace?(%{event_type: "security." <> _}, _ids), do: true
+  # `agent_keys.*` rows carry `subject_id = workspace.id` (#231-a),
+  # so they are visible iff that subject equals the current
+  # workspace — keeps the timeline from leaking another workspace's
+  # pause activity.
+  defp visible_to_workspace?(%{event_type: "security." <> _}, _ids, _ws_id), do: true
 
-  defp visible_to_workspace?(%{event_type: "delegation." <> _, subject_id: id}, ids)
+  defp visible_to_workspace?(%{event_type: "delegation." <> _, subject_id: id}, ids, _ws_id)
        when is_binary(id),
        do: MapSet.member?(ids, id)
 
-  defp visible_to_workspace?(_event, _ids), do: false
+  defp visible_to_workspace?(%{event_type: "agent_keys." <> _, subject_id: id}, _ids, ws_id)
+       when is_binary(id) and is_binary(ws_id),
+       do: id == ws_id
+
+  defp visible_to_workspace?(_event, _ids, _ws_id), do: false
 
   # --- Render ----------------------------------------------------------------
 
@@ -340,6 +362,11 @@ defmodule BankWeb.SecurityLive do
             paused={@agent_keys_paused}
             paused_by={@agent_keys_paused_by}
             current_role={@current_scope.role}
+          />
+          <.risk_summary_card
+            summary={@risk_summary}
+            executable_count={@executable_count}
+            total={length(@delegations)}
           />
           <.delegations_card delegations={@delegations} />
         </div>
@@ -644,6 +671,77 @@ defmodule BankWeb.SecurityLive do
           <.icon name="hero-play" class="size-3.5" /> Resume agent keys
         </.button>
       </footer>
+    </section>
+    """
+  end
+
+  # --- Component: risk summary card (#231-e) -------------------------------
+
+  attr :summary, :map, required: true
+  attr :executable_count, :integer, required: true
+  attr :total, :integer, required: true
+
+  # Compact at-a-glance roll-up of the workspace's active delegation
+  # population. The headline numbers — total tracked + executable now
+  # — are first-class because they answer the operator's primary
+  # questions ("how many delegations am I responsible for?" and "how
+  # many can move funds right now?"). Per-state counts are rendered
+  # only when non-zero so the card collapses to a clean two-cell view
+  # when nothing is in flight.
+  defp risk_summary_card(assigns) do
+    ~H"""
+    <section
+      id="risk-summary-card"
+      data-total={@total}
+      data-executable={@executable_count}
+      class="rounded-xl border border-base-300 bg-base-100 shadow-sm overflow-hidden"
+    >
+      <header class="px-6 py-4 border-b border-base-300 flex items-center justify-between">
+        <h2 class="text-sm font-semibold flex items-center gap-1.5">
+          <.icon name="hero-shield-check" class="size-4" /> Active delegation risk summary
+        </h2>
+        <span class="badge badge-sm badge-ghost">{@total}</span>
+      </header>
+
+      <dl class="grid grid-cols-2 gap-4 px-6 py-5 text-sm">
+        <div>
+          <dt class="text-[0.65rem] uppercase tracking-wider text-base-content/40 mb-0.5">
+            Total tracked
+          </dt>
+          <dd id="risk-total" class="font-mono text-base-content/80">{@total}</dd>
+        </div>
+        <div>
+          <dt class="text-[0.65rem] uppercase tracking-wider text-base-content/40 mb-0.5">
+            Executable now
+          </dt>
+          <dd id="risk-executable" class="font-mono text-base-content/80">
+            {@executable_count}
+          </dd>
+        </div>
+
+        <%= for {state, label, dom_id} <- [
+          {:active, "Active", "risk-state-active"},
+          {:pending, "Pending grant", "risk-state-pending"},
+          {:revoking, "Revoking", "risk-state-revoking"},
+          {:revoke_failed, "Revoke failed", "risk-state-revoke-failed"}
+        ], Map.get(@summary, state, 0) > 0 do %>
+          <div>
+            <dt class="text-[0.65rem] uppercase tracking-wider text-base-content/40 mb-0.5">
+              {label}
+            </dt>
+            <dd id={dom_id} class="font-mono text-base-content/80">
+              {Map.get(@summary, state, 0)}
+            </dd>
+          </div>
+        <% end %>
+      </dl>
+
+      <div
+        :if={@total == 0}
+        class="px-6 pb-5 -mt-2 text-xs text-base-content/50"
+      >
+        No active delegations to monitor.
+      </div>
     </section>
     """
   end
