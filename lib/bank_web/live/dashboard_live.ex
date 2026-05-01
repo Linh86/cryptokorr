@@ -82,8 +82,25 @@ defmodule BankWeb.DashboardLive do
     active_executions = Decisions.count_active_executions(scope_opts)
     recent_decisions = Decisions.list_recent_decisions(8, scope_opts)
 
+    # Stuck-plan count (#229 dashboard surfacing). Workspace-scoped via
+    # `Health.stuck_plan_details/1`'s `:workspace_id` option (added in
+    # PR #308); the per-status DB query applies the workspace filter
+    # before its `LIMIT`, so sibling-tenant rows cannot starve the
+    # current workspace's slot. `:limit: 25` caps the read while still
+    # being enough to count comfortably above the SecurityLive card's
+    # `limit: 10` display window.
+    stuck_plan_count =
+      Bank.Ops.Health.stuck_plan_details(workspace_id: workspace_id, limit: 25)
+      |> length()
+
     attention_items =
-      build_attention_items(paused?, delegations, pending_approvals, active_executions)
+      build_attention_items(
+        paused?,
+        delegations,
+        pending_approvals,
+        active_executions,
+        stuck_plan_count
+      )
 
     socket
     |> assign(:paused, paused?)
@@ -92,11 +109,18 @@ defmodule BankWeb.DashboardLive do
     |> assign(:execution_ready, execution_ready?)
     |> assign(:pending_approvals, pending_approvals)
     |> assign(:active_executions, active_executions)
+    |> assign(:stuck_plan_count, stuck_plan_count)
     |> assign(:recent_decisions, recent_decisions)
     |> assign(:attention_items, attention_items)
   end
 
-  defp build_attention_items(paused?, delegations, pending_approvals, active_executions) do
+  defp build_attention_items(
+         paused?,
+         delegations,
+         pending_approvals,
+         active_executions,
+         stuck_plan_count
+       ) do
     items = []
 
     items =
@@ -170,6 +194,34 @@ defmodule BankWeb.DashboardLive do
         do: [%{severity: :info, text: "#{active_executions} execution(s) in flight"} | items],
         else: items
 
+    items =
+      cond do
+        stuck_plan_count == 1 ->
+          [
+            %{
+              id: "attention-stuck-plans",
+              severity: :warning,
+              text: "1 execution plan stuck past threshold",
+              link: "/security#stuck-plans-card"
+            }
+            | items
+          ]
+
+        stuck_plan_count > 1 ->
+          [
+            %{
+              id: "attention-stuck-plans",
+              severity: :warning,
+              text: "#{stuck_plan_count} execution plans stuck past threshold",
+              link: "/security#stuck-plans-card"
+            }
+            | items
+          ]
+
+        true ->
+          items
+      end
+
     Enum.reverse(items)
   end
 
@@ -178,7 +230,7 @@ defmodule BankWeb.DashboardLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} active_page={:dashboard}>
+    <Layouts.app flash={@flash} current_scope={@current_scope} active_page={:dashboard}>
       <%!-- Page header --%>
       <div class="flex items-center justify-between mb-8">
         <div>
@@ -259,9 +311,21 @@ defmodule BankWeb.DashboardLive do
         <.icon name="hero-exclamation-triangle" class="size-4 text-warning" /> Needs attention
       </h3>
       <ul class="space-y-1.5">
-        <li :for={item <- @items} class="flex items-center gap-2 text-sm">
+        <li
+          :for={item <- @items}
+          id={item[:id]}
+          class="flex items-center gap-2 text-sm"
+        >
           <span class={["badge badge-xs", attention_badge_class(item.severity)]} />
           <span class="text-base-content/80">{item.text}</span>
+          <.link
+            :if={item[:link]}
+            navigate={item.link}
+            class="ml-1 link link-primary text-xs"
+            data-role="attention-link"
+          >
+            Review
+          </.link>
         </li>
       </ul>
     </div>
