@@ -112,14 +112,14 @@ Single polymorphic `pauses` table mirroring the `agent_keys_paused_at` precedent
 - **Durable across restart.** Survives deploys, control-plane crashes, and multi-node rollouts (when those land).
 - Maps 1:1 onto #228's required attribute list (`scope_type`, `scope_value`, `reason`, `created_by`, `expires_at`, `status`).
 - Native `workspace_id` column → cross-workspace isolation at the query layer; mirrors the rest of the codebase's #158 scoping pattern.
-- Idempotency via partial unique index on `(scope_type, scope_value, status='active')`.
+- Idempotency via partial unique index on `(workspace_id, scope_type, scope_value)` filtered to active rows.
 - Audit + replay parity with `agent_keys.*` (workspace-stamped, idempotent emission).
 
 **Cons**
 
 - More moving pieces: migration, schema module, context functions, tests.
-- Hot-path lookup cost: `RunExecution`'s pause check goes from in-memory `:ets`/GenServer to a SELECT. Mitigated with a per-process cache or a small `:ets` projection refreshed via PubSub on `pauses.changed` (proposed in §6).
-- Inherits all DB-migration discipline: the column stays nullable, the unique index is partial, the rollout is incremental (§5).
+- Hot-path lookup cost: `RunExecution`'s pause check goes from in-memory `:ets`/GenServer to a SELECT against the partial unique index. Phase 1 absorbs that cost directly (DB-only, see §6); a Phase 1.5+ slice may add an active-rows-only `:ets` projection if the latency budget demands it, with the strict invariant that a cache miss falls through to the DB and the cache never asserts "not paused".
+- Inherits all DB-migration discipline: the partial unique index is filtered, `workspace_id` is `null: false` for Phase 1 (§6), and the rollout is incremental (§5).
 
 ### Option C — Hybrid
 
@@ -150,9 +150,9 @@ Keep `PauseState` in-memory for `:global` (the panic lever — must respond inst
 
 ## 5. Recommended option + phased rollout
 
-**Recommendation: Option B with a small in-memory projection for hot-path reads.**
+**Recommendation: Option B (DB-backed `pauses` table). Phase 1 is DB-only; an active-rows-only `:ets` projection is a Phase 1.5+ option if a latency budget makes it necessary.**
 
-The durability and workspace-isolation arguments are decisive; the hot-path concern is solvable with a `:ets`-backed read-through cache invalidated on PubSub `pauses.changed` events. `:global` and `{:counterparty, id}` stay where they are in `PauseState` for v0.1 — this memo does **not** propose collapsing those into the new table — but the new scope shapes (chain, api_key, smart_account) all land in the DB.
+The durability and workspace-isolation arguments are decisive. Phase 1 ships without a hot-path cache because correctness comes first: a partial-unique-index lookup is cheap enough at v0.1 dispatch volumes, and the absence of a cache eliminates every skew window in which a paused scope could be admitted. If a later slice introduces an `:ets` projection, it MUST follow the active-rows-only invariant defined in §6 — the cache may answer "paused" fast, but a miss MUST fall through to the DB and the cache never asserts "not paused" on its own. `:global` and `{:counterparty, id}` stay where they are in `PauseState` for v0.1 — this memo does **not** propose collapsing those into the new table — but the new scope shapes (chain, api_key, smart_account) all land in the DB.
 
 ### Phased rollout
 
@@ -186,11 +186,18 @@ create table(:pauses, primary_key: false) do
   add :scope_type, :text, null: false
   add :scope_value, :text, null: false   # chain id, smart_account_id, api_key.id
 
-  # Nullable workspace_id — mirrors agent_keys_paused on workspaces.
-  # Per-chain pauses are workspace-scoped; one workspace pausing Base
-  # cannot block a sibling workspace.
+  # Workspace boundary — every scope this issue introduces is
+  # workspace-scoped, so `workspace_id` is `null: false` at the DB
+  # level. This is what makes the partial unique index below
+  # actually enforce single-active: Postgres treats NULL as
+  # distinct, so without this constraint two concurrent inserts at
+  # `(chain, "base", NULL)` would both pass the index. If a future
+  # slice ports `:global` into this table, that is a deliberate
+  # later schema change (relax the column + add a CHECK or
+  # COALESCE-based unique-index expression to keep the invariant).
+  # Phase 1 does not allow NULL.
   add :workspace_id, references(:workspaces, type: :binary_id,
-       on_delete: :nilify_all), null: true
+       on_delete: :nilify_all), null: false
 
   add :reason, :text, null: true
   add :created_by_user_id, references(:users, type: :binary_id,
@@ -198,19 +205,28 @@ create table(:pauses, primary_key: false) do
 
   add :paused_at, :utc_datetime_usec, null: false
   add :resumed_at, :utc_datetime_usec, null: true
-  add :expires_at, :utc_datetime_usec, null: true
 
-  # Active = paused_at IS NOT NULL AND resumed_at IS NULL AND
-  # (expires_at IS NULL OR expires_at > now). Stored as a generated
-  # / computed column would be ideal; for now it is implicit in the
-  # status query helper and reasserted by the partial index below.
+  # Active (Phase 1) = `resumed_at IS NULL`. The `expires_at` column
+  # and its auto-resume sweeper land together as a single Phase 1.5
+  # PR (see §13). Shipping the column without the sweeper would
+  # force a partial-index predicate that depends on `now()`, which
+  # Postgres rejects, and would create exactly the inconsistency
+  # the #310 review flagged: a row with elapsed `expires_at` but
+  # NULL `resumed_at` would still occupy the active slot.
   timestamps(type: :utc_datetime_usec)
 end
 
-# At-most-one active pause per (scope_type, scope_value, workspace_id)
+# At-most-one active pause per (workspace_id, scope_type, scope_value).
+# Because `workspace_id` is `null: false` above, NULL does not
+# participate in this index — every active row has a real workspace
+# and the unique constraint genuinely enforces single-active. A
+# regression test (§11) drives two concurrent `create_pause` calls
+# at the same tuple and asserts they converge to one active row,
+# with the loser observing a unique-constraint violation translated
+# at the context layer into an idempotent return.
 create unique_index(
   :pauses,
-  [:scope_type, :scope_value, :workspace_id],
+  [:workspace_id, :scope_type, :scope_value],
   where: "resumed_at IS NULL",
   name: :pauses_active_uniq
 )
@@ -219,11 +235,13 @@ create unique_index(
 create index(:pauses, [:workspace_id, :scope_type, :scope_value])
 ```
 
-**Nullable-first commitment.** Every column except `id`, `scope_type`, `scope_value`, `paused_at`, and the timestamps is nullable. No NOT NULL is added. The migration creates a brand-new table — it does not alter any existing table — so #228 cannot regress any other feature's row-level invariants.
+**Null discipline.** The `null: false` columns on this brand-new table are `id`, `scope_type`, `scope_value`, `workspace_id`, `paused_at`, `inserted_at`, `updated_at`. Per AGENTS.md, NOT NULL is permitted on a fresh table — what is restricted is adding NOT NULL to existing columns (which #228 does not do). `workspace_id null: false` is the strict-by-design choice for Phase 1: every scope this issue introduces is workspace-scoped, and the partial unique index relies on the column being non-NULL to enforce single-active. `reason`, `resumed_at`, and `created_by_user_id` stay nullable.
 
-**Schema module** (`Bank.Security.Pause`) declares `scope_type` as `Ecto.Enum, values: [:chain, :smart_account, :api_key]` and exposes `active?/1` derived from the three columns. A `Bank.Security.Pauses` context owns the CRUD: `create_pause/1`, `resume/2`, `list_active/1`, `paused?/3`. The existing `Bank.Security` module gets one new clause per scope inside `pause/2` and `resume/2` that delegates to the new context for non-`:global`, non-`:counterparty` scopes; the GenServer is left alone.
+**Schema module** (`Bank.Security.Pause`) declares `scope_type` as `Ecto.Enum, values: [:chain, :smart_account, :api_key]` (Phase 1 ships `:chain` only; later phases extend the enum in their own schema PRs) and exposes `active?/1` as `is_nil(resumed_at)`. A `Bank.Security.Pauses` context owns the CRUD: `create_pause/1`, `resume/2`, `list_active/1`, `paused?/3`. The existing `Bank.Security` module gets one new clause per scope inside `pause/2` and `resume/2` that delegates to the new context for non-`:global`, non-`:counterparty` scopes; the GenServer is left alone.
 
-**Hot-path read.** A small `:ets` projection (e.g. `:bank_pauses_active`) refreshed by a `Bank.Runtime.PubSub` subscriber on `security:events` keeps `RunExecution.verify_not_paused/1`'s read at single-digit microseconds. Cache-miss falls through to `Bank.Security.Pauses.paused?/3`. The fail-closed contract is preserved: a stale projection never falsely admits a paused scope (each phase's tests prove this with a deliberate cache-skew case).
+**Hot-path read — Phase 1 is DB-only.** No `:ets` projection ships in Phase 1. Every dispatch-gate read (`Bank.Security.Pauses.paused?/3`) hits the partial unique index directly. This is the correctness-first choice: with the cache out of the picture there is no skew window in which a paused scope can be admitted.
+
+**Future projection invariant (Phase 1.5+).** If a later slice introduces an `:ets` projection for hot-path reads, it MUST be **active-rows-only**: the cache stores only currently-active pause rows. A cache hit answers "paused" fast; a cache miss MUST fall through to `Bank.Security.Pauses.paused?/3` against the DB. The cache never asserts "not paused" on its own. This preserves the fail-closed contract — the only thing the projection can be stale about is which rows are active, and a missed-active row simply forces a DB read; a stale "not paused" entry cannot exist because "not paused" is not stored. (Earlier wording in this section claimed the projection was fail-closed because "a stale projection never falsely admits a paused scope" — that claim was wrong when the cache could hold stale "not paused" entries. The active-rows-only invariant above replaces it.)
 
 ## 7. Auth / RBAC
 
@@ -233,7 +251,13 @@ create index(:pauses, [:workspace_id, :scope_type, :scope_value])
 | `:smart_account` (phase 2) | `:admin` (workspace-scoped) | `:admin` (workspace-scoped) | LiveView refuses; flash + 200 | `403 forbidden` |
 | `:api_key` (phase 3) | `:admin` (workspace-scoped) | `:admin` (workspace-scoped) | LiveView refuses; flash + 200 | `403 forbidden` |
 
-Everything mirrors the existing `Security.pause(:global, ...)` flow in `BankWeb.SecurityLive.handle_event("pause_runtime", ...)` (`lib/bank_web/live/security_live.ex:108-121`) and the agent-keys handler (`lib/bank_web/live/security_live.ex:218-254`): `BankWeb.LiveAuth.authorize_action(socket, :admin)` for browser, `BankWeb.Plugs.RequireRole, :admin` for API. **A paused scope NEVER locks the operator out of the resume path** — `/security` is reachable through Google OAuth + Plug session, not API-key auth (`lib/bank/api_keys.ex:152-156`). This rule transfers from the agent-keys precedent unchanged.
+Everything mirrors the existing `Security.pause(:global, ...)` flow in `BankWeb.SecurityLive.handle_event("pause_runtime", ...)` (`lib/bank_web/live/security_live.ex:108-121`) and the agent-keys handler (`lib/bank_web/live/security_live.ex:218-254`): `BankWeb.LiveAuth.authorize_action(socket, :admin)` for browser, `BankWeb.Plugs.RequireRole, :admin` for API. **A paused scope NEVER locks the operator out of the resume path** — `/security` is reachable through Google OAuth + Plug session, not API-key auth (`lib/bank/api_keys.ex:152-156`).
+
+**Per-scope bootstrap-caveat behavior** (the resume path differs by scope because each scope gates a different layer of the stack):
+
+- `:chain` (phase 1) — both API (`POST /v1/security/resume_chain`) and LiveView (`/security` console) work for resume. Pausing a chain does not affect API-key authentication, so the calling key can resume the chain it just paused. **No bootstrap caveat.**
+- `:smart_account` (phase 2) — both API and LiveView paths work for resume. The pause gates dispatch on `smart_account_id`, not on the API key, so any admin key can issue the resume. **No bootstrap caveat.**
+- `:api_key` (phase 3) — same-key HTTP resume returns `401`. The pause is enforced inside `VerifyAPIKey`, so the paused key cannot be the credential that lifts its own pause. Resume MUST come from the LiveView console (Google OAuth session) or IEx (`Bank.Security.Pauses.resume/2`), mirroring the workspace agent-keys precedent (#231-a, [api_keys.ex:226](lib/bank/api_keys.ex:226)). **Bootstrap caveat documented per phase-3 PR.**
 
 API endpoints `POST /v1/security/pause_chain`, `POST /v1/security/resume_chain`, etc., go through `BankWeb.Plugs.RateLimit.ChainAction` (`lib/bank_web/plugs/rate_limit/chain_action.ex:19-26` already lists the new families as routes covered).
 
@@ -253,13 +277,16 @@ def security_scope_paused(%Pause{} = pause, opts), do: %{
   correlation_id: nil,
   before_ref: %{paused_at: nil},
   after_ref: %{paused_at: pause.paused_at, reason: pause.reason,
-               expires_at: pause.expires_at,
                created_by_user_id: pause.created_by_user_id},
   workspace_id: pause.workspace_id
 }
 
 def security_scope_resumed(%Pause{} = pause, prior, opts), do: # mirror
 ```
+
+**Why the subject keys differ from `agent_keys.paused`.** The existing `agent_keys.paused` builder (`lib/bank/audit/events.ex:1142-1162`) uses `subject_type: "workspace", subject_id: workspace.id` because the workspace itself is the resource being paused — there is no per-key target. For the scope-paused events, the resource being paused IS a specific chain, smart account, or API key, so `subject_type: "chain"` (or `"smart_account"`, `"api_key"`) and `subject_id: scope_value` keeps the audit row pointing at the actual paused thing. Workspace isolation is carried by the `workspace_id` envelope field (mandatory, populated from the pause row), not by overloading `subject_id`. SecurityLive's `visible_to_workspace?/3` clause (§9) gates on `workspace_id`, not `subject_id`, for these events.
+
+(The Phase 1 audit shape carries no `expires_at` field because the column is deferred to Phase 1.5; the builder picks it up at that point.)
 
 The existing `security.paused` / `security.resumed` events for `:global` and `:counterparty` are **NOT renamed** — they stay as the canonical events for those two scopes. The new event names cover only the scopes introduced by this issue.
 
@@ -271,7 +298,29 @@ The existing `security.paused` / `security.resumed` events for `:global` and `:c
 - **Per-row pause toggle** added to `delegations_card` (phase 2, `lib/bank_web/live/security_live.ex:1138-1207`), beside the existing Revoke button.
 - **Per-key pause toggle** appears in the future API-keys management surface (phase 3); SecurityLive surfaces only the count of currently paused keys in `risk_summary_card`.
 - **Aggregate badge** on the page header: `n` non-global scopes paused. Not a new card — augments the existing `posture_banner/1` (`lib/bank_web/live/security_live.ex:652-731`) so the operator sees "runtime running, but 2 scoped pauses active".
-- **Safety timeline** (`load_safety_events/3`, `lib/bank_web/live/security_live.ex:449`) gains `"security.scope_paused"` and `"security.scope_resumed"` in `@safety_event_types` (`lib/bank_web/live/security_live.ex:52`). `visible_to_workspace?/3` adds a clause matching on `event.workspace_id == ws_id` for these (mirrors the existing `ops.stuck_plan_detected` clause at `lib/bank_web/live/security_live.ex:574-580`).
+- **Safety timeline** (`load_safety_events/3`, `lib/bank_web/live/security_live.ex:449`) gains `"security.scope_paused"` and `"security.scope_resumed"` in `@safety_event_types` (`lib/bank_web/live/security_live.ex:52`).
+
+**Implementation invariant — `visible_to_workspace?/3` ordering and gating.** The existing clause at `lib/bank_web/live/security_live.ex:560` is `defp visible_to_workspace?(%{event_type: "security." <> _}, _ids, _ws_id), do: true`. That clause is correct for `security.paused`/`security.resumed` (which are runtime-global by definition) but would leak the new workspace-scoped events because the pattern `"security." <> _` also matches `security.scope_paused`/`_resumed`. Phase 1's PR MUST add two more-specific clauses **before** the existing `"security." <> _` fall-through:
+
+```elixir
+defp visible_to_workspace?(
+       %{event_type: "security.scope_paused", workspace_id: row_ws},
+       _ids,
+       ws_id
+     )
+     when is_binary(row_ws) and is_binary(ws_id),
+     do: row_ws == ws_id
+
+defp visible_to_workspace?(
+       %{event_type: "security.scope_resumed", workspace_id: row_ws},
+       _ids,
+       ws_id
+     )
+     when is_binary(row_ws) and is_binary(ws_id),
+     do: row_ws == ws_id
+```
+
+Mirrors the existing `ops.stuck_plan_detected` clause at `lib/bank_web/live/security_live.ex:574-580`. The clauses must precede the `"security." <> _` line in source order; Elixir matches on first hit. **Regression test required:** `BankWeb.SecurityLiveTest` MUST include a case where workspace A creates a `security.scope_paused` event, workspace B's admin loads `/security`, and the event does NOT appear in B's safety timeline. This test, paired with the symmetric "A sees its own pause", pins the gating contract.
 
 No new card replaces an existing one. The runtime card and agent-keys card stay exactly as they are.
 
@@ -279,7 +328,7 @@ No new card replaces an existing one. The runtime card and agent-keys card stay 
 
 Explicit commitments enforced in every phase's PR:
 
-- **No NOT NULL adds.** The `pauses` table is created from scratch; the only `null: false` columns are `id`, `scope_type`, `scope_value`, `paused_at`, `inserted_at`, `updated_at`. `workspace_id` is nullable for the same reason `agent_keys_paused_at` is on `workspaces`: an in-progress migration must never refuse a write because of a missing-tenant case.
+- **NOT NULL discipline.** The `pauses` table is created from scratch; per AGENTS.md, NOT NULL is permitted on a fresh table — what is restricted is adding NOT NULL to existing columns (which #228 does not do). The `null: false` columns are `id`, `scope_type`, `scope_value`, `workspace_id`, `paused_at`, `inserted_at`, `updated_at`. `workspace_id null: false` is the strict-by-design choice for Phase 1 because every scope this issue introduces is workspace-scoped and the partial unique index relies on it (§6). `reason`, `resumed_at`, and `created_by_user_id` stay nullable.
 - **No production backfill.** The table starts empty. There is no historical pause state to import. (The `:global` and `{:counterparty, id}` rows in `PauseState` stay where they are; this issue does not migrate them.)
 - **Migration generated via `mix ecto.gen.migration`** per AGENTS.md.
 - **Reversible.** The `down/0` clause drops the table and indexes; nothing else is touched.
@@ -291,8 +340,8 @@ Each phase's PR ships:
 
 - **Context tests** (`Bank.Security.Pauses` / extended `Bank.Security`):
   - happy path pause/resume per scope, idempotent re-pause, idempotent re-resume,
-  - expired pause auto-clears (phase 1: deferred to a follow-up worker; the schema column lands now, the auto-resume worker is its own slice),
-  - the partial unique index races (two concurrent pauses on the same scope, one wins).
+  - **concurrent duplicate active pause converges to one row** (regression test for §6's NULL-uniqueness fix): two `Task.async` calls into `create_pause/1` at the same `(workspace_id, scope_type, scope_value)`; assert exactly one row exists with `resumed_at IS NULL`, the other call observes the unique violation translated into the idempotent return shape, and exactly one audit row is emitted. Mirror `Bank.APIKeysTest:234-250`'s race pattern; no `Process.sleep`,
+  - **expiry / auto-resume is deferred to Phase 1.5** — neither the column nor any `expires_at` semantics are tested in Phase 1; Phase 1.5's PR adds the column, the sweeper, and the expiry tests together.
 - **Controller tests** (`/v1/security/pause_chain`, `/resume_chain`, etc.):
   - `:admin` admits, `:operator` 403, `:viewer` 403,
   - cross-workspace boundary: workspace A's admin cannot pause workspace B's chain (the controller resolves `current_scope.workspace_id` and the context refuses anything else),
@@ -300,7 +349,8 @@ Each phase's PR ships:
 - **LiveView tests** (`SecurityLiveTest`):
   - per-scope card renders; pause button gated by `:admin`,
   - non-admin sees a read-only panel,
-  - safety timeline includes the new event names.
+  - safety timeline includes the new event names,
+  - **cross-workspace timeline isolation** (regression test for §9's `visible_to_workspace?/3` invariant): workspace A creates a `security.scope_paused` event, workspace B's admin loads `/security`, and the event MUST NOT appear in B's safety timeline. Symmetric assertion: workspace A's admin sees its own scope-paused row.
 - **Audit hygiene tests** (`AuditEventsTest`):
   - `after_ref` for the new builders carries no secret-bearing fields,
   - workspace_id is stamped, actor + actor_id present, idempotent emission proven against the unique-index dedupe.
@@ -334,4 +384,4 @@ Listed for explicitness so review can flag scope creep:
 - **#158e workspace_id audit backfill.** The legacy-NULL audit tail (`lib/bank_web/live/security_live.ex:425-437`) is not addressed here. New `security.scope_paused` events stamp `workspace_id` from day one.
 - **`Bank.RateLimit` and `BankWeb.Plugs.RateLimit.ChainAction`.** Different concern (throttling vs pausing). The chain-action plug already covers the new `/v1/security/pause_chain` family by route prefix; no plug changes are needed beyond adding the routes themselves.
 - **`PauseState` GenServer durability.** Out of scope. The existing `:global` and `{:counterparty, id}` scopes stay in-memory; their persistence is a separate v1.0 follow-up already documented in the module (`lib/bank/security/pause_state.ex:5-13`). This memo only adds DB-backed scopes alongside.
-- **Auto-resume / `expires_at` worker.** The schema lands the column now (§6); the periodic worker that flips active → resumed when `expires_at < now` is a distinct slice, deliberately decoupled from the scope rollout so a test of `expires_at` enforcement does not gate phase 1 from shipping.
+- **Auto-resume / `expires_at`.** Deferred to a single Phase 1.5 PR that ships the column, the sweeper (`Bank.Runtime.Workers.SweepExpiredPauses` or similar — the periodic worker that flips `resumed_at = expires_at` when `expires_at < now`), and the expiry tests together. Phase 1 does NOT carry the `expires_at` column: shipping it without the sweeper would force the partial-index predicate to depend on `now()` (rejected by Postgres) or leave a row with elapsed `expires_at` and NULL `resumed_at` occupying the active slot — exactly the inconsistency the #310 review flagged.
