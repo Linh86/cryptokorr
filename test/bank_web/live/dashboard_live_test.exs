@@ -7,6 +7,8 @@ defmodule BankWeb.DashboardLiveTest do
 
   import Phoenix.LiveViewTest
 
+  import Ecto.Query
+
   setup :register_and_log_in_user
 
   alias Bank.Delegations
@@ -290,5 +292,101 @@ defmodule BankWeb.DashboardLiveTest do
       html = render(view)
       assert html =~ "awaiting approval"
     end
+  end
+
+  # --- Stuck-plans attention line (#229) -----------------------------------
+
+  describe "stuck-plans attention line" do
+    test "no stuck plans → no attention row", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/dashboard")
+
+      refute has_element?(view, "#attention-stuck-plans")
+    end
+
+    test "one stuck :prepared plan in current workspace → row appears with link",
+         %{conn: conn, workspace: ws} do
+      _plan = stuck_prepared_plan(ws.id)
+
+      {:ok, view, _html} = live(conn, "/dashboard")
+
+      assert has_element?(view, "#attention-stuck-plans")
+      assert has_element?(view, "#attention-stuck-plans", "1 execution plan stuck")
+
+      assert has_element?(
+               view,
+               ~s|#attention-stuck-plans a[href="/security#stuck-plans-card"]|
+             )
+    end
+
+    test "multiple stuck plans → pluralized text",
+         %{conn: conn, workspace: ws} do
+      for _ <- 1..3 do
+        stuck_prepared_plan(ws.id)
+      end
+
+      {:ok, view, _html} = live(conn, "/dashboard")
+
+      assert has_element?(view, "#attention-stuck-plans", "3 execution plans stuck")
+    end
+
+    test "stuck plan in sibling workspace does NOT appear on current dashboard",
+         %{conn: conn} do
+      {:ok, other_ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "sibling-stuck-#{System.unique_integer([:positive])}",
+          name: "Sibling"
+        })
+
+      _other = stuck_prepared_plan(other_ws.id)
+
+      {:ok, view, _html} = live(conn, "/dashboard")
+
+      refute has_element?(view, "#attention-stuck-plans")
+    end
+  end
+
+  # --- Layouts.app current_scope (admin nav visibility, mirrors #308) ------
+
+  describe "layout current_scope wiring" do
+    test "admin user sees /admin/api_keys nav link when allowlisted",
+         %{conn: conn, current_user: user} do
+      # Pre-fix `<Layouts.app>` was rendered without `current_scope` on
+      # the dashboard, so `admin_visible?/1` always returned `false`
+      # and the API Keys sidebar link was hidden for legitimate
+      # admins. Pin the corrected wiring with a temporary
+      # `:admin_emails` allowlist override.
+      original_admin_emails = Application.get_env(:bank, :admin_emails)
+
+      try do
+        Application.put_env(:bank, :admin_emails, [user.email])
+
+        {:ok, _view, html} = live(conn, "/dashboard")
+
+        assert html =~ ~s(href="/admin/api_keys")
+      after
+        Application.put_env(:bank, :admin_emails, original_admin_emails)
+      end
+    end
+  end
+
+  # Insert a stuck `:prepared` plan with an old `updated_at` so it
+  # crosses the per-status threshold (default 600s for `:prepared`).
+  # Mirrors the helper in `test/bank_web/live/security_live_test.exs`.
+  defp stuck_prepared_plan(workspace_id) do
+    plan =
+      Bank.Fixtures.execution_plan(
+        execution_status: :prepared,
+        workspace_id: workspace_id
+      )
+
+    twenty_min_ago = DateTime.utc_now() |> DateTime.add(-20 * 60, :second)
+
+    {1, _} =
+      Bank.Repo.update_all(
+        from(p in Bank.Decisions.ExecutionPlan, where: p.id == ^plan.id),
+        set: [updated_at: twenty_min_ago]
+      )
+
+    %{plan | updated_at: twenty_min_ago}
   end
 end
