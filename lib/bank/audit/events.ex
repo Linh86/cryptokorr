@@ -893,6 +893,90 @@ defmodule Bank.Audit.Events do
   end
 
   @doc """
+  `api_key.denied` — `BankWeb.Plugs.VerifyAPIKey` refused an
+  authentication attempt (#222).
+
+  Closes the auth-side observability gap: previously, rejected
+  attempts only landed in `Logger.warning` lines, invisible to the
+  audit/replay pipeline. Now every reject path emits ONE audit
+  event, deduped per `(prefix-or-id, reason, window)` via
+  `Bank.Audit.DedupeWindow.claim/2` so a brute-force probe cannot
+  flood the audit log.
+
+  ## Reasons
+
+  The internal `verify_key/1` distinguishes seven reject reasons
+  (`:missing_authorization`, `:invalid_authorization_scheme`,
+  `:malformed`, `:not_found`, `:hash_mismatch`, `:revoked`,
+  `:expired`) but maps them to fewer wire codes to avoid leaking
+  timing / probing signal. The audit shape mirrors the wire
+  collapse:
+
+    * `:missing` — header absent or wrong scheme
+    * `:malformed` — token did not match `cb_<base32>` shape
+    * `:invalid_credentials` — prefix lookup missed OR hash compare
+      failed (collapsed; same as the 401 wire code)
+    * `:revoked` — key found and revoked
+    * `:expired` — key found and expired
+
+  ## Subject identity
+
+  When `verify_key/1` found a row (`:hash_mismatch`, `:revoked`,
+  `:expired`), `subject_id = api_key.id` and `workspace_id` is
+  stamped — the row is real and the workspace tag is safe.
+
+  When the prefix was parsed but no row matched (`:not_found`),
+  `subject_id = "prefix:" <> prefix` — the bare prefix is a public
+  identifier, no leakage.
+
+  When no prefix was even parseable (`:missing`, `:malformed`),
+  `subject_id = "anonymous"` — sentinel for unknown-credential
+  events. `workspace_id` is `nil`.
+
+  ## Actor
+
+  `:runtime` with `actor_id = nil`. The runtime is the rejecting
+  party; no calling-agent identity exists for failed auth. Same
+  convention used by other runtime-emitted events
+  (`intent.state_changed`, `simulation.produced`).
+
+  ## Secret hygiene
+
+  `after_ref` is a hard-coded allowlist: `reason` (string),
+  `prefix` (8 chars or nil), `api_key_id` (uuid or nil). NEVER the
+  raw bearer token, `secret_hash`, Authorization header bytes, or
+  remote IP. Tests JSON-encode the row and refute every leakable
+  substring.
+  """
+  @spec api_key_denied(atom(), keyword()) :: attrs()
+  def api_key_denied(reason, opts \\ [])
+      when reason in [:missing, :malformed, :invalid_credentials, :revoked, :expired] do
+    api_key = Keyword.get(opts, :api_key)
+    prefix = Keyword.get(opts, :prefix)
+
+    {subject_id, workspace_id, api_key_id} =
+      case api_key do
+        %APIKey{} = k -> {k.id, k.workspace_id, k.id}
+        _ when is_binary(prefix) -> {"prefix:" <> prefix, nil, nil}
+        _ -> {"anonymous", nil, nil}
+      end
+
+    %{
+      actor: :runtime,
+      actor_id: nil,
+      event_type: "api_key.denied",
+      subject_type: "api_key",
+      subject_id: subject_id,
+      after_ref: %{
+        reason: Atom.to_string(reason),
+        prefix: prefix,
+        api_key_id: api_key_id
+      },
+      workspace_id: workspace_id
+    }
+  end
+
+  @doc """
   `api_key.rate_limited` — the rate-limit plug refused a request
   because the per-key counter exceeded the window quota (#221, first
   slice).

@@ -323,6 +323,38 @@ defmodule Bank.APIKeys do
   def verify_key(_), do: {:error, :malformed}
 
   @doc """
+  Audit-only lookup for the reject path of
+  `BankWeb.Plugs.VerifyAPIKey` (#222).
+
+  Returns `{prefix_or_nil, api_key_or_nil}` for the bearer token
+  in roughly the same shape `verify_key/1` consumes:
+
+    * Wire format `cb_<body>` with `byte_size(body) > 8` →
+      attempts a prefix lookup. Returns `{prefix, %APIKey{}}` if a
+      row exists or `{prefix, nil}` if not.
+    * Anything else → `{nil, nil}`.
+
+  Deliberately NO authentication semantics: callers MUST NOT use
+  the returned `%APIKey{}` to admit traffic. The function exists
+  purely so the audit emit on a failed attempt can carry the
+  prefix and / or workspace_id when those facts are already
+  knowable. Cost is one extra DB query on the reject path; rejects
+  should be rare relative to admits.
+  """
+  @spec lookup_for_audit(String.t() | nil) ::
+          {String.t() | nil, APIKey.t() | nil}
+  def lookup_for_audit(@namespace <> body) when byte_size(body) > @prefix_chars do
+    prefix = String.slice(body, 0, @prefix_chars)
+
+    case Repo.one(from k in APIKey, where: k.prefix == ^prefix) do
+      nil -> {prefix, nil}
+      %APIKey{} = key -> {prefix, key}
+    end
+  end
+
+  def lookup_for_audit(_), do: {nil, nil}
+
+  @doc """
   List all non-revoked keys for a workspace, newest first. Used
   by the (future) management UI; safe to call now.
   """

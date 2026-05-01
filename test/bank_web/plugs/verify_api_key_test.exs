@@ -256,4 +256,210 @@ defmodule BankWeb.Plugs.VerifyAPIKeyTest do
       end
     end
   end
+
+  # --- api_key.denied audit emission (#222) -------------------------------
+
+  describe "api_key.denied audit event" do
+    setup do
+      Bank.Audit.DedupeWindow.reset()
+      :ok
+    end
+
+    test "missing header → reason=missing, subject=anonymous, no workspace" do
+      conn =
+        Phoenix.ConnTest.build_conn()
+        |> VerifyAPIKey.call(VerifyAPIKey.init([]))
+
+      assert conn.status == 401
+
+      [event] = list_denied_events()
+
+      assert event.actor == :runtime
+      assert event.actor_id == nil
+      assert event.subject_type == "api_key"
+      assert event.subject_id == "anonymous"
+      assert event.workspace_id == nil
+      assert event.after_ref["reason"] == "missing"
+      assert event.after_ref["prefix"] == nil
+    end
+
+    test "wrong scheme → reason=missing" do
+      _conn =
+        Phoenix.ConnTest.build_conn()
+        |> put_req_header("authorization", "Basic abc")
+        |> VerifyAPIKey.call(VerifyAPIKey.init([]))
+
+      [event] = list_denied_events()
+      assert event.after_ref["reason"] == "missing"
+    end
+
+    test "garbage non-prefixed bearer → reason=malformed" do
+      _conn =
+        "totally-not-a-cb-key"
+        |> build_conn_with_bearer()
+        |> VerifyAPIKey.call(VerifyAPIKey.init([]))
+
+      [event] = list_denied_events()
+      assert event.after_ref["reason"] == "malformed"
+      assert event.after_ref["prefix"] == nil
+      assert event.subject_id == "anonymous"
+    end
+
+    test "unknown prefix → reason=invalid_credentials, subject=prefix:..., prefix in after_ref" do
+      _conn =
+        "cb_aaaaaaaabbbbbbbbccccccccddddddddeeeeeeee"
+        |> build_conn_with_bearer()
+        |> VerifyAPIKey.call(VerifyAPIKey.init([]))
+
+      [event] = list_denied_events()
+      assert event.after_ref["reason"] == "invalid_credentials"
+      assert event.after_ref["prefix"] == "aaaaaaaa"
+      assert event.subject_id == "prefix:aaaaaaaa"
+      assert event.workspace_id == nil
+    end
+
+    test "hash mismatch → reason=invalid_credentials, key id stamped, workspace stamped" do
+      {ws, _user, key, _raw} = ws_user_key(:operator)
+
+      # Same prefix as the real key, but a different secret body —
+      # the hash compare fails. We construct the wire token by
+      # taking the prefix and appending random base32 padding.
+      forged_body = key.prefix <> String.duplicate("a", 40)
+
+      _conn =
+        ("cb_" <> forged_body)
+        |> build_conn_with_bearer()
+        |> VerifyAPIKey.call(VerifyAPIKey.init([]))
+
+      [event] = list_denied_events()
+      assert event.after_ref["reason"] == "invalid_credentials"
+      assert event.after_ref["prefix"] == key.prefix
+      assert event.subject_id == key.id
+      assert event.workspace_id == ws.id
+    end
+
+    test "revoked → reason=revoked, key id stamped, workspace stamped" do
+      {ws, user, key, raw} = ws_user_key(:operator)
+      {:ok, _} = APIKeys.revoke_key(key, actor: user)
+
+      _conn =
+        raw
+        |> build_conn_with_bearer()
+        |> VerifyAPIKey.call(VerifyAPIKey.init([]))
+
+      [event] = list_denied_events()
+      assert event.after_ref["reason"] == "revoked"
+      assert event.after_ref["prefix"] == key.prefix
+      assert event.subject_id == key.id
+      assert event.workspace_id == ws.id
+    end
+
+    test "expired → reason=expired, key id stamped, workspace stamped" do
+      suffix = System.unique_integer([:positive])
+
+      {:ok, user} =
+        Bank.Accounts.find_or_create_from_oauth(%{
+          provider: :google,
+          subject: "vk-exp-#{suffix}",
+          email: "vk-exp-#{suffix}@example.com",
+          name: "VK Exp"
+        })
+
+      {:ok, ws} = Workspaces.create_workspace(%{slug: "vk-exp-#{suffix}", name: "VK Exp"})
+
+      {:ok, _} =
+        Workspaces.create_membership(%{user_id: user.id, workspace_id: ws.id, role: :admin})
+
+      past = ~U[2000-01-01 00:00:00.000000Z]
+      {:ok, key, raw} = APIKeys.create_key(ws, user, :operator, "exp", expires_at: past)
+
+      _conn =
+        raw
+        |> build_conn_with_bearer()
+        |> VerifyAPIKey.call(VerifyAPIKey.init([]))
+
+      [event] = list_denied_events()
+      assert event.after_ref["reason"] == "expired"
+      assert event.after_ref["prefix"] == key.prefix
+      assert event.subject_id == key.id
+      assert event.workspace_id == ws.id
+    end
+
+    test "audit event JSON contains NO raw bearer, NO secret_hash, NO Authorization header" do
+      {_ws, _user, _key, raw} = ws_user_key(:operator)
+
+      # Make a hash-mismatch attempt by mangling the bearer.
+      forged = String.replace(raw, "cb_", "cb_xx", global: false)
+
+      _conn =
+        forged
+        |> build_conn_with_bearer()
+        |> VerifyAPIKey.call(VerifyAPIKey.init([]))
+
+      [event] = list_denied_events()
+
+      sanitized = event |> Map.from_struct() |> Map.drop([:__meta__, :workspace])
+      json = Jason.encode!(sanitized)
+
+      refute json =~ raw, "audit MUST NOT contain the original bearer"
+      refute json =~ forged, "audit MUST NOT contain the forged bearer"
+      refute json =~ "secret_hash"
+      refute json =~ "Bearer "
+    end
+
+    test "deduplicates within a window — repeated rejects emit ONE row per (key, reason)" do
+      {_ws, _user, _key, raw} = ws_user_key(:operator)
+
+      # Same forged token 50× in a row should produce exactly ONE
+      # api_key.denied event (per the dedupe window).
+      forged = String.replace(raw, "cb_", "cb_xx", global: false)
+
+      for _ <- 1..50 do
+        forged
+        |> build_conn_with_bearer()
+        |> VerifyAPIKey.call(VerifyAPIKey.init([]))
+      end
+
+      events = list_denied_events()
+      assert length(events) == 1
+    end
+
+    test "missing-header bursts collapse to one anonymous event per window" do
+      for _ <- 1..50 do
+        Phoenix.ConnTest.build_conn()
+        |> VerifyAPIKey.call(VerifyAPIKey.init([]))
+      end
+
+      events = list_denied_events()
+      assert length(events) == 1
+    end
+
+    test "different reasons against the same key emit independently" do
+      {_ws, user, key, raw} = ws_user_key(:operator)
+
+      # 1. hash mismatch (same prefix, wrong secret)
+      forged = String.replace(raw, "cb_", "cb_xx", global: false)
+
+      _ =
+        forged
+        |> build_conn_with_bearer()
+        |> VerifyAPIKey.call(VerifyAPIKey.init([]))
+
+      # 2. revoked
+      {:ok, _} = APIKeys.revoke_key(key, actor: user)
+
+      _ = raw |> build_conn_with_bearer() |> VerifyAPIKey.call(VerifyAPIKey.init([]))
+
+      events = list_denied_events()
+      reasons = events |> Enum.map(& &1.after_ref["reason"]) |> Enum.sort()
+
+      assert "invalid_credentials" in reasons
+      assert "revoked" in reasons
+    end
+  end
+
+  defp list_denied_events do
+    %{events: events} = Bank.Audit.list_events(%{event_type: "api_key.denied"})
+    events
+  end
 end

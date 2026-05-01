@@ -20,6 +20,9 @@ defmodule Bank.Application do
       Bank.Stablecoins.ProviderHealth,
       # Per-key rate-limit buckets for /v1 (#221).
       Bank.RateLimit,
+      # Generic audit-emission dedupe (#222) — used by VerifyAPIKey
+      # to collapse api_key.denied spam.
+      Bank.Audit.DedupeWindow,
       # Delegation state is now durable in Postgres (see Bank.Delegations).
       # Background workers for runtime orchestration (see Bank.Runtime).
       {Oban, Application.fetch_env!(:bank, Oban)},
