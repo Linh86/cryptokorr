@@ -26,7 +26,9 @@ pauses, and revocation gone wrong. Pairs with
 | Chain refuses every intent (bundler_rejected, etc.)  | [Chain-side refusal cascade](#chain-side-refusal-cascade)|
 | Delegation revoke submitted but never lands          | [Revoke did not land](#revoke-did-not-land)              |
 | Need to stop *everything* right now                  | [Emergency pause](#emergency-pause)                      |
+| Workspace API keys leaking / one agent compromised   | [Workspace agent-key lockdown](#workspace-agent-key-lockdown) |
 | Postgres unreachable                                 | [Database outage](#database-outage)                      |
+| Verifying recovery after any pause / abort / revoke   | [Resume checklist](#resume-checklist)                    |
 
 ---
 
@@ -485,6 +487,60 @@ Only after the pause is confirmed, open the audit log and investigate.
 
 ---
 
+## Workspace agent-key lockdown
+
+**Signal**: a workspace's API keys are leaking, an agent process is
+behaving suspiciously, or the operator wants to halt every `/v1`
+request from one workspace without taking the whole runtime down
+(#231-a / #231-b).
+
+### Immediate actions
+
+```sh
+# Pause every API key in the calling workspace. Workspace is taken
+# from the calling key's `current_scope`; a `workspace_id` field in
+# the body is silently ignored.
+curl -sS -X POST "$PHX_HOST/v1/security/pause_agent_keys" \
+  -H "Authorization: Bearer cb_<…redacted-admin-key…>" \
+  -H "Content-Type: application/json" \
+  -d '{"reason": "credential leak under investigation"}' \
+  | jq
+# 200 — { "data": { "workspace_id": "...", "paused": true,
+#                   "agent_keys_paused_at": "2026-05-01T...Z",
+#                   "paused_by_user_id": "...",
+#                   "reason": "credential leak under investigation" } }
+```
+
+Once paused, every `/v1` request from this workspace's API keys
+returns `401 invalid_credentials` — including the calling admin key
+that just made the pause call. The audit row carries
+`event_type: "agent_keys.paused"`, `actor: :user`, the operator's
+`actor_id`, and the workspace id as `subject_id`. See
+[`docs/runbooks/api-key-auth-smoke.md`](runbooks/api-key-auth-smoke.md)
+Step 16 for a full bootstrap walkthrough.
+
+### Resume — bootstrap caveat
+
+**The same workspace's HTTP API cannot resume itself.** The
+`POST /v1/security/resume_agent_keys` endpoint exists but it is
+itself behind `VerifyAPIKey`, so a paused workspace will 401 every
+attempt. Resume MUST come from one of:
+
+1. **The `/security` LiveView console** — Google OAuth session, NOT
+   routed through `VerifyAPIKey`. Operator-recommended path.
+2. **`Bank.APIKeys.resume_workspace/2` from IEx**:
+
+   ```elixir
+   ws   = Bank.Repo.get!(Bank.Workspaces.Workspace, "<workspace-uuid>")
+   user = Bank.Accounts.get_user("<admin-user-uuid>")
+   {:ok, :resumed, _} = Bank.APIKeys.resume_workspace(ws, user)
+   ```
+
+After resume, retry one of the previously-failing keys to confirm
+`/v1` access is restored.
+
+---
+
 ## Database outage
 
 **Signal**: `bank.ops.health.database_up = 0`, Phoenix returning 500s,
@@ -509,6 +565,66 @@ many log lines `DBConnection.ConnectionError`.
 - When Postgres is back, Phoenix reconnects automatically.
 - If Oban was backed up, jobs drain as capacity returns. Monitor
   `oban.job.stop.duration` until it returns to baseline.
+
+---
+
+## Resume checklist
+
+Use this list AFTER any pause / abort / revoke action, before
+declaring the incident resolved. Each step is a hard fail: stop
+and re-investigate if a check returns the wrong shape.
+
+1. **Deep readiness probe is `:ok`.**
+   ```sh
+   curl -sS "$PHX_HOST/v1/health/deep" | jq '.status'
+   # → "ok"
+   ```
+   `:degraded` means at least one check (`database`, `adapter`,
+   `stuck_plans`) is still red. Stop and resolve before moving on.
+2. **No fresh `ops.stuck_plan_detected` rows in the current
+   detection window.** The detector cron is every 2 min; the dedupe
+   window is 5 min. If a new row appears 5+ min after your abort,
+   something is still stuck.
+   ```sh
+   curl -sS "$PHX_HOST/v1/audit?event_type=ops.stuck_plan_detected&limit=5" \
+     -H "Authorization: Bearer cb_<…redacted-admin-key…>" \
+     | jq '.data[].after_ref.window_start'
+   ```
+3. **Every `agent_keys.paused` row in the last hour has a matching
+   `agent_keys.resumed` row** (or the workspace is intentionally
+   still locked down). Same query, swap `event_type` and grep
+   `subject_id` for unmatched workspace ids.
+4. **Every `security.paused` row in the last hour has a matching
+   `security.resumed`** for the same scope (`global` /
+   `counterparty:<id>`). The runtime never auto-resumes; an
+   unmatched pause means the runtime is still gated.
+5. **The smoke transfer round-trips against the staging adapter.**
+   ```sh
+   mix bank.smoke.transfer
+   ```
+   This exercises end-to-end intent → decision → dispatch →
+   callback. A clean run is the strongest single signal that the
+   stack is back.
+6. **Issue resume curls per scope, in this order**, and confirm the
+   `200` response shape from each:
+
+   ```sh
+   # Global runtime resume.
+   curl -XPOST "$PHX_HOST/v1/security/resume" \
+     -H "Authorization: Bearer cb_<…redacted-admin-key…>" \
+     -d '{"scope": "global"}'
+
+   # Counterparty-scoped resume (only if you previously paused this scope).
+   curl -XPOST "$PHX_HOST/v1/security/resume" \
+     -H "Authorization: Bearer cb_<…redacted-admin-key…>" \
+     -d '{"scope": "counterparty:<cp-uuid>"}'
+
+   # Workspace agent-key resume — MUST come from the /security
+   # LiveView console or IEx (see "Workspace agent-key lockdown" §).
+   ```
+
+7. **Record the incident and outcome.** Use the [Incident log
+   template](#incident-log-template) below.
 
 ---
 
