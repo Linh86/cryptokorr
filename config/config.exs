@@ -83,16 +83,28 @@ config :bank, Oban,
     # API key usage aggregation (#218d). One concurrent job is
     # plenty — the daily cron schedules at most one job per day
     # and operator-driven backfill jobs are explicit.
-    api_key_usage: 1
+    api_key_usage: 1,
+    # Operational scans — currently the stuck-plan detector
+    # (#230-b). Concurrency 1 because the detector serialises
+    # its per-plan dedupe via an audit-row pre-check that is
+    # not atomic at the SQL level (same constraint as
+    # `:api_key_usage`).
+    ops_scan: 1
   ],
   plugins: [
     {Oban.Plugins.Pruner, max_age: 60 * 60 * 24 * 7},
     # Daily aggregation of API key usage (#218d). Runs at 00:30
     # UTC and emits `api_key.used` audit rows for every key whose
     # `last_used_at` falls in the prior calendar day.
+    #
+    # Periodic stuck-plan detection (#230-b). Runs every 2 minutes
+    # and emits one `ops.stuck_plan_detected` audit row per plan
+    # past its per-status threshold (deduped on a 5-minute aligned
+    # window).
     {Oban.Plugins.Cron,
      crontab: [
-       {"30 0 * * *", Bank.Runtime.Workers.AggregateAPIKeyUsage}
+       {"30 0 * * *", Bank.Runtime.Workers.AggregateAPIKeyUsage},
+       {"*/2 * * * *", Bank.Runtime.Workers.ScanStuckPlans}
      ]}
   ]
 
@@ -132,6 +144,24 @@ config :bank, Bank.RateLimit,
   # incident-response drills or down for hardened deployments.
   chain_action_per_window: 5,
   chain_action_window_seconds: 60
+
+# Bank.Ops.Health stuck-plan detector (#230-b). Per-status
+# thresholds (in seconds) that the periodic scanner uses to flag a
+# non-terminal execution plan as stuck. Defaults are tuned to the
+# adapter's observed SLA: the dispatch path moves a `:prepared`
+# plan to `:signing` within seconds, so a 10-minute dwell is
+# already a strong signal something is wrong; bundler-bound
+# `:pending_confirmation` plans legitimately wait minutes on
+# mainnet, so 30 minutes is the threshold there. Tune downward in
+# tests / staging for tighter signal, upward in deployments with
+# slow upstream bundlers.
+config :bank, Bank.Ops.Health,
+  stuck_plan_thresholds: [
+    prepared: 600,
+    signing: 300,
+    broadcasting: 600,
+    pending_confirmation: 1_800
+  ]
 
 # Bank.AdapterClient: connection to the TypeScript chain adapter is
 # configured per-environment. dev/test set local defaults below;

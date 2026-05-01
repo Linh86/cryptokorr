@@ -13,6 +13,8 @@ defmodule Bank.Ops.HealthTest do
 
   use Bank.DataCase, async: false
 
+  import Ecto.Query
+
   alias Bank.Ops.Health
 
   describe "BankWeb.Telemetry.periodic_measurements/0" do
@@ -90,5 +92,130 @@ defmodule Bank.Ops.HealthTest do
 
   defp detach_handler(ref) do
     :telemetry.detach({__MODULE__, ref})
+  end
+
+  # --- Stuck-plan detection (#230-b) --------------------------------------
+
+  describe "stuck_plan_details/1" do
+    alias Bank.Decisions.ExecutionPlan
+    alias Bank.Repo
+
+    test "returns plans whose per-status threshold elapsed; status-specific cutoffs apply" do
+      now = DateTime.utc_now()
+      seven_min_ago = DateTime.add(now, -7 * 60, :second)
+      twenty_min_ago = DateTime.add(now, -20 * 60, :second)
+
+      # :prepared with 20 min staleness — past 10-min default → IN.
+      stale_prepared = stale_plan(:prepared, twenty_min_ago)
+      # :signing with 7 min staleness — past 5-min default → IN.
+      stale_signing = stale_plan(:signing, seven_min_ago)
+      # :pending_confirmation with 7 min staleness — UNDER 30-min default → OUT.
+      _fresh_pending = stale_plan(:pending_confirmation, seven_min_ago)
+      # Terminal :confirmed regardless of age → OUT.
+      _terminal = stale_plan(:confirmed, twenty_min_ago, final_outcome: :confirmed)
+
+      details = Health.stuck_plan_details(now: now)
+      ids = Enum.map(details, & &1.id)
+
+      assert stale_prepared.id in ids
+      assert stale_signing.id in ids
+      assert length(details) == 2
+    end
+
+    test "respects an explicit `:thresholds` override" do
+      now = DateTime.utc_now()
+      one_min_ago = DateTime.add(now, -60, :second)
+
+      _fresh = stale_plan(:prepared, one_min_ago)
+
+      # With the default 10-min threshold the row is fresh; with a
+      # 30-second override it's stuck.
+      assert Health.stuck_plan_details(now: now) == []
+
+      details =
+        Health.stuck_plan_details(
+          now: now,
+          thresholds: [prepared: 30, signing: 30, broadcasting: 30, pending_confirmation: 30]
+        )
+
+      assert length(details) == 1
+      assert hd(details).execution_status == :prepared
+    end
+
+    test "ignores plans with `active: false` (manual-abort #302 carryover)" do
+      now = DateTime.utc_now()
+      twenty_min_ago = DateTime.add(now, -20 * 60, :second)
+
+      plan = stale_plan(:aborted, twenty_min_ago, final_outcome: :aborted, active: false)
+
+      # Sanity: the plan exists but is filtered out by both the
+      # status guard AND the `active: false` clause.
+      assert Repo.exists?(from p in ExecutionPlan, where: p.id == ^plan.id)
+      assert Health.stuck_plan_details(now: now) == []
+    end
+
+    test "caps result at `:limit`" do
+      now = DateTime.utc_now()
+      twenty_min_ago = DateTime.add(now, -20 * 60, :second)
+
+      for _ <- 1..7, do: stale_plan(:prepared, twenty_min_ago)
+
+      assert length(Health.stuck_plan_details(now: now, limit: 3)) == 3
+    end
+  end
+
+  describe "detection_window_start/1 + stuck_plan_event_exists?/2" do
+    test "detection_window_start aligns to a 5-minute bucket" do
+      # Two timestamps inside the same 5-minute bucket should round
+      # to the same window-start.
+      base = DateTime.from_naive!(~N[2026-05-01 12:34:56], "Etc/UTC")
+      a = DateTime.add(base, 30, :second)
+      b = DateTime.add(base, 240, :second)
+
+      assert Health.detection_window_start(a) == Health.detection_window_start(b)
+    end
+
+    test "stuck_plan_event_exists?/2 flips after an audit row lands" do
+      plan_id = Ecto.UUID.generate()
+      window_iso = DateTime.utc_now() |> Health.detection_window_start() |> DateTime.to_iso8601()
+
+      refute Health.stuck_plan_event_exists?(plan_id, window_iso)
+
+      attrs =
+        Bank.Audit.Events.ops_stuck_plan_detected(
+          %{
+            id: plan_id,
+            workspace_id: nil,
+            execution_status: :prepared,
+            updated_at: DateTime.utc_now(),
+            stuck_for_seconds: 700,
+            threshold_seconds: 600
+          },
+          window_start: DateTime.utc_now() |> Health.detection_window_start()
+        )
+
+      assert {:ok, _} = Bank.Audit.append_event(attrs)
+      assert Health.stuck_plan_event_exists?(plan_id, window_iso)
+    end
+  end
+
+  # Insert an `ExecutionPlan` whose `updated_at` is overwritten via a
+  # raw SQL update so the stale-clock case is reproducible without
+  # Ecto's automatic timestamps. Defaults are workspace-stamped via
+  # `Bank.Fixtures` so cross-workspace tests can still distinguish.
+  defp stale_plan(status, updated_at, extra \\ []) do
+    plan_attrs =
+      [execution_status: status]
+      |> Keyword.merge(extra)
+
+    plan = Bank.Fixtures.execution_plan(plan_attrs)
+
+    {1, _} =
+      Bank.Repo.update_all(
+        from(p in Bank.Decisions.ExecutionPlan, where: p.id == ^plan.id),
+        set: [updated_at: updated_at]
+      )
+
+    %{plan | updated_at: updated_at}
   end
 end
