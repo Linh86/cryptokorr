@@ -209,6 +209,116 @@ defmodule BankWeb.SecurityLiveTest do
       refute html =~ "intent.submitted"
       assert html =~ "No safety events recorded yet"
     end
+
+    # --- #231-e workspace agent-key safety timeline ---------------------
+
+    test "shows agent_keys.paused / agent_keys.resumed for the current workspace",
+         %{conn: conn, workspace: ws} do
+      audit_event(
+        event_type: "agent_keys.paused",
+        subject_type: "workspace",
+        subject_id: ws.id,
+        workspace_id: ws.id,
+        actor: :user
+      )
+
+      audit_event(
+        event_type: "agent_keys.resumed",
+        subject_type: "workspace",
+        subject_id: ws.id,
+        workspace_id: ws.id,
+        actor: :user
+      )
+
+      {:ok, _view, html} = live(conn, "/security")
+
+      assert html =~ "agent_keys.paused"
+      assert html =~ "agent_keys.resumed"
+    end
+
+    test "does NOT leak another workspace's agent_keys.* events",
+         %{conn: conn} do
+      # Spawn a separate workspace and stamp an agent_keys.paused
+      # event against ITS subject_id. The current admin's view must
+      # not show this row — pin the workspace boundary.
+      {:ok, other_ws} =
+        Bank.Workspaces.create_workspace(%{slug: "other-ws-leak", name: "Other"})
+
+      audit_event(
+        event_type: "agent_keys.paused",
+        subject_type: "workspace",
+        subject_id: other_ws.id,
+        workspace_id: other_ws.id,
+        actor: :user
+      )
+
+      {:ok, _view, html} = live(conn, "/security")
+
+      refute html =~ "agent_keys.paused"
+      assert html =~ "No safety events recorded yet"
+    end
+  end
+
+  # --- Risk summary card (#231-e) -----------------------------------------
+
+  describe "risk summary card" do
+    test "renders with zero counts and empty-state hint when no delegations exist",
+         %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/security")
+
+      assert html =~ ~s(id="risk-summary-card")
+      assert html =~ "Active delegation risk summary"
+      assert html =~ ~s(id="risk-total")
+      assert html =~ ~s(id="risk-executable")
+      assert html =~ "No active delegations to monitor"
+      # No per-state cells when every count is zero.
+      refute html =~ ~s(id="risk-state-active")
+      refute html =~ ~s(id="risk-state-pending")
+      refute html =~ ~s(id="risk-state-revoking")
+      refute html =~ ~s(id="risk-state-revoke-failed")
+    end
+
+    test "renders per-state counts when delegations are in mixed states",
+         %{conn: conn} do
+      _ = delegation(state: :active)
+      _ = delegation(state: :active)
+      _ = delegation(state: :pending)
+      _ = delegation(state: :revoking)
+
+      {:ok, _view, html} = live(conn, "/security")
+
+      assert html =~ ~s(id="risk-state-active")
+      assert html =~ ~s(id="risk-state-pending")
+      assert html =~ ~s(id="risk-state-revoking")
+      # No revoke_failed row exists, so that cell stays absent.
+      refute html =~ ~s(id="risk-state-revoke-failed")
+      # The total badge tracks the full active list.
+      assert html =~ ~s(data-total="4")
+    end
+
+    test "executable count cell reflects Delegations.executable?/1",
+         %{conn: conn} do
+      del = delegation(state: :active)
+      assert Bank.Delegations.executable?(del.smart_account_id)
+
+      {:ok, _view, html} = live(conn, "/security")
+
+      assert html =~ ~s(data-executable="1")
+    end
+
+    test "is workspace-scoped — another workspace's delegations don't bleed in",
+         %{conn: conn} do
+      {:ok, other_ws} =
+        Bank.Workspaces.create_workspace(%{slug: "other-ws-risk", name: "Other"})
+
+      _ = delegation(state: :active, workspace_id: other_ws.id)
+
+      {:ok, _view, html} = live(conn, "/security")
+
+      # Total stays at 0 for the current workspace's view.
+      assert html =~ ~s(data-total="0")
+      assert html =~ "No active delegations to monitor"
+    end
   end
 
   describe "navigation" do
