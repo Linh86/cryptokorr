@@ -1083,30 +1083,66 @@ defmodule Bank.Audit.Events do
   service-account-style traffic, even though it ultimately maps
   back to a human via `created_by_user_id`.
 
+  ## Scope discriminator (#221, third slice)
+
+  The `:scope` opt picks which limiter fired:
+
+    * `:key` (default) — the per-key bucket from #286.
+    * `:workspace` — the per-workspace collective bucket. Bucket
+      key is the workspace id; `after_ref.bucket_id` carries it
+      explicitly so operators can query by workspace without
+      reconstructing it.
+
+  Same event_type and subject_id (the calling key) in both cases
+  — minimal schema surface, single query for "all rate-limit
+  events". The discriminator lives in `after_ref.scope` so SDK
+  consumers and replay tools can filter without inventing a new
+  event taxonomy.
+
   ## after_ref shape
 
   Hard-coded allowlist — explicitly excludes the raw key,
   `secret_hash`, and any Authorization header bytes. The fields
   recorded are the same `id` / `prefix` / `role` triple used by
   `api_key.used`, plus the window bounds, the configured `limit`,
-  and the `retry_after_seconds` returned to the client. Operators
-  reading replay can answer "which key, when, and how badly was it
-  over" without correlating against any other source.
+  the `retry_after_seconds` returned to the client, the `scope`
+  discriminator, and (for workspace scope) the `bucket_id`.
+  Operators reading replay can answer "which key, when, and how
+  badly was it over" without correlating against any other source.
   """
-  @spec api_key_rate_limited(APIKey.t(), %{
-          required(:window_start) => integer(),
-          required(:window_end) => integer(),
-          required(:limit) => pos_integer(),
-          required(:retry_after_seconds) => pos_integer()
-        }) :: attrs()
-  def api_key_rate_limited(%APIKey{} = api_key, %{
-        window_start: window_start_unix,
-        window_end: window_end_unix,
-        limit: limit,
-        retry_after_seconds: retry_after
-      })
+  @spec api_key_rate_limited(
+          APIKey.t(),
+          %{
+            required(:window_start) => integer(),
+            required(:window_end) => integer(),
+            required(:limit) => pos_integer(),
+            required(:retry_after_seconds) => pos_integer()
+          },
+          keyword()
+        ) :: attrs()
+  def api_key_rate_limited(api_key, meta, opts \\ [])
+
+  def api_key_rate_limited(
+        %APIKey{} = api_key,
+        %{
+          window_start: window_start_unix,
+          window_end: window_end_unix,
+          limit: limit,
+          retry_after_seconds: retry_after
+        },
+        opts
+      )
       when is_integer(window_start_unix) and is_integer(window_end_unix) and
-             is_integer(limit) and is_integer(retry_after) do
+             is_integer(limit) and is_integer(retry_after) and is_list(opts) do
+    scope = Keyword.get(opts, :scope, :key)
+    true = scope in [:key, :workspace]
+
+    bucket_id =
+      case scope do
+        :key -> api_key.id
+        :workspace -> api_key.workspace_id
+      end
+
     %{
       actor: :agent,
       actor_id: api_key.id,
@@ -1118,6 +1154,8 @@ defmodule Bank.Audit.Events do
         id: api_key.id,
         prefix: api_key.prefix,
         role: atom_or_nil(api_key.role),
+        scope: Atom.to_string(scope),
+        bucket_id: bucket_id,
         window_start: window_start_unix |> DateTime.from_unix!() |> DateTime.to_iso8601(),
         window_end: window_end_unix |> DateTime.from_unix!() |> DateTime.to_iso8601(),
         limit: limit,
