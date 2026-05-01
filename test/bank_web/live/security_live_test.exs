@@ -7,6 +7,8 @@ defmodule BankWeb.SecurityLiveTest do
 
   import Phoenix.LiveViewTest
 
+  import Ecto.Query
+
   setup :register_and_log_in_user_as_admin
   import Bank.Fixtures
 
@@ -672,5 +674,145 @@ defmodule BankWeb.SecurityLiveTest do
       refute html =~ "secret_hash"
       refute html =~ "Bearer "
     end
+  end
+
+  # --- Stuck-plans card (#229/#230 UI) --------------------------------------
+
+  describe "stuck plans card" do
+    alias Bank.Decisions.ExecutionPlan
+    alias Bank.Repo
+
+    test "renders empty state when no stuck plans exist", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#stuck-plans-card")
+      assert has_element?(view, "#stuck-plans-empty")
+    end
+
+    test "renders a stuck :prepared plan with abort button",
+         %{conn: conn, workspace: ws} do
+      plan = stuck_prepared_plan(ws.id)
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#stuck-plans-card")
+      refute has_element?(view, "#stuck-plans-empty")
+      assert has_element?(view, "#stuck-plan-#{plan.id}")
+      assert has_element?(view, "#abort-plan-btn-#{plan.id}")
+      assert has_element?(view, "#stuck-plan-status-#{plan.id}")
+    end
+
+    test "non-:prepared stuck plans render the not-safe message instead of the abort button",
+         %{conn: conn, workspace: ws} do
+      plan = stuck_plan(:signing, ws.id)
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#stuck-plan-#{plan.id}")
+      assert has_element?(view, "#stuck-plan-not-safe-#{plan.id}")
+      refute has_element?(view, "#abort-plan-btn-#{plan.id}")
+    end
+
+    test "fresh plans (under threshold) do NOT appear", %{conn: conn, workspace: ws} do
+      _fresh = fresh_plan(:prepared, ws.id)
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#stuck-plans-empty")
+    end
+
+    test "clicking abort transitions :prepared plan to :aborted and removes the row",
+         %{conn: conn, workspace: ws} do
+      plan = stuck_prepared_plan(ws.id)
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      view |> element("#abort-plan-btn-#{plan.id}") |> render_click()
+
+      reloaded = Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :aborted
+      assert reloaded.active == false
+
+      # After reload, the now-aborted (active=false) row no longer
+      # appears on the card.
+      refute has_element?(view, "#stuck-plan-#{plan.id}")
+      assert has_element?(view, "#stuck-plans-empty")
+    end
+
+    test "cross-workspace stuck plan does NOT appear",
+         %{conn: conn} do
+      {:ok, other_ws} =
+        Bank.Workspaces.create_workspace(%{slug: "other-stuck", name: "Other"})
+
+      _other = stuck_prepared_plan(other_ws.id)
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#stuck-plans-empty")
+    end
+  end
+
+  # --- ops.stuck_plan_detected on the safety timeline (#230-b) -------------
+
+  describe "ops.stuck_plan_detected on safety timeline" do
+    test "shows ops.stuck_plan_detected for the current workspace",
+         %{conn: conn, workspace: ws} do
+      audit_event(
+        event_type: "ops.stuck_plan_detected",
+        subject_type: "execution_plan",
+        subject_id: Ecto.UUID.generate(),
+        workspace_id: ws.id,
+        actor: :runtime
+      )
+
+      {:ok, _view, html} = live(conn, "/security")
+
+      assert html =~ "ops.stuck_plan_detected"
+    end
+
+    test "does NOT leak ops.stuck_plan_detected from another workspace",
+         %{conn: conn} do
+      {:ok, other_ws} =
+        Bank.Workspaces.create_workspace(%{slug: "other-stuck-detected", name: "Other"})
+
+      audit_event(
+        event_type: "ops.stuck_plan_detected",
+        subject_type: "execution_plan",
+        subject_id: Ecto.UUID.generate(),
+        workspace_id: other_ws.id,
+        actor: :runtime
+      )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#safety-events-empty")
+    end
+  end
+
+  # Insert an `ExecutionPlan` whose `updated_at` is overwritten via a
+  # raw SQL update so it appears stuck without depending on Ecto's
+  # automatic timestamp behavior.
+  defp stuck_plan(status, workspace_id) do
+    plan =
+      Bank.Fixtures.execution_plan(
+        execution_status: status,
+        workspace_id: workspace_id
+      )
+
+    twenty_min_ago = DateTime.utc_now() |> DateTime.add(-20 * 60, :second)
+
+    {1, _} =
+      Bank.Repo.update_all(
+        from(p in Bank.Decisions.ExecutionPlan, where: p.id == ^plan.id),
+        set: [updated_at: twenty_min_ago]
+      )
+
+    %{plan | updated_at: twenty_min_ago}
+  end
+
+  defp stuck_prepared_plan(workspace_id), do: stuck_plan(:prepared, workspace_id)
+
+  defp fresh_plan(status, workspace_id) do
+    Bank.Fixtures.execution_plan(execution_status: status, workspace_id: workspace_id)
   end
 end
