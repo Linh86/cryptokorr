@@ -339,7 +339,17 @@ defmodule BankWeb.SecurityLive do
   # then we union and sort. Capped small — this is a "is the runtime
   # safe right now?" view, not a forensic timeline.
   #
-  # Workspace-scoping rule (#158c, refined by #158d-b):
+  # ## Filter pushdown vs in-memory (#212 P2 fix)
+  #
+  # `actor` and `range` are pushed down into the DB query via
+  # `Audit.list_events/2`'s native `:actor` and `:from` filters so a
+  # user with thousands of recent events of one type cannot starve
+  # the in-memory match for a less-common actor / older row. The
+  # earlier implementation fetched the latest 10 unfiltered rows per
+  # type and then in-memory filtered, which silently hid every
+  # actor-or-range match that fell outside the head of the table.
+  #
+  # ## Workspace-scoping rule (#158c, refined by #158d-b)
   #
   #   * `security.paused` / `security.resumed` stay runtime-global
   #     (correlation_id is `nil` per `Bank.Audit` docs). Every
@@ -353,6 +363,16 @@ defmodule BankWeb.SecurityLive do
   #     legacy events. Once a backfill closes the legacy tail (a
   #     future PR), the query can switch to `WHERE workspace_id`
   #     directly.
+  #   * `agent_keys.*` carry `subject_id = workspace.id` (#231-a) and
+  #     are filtered by that subject post-query.
+  #
+  # Because the workspace boundary stays in-memory for legacy-NULL
+  # safety, we cursor through pages until we have collected up to 15
+  # workspace-visible rows per type or hit the safety cap.
+  @timeline_target_per_type 15
+  @timeline_max_pages 5
+  @timeline_page_size 50
+
   defp load_safety_events(workspace_delegations, workspace_id, filters) do
     delegation_ids =
       workspace_delegations
@@ -361,18 +381,71 @@ defmodule BankWeb.SecurityLive do
 
     types_to_fetch = restrict_event_types(filters.event_type)
     cutoff = range_cutoff(filters.range)
-    actor_filter = parse_actor_filter(filters.actor)
+    actor_atom = parse_actor_filter(filters.actor)
 
     types_to_fetch
     |> Enum.flat_map(fn type ->
-      %{events: events} = Audit.list_events(%{event_type: type}, limit: 10, order: :desc)
-      events
+      fetch_visible_for_type(type, actor_atom, cutoff, delegation_ids, workspace_id)
     end)
-    |> Enum.filter(&visible_to_workspace?(&1, delegation_ids, workspace_id))
-    |> Enum.filter(&matches_actor?(&1, actor_filter))
-    |> Enum.filter(&within_range?(&1, cutoff))
     |> Enum.sort_by(& &1.ts, {:desc, DateTime})
-    |> Enum.take(15)
+    |> Enum.take(@timeline_target_per_type)
+  end
+
+  defp fetch_visible_for_type(type, actor, cutoff, delegation_ids, workspace_id) do
+    base_filters = build_query_filters(type, actor, cutoff)
+
+    collect_pages(
+      base_filters,
+      delegation_ids,
+      workspace_id,
+      @timeline_target_per_type,
+      _cursor = nil,
+      _pages = 0,
+      _acc = []
+    )
+  end
+
+  # Recursively pages through `Audit.list_events/2` until either:
+  #   * `target` workspace-visible rows have been collected,
+  #   * no `next_cursor` remains (full table scanned within filters),
+  #   * `@timeline_max_pages` safety cap is hit.
+  defp collect_pages(_filters, _ids, _ws_id, target, _cursor, pages, acc)
+       when length(acc) >= target or pages >= @timeline_max_pages do
+    Enum.take(acc, target)
+  end
+
+  defp collect_pages(filters, delegation_ids, workspace_id, target, cursor, pages, acc) do
+    opts = [limit: @timeline_page_size, order: :desc] ++ cursor_opt(cursor)
+    %{events: events, next_cursor: next} = Audit.list_events(filters, opts)
+
+    visible =
+      Enum.filter(events, &visible_to_workspace?(&1, delegation_ids, workspace_id))
+
+    new_acc = acc ++ visible
+
+    cond do
+      length(new_acc) >= target ->
+        Enum.take(new_acc, target)
+
+      next == nil ->
+        new_acc
+
+      true ->
+        collect_pages(filters, delegation_ids, workspace_id, target, next, pages + 1, new_acc)
+    end
+  end
+
+  defp cursor_opt(nil), do: []
+  defp cursor_opt(cursor), do: [cursor: cursor]
+
+  # Build the filter map handed to `Audit.list_events/2`. Actor and
+  # range collapse to the no-filter form when the operator chose
+  # `"all"` so the query stays as broad as before.
+  defp build_query_filters(type, actor, cutoff) do
+    base = %{event_type: type}
+    base = if actor == :any, do: base, else: Map.put(base, :actor, actor)
+    base = if is_nil(cutoff), do: base, else: Map.put(base, :from, cutoff)
+    base
   end
 
   # Restrict the set of event_types to fetch based on the filter.
@@ -387,31 +460,22 @@ defmodule BankWeb.SecurityLive do
 
   # `actor` is stored as an enum atom on `AuditEvent`. Coerce to atom
   # via the documented allowlist; anything else collapses to `:any`.
+  # `:any` causes `build_query_filters/3` to omit the filter so the
+  # DB-level `actor` predicate is skipped.
   defp parse_actor_filter("user"), do: :user
   defp parse_actor_filter("agent"), do: :agent
   defp parse_actor_filter("runtime"), do: :runtime
   defp parse_actor_filter("adapter"), do: :adapter
   defp parse_actor_filter(_), do: :any
 
-  defp matches_actor?(_event, :any), do: true
-  defp matches_actor?(%{actor: actor}, expected), do: actor == expected
-  defp matches_actor?(_event, _expected), do: false
-
-  # `cutoff` is `nil` for the "all" range, so every event passes.
-  # Otherwise compare against the event `ts` (utc_datetime_usec).
+  # `range_cutoff` returns the lower-bound `DateTime` to push down
+  # via `Audit.list_events`'s `:from` filter. `nil` is the no-bound
+  # case ("all time") and `build_query_filters/3` skips the `:from`
+  # entry when `cutoff` is `nil`.
   defp range_cutoff("24h"), do: DateTime.add(DateTime.utc_now(), -24 * 3600, :second)
   defp range_cutoff("7d"), do: DateTime.add(DateTime.utc_now(), -7 * 86_400, :second)
   defp range_cutoff("30d"), do: DateTime.add(DateTime.utc_now(), -30 * 86_400, :second)
   defp range_cutoff(_), do: nil
-
-  defp within_range?(_event, nil), do: true
-
-  defp within_range?(%{ts: %DateTime{} = ts}, %DateTime{} = cutoff),
-    do: DateTime.compare(ts, cutoff) != :lt
-
-  # Defensive: if `ts` is somehow nil and a cutoff is set, keep the
-  # event out of the filtered slice rather than crashing the sort.
-  defp within_range?(_event, _cutoff), do: false
 
   # `security.*` rows are runtime-global and always visible.
   # `delegation.*` rows are visible only when the subject_id (the

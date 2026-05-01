@@ -461,6 +461,61 @@ defmodule BankWeb.SecurityLiveTest do
       assert has_element?(view, "#filter-range option[value='7d'][selected]")
     end
 
+    test "filter pushdown — actor match in older events is NOT hidden by newer non-matching events (#212 P2)",
+         %{conn: conn} do
+      # Pre-pushdown, `load_safety_events/3` fetched the latest 10
+      # unfiltered rows per type and applied actor/range in memory.
+      # An operator filtering by actor=runtime would see an empty
+      # timeline whenever 10+ user-actor events of the same type
+      # piled up on top of an older runtime row — false-negative.
+      # Pin the corrected behavior: the runtime row appears.
+      now = DateTime.utc_now()
+
+      # 12 newer security.paused rows from :user (one above the
+      # legacy 10-row window).
+      for i <- 1..12 do
+        audit_event(
+          event_type: "security.paused",
+          subject_type: "runtime",
+          subject_id: "global",
+          actor: :user,
+          ts: DateTime.add(now, -i, :second)
+        )
+      end
+
+      # One OLDER :runtime row that the pre-pushdown code would miss.
+      _runtime_row =
+        audit_event(
+          event_type: "security.paused",
+          subject_type: "runtime",
+          subject_id: "global",
+          actor: :runtime,
+          ts: DateTime.add(now, -3600, :second)
+        )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      view
+      |> form("#safety-filters-form", %{
+        filter: %{event_type: "all", actor: "runtime", range: "all"}
+      })
+      |> render_change()
+
+      # Empty-state must NOT render — the runtime row must be visible.
+      refute has_element?(view, "#safety-events-empty")
+
+      # And the row IS the runtime-actor pill, not one of the
+      # 12 user-actor rows. Match on the actor pill class +
+      # icon to dodge collisions with dropdown labels.
+      html = render(view)
+
+      assert html =~
+               ~s(<span class="badge badge-sm badge-ghost gap-1"><span class="hero-cog-6-tooth size-3"></span>)
+
+      refute html =~
+               ~s(<span class="badge badge-sm badge-ghost gap-1"><span class="hero-user size-3"></span>)
+    end
+
     test "workspace isolation still holds with filters applied",
          %{conn: conn} do
       {:ok, other_ws} =
