@@ -25,6 +25,8 @@ defmodule BankWeb.API.V1.ConnectController do
   use OpenApiSpex.ControllerSpecs
 
   alias Bank.Delegations
+  alias Bank.Repo
+  alias Bank.Workspaces.Workspace
   alias OpenApiSpex.Reference
 
   @idempotency_key_ref %Reference{"$ref": "#/components/parameters/IdempotencyKey"}
@@ -48,6 +50,18 @@ defmodule BankWeb.API.V1.ConnectController do
     `delegation.state_changed{state: "granted"}` callback path.
     Chain ids other than `8453` (Base) and `84532` (Base Sepolia)
     return `422 unsupported_chain`.
+
+    If the calling workspace's agent keys are paused (#231-a /
+    #231-b), the request is rejected with `422 workspace_paused`
+    BEFORE any audit row is written or grant worker is enqueued.
+    The gate reloads the workspace from the DB so a pause that
+    landed between auth's preload and this check is honored.
+    Resume via the LiveView `/security` console (operator session)
+    before retrying — there is no API-side resume bypass. Note
+    that the same workspace's API keys are also rejected at
+    `VerifyAPIKey` with `401 invalid_credentials`, so this 422
+    surfaces only in the narrow race where the pause landed
+    between auth and this controller.
     """,
     tags: ["Connect"],
     parameters: [@idempotency_key_ref, @request_id_in_ref],
@@ -67,6 +81,7 @@ defmodule BankWeb.API.V1.ConnectController do
 
   def request(conn, params) do
     with {:ok, payload} <- validate_payload(params),
+         :ok <- ensure_workspace_unpaused(conn.assigns.current_scope),
          {:ok, :accepted} <- Delegations.request_connect(payload) do
       conn
       |> put_status(:accepted)
@@ -92,10 +107,37 @@ defmodule BankWeb.API.V1.ConnectController do
           }
         })
 
+      {:error, :workspace_paused} ->
+        conn
+        |> put_status(:unprocessable_entity)
+        |> json(%{
+          error: %{
+            code: "workspace_paused",
+            message:
+              "agent keys are paused for this workspace; resume via the /security console before retrying"
+          }
+        })
+
       {:error, reason} ->
         conn
         |> put_status(:unprocessable_entity)
         |> json(%{error: %{code: "connect_failed", message: inspect(reason)}})
+    end
+  end
+
+  # Reload the workspace from the DB so a pause that landed between
+  # `VerifyAPIKey`'s preload and this controller is honored. Defense
+  # in depth: the auth pipeline already rejects keys whose workspace
+  # is paused, but the auth-time read is racy with concurrent
+  # `/security` console pause writes. A controller-side reload closes
+  # that window without standing up a transaction.
+  defp ensure_workspace_unpaused(%{workspace: %Workspace{id: ws_id}}) do
+    case Repo.get(Workspace, ws_id) do
+      %Workspace{} = fresh ->
+        if Workspace.agent_keys_paused?(fresh), do: {:error, :workspace_paused}, else: :ok
+
+      nil ->
+        {:error, :workspace_paused}
     end
   end
 
