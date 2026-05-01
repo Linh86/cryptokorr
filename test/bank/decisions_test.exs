@@ -564,4 +564,214 @@ defmodule Bank.DecisionsTest do
       )
     )
   end
+
+  # --- Bank.Decisions.abort_plan/3 (#230, #212) ---------------------------
+
+  describe "abort_plan/3" do
+    alias Bank.Audit.AuditEvent
+    alias Bank.Decisions.ExecutionPlan
+
+    setup do
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "abort-#{System.unique_integer([:positive])}",
+          name: "Abort"
+        })
+
+      {:ok, user} =
+        Bank.Accounts.find_or_create_from_oauth(%{
+          provider: :google,
+          subject: "abort-#{System.unique_integer([:positive])}",
+          email: "abort-#{System.unique_integer([:positive])}@example.com",
+          name: "Abort Operator"
+        })
+
+      Process.put(:bank_test_workspace_id, ws.id)
+      ExUnit.Callbacks.on_exit(fn -> Process.delete(:bank_test_workspace_id) end)
+
+      %{workspace: ws, actor: user}
+    end
+
+    test "transitions :prepared plan to :aborted, transitions intent, emits audit",
+         %{workspace: ws, actor: user} do
+      intent = agent_intent(state: :decided, workspace_id: ws.id)
+      envelope = decision_envelope(intent: intent)
+      plan = execution_plan(decision: envelope, workspace_id: ws.id)
+
+      assert {:ok, :aborted, aborted_plan, intent_transition} =
+               Decisions.abort_plan(plan.id, ws,
+                 reason: :operator_requested,
+                 actor: :user,
+                 actor_id: user.id
+               )
+
+      assert aborted_plan.execution_status == :aborted
+      assert aborted_plan.final_outcome == :aborted
+      assert aborted_plan.final_reason == "operator_requested"
+
+      # Intent moved :decided → :blocked.
+      assert {:transitioned, :decided, %AgentIntent{state: :blocked}} = intent_transition
+
+      reloaded_intent = Bank.Repo.get!(AgentIntent, intent.id)
+      assert reloaded_intent.state == :blocked
+      assert reloaded_intent.current_execution_plan_id == plan.id
+
+      # Audit rows: one execution.aborted + one intent.state_changed.
+      types = audit_event_types_for_subject(plan.id)
+      assert "execution.aborted" in types
+
+      [exec_audit] =
+        Bank.Repo.all(
+          from(e in AuditEvent,
+            where: e.subject_id == ^plan.id and e.event_type == "execution.aborted"
+          )
+        )
+
+      assert exec_audit.actor == :user
+      assert exec_audit.actor_id == user.id
+      assert exec_audit.workspace_id == ws.id
+      assert exec_audit.before_ref == %{"execution_status" => "prepared"}
+      assert exec_audit.after_ref["execution_status"] == "aborted"
+      assert exec_audit.after_ref["final_outcome"] == "aborted"
+    end
+
+    test "is idempotent on already-terminal :aborted plan (no second audit row)",
+         %{workspace: ws, actor: user} do
+      intent = agent_intent(state: :decided, workspace_id: ws.id)
+      envelope = decision_envelope(intent: intent)
+      plan = execution_plan(decision: envelope, workspace_id: ws.id)
+
+      assert {:ok, :aborted, _, _} = Decisions.abort_plan(plan.id, ws, actor_id: user.id)
+
+      assert {:ok, :already_terminal, second_plan, _} =
+               Decisions.abort_plan(plan.id, ws, actor_id: user.id)
+
+      assert second_plan.execution_status == :aborted
+
+      # Exactly one execution.aborted row.
+      assert "execution.aborted" |> count_audit_for(plan.id) == 1
+    end
+
+    test "is idempotent on terminal :confirmed (no transition, no audit)",
+         %{workspace: ws, actor: user} do
+      intent = agent_intent(state: :executed, workspace_id: ws.id)
+      envelope = decision_envelope(intent: intent)
+
+      plan =
+        execution_plan(
+          decision: envelope,
+          workspace_id: ws.id,
+          execution_status: :confirmed,
+          final_outcome: :confirmed
+        )
+
+      assert {:ok, :already_terminal, returned, intent_transition} =
+               Decisions.abort_plan(plan.id, ws, actor_id: user.id)
+
+      assert returned.execution_status == :confirmed
+      assert {:no_transition, :executed} = intent_transition
+
+      # No execution.aborted row written.
+      assert "execution.aborted" |> count_audit_for(plan.id) == 0
+    end
+
+    test "rejects cross-workspace plan with :not_found (no existence leak)",
+         %{workspace: ws, actor: user} do
+      {:ok, other_ws} =
+        Bank.Workspaces.create_workspace(%{slug: "other-abort", name: "Other"})
+
+      # Plan belongs to other_ws, not the calling ws.
+      Process.put(:bank_test_workspace_id, other_ws.id)
+      intent = agent_intent(state: :decided, workspace_id: other_ws.id)
+      envelope = decision_envelope(intent: intent)
+      plan = execution_plan(decision: envelope, workspace_id: other_ws.id)
+      Process.put(:bank_test_workspace_id, ws.id)
+
+      assert {:error, :not_found} =
+               Decisions.abort_plan(plan.id, ws, actor_id: user.id)
+
+      # Plan in other workspace is unchanged.
+      reloaded = Bank.Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :prepared
+    end
+
+    test "rejects missing plan id with :not_found", %{workspace: ws, actor: user} do
+      assert {:error, :not_found} =
+               Decisions.abort_plan(Ecto.UUID.generate(), ws, actor_id: user.id)
+    end
+
+    test "rejects :signing plan with {:not_safe_to_abort, :signing}",
+         %{workspace: ws, actor: user} do
+      intent = agent_intent(state: :executing, workspace_id: ws.id)
+      envelope = decision_envelope(intent: intent)
+      plan = execution_plan(decision: envelope, workspace_id: ws.id, execution_status: :signing)
+
+      assert {:error, {:not_safe_to_abort, :signing}} =
+               Decisions.abort_plan(plan.id, ws, actor_id: user.id)
+
+      # Plan unchanged; no audit row.
+      reloaded = Bank.Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :signing
+      assert "execution.aborted" |> count_audit_for(plan.id) == 0
+    end
+
+    test "rejects :broadcasting plan with {:not_safe_to_abort, :broadcasting}",
+         %{workspace: ws, actor: user} do
+      intent = agent_intent(state: :executing, workspace_id: ws.id)
+      envelope = decision_envelope(intent: intent)
+
+      plan =
+        execution_plan(decision: envelope, workspace_id: ws.id, execution_status: :broadcasting)
+
+      assert {:error, {:not_safe_to_abort, :broadcasting}} =
+               Decisions.abort_plan(plan.id, ws, actor_id: user.id)
+    end
+
+    test "leaves intent untouched when intent is already terminal :blocked",
+         %{workspace: ws, actor: user} do
+      intent = agent_intent(state: :blocked, workspace_id: ws.id)
+      envelope = decision_envelope(intent: intent)
+      plan = execution_plan(decision: envelope, workspace_id: ws.id)
+
+      assert {:ok, :aborted, _, intent_transition} =
+               Decisions.abort_plan(plan.id, ws, actor_id: user.id)
+
+      assert {:no_transition, :blocked} = intent_transition
+
+      reloaded_intent = Bank.Repo.get!(AgentIntent, intent.id)
+      assert reloaded_intent.state == :blocked
+    end
+
+    test "audit JSON contains no raw bearer / secret_hash / Authorization",
+         %{workspace: ws, actor: user} do
+      intent = agent_intent(state: :decided, workspace_id: ws.id)
+      envelope = decision_envelope(intent: intent)
+      plan = execution_plan(decision: envelope, workspace_id: ws.id)
+
+      assert {:ok, :aborted, _, _} =
+               Decisions.abort_plan(plan.id, ws, actor_id: user.id, reason: :stuck_pending)
+
+      [event] =
+        Bank.Repo.all(
+          from(e in AuditEvent,
+            where: e.subject_id == ^plan.id and e.event_type == "execution.aborted"
+          )
+        )
+
+      json = event |> Map.from_struct() |> Map.drop([:__meta__, :workspace]) |> Jason.encode!()
+
+      refute json =~ "secret_hash"
+      refute json =~ "Bearer "
+      refute json =~ "Authorization"
+    end
+  end
+
+  defp count_audit_for(event_type, subject_id) do
+    Bank.Repo.aggregate(
+      from(e in Bank.Audit.AuditEvent,
+        where: e.event_type == ^event_type and e.subject_id == ^subject_id
+      ),
+      :count
+    )
+  end
 end

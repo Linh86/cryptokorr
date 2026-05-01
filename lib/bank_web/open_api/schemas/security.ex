@@ -270,3 +270,99 @@ defmodule BankWeb.OpenApi.Schemas.RevokeDelegationResponse do
     }
   })
 end
+
+defmodule BankWeb.OpenApi.Schemas.AbortExecutionRequest do
+  @moduledoc "Body for `POST /v1/security/abort_execution` (#230)."
+
+  require OpenApiSpex
+  alias OpenApiSpex.{Reference, Schema}
+
+  OpenApiSpex.schema(%{
+    title: "AbortExecutionRequest",
+    description: """
+    Manually abort a stuck execution plan. The runtime forces the
+    plan to the terminal `aborted` state and persists `final_reason`
+    on the audit row. Only `:prepared` plans are abortable here —
+    plans that have already been dispatched (`:signing`,
+    `:broadcasting`, `:pending_confirmation`) return
+    `409 not_safe_to_abort`. Already-terminal plans return `200`
+    idempotently with no second audit row.
+    """,
+    type: :object,
+    required: [:execution_plan_id],
+    properties: %{
+      execution_plan_id: %Reference{"$ref": "#/components/schemas/Id"},
+      reason: %Schema{
+        type: :string,
+        enum: ["operator_requested", "stuck_pending", "adapter_unrecoverable"],
+        description:
+          "Audit-persisted reason. Server allowlists three values; any " <>
+            "other value collapses to `\"operator_requested\"`. Defaults " <>
+            "to `\"operator_requested\"` when absent.",
+        example: "stuck_pending"
+      }
+    }
+  })
+end
+
+defmodule BankWeb.OpenApi.Schemas.AbortExecutionResponse do
+  @moduledoc "Response body for `POST /v1/security/abort_execution` (#230)."
+
+  require OpenApiSpex
+  alias OpenApiSpex.{Reference, Schema}
+
+  OpenApiSpex.schema(%{
+    title: "AbortExecutionResponse",
+    description: """
+    Synchronous terminal-state response. Unlike
+    `revoke_delegation` (which is a `202` chain-side receipt),
+    abort is a DB-only state-machine flip that completes inside
+    the request — by the time `200` returns, the plan row is
+    `aborted` and the `execution.aborted` audit row has been
+    appended.
+
+    The same body shape is returned for a fresh abort and for an
+    idempotent re-call against an already-terminal plan, so callers
+    can safely retry on partial network failures without branching
+    on the response code.
+    """,
+    type: :object,
+    required: [:status, :data],
+    properties: %{
+      status: %Schema{type: :string, enum: ["aborted"], example: "aborted"},
+      data: %Schema{
+        type: :object,
+        required: [:execution_plan_id, :decision_id, :execution_status, :workspace_id],
+        properties: %{
+          execution_plan_id: %Reference{"$ref": "#/components/schemas/Id"},
+          decision_id: %Reference{"$ref": "#/components/schemas/Id"},
+          execution_status: %Schema{
+            type: :string,
+            description:
+              "Terminal status of the plan after the call. Always one of " <>
+                "`aborted`, `confirmed`, or `reverted` — `confirmed` and " <>
+                "`reverted` only when an operator re-issues `abort` against " <>
+                "a plan that already terminated through the adapter callback " <>
+                "path.",
+            example: "aborted"
+          },
+          final_outcome: %Schema{
+            type: :string,
+            nullable: true,
+            description:
+              "Mirrors the plan's `final_outcome` enum value. Always set " <>
+                "to match `execution_status` once terminal.",
+            example: "aborted"
+          },
+          final_reason: %Schema{
+            type: :string,
+            nullable: true,
+            description: "Operator-supplied reason; null on already-terminal idempotent paths.",
+            example: "stuck_pending"
+          },
+          workspace_id: %Reference{"$ref": "#/components/schemas/Id"}
+        }
+      }
+    }
+  })
+end

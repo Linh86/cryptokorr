@@ -7,6 +7,8 @@ defmodule BankWeb.API.V1.SecurityControllerTest do
 
   setup :setup_api_key_admin
 
+  import Ecto.Query
+
   alias Bank.Security
   alias Bank.Security.PauseState
 
@@ -336,6 +338,181 @@ defmodule BankWeb.API.V1.SecurityControllerTest do
     test "missing auth returns 401" do
       conn = build_conn() |> post(~p"/v1/security/resume_agent_keys", %{})
       assert %{"error" => %{"code" => "missing_authorization"}} = json_response(conn, 401)
+    end
+  end
+
+  # --- POST /v1/security/abort_execution (#230) ---------------------------
+
+  describe "POST /v1/security/abort_execution" do
+    alias Bank.APIKeys
+    alias Bank.Decisions.ExecutionPlan
+    import Bank.Fixtures
+
+    test "admin aborts a :prepared plan in own workspace and returns 200",
+         %{conn: conn, workspace: ws} do
+      intent = agent_intent(state: :decided, workspace_id: ws.id)
+      envelope = decision_envelope(intent: intent)
+      plan = execution_plan(decision: envelope, workspace_id: ws.id)
+
+      conn =
+        post(conn, ~p"/v1/security/abort_execution", %{
+          "execution_plan_id" => plan.id,
+          "reason" => "stuck_pending"
+        })
+
+      body = json_response(conn, 200)
+
+      assert body["status"] == "aborted"
+      assert body["data"]["execution_plan_id"] == plan.id
+      assert body["data"]["execution_status"] == "aborted"
+      assert body["data"]["final_outcome"] == "aborted"
+      assert body["data"]["final_reason"] == "stuck_pending"
+      assert body["data"]["workspace_id"] == ws.id
+
+      reloaded = Bank.Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :aborted
+    end
+
+    test "missing execution_plan_id returns 422 invalid_body", %{conn: conn} do
+      conn = post(conn, ~p"/v1/security/abort_execution", %{})
+      body = json_response(conn, 422)
+      assert body["error"]["code"] == "invalid_body"
+      assert body["error"]["message"] =~ "execution_plan_id"
+    end
+
+    test "empty execution_plan_id returns 422 invalid_body", %{conn: conn} do
+      conn =
+        post(conn, ~p"/v1/security/abort_execution", %{"execution_plan_id" => ""})
+
+      assert json_response(conn, 422)["error"]["code"] == "invalid_body"
+    end
+
+    test "cross-workspace plan returns 404 not_found",
+         %{conn: conn} do
+      {:ok, other_ws} =
+        Bank.Workspaces.create_workspace(%{slug: "other-abort-controller", name: "Other"})
+
+      Process.put(:bank_test_workspace_id, other_ws.id)
+      intent = agent_intent(state: :decided, workspace_id: other_ws.id)
+      envelope = decision_envelope(intent: intent)
+      plan = execution_plan(decision: envelope, workspace_id: other_ws.id)
+      Process.put(:bank_test_workspace_id, nil)
+
+      conn =
+        post(conn, ~p"/v1/security/abort_execution", %{
+          "execution_plan_id" => plan.id
+        })
+
+      assert json_response(conn, 404)["error"]["code"] == "not_found"
+
+      reloaded = Bank.Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :prepared
+    end
+
+    test "unknown plan id returns 404 not_found", %{conn: conn} do
+      conn =
+        post(conn, ~p"/v1/security/abort_execution", %{
+          "execution_plan_id" => Ecto.UUID.generate()
+        })
+
+      assert json_response(conn, 404)["error"]["code"] == "not_found"
+    end
+
+    test "plan in :signing returns 409 not_safe_to_abort",
+         %{conn: conn, workspace: ws} do
+      intent = agent_intent(state: :executing, workspace_id: ws.id)
+      envelope = decision_envelope(intent: intent)
+
+      plan =
+        execution_plan(
+          decision: envelope,
+          workspace_id: ws.id,
+          execution_status: :signing
+        )
+
+      conn =
+        post(conn, ~p"/v1/security/abort_execution", %{
+          "execution_plan_id" => plan.id
+        })
+
+      body = json_response(conn, 409)
+      assert body["error"]["code"] == "not_safe_to_abort"
+      assert body["error"]["details"]["execution_status"] == "signing"
+    end
+
+    test "idempotent re-abort returns 200 with same shape, no second audit row",
+         %{conn: conn, workspace: ws} do
+      intent = agent_intent(state: :decided, workspace_id: ws.id)
+      envelope = decision_envelope(intent: intent)
+      plan = execution_plan(decision: envelope, workspace_id: ws.id)
+
+      _ =
+        post(conn, ~p"/v1/security/abort_execution", %{"execution_plan_id" => plan.id})
+
+      conn =
+        post(conn, ~p"/v1/security/abort_execution", %{"execution_plan_id" => plan.id})
+
+      body = json_response(conn, 200)
+      assert body["status"] == "aborted"
+      assert body["data"]["execution_status"] == "aborted"
+
+      assert Bank.Repo.aggregate(
+               from(e in Bank.Audit.AuditEvent,
+                 where: e.event_type == "execution.aborted" and e.subject_id == ^plan.id
+               ),
+               :count
+             ) == 1
+    end
+
+    test "operator-tier key gets 403 insufficient_role",
+         %{workspace: ws, current_user: user} do
+      {:ok, _, op_raw} = APIKeys.create_key(ws, user, :operator, "op-abort-attempt")
+
+      intent = agent_intent(state: :decided, workspace_id: ws.id)
+      envelope = decision_envelope(intent: intent)
+      plan = execution_plan(decision: envelope, workspace_id: ws.id)
+
+      conn =
+        build_conn()
+        |> put_req_header("authorization", "Bearer " <> op_raw)
+        |> post(~p"/v1/security/abort_execution", %{"execution_plan_id" => plan.id})
+
+      assert %{"error" => %{"code" => "insufficient_role"}} = json_response(conn, 403)
+
+      reloaded = Bank.Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :prepared
+    end
+
+    test "missing auth returns 401" do
+      conn =
+        build_conn()
+        |> post(~p"/v1/security/abort_execution", %{
+          "execution_plan_id" => Ecto.UUID.generate()
+        })
+
+      assert %{"error" => %{"code" => "missing_authorization"}} = json_response(conn, 401)
+    end
+
+    test "unknown reason value silently collapses to operator_requested (allowlist)",
+         %{conn: conn, workspace: ws} do
+      intent = agent_intent(state: :decided, workspace_id: ws.id)
+      envelope = decision_envelope(intent: intent)
+      plan = execution_plan(decision: envelope, workspace_id: ws.id)
+
+      probe = "unknown_reason_#{System.unique_integer([:positive])}"
+
+      assert_raise ArgumentError, fn -> String.to_existing_atom(probe) end
+
+      conn =
+        post(conn, ~p"/v1/security/abort_execution", %{
+          "execution_plan_id" => plan.id,
+          "reason" => probe
+        })
+
+      body = json_response(conn, 200)
+      assert body["data"]["final_reason"] == "operator_requested"
+
+      assert_raise ArgumentError, fn -> String.to_existing_atom(probe) end
     end
   end
 end

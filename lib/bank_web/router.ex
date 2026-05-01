@@ -252,6 +252,12 @@ defmodule BankWeb.Router do
     # `/security` or IEx. Documented on the operation specs.
     post "/security/pause_agent_keys", SecurityController, :pause_agent_keys
     post "/security/resume_agent_keys", SecurityController, :resume_agent_keys
+
+    # Manual abort of stuck execution plans (#230). DB-only state
+    # transition; no chain dispatch and no adapter call. Aborts only
+    # `:prepared` plans; other non-terminal states return 409
+    # `not_safe_to_abort`.
+    post "/security/abort_execution", SecurityController, :abort_execution
   end
 
   # Internal adapter callback — private network, not part of /v1/.

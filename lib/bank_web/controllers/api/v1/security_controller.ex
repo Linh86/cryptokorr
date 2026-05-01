@@ -16,6 +16,9 @@ defmodule BankWeb.API.V1.SecurityController do
       this workspace's API keys until resumed.
     * `POST /v1/security/resume_agent_keys`  — resume workspace-wide
       agent-key auth.
+    * `POST /v1/security/abort_execution`    — manually abort a stuck
+      execution plan currently in `:prepared` (#230). DB state-only;
+      no chain dispatch and no adapter call.
   """
 
   use BankWeb, :controller
@@ -23,6 +26,7 @@ defmodule BankWeb.API.V1.SecurityController do
 
   alias Bank.Accounts
   alias Bank.APIKeys
+  alias Bank.Decisions
   alias Bank.Security
   alias Bank.Workspaces.Workspace
   alias OpenApiSpex.Reference
@@ -31,6 +35,8 @@ defmodule BankWeb.API.V1.SecurityController do
   @request_id_in_ref %Reference{"$ref": "#/components/parameters/RequestIdIn"}
   @unauthorized_ref %Reference{"$ref": "#/components/responses/Unauthorized"}
   @forbidden_ref %Reference{"$ref": "#/components/responses/Forbidden"}
+  @not_found_ref %Reference{"$ref": "#/components/responses/NotFound"}
+  @conflict_ref %Reference{"$ref": "#/components/responses/Conflict"}
   @too_many_requests_ref %Reference{"$ref": "#/components/responses/TooManyRequests"}
   @unprocessable_ref %Reference{"$ref": "#/components/responses/UnprocessableEntity"}
 
@@ -378,5 +384,153 @@ defmodule BankWeb.API.V1.SecurityController do
       [] ->
         %{code: "invalid_body"}
     end
+  end
+
+  # --- POST /v1/security/abort_execution (#230) ---------------------------
+
+  operation(:abort_execution,
+    summary: "Manually abort a stuck execution plan",
+    description: """
+    Forces an execution plan currently in `:prepared` to the
+    terminal `:aborted` state and (when present) transitions the
+    parent intent `:decided | :executing → :blocked`. The
+    transition completes synchronously inside the request — by the
+    time `200` returns, the plan row is `aborted` and a single
+    `execution.aborted` audit row has been appended.
+
+    ## Safety contract
+
+    Only `:prepared` plans are abortable on this endpoint. A plan
+    in `:signing`, `:broadcasting`, or `:pending_confirmation` has
+    already been dispatched to the chain adapter and aborting it
+    locally would orphan a real chain operation; those cases
+    return `409 not_safe_to_abort` with `details.execution_status`
+    carrying the current state. The future
+    "abort dispatched plan" flow belongs in a separate slice
+    paired with an adapter cancel callback path.
+
+    Already-terminal plans (`:confirmed`, `:reverted`, `:aborted`)
+    return a `200` response idempotently — the same body shape as
+    a fresh abort, with no second audit row written. Operators
+    can rely on safely re-issuing the call after a partial network
+    failure.
+
+    ## Workspace boundary
+
+    The plan lookup is filtered by `workspace_id` in a locked
+    SELECT. Cross-workspace and missing-id collapse to the same
+    `404 not_found` so existence is never disclosed across
+    workspaces.
+
+    ## Reason allowlist
+
+    The optional `reason` field is allowlisted server-side. Known
+    values: `operator_requested` (default), `stuck_pending`,
+    `adapter_unrecoverable`. Any other value collapses to
+    `operator_requested` (mirrors the `revoke_delegation` pattern
+    from #298). The resolved reason is persisted on the plan's
+    `final_reason` and on the audit `after_ref`.
+
+    Chain-action rate-limited: the same 5-req/60s cap that covers
+    `/v1/security/pause` and `/v1/security/revoke_delegation`
+    applies here. For bulk-abort scenarios during an incident,
+    use `Bank.Decisions.abort_plan/3` from IEx (see runbook).
+    """,
+    tags: ["Security"],
+    parameters: [@idempotency_key_ref, @request_id_in_ref],
+    request_body:
+      {"Abort body", "application/json", BankWeb.OpenApi.Schemas.AbortExecutionRequest},
+    responses: %{
+      200 =>
+        {"Plan aborted (or already terminal)", "application/json",
+         BankWeb.OpenApi.Schemas.AbortExecutionResponse},
+      401 => @unauthorized_ref,
+      403 => @forbidden_ref,
+      404 => @not_found_ref,
+      409 => @conflict_ref,
+      422 => @unprocessable_ref,
+      429 => @too_many_requests_ref
+    }
+  )
+
+  def abort_execution(conn, params) do
+    scope = conn.assigns.current_scope
+
+    with {:ok, plan_id} <- require_plan_id(params),
+         reason <- parse_abort_reason(Map.get(params, "reason")),
+         {:ok, actor} <- resolve_creator(scope) do
+      case Decisions.abort_plan(plan_id, scope.workspace,
+             reason: reason,
+             actor: :user,
+             actor_id: actor.id
+           ) do
+        {:ok, discriminator, plan, _intent_transition}
+        when discriminator in [:aborted, :already_terminal] ->
+          conn |> put_status(:ok) |> json(%{status: "aborted", data: abort_state(plan)})
+
+        {:error, :not_found} ->
+          conn
+          |> put_status(:not_found)
+          |> json(%{error: %{code: "not_found"}})
+
+        {:error, {:not_safe_to_abort, status}} ->
+          conn
+          |> put_status(:conflict)
+          |> json(%{
+            error: %{
+              code: "not_safe_to_abort",
+              message:
+                "plan is in #{status}; only :prepared plans can be aborted via this endpoint",
+              details: %{execution_status: Atom.to_string(status)}
+            }
+          })
+
+        {:error, %Ecto.Changeset{} = changeset} ->
+          conn |> put_status(:unprocessable_entity) |> json(%{error: changeset_error(changeset)})
+
+        {:error, reason} ->
+          conn
+          |> put_status(:unprocessable_entity)
+          |> json(%{error: %{code: "abort_failed", message: inspect(reason)}})
+      end
+    else
+      {:error, :missing_plan_id} ->
+        conn
+        |> put_status(:unprocessable_entity)
+        |> json(%{
+          error: %{code: "invalid_body", message: "execution_plan_id is required"}
+        })
+
+      {:error, :no_creator_user} ->
+        conn
+        |> put_status(:forbidden)
+        |> json(%{error: %{code: "creator_user_unavailable"}})
+    end
+  end
+
+  defp require_plan_id(params) do
+    case Map.get(params, "execution_plan_id") do
+      v when is_binary(v) and v != "" -> {:ok, v}
+      _ -> {:error, :missing_plan_id}
+    end
+  end
+
+  # Allowlist for abort reasons. Pattern-matched dispatch to baked-in
+  # atom literals so the request body cannot mint a new atom — same
+  # pattern as `parse_revoke_reason/1` (#298 P2 fix).
+  defp parse_abort_reason("operator_requested"), do: :operator_requested
+  defp parse_abort_reason("stuck_pending"), do: :stuck_pending
+  defp parse_abort_reason("adapter_unrecoverable"), do: :adapter_unrecoverable
+  defp parse_abort_reason(_), do: :operator_requested
+
+  defp abort_state(%Bank.Decisions.ExecutionPlan{} = plan) do
+    %{
+      execution_plan_id: plan.id,
+      decision_id: plan.decision_id,
+      execution_status: Atom.to_string(plan.execution_status),
+      final_outcome: plan.final_outcome && Atom.to_string(plan.final_outcome),
+      final_reason: plan.final_reason,
+      workspace_id: plan.workspace_id
+    }
   end
 end

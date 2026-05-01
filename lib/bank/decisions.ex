@@ -62,6 +62,7 @@ defmodule Bank.Decisions do
 
   import Ecto.Query
 
+  alias Bank.Audit
   alias Bank.Audit.Events
   alias Bank.Autonomy
   alias Bank.Decisions.{DecisionEnvelope, ExecutionPlan, SimulationReport, TrustAssessment}
@@ -1439,6 +1440,199 @@ defmodule Bank.Decisions do
   end
 
   def apply_execution_callback(_), do: {:error, :unknown_kind}
+
+  # --- Operator manual abort (#230) ---------------------------------------
+
+  @typedoc """
+  Result of `abort_plan/3`. The discriminator atom signals whether
+  the call performed the actual abort transition or short-circuited
+  on an already-terminal row.
+  """
+  @type abort_intent_transition ::
+          {:transitioned, atom(), AgentIntent.t()}
+          | {:no_transition, atom()}
+          | :not_applicable
+
+  @type abort_result ::
+          {:ok, :aborted | :already_terminal, ExecutionPlan.t(), abort_intent_transition()}
+          | {:error, :not_found}
+          | {:error, {:not_safe_to_abort, atom()}}
+          | {:error, Ecto.Changeset.t()}
+
+  @doc """
+  Manually abort a stuck execution plan (#230, #212).
+
+  Forces a plan currently in `:prepared` to the terminal `:aborted`
+  state and (when present) transitions the parent intent
+  `:decided | :executing → :blocked`. Performs **no** chain
+  dispatch, **no** adapter call, and **no** worker broadcast — the
+  plan never reached the adapter while in `:prepared` (no
+  `adapter_ref`, no `tx_refs`, no `nonce`), so this path is purely
+  a DB state-machine flip plus audit emit.
+
+  ## Concurrency / idempotency
+
+  The plan row is locked `FOR UPDATE` for the entire transition so
+  concurrent operators / a late adapter callback observe a single
+  committed final state. Idempotent re-call against an
+  already-terminal plan returns
+  `{:ok, :already_terminal, plan, intent_transition}` — no second
+  audit row is emitted.
+
+  ## Workspace boundary
+
+  The plan lookup filters by `workspace_id` inside the locked
+  SELECT. Cross-workspace and missing-id collapse to the same
+  `{:error, :not_found}` so existence is never disclosed across
+  workspaces (mirrors `Bank.APIKeys.get_workspace_key/2`).
+
+  ## Safe-state guard
+
+  Only `:prepared` plans are abortable here. A plan in `:signing`,
+  `:broadcasting`, or `:pending_confirmation` has already been
+  dispatched to the adapter; aborting locally without an
+  adapter-level cancel would orphan a real chain operation, so
+  this function returns `{:error, {:not_safe_to_abort, status}}`
+  for those cases. The future "abort dispatched plan" flow
+  belongs in a separate slice paired with an adapter cancel
+  endpoint.
+
+  ## Caller contract
+
+  The caller (typically `BankWeb.API.V1.SecurityController.abort_execution/2`)
+  must already have authenticated the operator and resolved the
+  workspace from `current_scope`. This function does **not** check
+  caller role — that is the controller's pipeline (`:api_admin`).
+
+  ## opts
+
+    * `:reason` — atom; allowlisted at the controller boundary
+      (`parse_abort_reason/1` rejects atom-table abuse). Defaults
+      to `:operator_requested`. Persisted as a string on
+      `final_reason` and on the audit `after_ref`.
+    * `:actor` — atom; defaults to `:user`.
+    * `:actor_id` — uuid; the operator's user id when known.
+  """
+  @spec abort_plan(String.t(), Bank.Workspaces.Workspace.t(), keyword()) :: abort_result()
+  def abort_plan(plan_id, workspace, opts \\ [])
+
+  def abort_plan(plan_id, %Bank.Workspaces.Workspace{id: ws_id}, opts) when is_binary(plan_id) do
+    reason = Keyword.get(opts, :reason, :operator_requested)
+    actor = Keyword.get(opts, :actor, :user)
+    actor_id = Keyword.get(opts, :actor_id)
+
+    Repo.transaction(fn ->
+      case lock_plan_in_workspace(plan_id, ws_id) do
+        nil ->
+          Repo.rollback(:not_found)
+
+        %ExecutionPlan{execution_status: status} = plan
+        when status in [:confirmed, :reverted, :aborted] ->
+          {:already_terminal, plan, no_intent_transition(plan)}
+
+        %ExecutionPlan{execution_status: :prepared} = plan ->
+          do_abort_prepared(plan, reason, actor, actor_id)
+
+        %ExecutionPlan{execution_status: status} ->
+          Repo.rollback({:not_safe_to_abort, status})
+      end
+    end)
+    |> case do
+      {:ok, {discriminator, plan, intent_transition}} ->
+        {:ok, discriminator, plan, intent_transition}
+
+      {:error, %Ecto.Changeset{} = cs} ->
+        {:error, cs}
+
+      {:error, :not_found} ->
+        {:error, :not_found}
+
+      {:error, {:not_safe_to_abort, _status} = e} ->
+        {:error, e}
+
+      {:error, other} ->
+        {:error, other}
+    end
+  end
+
+  defp lock_plan_in_workspace(plan_id, ws_id) do
+    query =
+      from p in ExecutionPlan,
+        where: p.id == ^plan_id and p.workspace_id == ^ws_id,
+        lock: "FOR UPDATE"
+
+    case Repo.one(query) do
+      nil -> nil
+      plan -> Repo.preload(plan, :intent)
+    end
+  end
+
+  defp do_abort_prepared(%ExecutionPlan{} = plan, reason, actor, actor_id) do
+    prior_status = plan.execution_status
+    reason_str = Atom.to_string(reason)
+
+    with {:ok, aborted} <-
+           plan
+           |> ExecutionPlan.progress_changeset(%{
+             execution_status: :aborted,
+             final_outcome: :aborted,
+             final_reason: reason_str
+           })
+           |> Repo.update(),
+         intent_transition =
+           transition_intent_to_blocked(plan.intent, aborted, actor, actor_id),
+         {:ok, _audit} <- emit_abort_audit(aborted, prior_status, actor, actor_id) do
+      {:aborted, aborted, intent_transition}
+    else
+      {:error, %Ecto.Changeset{} = cs} -> Repo.rollback(cs)
+      {:error, other} -> Repo.rollback(other)
+    end
+  end
+
+  defp transition_intent_to_blocked(nil, _plan, _actor, _actor_id), do: :not_applicable
+
+  defp transition_intent_to_blocked(
+         %AgentIntent{state: state} = intent,
+         %ExecutionPlan{} = plan,
+         actor,
+         actor_id
+       )
+       when state in [:decided, :executing] do
+    {:ok, updated} =
+      intent
+      |> AgentIntent.current_pointer_changeset(%{
+        state: :blocked,
+        current_execution_plan_id: plan.id
+      })
+      |> Repo.update()
+
+    case Audit.append_event(intent_audit_attrs(updated, state, :blocked, actor, actor_id)) do
+      {:ok, _} -> {:transitioned, state, updated}
+      {:error, reason} -> Repo.rollback(reason)
+    end
+  end
+
+  defp transition_intent_to_blocked(%AgentIntent{state: state}, _plan, _actor, _actor_id) do
+    {:no_transition, state}
+  end
+
+  defp emit_abort_audit(%ExecutionPlan{} = plan, prior_status, actor, actor_id) do
+    plan
+    |> Events.execution_transition(prior_status, actor: actor)
+    |> Map.put(:actor_id, actor_id)
+    |> Audit.append_event()
+  end
+
+  defp intent_audit_attrs(%AgentIntent{} = intent, from, to, actor, actor_id) do
+    intent
+    |> Events.intent_state_changed(from, to, actor: actor)
+    |> Map.put(:actor_id, actor_id)
+  end
+
+  defp no_intent_transition(%ExecutionPlan{intent: %AgentIntent{state: state}}),
+    do: {:no_transition, state}
+
+  defp no_intent_transition(_), do: :not_applicable
 
   defp progress_plan_for_kind(plan, "execution.broadcast", params) do
     plan
