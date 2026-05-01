@@ -27,6 +27,7 @@ defmodule Bank.Ops.Health do
 
   import Ecto.Query
 
+  alias Bank.Audit.AuditEvent
   alias Bank.Decisions.ExecutionPlan
   alias Bank.Repo
 
@@ -35,6 +36,28 @@ defmodule Bank.Ops.Health do
   @adapter_health_timeout_ms 2_000
 
   @non_terminal [:prepared, :signing, :broadcasting, :pending_confirmation]
+
+  # Per-status thresholds for `stuck_plan_details/1` and the
+  # `ScanStuckPlans` worker (#230-b). Defaults chosen against the
+  # observed adapter SLA: `:prepared` should leave the worker queue
+  # within seconds; `:pending_confirmation` is bundler-bound and
+  # legitimately waits 30+ seconds even on a healthy mainnet. The
+  # values are tunable per-environment via
+  # `config :bank, Bank.Ops.Health, stuck_plan_thresholds: [...]`.
+  @default_stuck_plan_thresholds %{
+    prepared: 600,
+    signing: 300,
+    broadcasting: 600,
+    pending_confirmation: 1_800
+  }
+
+  # Detection writes one `ops.stuck_plan_detected` audit row per
+  # plan per *aligned* window. With a 2-minute cron tick we widen
+  # the dedupe bucket to 5 minutes so a single legitimately-stuck
+  # plan generates one alert every 5 min, not every tick.
+  @detection_window_seconds 300
+
+  @scan_batch_default 50
 
   @doc """
   Runs every check and returns a map suitable for JSON rendering.
@@ -162,4 +185,130 @@ defmodule Bank.Ops.Health do
 
   defp bool_to_int(true), do: 1
   defp bool_to_int(false), do: 0
+
+  # --- Stuck-plan detection (#230-b) ---------------------------------------
+
+  @doc """
+  Per-plan stuck detail rows for the `ScanStuckPlans` worker (#230-b).
+
+  Unlike `stuck_plans/1` (which returns a single aggregate count
+  for `/v1/health/deep`), this returns one row per stuck plan
+  with the per-status threshold the row breached.
+
+  ## opts
+
+    * `:thresholds` — overrides the per-status threshold map.
+      Default comes from
+      `Application.get_env(:bank, Bank.Ops.Health, [])[:stuck_plan_thresholds]`,
+      falling back to `#{inspect(@default_stuck_plan_thresholds)}`.
+    * `:limit` — caps the result set; default
+      `#{@scan_batch_default}` so a degraded run does not flood
+      the audit pipeline.
+    * `:now` — clock override for tests.
+  """
+  @spec stuck_plan_details(keyword()) :: [
+          %{
+            id: String.t(),
+            workspace_id: String.t() | nil,
+            execution_status: atom(),
+            updated_at: DateTime.t(),
+            stuck_for_seconds: non_neg_integer(),
+            threshold_seconds: pos_integer()
+          }
+        ]
+  def stuck_plan_details(opts \\ []) do
+    thresholds = resolve_thresholds(opts)
+    limit = Keyword.get(opts, :limit, @scan_batch_default)
+    now = Keyword.get(opts, :now, DateTime.utc_now())
+
+    # Run one query per status so the per-status cutoff is applied
+    # at the DB level. The status set is small (4 entries) so the
+    # constant fan-out is cheap; alternatives that pack thresholds
+    # into a single query require a CASE/WHEN ladder over the enum.
+    rows =
+      thresholds
+      |> Enum.flat_map(fn {status, threshold_seconds} ->
+        cutoff = DateTime.add(now, -threshold_seconds, :second)
+
+        from(p in ExecutionPlan,
+          where:
+            p.execution_status == ^status and
+              p.updated_at < ^cutoff and
+              p.active == true,
+          select: %{
+            id: p.id,
+            workspace_id: p.workspace_id,
+            execution_status: p.execution_status,
+            updated_at: p.updated_at
+          },
+          limit: ^limit
+        )
+        |> Repo.all()
+        |> Enum.map(fn row ->
+          stuck_for = DateTime.diff(now, row.updated_at, :second)
+
+          row
+          |> Map.put(:threshold_seconds, threshold_seconds)
+          |> Map.put(:stuck_for_seconds, stuck_for)
+        end)
+      end)
+
+    rows
+    |> Enum.sort_by(& &1.updated_at, {:asc, DateTime})
+    |> Enum.take(limit)
+  end
+
+  @doc """
+  Tick-aligned dedupe key for `ops.stuck_plan_detected` audit
+  emission. Two ticks within the same `#{@detection_window_seconds}`-second
+  bucket produce the same window-start, so a per-plan
+  `(plan.id, window_start_iso)` lookup short-circuits the second
+  emission.
+  """
+  @spec detection_window_start(DateTime.t()) :: DateTime.t()
+  def detection_window_start(now \\ DateTime.utc_now()) do
+    epoch = DateTime.to_unix(now, :second)
+    aligned = div(epoch, @detection_window_seconds) * @detection_window_seconds
+    DateTime.from_unix!(aligned, :second)
+  end
+
+  @doc """
+  True iff an `ops.stuck_plan_detected` audit row already exists
+  for the given plan id within the same detection window.
+  Mirrors `Bank.APIKeys.used_event_exists?/2`.
+  """
+  @spec stuck_plan_event_exists?(String.t(), String.t()) :: boolean()
+  def stuck_plan_event_exists?(plan_id, window_start_iso)
+      when is_binary(plan_id) and is_binary(window_start_iso) do
+    Repo.exists?(
+      from e in AuditEvent,
+        where:
+          e.event_type == "ops.stuck_plan_detected" and
+            e.subject_type == "execution_plan" and
+            e.subject_id == ^plan_id and
+            fragment("?->>'window_start' = ?", e.after_ref, ^window_start_iso)
+    )
+  end
+
+  defp resolve_thresholds(opts) do
+    case Keyword.get(opts, :thresholds) do
+      nil ->
+        configured =
+          :bank
+          |> Application.get_env(Bank.Ops.Health, [])
+          |> Keyword.get(:stuck_plan_thresholds)
+
+        case configured do
+          nil -> @default_stuck_plan_thresholds
+          kw when is_list(kw) -> Map.new(kw)
+          %{} = map -> map
+        end
+
+      kw when is_list(kw) ->
+        Map.new(kw)
+
+      %{} = map ->
+        map
+    end
+  end
 end

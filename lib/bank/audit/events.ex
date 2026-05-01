@@ -243,6 +243,42 @@ defmodule Bank.Audit.Events do
   end
 
   @doc """
+  `ops.stuck_plan_detected` — periodic detector flagged an
+  execution plan as stuck past its per-status threshold (#230-b).
+
+  Subject is the plan; `correlation_id` is the parent intent so
+  audit replay can group with the plan's other lifecycle rows.
+  `after_ref` carries:
+
+    * `execution_status` — current non-terminal status (atom)
+    * `stuck_for_seconds` — observed staleness at detection time
+    * `threshold_seconds` — the per-status threshold that tripped
+    * `window_start` — ISO 8601 detection-window start; the
+      idempotency key the worker uses to skip an already-emitted
+      plan within the same window
+  """
+  @spec ops_stuck_plan_detected(map(), keyword()) :: attrs()
+  def ops_stuck_plan_detected(%{} = detail, opts \\ []) do
+    window_start = Keyword.get(opts, :window_start, DateTime.utc_now())
+
+    %{
+      actor: :runtime,
+      actor_id: nil,
+      event_type: "ops.stuck_plan_detected",
+      subject_type: "execution_plan",
+      subject_id: detail.id,
+      correlation_id: Map.get(detail, :intent_id),
+      after_ref: %{
+        execution_status: Atom.to_string(detail.execution_status),
+        stuck_for_seconds: detail.stuck_for_seconds,
+        threshold_seconds: detail.threshold_seconds,
+        window_start: DateTime.to_iso8601(window_start)
+      },
+      workspace_id: Map.get(detail, :workspace_id)
+    }
+  end
+
+  @doc """
   `counterparty.created` — operator created a new counterparty.
   Correlation is the counterparty id itself, matching the audit
   docstring's convention for counterparty-scoped events.
