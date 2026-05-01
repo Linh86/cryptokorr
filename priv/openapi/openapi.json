@@ -11,6 +11,16 @@
           "type": "string"
         },
         "style": "simple"
+      },
+      "RetryAfter": {
+        "description": "Integer seconds until the rate-limit window rolls over for\nthe bucket that refused this request. Always at least `1`\nand bounded by the configured window length (default 60s\nfor the success-path buckets; up to 300s for the\nauth-failure bucket).\n",
+        "required": true,
+        "schema": {
+          "example": 17,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "style": "simple"
       }
     },
     "parameters": {
@@ -155,6 +165,24 @@
         },
         "description": "Runtime is paused (global or scoped) and is refusing to advance execution. Callers must not retry into autonomy — the pause is lifted only by operator action.",
         "headers": {
+          "X-Request-Id": {
+            "$ref": "#/components/headers/RequestIdOut"
+          }
+        }
+      },
+      "TooManyRequests": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        },
+        "description": "Rate-limit refusal. The body is the standard `ErrorEnvelope` with `code: \"rate_limited\"`. `Retry-After` carries integer seconds until the bucket's window rolls over. See `BankWeb.Plugs.RateLimit` and `BankWeb.Plugs.RateLimit.ChainAction` for the four bucket flavors.",
+        "headers": {
+          "Retry-After": {
+            "$ref": "#/components/headers/RetryAfter"
+          },
           "X-Request-Id": {
             "$ref": "#/components/headers/RequestIdOut"
           }
@@ -2560,6 +2588,9 @@
           },
           "422": {
             "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "Update an address label",
@@ -2592,6 +2623,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "List API keys for the current workspace",
@@ -2637,6 +2671,9 @@
           },
           "422": {
             "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "Mint a new API key",
@@ -2681,6 +2718,9 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "Soft-revoke an API key",
@@ -2731,6 +2771,9 @@
           },
           "422": {
             "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "Rotate an API key",
@@ -2763,6 +2806,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "List pending approvals",
@@ -2825,6 +2871,9 @@
           },
           "422": {
             "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "Approve a decision in the queue",
@@ -2887,6 +2936,9 @@
           },
           "422": {
             "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "Reject a decision in the queue",
@@ -3012,6 +3064,9 @@
           },
           "422": {
             "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "List audit events",
@@ -3059,6 +3114,9 @@
           },
           "422": {
             "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "Request a browser-initiated smart-account connect",
@@ -3134,6 +3192,9 @@
           },
           "422": {
             "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "List counterparties",
@@ -3179,6 +3240,9 @@
           },
           "422": {
             "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "Create a counterparty",
@@ -3238,6 +3302,9 @@
           },
           "422": {
             "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "Update a counterparty",
@@ -3300,6 +3367,9 @@
           },
           "422": {
             "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "Attach an address label to a counterparty",
@@ -3362,6 +3432,9 @@
           },
           "422": {
             "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "Pin an evidence artifact to a counterparty",
@@ -3406,6 +3479,9 @@
           },
           "422": {
             "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "Get a decision envelope",
@@ -3468,6 +3544,9 @@
           },
           "422": {
             "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           },
           "503": {
             "$ref": "#/components/responses/ServiceUnavailable"
@@ -3583,6 +3662,9 @@
           },
           "422": {
             "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "Submit an intent for evaluation",
@@ -3624,6 +3706,9 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "Get an intent by id",
@@ -3686,6 +3771,9 @@
           },
           "422": {
             "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "Cancel an intent before execution",
@@ -3727,6 +3815,9 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "Get the full replay bundle for an intent",
@@ -3789,6 +3880,9 @@
           },
           "422": {
             "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "Request an on-demand simulation",
@@ -3876,6 +3970,9 @@
           },
           "422": {
             "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "List policy rules",
@@ -3921,6 +4018,9 @@
           },
           "422": {
             "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "Create a policy rule",
@@ -3971,6 +4071,9 @@
           },
           "409": {
             "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "Archive a policy rule",
@@ -4033,6 +4136,9 @@
           },
           "422": {
             "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "Revise a policy rule",
@@ -4080,6 +4186,9 @@
           },
           "422": {
             "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "Pause automation",
@@ -4127,6 +4236,9 @@
           },
           "422": {
             "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "Resume automation",
@@ -4174,6 +4286,9 @@
           },
           "422": {
             "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "Submit a delegation revoke",
@@ -4224,6 +4339,9 @@
           },
           "422": {
             "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
           }
         },
         "summary": "Issue a trust assertion",

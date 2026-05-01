@@ -35,15 +35,25 @@ defmodule BankWeb.OpenApi.Responses do
     * `BadGateway` — 502, adapter / upstream provider failure
       treated as caution-widening (`retryable: false`).
     * `GatewayTimeout` — 504, adapter / upstream provider timeout.
+    * `TooManyRequests` — 429, rate-limit refusal from any of the
+      `/v1` rate-limit buckets (per-key, per-workspace,
+      chain-action stricter cap, or auth-failure lockout). Body
+      shape is the standard `ErrorEnvelope` with
+      `code: "rate_limited"`. The response carries a `Retry-After`
+      header (integer seconds until window rollover). Added by
+      #221 once all four rate-limit slices were in `main`.
 
   Every response references `components.headers.RequestIdOut` so
-  `X-Request-Id` correlation is documented once.
+  `X-Request-Id` correlation is documented once. The
+  `TooManyRequests` response additionally references
+  `components.headers.RetryAfter`.
   """
 
   alias OpenApiSpex.{MediaType, Reference, Response}
 
   @error_envelope_ref %Reference{"$ref": "#/components/schemas/ErrorEnvelope"}
   @request_id_header_ref %Reference{"$ref": "#/components/headers/RequestIdOut"}
+  @retry_after_header_ref %Reference{"$ref": "#/components/headers/RetryAfter"}
 
   @doc "400 — request body failed schema validation."
   @spec bad_request() :: Response.t()
@@ -135,6 +145,50 @@ defmodule BankWeb.OpenApi.Responses do
         "Adapter or upstream provider did not respond in time. Treated as a caution-widening " <>
           "input (`retryable: false`); callers must not loop."
       )
+
+  @doc """
+  429 — rate-limit refusal (#221).
+
+  Emitted from one of four buckets:
+
+    * **Per-key bucket** (`BankWeb.Plugs.RateLimit`) — calling
+      key exceeded its sustained request rate. Audit
+      `api_key.rate_limited` with `after_ref.scope = "key"`.
+    * **Per-workspace bucket** (same plug) — workspace's
+      collective request rate across all its keys exceeded the
+      cap. Audit `api_key.rate_limited` with
+      `after_ref.scope = "workspace"`.
+    * **Chain-action stricter cap**
+      (`BankWeb.Plugs.RateLimit.ChainAction`) — refused on
+      `/v1/security/{pause,resume,revoke_delegation}`. Audit
+      `api_key.rate_limited` with
+      `after_ref.scope = "chain_action"`.
+    * **Auth-failure lockout** (`BankWeb.Plugs.VerifyAPIKey`) —
+      bucket of failed-auth attempts (per `api_key.id`,
+      per-prefix, or per-IP) exceeded the lockout threshold.
+      Audit `api_key.auth_failure_limited`.
+
+  Body is the standard `ErrorEnvelope` with `code:
+  "rate_limited"`. The `Retry-After` response header carries
+  the integer seconds until the window rolls over.
+  """
+  @spec too_many_requests() :: Response.t()
+  def too_many_requests do
+    %Response{
+      description:
+        "Rate-limit refusal. The body is the standard `ErrorEnvelope` with " <>
+          "`code: \"rate_limited\"`. `Retry-After` carries integer seconds until the bucket's " <>
+          "window rolls over. See `BankWeb.Plugs.RateLimit` and " <>
+          "`BankWeb.Plugs.RateLimit.ChainAction` for the four bucket flavors.",
+      headers: %{
+        "X-Request-Id" => @request_id_header_ref,
+        "Retry-After" => @retry_after_header_ref
+      },
+      content: %{
+        "application/json" => %MediaType{schema: @error_envelope_ref}
+      }
+    }
+  end
 
   # --- internals ---
 

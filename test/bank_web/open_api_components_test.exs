@@ -181,9 +181,14 @@ defmodule BankWeb.OpenApiComponentsTest do
       # `NotImplemented` was added in #88 for the intent stubs.
       # `Unauthorized` was added in #218c so authenticated `/v1`
       # operations can $ref a consistent 401 body shape.
+      # `TooManyRequests` was added in #221 once all four
+      # rate-limit slices (per-key, auth-failure, per-workspace,
+      # chain-action) were in `main` so authenticated `/v1`
+      # operations can $ref the 429 body shape and `Retry-After`
+      # header.
       expected =
         ~w(BadRequest Unauthorized Forbidden NotFound Conflict UnprocessableEntity
-           NotImplemented ServiceUnavailable BadGateway GatewayTimeout)
+           TooManyRequests NotImplemented ServiceUnavailable BadGateway GatewayTimeout)
 
       actual = components().responses |> Map.keys() |> Enum.sort()
       assert actual == Enum.sort(expected)

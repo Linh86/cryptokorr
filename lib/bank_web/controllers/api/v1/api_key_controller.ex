@@ -69,6 +69,7 @@ defmodule BankWeb.API.V1.APIKeyController do
   @forbidden_ref %Reference{"$ref": "#/components/responses/Forbidden"}
   @not_found_ref %Reference{"$ref": "#/components/responses/NotFound"}
   @unprocessable_ref %Reference{"$ref": "#/components/responses/UnprocessableEntity"}
+  @too_many_requests_ref %Reference{"$ref": "#/components/responses/TooManyRequests"}
 
   @api_key_id_param %Parameter{
     name: :id,
@@ -92,7 +93,8 @@ defmodule BankWeb.API.V1.APIKeyController do
     responses: %{
       ok: {"API key list", "application/json", BankWeb.OpenApi.Schemas.APIKeyListResponse},
       unauthorized: @unauthorized_ref,
-      forbidden: @forbidden_ref
+      forbidden: @forbidden_ref,
+      too_many_requests: @too_many_requests_ref
     }
   )
 
@@ -128,6 +130,7 @@ defmodule BankWeb.API.V1.APIKeyController do
          BankWeb.OpenApi.Schemas.APIKeyCreatedResponse},
       unauthorized: @unauthorized_ref,
       forbidden: @forbidden_ref,
+      too_many_requests: @too_many_requests_ref,
       unprocessable_entity: @unprocessable_ref
     }
   )
@@ -206,6 +209,7 @@ defmodule BankWeb.API.V1.APIKeyController do
          BankWeb.OpenApi.Schemas.APIKeyCreatedResponse},
       unauthorized: @unauthorized_ref,
       forbidden: @forbidden_ref,
+      too_many_requests: @too_many_requests_ref,
       not_found: @not_found_ref,
       unprocessable_entity: @unprocessable_ref
     }
@@ -269,6 +273,7 @@ defmodule BankWeb.API.V1.APIKeyController do
       ok: {"Revoked key", "application/json", BankWeb.OpenApi.Schemas.APIKeyEntity},
       unauthorized: @unauthorized_ref,
       forbidden: @forbidden_ref,
+      too_many_requests: @too_many_requests_ref,
       not_found: @not_found_ref
     }
   )

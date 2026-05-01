@@ -373,7 +373,8 @@ defmodule BankWeb.ApiSpec do
 
   defp headers do
     %{
-      "RequestIdOut" => Headers.request_id_out()
+      "RequestIdOut" => Headers.request_id_out(),
+      "RetryAfter" => Headers.retry_after()
     }
   end
 
@@ -385,6 +386,7 @@ defmodule BankWeb.ApiSpec do
       "NotFound" => Responses.not_found(),
       "Conflict" => Responses.conflict(),
       "UnprocessableEntity" => Responses.unprocessable_entity(),
+      "TooManyRequests" => Responses.too_many_requests(),
       "NotImplemented" => Responses.not_implemented(),
       "ServiceUnavailable" => Responses.service_unavailable(),
       "BadGateway" => Responses.bad_gateway(),
