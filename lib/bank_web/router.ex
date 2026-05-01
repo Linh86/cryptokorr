@@ -49,6 +49,18 @@ defmodule BankWeb.Router do
     plug BankWeb.Plugs.RequireRole, :admin
   end
 
+  # Chain-action stricter cap (#221, fourth slice). Composes on top
+  # of `:api_admin` for `/v1/security/*` only. Pausing the runtime
+  # or revoking a delegation 5+ times per minute is far above any
+  # legitimate operator pace; the standard per-key/per-workspace
+  # caps are tuned for read traffic and approve relatively wide
+  # bursts. See `BankWeb.Plugs.RateLimit.ChainAction` for the
+  # documented route list and the rationale for keeping
+  # `/v1/decisions/:id/execute` on the standard caps for v0.1.
+  pipeline :api_chain_action do
+    plug BankWeb.Plugs.RateLimit.ChainAction
+  end
+
   # Adapter callback pipeline — shared bearer secret check on top of
   # the JSON API pipeline. In production mTLS is terminated at the
   # ingress; this plug is defense in depth. See
@@ -206,24 +218,32 @@ defmodule BankWeb.Router do
     pipe_through [:api, :api_authenticated, :api_admin]
 
     # Policy CRUD — governance-level. Rules drive decisioning and
-    # cannot be changed casually by an on-call operator.
+    # cannot be changed casually by an on-call operator. NOT
+    # chain-affecting, so no chain-action stricter cap.
     post "/policies", PolicyController, :create
     post "/policies/:id/revise", PolicyController, :revise
     post "/policies/:id/archive", PolicyController, :archive
 
-    # Security kill-switches — global, deployment-wide. Admin-only
-    # because pause halts every workspace's runtime, not just the
-    # caller's.
-    post "/security/pause", SecurityController, :pause
-    post "/security/resume", SecurityController, :resume
-    post "/security/revoke_delegation", SecurityController, :revoke_delegation
-
     # API key management (#218c, rotation #220). Admin-only —
-    # credential issuance.
+    # credential issuance. NOT chain-affecting; rides standard
+    # per-key + per-workspace caps only.
     get "/api_keys", APIKeyController, :index
     post "/api_keys", APIKeyController, :create
     post "/api_keys/:id/rotate", APIKeyController, :rotate
     delete "/api_keys/:id", APIKeyController, :delete
+  end
+
+  # Security kill-switches — global, deployment-wide. Admin-only
+  # because pause halts every workspace's runtime, not just the
+  # caller's. Layered with the chain-action stricter cap (#221,
+  # fourth slice): pausing the runtime or revoking a delegation 5+
+  # times per minute is far above any legitimate operator pace.
+  scope "/v1", BankWeb.API.V1, as: :api_v1_admin_chain do
+    pipe_through [:api, :api_authenticated, :api_admin, :api_chain_action]
+
+    post "/security/pause", SecurityController, :pause
+    post "/security/resume", SecurityController, :resume
+    post "/security/revoke_delegation", SecurityController, :revoke_delegation
   end
 
   # Internal adapter callback — private network, not part of /v1/.
