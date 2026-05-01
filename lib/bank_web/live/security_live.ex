@@ -56,7 +56,13 @@ defmodule BankWeb.SecurityLive do
     "delegation.revoked",
     "delegation.state_changed",
     "agent_keys.paused",
-    "agent_keys.resumed"
+    "agent_keys.resumed",
+    # Periodic stuck-plan detector (#230-b). The audit row stamps
+    # `workspace_id` on the row directly, so the workspace gate in
+    # `visible_to_workspace?/3` for this event matches on
+    # `event.workspace_id` rather than `subject_id` like
+    # `agent_keys.*`.
+    "ops.stuck_plan_detected"
   ]
 
   # Default safety-timeline filter (#212). `range: "7d"` matches the
@@ -149,6 +155,62 @@ defmodule BankWeb.SecurityLive do
 
   def handle_event("refresh", _params, socket) do
     {:noreply, socket |> load_state() |> put_flash(:info, "Console refreshed")}
+  end
+
+  # --- Manual abort of a stuck :prepared plan (#229/#230 UI) ---------------
+
+  def handle_event("abort_plan", %{"plan-id" => plan_id}, socket) do
+    with :ok <- BankWeb.LiveAuth.authorize_action(socket, :admin) do
+      # Workspace from current_scope (NEVER from form params): a hostile
+      # event payload cannot redirect the abort at a sibling tenant's
+      # plan. The context function ALSO scopes by workspace inside the
+      # locked SELECT, so this is belt-and-suspenders.
+      scope = socket.assigns.current_scope
+      actor_id = scope.user && scope.user.id
+
+      case Bank.Decisions.abort_plan(plan_id, scope.workspace,
+             reason: :operator_requested,
+             actor: :user,
+             actor_id: actor_id
+           ) do
+        {:ok, :aborted, _plan, _intent_transition} ->
+          {:noreply,
+           socket
+           |> load_state()
+           |> put_flash(:info, "Execution plan aborted.")}
+
+        {:ok, :already_terminal, _plan, _intent_transition} ->
+          {:noreply,
+           socket
+           |> load_state()
+           |> put_flash(:info, "Plan was already terminal; no change.")}
+
+        {:error, :not_found} ->
+          {:noreply,
+           socket
+           |> load_state()
+           |> put_flash(:error, "Plan not found in this workspace.")}
+
+        {:error, {:not_safe_to_abort, status}} ->
+          {:noreply,
+           socket
+           |> load_state()
+           |> put_flash(
+             :error,
+             "Cannot abort plan in #{status} from this console — adapter cancel required."
+           )}
+
+        {:error, %Ecto.Changeset{} = changeset} ->
+          message = changeset_message(changeset, "Abort failed")
+          {:noreply, put_flash(socket, :error, message)}
+
+        {:error, reason} ->
+          {:noreply, put_flash(socket, :error, "Abort failed: #{inspect(reason)}")}
+      end
+    else
+      {:error, {:insufficient_role, _}} ->
+        {:noreply, put_flash(socket, :error, "Admin role required to abort an execution plan.")}
+    end
   end
 
   # --- Agent-key pause / resume (#231-c) -----------------------------------
@@ -304,6 +366,15 @@ defmodule BankWeb.SecurityLive do
 
     risk_summary = Enum.frequencies_by(delegations, & &1.state)
 
+    # Stuck-plan detector rows (#229/#230). `stuck_plan_details/1`
+    # is workspace-agnostic at the context level, so we filter by
+    # workspace AFTER fetch — stale rows from sibling tenants would
+    # otherwise leak into the operator console.
+    stuck_plans =
+      [limit: 10]
+      |> Bank.Ops.Health.stuck_plan_details()
+      |> Enum.filter(&(&1.workspace_id == workspace_id))
+
     filters = socket.assigns[:safety_filters] || @default_safety_filters
     safety_events = load_safety_events(delegations, workspace_id, filters)
 
@@ -324,6 +395,7 @@ defmodule BankWeb.SecurityLive do
     |> assign(:executable_count, executable_count)
     |> assign(:execution_ready, execution_ready?)
     |> assign(:risk_summary, risk_summary)
+    |> assign(:stuck_plans, stuck_plans)
     |> assign(:safety_events, safety_events)
     |> assign(:safety_filters, filters)
     |> assign(:safety_filter_form, safety_filter_form)
@@ -494,6 +566,18 @@ defmodule BankWeb.SecurityLive do
        when is_binary(id) and is_binary(ws_id),
        do: id == ws_id
 
+  # `ops.stuck_plan_detected` (#230-b) stamps `workspace_id` on the
+  # audit row directly via the envelope passthrough, so we gate by
+  # `event.workspace_id` rather than `subject_id` (which is the
+  # plan id, not workspace-keyed).
+  defp visible_to_workspace?(
+         %{event_type: "ops.stuck_plan_detected", workspace_id: row_ws},
+         _ids,
+         ws_id
+       )
+       when is_binary(row_ws) and is_binary(ws_id),
+       do: row_ws == ws_id
+
   defp visible_to_workspace?(_event, _ids, _ws_id), do: false
 
   # --- Render ----------------------------------------------------------------
@@ -537,6 +621,10 @@ defmodule BankWeb.SecurityLive do
             summary={@risk_summary}
             executable_count={@executable_count}
             total={length(@delegations)}
+          />
+          <.stuck_plans_card
+            rows={@stuck_plans}
+            current_role={@current_scope.role}
           />
           <.delegations_card delegations={@delegations} />
         </div>
@@ -919,6 +1007,128 @@ defmodule BankWeb.SecurityLive do
     </section>
     """
   end
+
+  # --- Component: stuck-plans card (#229/#230) -----------------------------
+
+  attr :rows, :list, required: true
+  attr :current_role, :atom, required: true
+
+  # Per-status threshold + age cells; abort affordance is rendered ONLY
+  # for `:prepared` rows because `Bank.Decisions.abort_plan/3`'s
+  # safe-state guard rejects every other non-terminal status. Non-
+  # `:prepared` rows render the message "adapter cancel required" so
+  # the operator understands why the row appears without an action.
+  defp stuck_plans_card(assigns) do
+    ~H"""
+    <section
+      id="stuck-plans-card"
+      data-count={length(@rows)}
+      class="rounded-xl border border-base-300 bg-base-100 shadow-sm overflow-hidden"
+    >
+      <header class="px-6 py-4 border-b border-base-300 flex items-center justify-between">
+        <h2 class="text-sm font-semibold flex items-center gap-1.5">
+          <.icon name="hero-clock" class="size-4" /> Stuck execution plans
+        </h2>
+        <span class="badge badge-sm badge-ghost">{length(@rows)}</span>
+      </header>
+
+      <div
+        :if={@rows == []}
+        id="stuck-plans-empty"
+        class="px-6 py-8 text-center text-sm text-base-content/50"
+      >
+        No execution plans past their stuck threshold.
+      </div>
+
+      <ul :if={@rows != []} class="divide-y divide-base-300">
+        <li :for={row <- @rows} id={"stuck-plan-#{row.id}"} class="px-6 py-4">
+          <.stuck_plan_row row={row} current_role={@current_role} />
+        </li>
+      </ul>
+    </section>
+    """
+  end
+
+  attr :row, :map, required: true
+  attr :current_role, :atom, required: true
+
+  defp stuck_plan_row(assigns) do
+    ~H"""
+    <div class="flex items-start justify-between gap-3">
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="text-sm font-mono">{short_id(@row.id)}</span>
+          <span
+            id={"stuck-plan-status-#{@row.id}"}
+            class={["badge badge-sm font-mono", stuck_status_badge_class(@row.execution_status)]}
+            data-status={@row.execution_status}
+          >
+            {@row.execution_status}
+          </span>
+        </div>
+        <div class="mt-1 text-xs text-base-content/50 flex items-center gap-3 flex-wrap">
+          <span>
+            stuck for
+            <span id={"stuck-plan-stuck-for-#{@row.id}"} class="font-mono">
+              {format_duration(@row.stuck_for_seconds)}
+            </span>
+          </span>
+          <span>
+            threshold <span class="font-mono">{format_duration(@row.threshold_seconds)}</span>
+          </span>
+        </div>
+      </div>
+
+      <%!-- Abort button only for :prepared. Other non-terminal
+            statuses (:signing, :broadcasting, :pending_confirmation)
+            already touched the adapter; aborting locally would
+            orphan a chain operation. --%>
+      <.button
+        :if={@row.execution_status == :prepared and @current_role in [:admin, :owner]}
+        id={"abort-plan-btn-#{@row.id}"}
+        phx-click="abort_plan"
+        phx-value-plan-id={@row.id}
+        data-confirm="Abort this :prepared execution plan? Operator-confirmed; emits an audit row."
+        class="btn btn-error btn-soft btn-xs gap-1.5"
+      >
+        <.icon name="hero-x-circle" class="size-3" /> Abort
+      </.button>
+
+      <span
+        :if={@row.execution_status != :prepared}
+        id={"stuck-plan-not-safe-#{@row.id}"}
+        class="text-xs text-base-content/50 max-w-[12rem] text-right"
+      >
+        Adapter cancel required — not safe to abort here.
+      </span>
+    </div>
+    """
+  end
+
+  defp stuck_status_badge_class(:prepared), do: "badge-warning"
+  defp stuck_status_badge_class(:signing), do: "badge-error"
+  defp stuck_status_badge_class(:broadcasting), do: "badge-error"
+  defp stuck_status_badge_class(:pending_confirmation), do: "badge-error"
+  defp stuck_status_badge_class(_), do: "badge-ghost"
+
+  # `stuck_for_seconds` and `threshold_seconds` are integers from
+  # `Health.stuck_plan_details/1`. Render compactly so a long backlog
+  # still fits in the card.
+  defp format_duration(seconds) when is_integer(seconds) and seconds < 60, do: "#{seconds}s"
+
+  defp format_duration(seconds) when is_integer(seconds) and seconds < 3600 do
+    minutes = div(seconds, 60)
+    "#{minutes}m"
+  end
+
+  defp format_duration(seconds) when is_integer(seconds) do
+    hours = div(seconds, 3600)
+    minutes = div(rem(seconds, 3600), 60)
+
+    if minutes == 0, do: "#{hours}h", else: "#{hours}h #{minutes}m"
+  end
+
+  defp format_duration(_), do: "-"
 
   # --- Component: delegations card -----------------------------------------
 
