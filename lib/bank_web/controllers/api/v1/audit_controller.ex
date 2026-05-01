@@ -40,6 +40,7 @@ defmodule BankWeb.API.V1.AuditController do
   @request_id_in_ref %Reference{"$ref": "#/components/parameters/RequestIdIn"}
   @unauthorized_ref %Reference{"$ref": "#/components/responses/Unauthorized"}
   @forbidden_ref %Reference{"$ref": "#/components/responses/Forbidden"}
+  @too_many_requests_ref %Reference{"$ref": "#/components/responses/TooManyRequests"}
   @unprocessable_ref %Reference{"$ref": "#/components/responses/UnprocessableEntity"}
 
   @audit_query_params [
@@ -122,6 +123,7 @@ defmodule BankWeb.API.V1.AuditController do
       200 => {"Audit events page", "application/json", BankWeb.OpenApi.Schemas.AuditListResponse},
       401 => @unauthorized_ref,
       403 => @forbidden_ref,
+      429 => @too_many_requests_ref,
       422 => @unprocessable_ref
     }
   )

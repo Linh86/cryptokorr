@@ -31,6 +31,7 @@ defmodule BankWeb.API.V1.ConnectController do
   @request_id_in_ref %Reference{"$ref": "#/components/parameters/RequestIdIn"}
   @unauthorized_ref %Reference{"$ref": "#/components/responses/Unauthorized"}
   @forbidden_ref %Reference{"$ref": "#/components/responses/Forbidden"}
+  @too_many_requests_ref %Reference{"$ref": "#/components/responses/TooManyRequests"}
   @unprocessable_ref %Reference{"$ref": "#/components/responses/UnprocessableEntity"}
 
   # --- POST /v1/connect/smart_account -------------------------------------
@@ -59,6 +60,7 @@ defmodule BankWeb.API.V1.ConnectController do
          BankWeb.OpenApi.Schemas.ConnectSmartAccountResponse},
       401 => @unauthorized_ref,
       403 => @forbidden_ref,
+      429 => @too_many_requests_ref,
       422 => @unprocessable_ref
     }
   )

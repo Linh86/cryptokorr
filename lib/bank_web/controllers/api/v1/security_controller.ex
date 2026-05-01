@@ -23,6 +23,7 @@ defmodule BankWeb.API.V1.SecurityController do
   @request_id_in_ref %Reference{"$ref": "#/components/parameters/RequestIdIn"}
   @unauthorized_ref %Reference{"$ref": "#/components/responses/Unauthorized"}
   @forbidden_ref %Reference{"$ref": "#/components/responses/Forbidden"}
+  @too_many_requests_ref %Reference{"$ref": "#/components/responses/TooManyRequests"}
   @unprocessable_ref %Reference{"$ref": "#/components/responses/UnprocessableEntity"}
 
   # --- POST /v1/security/pause -------------------------------------------
@@ -51,6 +52,7 @@ defmodule BankWeb.API.V1.SecurityController do
       200 => {"Pause state", "application/json", BankWeb.OpenApi.Schemas.SecurityStateResponse},
       401 => @unauthorized_ref,
       403 => @forbidden_ref,
+      429 => @too_many_requests_ref,
       422 => @unprocessable_ref
     }
   )
@@ -96,6 +98,7 @@ defmodule BankWeb.API.V1.SecurityController do
       200 => {"Resume state", "application/json", BankWeb.OpenApi.Schemas.SecurityStateResponse},
       401 => @unauthorized_ref,
       403 => @forbidden_ref,
+      429 => @too_many_requests_ref,
       422 => @unprocessable_ref
     }
   )
@@ -143,6 +146,7 @@ defmodule BankWeb.API.V1.SecurityController do
         {"Revoke enqueued", "application/json", BankWeb.OpenApi.Schemas.RevokeDelegationResponse},
       401 => @unauthorized_ref,
       403 => @forbidden_ref,
+      429 => @too_many_requests_ref,
       422 => @unprocessable_ref
     }
   )

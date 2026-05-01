@@ -17,6 +17,10 @@ defmodule BankWeb.OpenApi.Headers do
       echoes the value that came in on the request (or the fresh
       id it generated when the request had none). Consumers use
       this for log correlation.
+    * `RetryAfter` — `Retry-After` response header (#221).
+      Present on every `429 Too Many Requests` response from the
+      rate-limit pipelines; integer seconds until the bucket's
+      window rolls over.
   """
 
   alias OpenApiSpex.{Header, Schema}
@@ -40,6 +44,32 @@ defmodule BankWeb.OpenApi.Headers do
         minLength: 1,
         maxLength: 255,
         example: "GKd2jN1eZDCQUvIAACHD"
+      }
+    }
+  end
+
+  @doc """
+  `Retry-After` response header (#221). Integer seconds until the
+  current rate-limit window rolls over. Always set on the 429
+  responses emitted by `BankWeb.Plugs.RateLimit`,
+  `BankWeb.Plugs.RateLimit.ChainAction`, and the auth-failure
+  lockout path inside `BankWeb.Plugs.VerifyAPIKey`.
+  """
+  @spec retry_after() :: Header.t()
+  def retry_after do
+    %Header{
+      description: """
+      Integer seconds until the rate-limit window rolls over for
+      the bucket that refused this request. Always at least `1`
+      and bounded by the configured window length (default 60s
+      for the success-path buckets; up to 300s for the
+      auth-failure bucket).
+      """,
+      required: true,
+      schema: %Schema{
+        type: :integer,
+        minimum: 1,
+        example: 17
       }
     }
   end

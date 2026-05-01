@@ -37,6 +37,7 @@ defmodule BankWeb.API.V1.TrustAssertionController do
   @request_id_in_ref %Reference{"$ref": "#/components/parameters/RequestIdIn"}
   @unauthorized_ref %Reference{"$ref": "#/components/responses/Unauthorized"}
   @forbidden_ref %Reference{"$ref": "#/components/responses/Forbidden"}
+  @too_many_requests_ref %Reference{"$ref": "#/components/responses/TooManyRequests"}
   @not_found_ref %Reference{"$ref": "#/components/responses/NotFound"}
   @unprocessable_ref %Reference{"$ref": "#/components/responses/UnprocessableEntity"}
 
@@ -63,6 +64,7 @@ defmodule BankWeb.API.V1.TrustAssertionController do
          BankWeb.OpenApi.Schemas.IssueTrustAssertionResponse},
       401 => @unauthorized_ref,
       403 => @forbidden_ref,
+      429 => @too_many_requests_ref,
       404 => @not_found_ref,
       422 => @unprocessable_ref
     }

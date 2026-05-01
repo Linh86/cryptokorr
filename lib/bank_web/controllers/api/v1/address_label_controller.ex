@@ -32,6 +32,7 @@ defmodule BankWeb.API.V1.AddressLabelController do
   @idempotency_key_ref %Reference{"$ref": "#/components/parameters/IdempotencyKey"}
   @unauthorized_ref %Reference{"$ref": "#/components/responses/Unauthorized"}
   @forbidden_ref %Reference{"$ref": "#/components/responses/Forbidden"}
+  @too_many_requests_ref %Reference{"$ref": "#/components/responses/TooManyRequests"}
   @not_found_ref %Reference{"$ref": "#/components/responses/NotFound"}
   @conflict_ref %Reference{"$ref": "#/components/responses/Conflict"}
   @unprocessable_ref %Reference{"$ref": "#/components/responses/UnprocessableEntity"}
@@ -62,6 +63,7 @@ defmodule BankWeb.API.V1.AddressLabelController do
          BankWeb.OpenApi.Schemas.AddressLabelResponse},
       401 => @unauthorized_ref,
       403 => @forbidden_ref,
+      429 => @too_many_requests_ref,
       404 => @not_found_ref,
       409 => @conflict_ref,
       422 => @unprocessable_ref

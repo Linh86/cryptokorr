@@ -36,6 +36,7 @@ defmodule BankWeb.API.V1.IntentController do
   @request_id_in_ref %Reference{"$ref": "#/components/parameters/RequestIdIn"}
   @unauthorized_ref %Reference{"$ref": "#/components/responses/Unauthorized"}
   @forbidden_ref %Reference{"$ref": "#/components/responses/Forbidden"}
+  @too_many_requests_ref %Reference{"$ref": "#/components/responses/TooManyRequests"}
   @not_found_ref %Reference{"$ref": "#/components/responses/NotFound"}
   @conflict_ref %Reference{"$ref": "#/components/responses/Conflict"}
   @unprocessable_ref %Reference{"$ref": "#/components/responses/UnprocessableEntity"}
@@ -78,6 +79,7 @@ defmodule BankWeb.API.V1.IntentController do
         {"Intent accepted", "application/json", BankWeb.OpenApi.Schemas.IntentSubmitResponse},
       401 => @unauthorized_ref,
       403 => @forbidden_ref,
+      429 => @too_many_requests_ref,
       409 => @conflict_ref,
       422 => @unprocessable_ref
     }
@@ -148,6 +150,7 @@ defmodule BankWeb.API.V1.IntentController do
     responses: %{
       200 => {"Intent detail", "application/json", BankWeb.OpenApi.Schemas.IntentShowResponse},
       401 => @unauthorized_ref,
+      429 => @too_many_requests_ref,
       404 => @not_found_ref
     }
   )
@@ -196,6 +199,7 @@ defmodule BankWeb.API.V1.IntentController do
          BankWeb.OpenApi.Schemas.IntentSimulationResponse},
       401 => @unauthorized_ref,
       403 => @forbidden_ref,
+      429 => @too_many_requests_ref,
       404 => @not_found_ref,
       409 => @conflict_ref,
       422 => @unprocessable_ref
@@ -347,6 +351,7 @@ defmodule BankWeb.API.V1.IntentController do
         {"Intent cancelled", "application/json", BankWeb.OpenApi.Schemas.IntentCancelResponse},
       401 => @unauthorized_ref,
       403 => @forbidden_ref,
+      429 => @too_many_requests_ref,
       404 => @not_found_ref,
       409 => @conflict_ref,
       422 => @unprocessable_ref
@@ -460,6 +465,7 @@ defmodule BankWeb.API.V1.IntentController do
     responses: %{
       200 => {"Replay bundle", "application/json", BankWeb.OpenApi.Schemas.IntentReplayResponse},
       401 => @unauthorized_ref,
+      429 => @too_many_requests_ref,
       404 => @not_found_ref
     }
   )

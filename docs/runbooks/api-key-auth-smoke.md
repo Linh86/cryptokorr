@@ -473,9 +473,12 @@ curl -sS "http://localhost:4000/v1/audit?event_type=api_key.rate_limited" \
   -H "Authorization: Bearer $ADMIN_KEY" | jq '.data[0]'
 ```
 
-The `after_ref` carries `id` / `prefix` / `role` / `window_start`
-/ `window_end` / `limit` / `retry_after_seconds`. NEVER the raw
-key, `secret_hash`, or Authorization header — hygiene tests in
+The `after_ref` carries `id` / `prefix` / `role` / `scope` /
+`bucket_id` / `window_start` / `window_end` / `limit` /
+`retry_after_seconds`. The `scope` discriminator is `"key"` for
+this step (per-key bucket); subsequent steps demonstrate
+`"workspace"` and `"chain_action"`. NEVER the raw key,
+`secret_hash`, or Authorization header — hygiene tests in
 [`test/bank_web/plugs/rate_limit_test.exs`](../../test/bank_web/plugs/rate_limit_test.exs)
 JSON-scan the audit row for those substrings on every run.
 
@@ -579,6 +582,264 @@ Repeated rejects of the SAME (prefix-or-id, reason) within a
 minute collapse to ONE audit row — verified by burst tests.
 This is intentional: a misconfigured client retrying for an
 hour produces 60 rows, not thousands.
+
+## Step 13 — auth-failure lockout + `api_key.auth_failure_limited`
+
+Repeated failed-auth attempts against the same bucket
+(per-key for known rows, per-prefix for unknown, per-IP for
+malformed) eventually trip the lockout and switch from `401` to
+`429`. Default ceiling: 10 failures / 5 minutes per bucket.
+`:missing_authorization` and `:invalid_authorization_scheme`
+are **deliberately skipped** (random crawlers / health checks /
+unauth browsers create a high false-positive surface) — the
+`api_key.denied` event still fires for observability via Step 12.
+
+Lower the threshold at runtime to exercise without sending 10+
+attempts:
+
+```elixir
+# In IEx
+Application.put_env(:bank, Bank.RateLimit,
+  Keyword.merge(
+    Application.get_env(:bank, Bank.RateLimit),
+    auth_failure_per_window: 3,
+    auth_failure_window_seconds: 300
+  )
+)
+
+Bank.RateLimit.reset()
+Bank.Audit.DedupeWindow.reset()
+```
+
+Forge a hash-mismatch attempt by mangling the bearer (real
+prefix, garbage suffix). The placeholder below uses the
+`smoke-rotate` key minted in Step 10; substitute any active key:
+
+```sh
+# `$SMOKE_PREFIX` is the 8-char prefix of an active key.
+# `$SMOKE_FORGED` is `cb_<prefix><40 garbage chars>`.
+SMOKE_PREFIX="<...redacted-prefix...>"
+SMOKE_FORGED="cb_${SMOKE_PREFIX}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+# Attempts 1-3 → 401. Attempt 4 → 429 (bucket tripped).
+for i in 1 2 3 4; do
+  curl -sS -o /dev/null -w "Request $i: %{http_code}\n" \
+    http://localhost:4000/v1/policies \
+    -H "Authorization: Bearer $SMOKE_FORGED"
+done
+# Request 1: 401
+# Request 2: 401
+# Request 3: 401
+# Request 4: 429
+```
+
+Confirm the audit row — exactly ONE per (bucket, lockout-window):
+
+```sh
+curl -sS "http://localhost:4000/v1/audit?event_type=api_key.auth_failure_limited" \
+  -H "Authorization: Bearer $ADMIN_KEY" | jq '.data[0]'
+```
+
+The `after_ref` carries `bucket_kind` (`"id" | "prefix" | "ip"`),
+`bucket_id`, `prefix`, `api_key_id`, `window_start`, `window_end`,
+`limit`, `retry_after_seconds`. Same hygiene contract as the
+other rate-limit events: hygiene tests in
+[`test/bank_web/plugs/verify_api_key_test.exs`](../../test/bank_web/plugs/verify_api_key_test.exs)
+JSON-scan the row for raw bearer / `secret_hash` / `Bearer `
+substrings.
+
+Restore the dev threshold before continuing:
+
+```elixir
+# In IEx
+Application.put_env(:bank, Bank.RateLimit,
+  Keyword.merge(
+    Application.get_env(:bank, Bank.RateLimit),
+    auth_failure_per_window: 10,
+    auth_failure_window_seconds: 300
+  )
+)
+
+Bank.RateLimit.reset()
+Bank.Audit.DedupeWindow.reset()
+```
+
+## Step 14 — workspace bucket + `api_key.rate_limited` (`scope: "workspace"`)
+
+Two keys in the SAME workspace share the workspace bucket. With
+per-key high (10) and workspace tight (5), a coordinated burst
+across both keys trips the workspace cap before either key trips
+its own.
+
+```elixir
+# In IEx
+Application.put_env(:bank, Bank.RateLimit,
+  Keyword.merge(
+    Application.get_env(:bank, Bank.RateLimit),
+    requests_per_window: 10,
+    window_seconds: 60,
+    workspace_requests_per_window: 5,
+    workspace_window_seconds: 60
+  )
+)
+
+Bank.RateLimit.reset()
+```
+
+Mint a second viewer key in the smoke workspace:
+
+```sh
+curl -sS -X POST http://localhost:4000/v1/api_keys \
+  -H "Authorization: Bearer $ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"role": "viewer", "name": "smoke-shared-b"}' | jq -r '.raw_key'
+# → cb_<...redacted-raw-key...>
+```
+
+Capture the raw key from the response into `$SHARED_B_KEY` (this
+is the only chance — the smoke runbook never asks you to keep
+the value beyond the test). Then split the workspace's 5 budget
+across both keys:
+
+```sh
+# 3 requests from VIEWER_KEY + 2 from SHARED_B_KEY = 5 total.
+for _ in 1 2 3; do
+  curl -sS -o /dev/null -w "%{http_code}\n" \
+    http://localhost:4000/v1/policies \
+    -H "Authorization: Bearer $VIEWER_KEY"
+done
+for _ in 1 2; do
+  curl -sS -o /dev/null -w "%{http_code}\n" \
+    http://localhost:4000/v1/policies \
+    -H "Authorization: Bearer $SHARED_B_KEY"
+done
+# all 5 → 200
+
+# 6th request from EITHER key → 429 (workspace cap).
+curl -sS -i http://localhost:4000/v1/policies \
+  -H "Authorization: Bearer $VIEWER_KEY" | head -10
+# HTTP/1.1 429 Too Many Requests
+# retry-after: <seconds>
+# {"error":{"code":"rate_limited"}}
+```
+
+Confirm the audit row:
+
+```sh
+curl -sS "http://localhost:4000/v1/audit?event_type=api_key.rate_limited" \
+  -H "Authorization: Bearer $ADMIN_KEY" \
+  | jq '.data[] | select(.after_ref.scope == "workspace") | .after_ref'
+```
+
+Look for `scope: "workspace"` and `bucket_id` matching the
+workspace UUID. **Per-key 429s and workspace 429s share the
+event type but discriminate via `after_ref.scope`** —
+operators can query either independently.
+
+Restore dev defaults:
+
+```elixir
+# In IEx
+Application.put_env(:bank, Bank.RateLimit,
+  Keyword.merge(
+    Application.get_env(:bank, Bank.RateLimit),
+    requests_per_window: 60,
+    window_seconds: 60,
+    workspace_requests_per_window: 600,
+    workspace_window_seconds: 60
+  )
+)
+
+Bank.RateLimit.reset()
+```
+
+## Step 15 — chain-action stricter cap on `/v1/security/*` (`scope: "chain_action"`)
+
+The chain-action plug applies a separate, tighter cap on the
+three security kill-switch routes (`pause`, `resume`,
+`revoke_delegation`). Default: 5 requests per 60 seconds per
+**calling key**. Pausing the runtime 5+ times in a minute is far
+above any legitimate operator pace.
+
+```elixir
+# In IEx
+Application.put_env(:bank, Bank.RateLimit,
+  Keyword.merge(
+    Application.get_env(:bank, Bank.RateLimit),
+    chain_action_per_window: 2,
+    chain_action_window_seconds: 60
+  )
+)
+
+Bank.RateLimit.reset()
+```
+
+Fire 3 pause calls — the third trips the cap:
+
+```sh
+for i in 1 2 3; do
+  curl -sS -o /dev/null -w "Request $i: %{http_code}\n" \
+    -X POST http://localhost:4000/v1/security/pause \
+    -H "Authorization: Bearer $ADMIN_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{"reason": "smoke"}'
+done
+# Request 1: 200 (or 422 if already paused)
+# Request 2: 200 (or 422 idempotent)
+# Request 3: 429
+```
+
+Confirm the chain-action audit row:
+
+```sh
+curl -sS "http://localhost:4000/v1/audit?event_type=api_key.rate_limited" \
+  -H "Authorization: Bearer $ADMIN_KEY" \
+  | jq '.data[] | select(.after_ref.scope == "chain_action") | .after_ref'
+```
+
+`scope: "chain_action"` distinguishes from `"key"` and
+`"workspace"`. Hygiene tests in
+[`test/bank_web/plugs/rate_limit/chain_action_test.exs`](../../test/bank_web/plugs/rate_limit/chain_action_test.exs)
+verify no raw secret material appears in the audit row.
+
+Non-chain admin routes (`/v1/api_keys`, `/v1/policies`) are NOT
+subject to the chain-action cap — they ride the standard per-key
++ per-workspace caps only. Verify by hammering an admin route
+during the lockout window:
+
+```sh
+for i in 1 2 3 4 5; do
+  curl -sS -o /dev/null -w "%{http_code}\n" \
+    http://localhost:4000/v1/api_keys \
+    -H "Authorization: Bearer $ADMIN_KEY"
+done
+# all 5 → 200, no 429
+```
+
+Restore dev defaults:
+
+```elixir
+# In IEx
+Application.put_env(:bank, Bank.RateLimit,
+  Keyword.merge(
+    Application.get_env(:bank, Bank.RateLimit),
+    chain_action_per_window: 5,
+    chain_action_window_seconds: 60
+  )
+)
+
+Bank.RateLimit.reset()
+```
+
+> **Threshold note:** the values quoted in Steps 11/13/14/15
+> are dev/test defaults. Production deployments may tune
+> downward via runtime config. Operators running this smoke
+> against staging should consult the deployment's config before
+> assuming the same numbers trip the limiters. Run this smoke
+> against **local or dev only** unless explicit approval has
+> been given to exercise a staging environment — the
+> `Application.put_env/3` overrides above mutate runtime config
+> and would affect every concurrent request on a shared node.
 
 ## What this smoke does NOT exercise
 
