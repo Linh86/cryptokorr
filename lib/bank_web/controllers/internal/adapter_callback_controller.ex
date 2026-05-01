@@ -105,6 +105,24 @@ defmodule BankWeb.Internal.AdapterCallbackController do
           warning: "plan_not_found"
         })
 
+      {:error, {:terminal_state, status}} ->
+        # Plan was already finalised (operator abort or earlier
+        # adapter callback) before this callback landed. Acknowledge
+        # so the adapter does not retry, but emit no audit /
+        # broadcast — the prior terminal transition is the
+        # authoritative one.
+        Logger.info(
+          "Execution callback ignored: kind=#{kind}, plan in terminal state=#{status}, params=#{inspect(safe_params(params))}"
+        )
+
+        conn
+        |> put_status(:ok)
+        |> json(%{
+          status: "accepted_with_warning",
+          kind: kind,
+          warning: "terminal_state:#{status}"
+        })
+
       {:error, reason} ->
         Logger.warning(
           "Execution callback failed: kind=#{kind}, reason=#{inspect(reason)}, params=#{inspect(safe_params(params))}"

@@ -1349,6 +1349,13 @@ defmodule Bank.Decisions do
 
   @execution_callback_kinds ~w(execution.broadcast execution.confirmed execution.reverted execution.aborted)
 
+  # Terminal `execution_status` values: rows in these states have
+  # already been finalised (either by an operator abort or by a
+  # prior adapter callback) and MUST NOT be mutated by a late /
+  # duplicate adapter callback. See `terminal_execution_status?/1`
+  # and `apply_execution_callback/1`.
+  @terminal_execution_statuses [:confirmed, :reverted, :aborted]
+
   @doc """
   Apply an `execution.*` adapter callback to the referenced plan,
   atomically updating the plan's status (and final outcome for
@@ -1400,20 +1407,29 @@ defmodule Bank.Decisions do
                | {:no_transition, atom()}
                | :not_applicable
            }}
-          | {:error, :plan_not_found | :unknown_kind | Ecto.Changeset.t()}
+          | {:error,
+             :plan_not_found
+             | :unknown_kind
+             | {:terminal_state, atom()}
+             | Ecto.Changeset.t()}
   def apply_execution_callback(%{"kind" => kind, "execution_plan_id" => plan_id} = params)
       when kind in @execution_callback_kinds and is_binary(plan_id) do
+    # Lock the row `FOR UPDATE` inside the transaction so a concurrent
+    # operator `abort_plan/3` (which locks the same row) serialises
+    # against this writer rather than racing it. After the lock is
+    # held, refuse callbacks against rows already in a terminal
+    # state — without this guard a late or duplicated
+    # `execution.confirmed` from the adapter could overwrite an
+    # operator-`:aborted` plan back to `:confirmed`. The controller
+    # converts `{:terminal_state, _}` to `200 accepted_with_warning`
+    # so the adapter does not retry.
     Repo.transaction(fn ->
-      plan =
-        Repo.get(ExecutionPlan, plan_id)
-        |> case do
-          nil -> nil
-          found -> Repo.preload(found, :intent)
-        end
-
-      case plan do
+      case lock_plan_for_callback(plan_id) do
         nil ->
           Repo.rollback(:plan_not_found)
+
+        %ExecutionPlan{execution_status: status} when status in @terminal_execution_statuses ->
+          Repo.rollback({:terminal_state, status})
 
         %ExecutionPlan{} = plan ->
           prior_status = plan.execution_status
@@ -1440,6 +1456,27 @@ defmodule Bank.Decisions do
   end
 
   def apply_execution_callback(_), do: {:error, :unknown_kind}
+
+  @doc """
+  True for `execution_status` values that have reached a terminal
+  state — `:confirmed`, `:reverted`, or `:aborted`. Centralised so
+  the callback guard, future replay tooling, and tests share a
+  single definition.
+  """
+  @spec terminal_execution_status?(atom()) :: boolean()
+  def terminal_execution_status?(status), do: status in @terminal_execution_statuses
+
+  defp lock_plan_for_callback(plan_id) do
+    query =
+      from p in ExecutionPlan,
+        where: p.id == ^plan_id,
+        lock: "FOR UPDATE"
+
+    case Repo.one(query) do
+      nil -> nil
+      plan -> Repo.preload(plan, :intent)
+    end
+  end
 
   # --- Worker dispatch claim / revert (#230 P1 race fix) -------------------
 

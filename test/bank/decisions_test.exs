@@ -924,4 +924,161 @@ defmodule Bank.DecisionsTest do
       assert reloaded.active == false
     end
   end
+
+  # --- Adapter callback cannot resurrect terminal plans (#212 P2) --------
+
+  describe "apply_execution_callback/1 terminal-state guard" do
+    alias Bank.Decisions.ExecutionPlan
+
+    setup do
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "term-#{System.unique_integer([:positive])}",
+          name: "Terminal guard"
+        })
+
+      {:ok, user} =
+        Bank.Accounts.find_or_create_from_oauth(%{
+          provider: :google,
+          subject: "term-#{System.unique_integer([:positive])}",
+          email: "term-#{System.unique_integer([:positive])}@example.com",
+          name: "Terminal Guard Operator"
+        })
+
+      Process.put(:bank_test_workspace_id, ws.id)
+      ExUnit.Callbacks.on_exit(fn -> Process.delete(:bank_test_workspace_id) end)
+
+      %{workspace: ws, actor: user}
+    end
+
+    test "execution.confirmed against an operator-aborted plan does not resurrect it",
+         %{workspace: ws, actor: user} do
+      # Operator manually aborts a :prepared plan. A late
+      # `execution.confirmed` callback from the adapter then arrives
+      # for the same plan id (e.g. the chain landed before the abort
+      # propagated). Pre-fix the callback re-acquired the row with an
+      # unlocked `Repo.get/2` and clobbered :aborted → :confirmed.
+      intent = agent_intent(state: :decided, workspace_id: ws.id)
+      envelope = decision_envelope(intent: intent)
+      plan = execution_plan(decision: envelope, workspace_id: ws.id)
+
+      assert {:ok, :aborted, aborted_plan, _} =
+               Decisions.abort_plan(plan.id, ws,
+                 reason: :operator_requested,
+                 actor: :user,
+                 actor_id: user.id
+               )
+
+      assert aborted_plan.execution_status == :aborted
+
+      assert {:error, {:terminal_state, :aborted}} =
+               Decisions.apply_execution_callback(%{
+                 "kind" => "execution.confirmed",
+                 "execution_plan_id" => plan.id,
+                 "tx_hashes" => ["0xdeadbeef"]
+               })
+
+      reloaded = Bank.Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :aborted
+      assert reloaded.final_outcome == :aborted
+      assert reloaded.final_reason == "operator_requested"
+      assert reloaded.active == false
+
+      # Intent stays :blocked (set by the abort), not :executed.
+      assert %AgentIntent{state: :blocked} = Bank.Repo.get!(AgentIntent, intent.id)
+
+      # Exactly one execution.aborted audit row from the operator
+      # path; no execution.confirmed audit emitted from the
+      # ignored callback (the controller does not call
+      # `emit_execution_side_effects` when apply_* returns an error).
+      assert "execution.aborted" |> count_audit_for(plan.id) == 1
+      assert "execution.confirmed" |> count_audit_for(plan.id) == 0
+    end
+
+    test "execution.reverted against an operator-aborted plan is rejected",
+         %{workspace: ws, actor: user} do
+      intent = agent_intent(state: :decided, workspace_id: ws.id)
+      envelope = decision_envelope(intent: intent)
+      plan = execution_plan(decision: envelope, workspace_id: ws.id)
+
+      assert {:ok, :aborted, _, _} =
+               Decisions.abort_plan(plan.id, ws, actor_id: user.id)
+
+      assert {:error, {:terminal_state, :aborted}} =
+               Decisions.apply_execution_callback(%{
+                 "kind" => "execution.reverted",
+                 "execution_plan_id" => plan.id,
+                 "reason" => "chain_revert:out_of_gas"
+               })
+
+      reloaded = Bank.Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :aborted
+      assert reloaded.final_outcome == :aborted
+      assert reloaded.active == false
+    end
+
+    test "execution.aborted against an operator-aborted plan is a no-op (no second audit)",
+         %{workspace: ws, actor: user} do
+      intent = agent_intent(state: :decided, workspace_id: ws.id)
+      envelope = decision_envelope(intent: intent)
+      plan = execution_plan(decision: envelope, workspace_id: ws.id)
+
+      assert {:ok, :aborted, _, _} =
+               Decisions.abort_plan(plan.id, ws,
+                 reason: :operator_requested,
+                 actor: :user,
+                 actor_id: user.id
+               )
+
+      assert {:error, {:terminal_state, :aborted}} =
+               Decisions.apply_execution_callback(%{
+                 "kind" => "execution.aborted",
+                 "execution_plan_id" => plan.id,
+                 "reason" => "adapter_late_abort"
+               })
+
+      reloaded = Bank.Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :aborted
+      assert reloaded.final_reason == "operator_requested"
+      assert "execution.aborted" |> count_audit_for(plan.id) == 1
+    end
+
+    test "duplicate execution.confirmed against an already-:confirmed plan is ignored" do
+      # Adapter at-least-once delivery: callbacks may be re-sent. The
+      # second delivery against a :confirmed plan must not reset
+      # `final_reason` or trigger a second intent transition.
+      intent = agent_intent(state: :executing)
+      envelope = decision_envelope(intent: intent)
+
+      plan =
+        execution_plan(
+          decision: envelope,
+          execution_status: :confirmed,
+          final_outcome: :confirmed,
+          active: false
+        )
+
+      assert {:error, {:terminal_state, :confirmed}} =
+               Decisions.apply_execution_callback(%{
+                 "kind" => "execution.confirmed",
+                 "execution_plan_id" => plan.id,
+                 "tx_hashes" => ["0xduplicate"]
+               })
+
+      reloaded = Bank.Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :confirmed
+      assert reloaded.final_outcome == :confirmed
+    end
+
+    test "terminal_execution_status?/1 classifies the three terminal states" do
+      for status <- [:confirmed, :reverted, :aborted] do
+        assert Decisions.terminal_execution_status?(status), "expected #{status} to be terminal"
+      end
+
+      for status <- [:prepared, :signing, :broadcasting, :pending_confirmation] do
+        refute Decisions.terminal_execution_status?(status),
+               "expected #{status} to be non-terminal"
+      end
+    end
+  end
 end
