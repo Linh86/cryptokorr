@@ -126,4 +126,6 @@ config :bank, Bank.RateLimit,
   workspace_window_seconds: 60,
   auth_failure_per_window: 10_000,
   auth_failure_window_seconds: 300,
-  auth_failure_enabled?: true
+  auth_failure_enabled?: true,
+  chain_action_per_window: 10_000,
+  chain_action_window_seconds: 60

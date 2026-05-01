@@ -123,7 +123,15 @@ config :bank, Bank.RateLimit,
   workspace_window_seconds: 60,
   auth_failure_per_window: 10,
   auth_failure_window_seconds: 300,
-  auth_failure_enabled?: true
+  auth_failure_enabled?: true,
+  # Chain-action stricter cap (#221, fourth slice). Applies ONLY to
+  # `/v1/security/*` (pause / resume / revoke_delegation). Default
+  # ceiling: 5 requests / 60 s per calling key. Pausing the runtime
+  # 5 times in a minute is far above any legitimate operator pace
+  # and well below the rate a runaway agent could trip. Tune up for
+  # incident-response drills or down for hardened deployments.
+  chain_action_per_window: 5,
+  chain_action_window_seconds: 60
 
 # Bank.AdapterClient: connection to the TypeScript chain adapter is
 # configured per-environment. dev/test set local defaults below;

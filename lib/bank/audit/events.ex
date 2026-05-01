@@ -1083,7 +1083,7 @@ defmodule Bank.Audit.Events do
   service-account-style traffic, even though it ultimately maps
   back to a human via `created_by_user_id`.
 
-  ## Scope discriminator (#221, third slice)
+  ## Scope discriminator (#221, third + fourth slices)
 
   The `:scope` opt picks which limiter fired:
 
@@ -1092,8 +1092,14 @@ defmodule Bank.Audit.Events do
       key is the workspace id; `after_ref.bucket_id` carries it
       explicitly so operators can query by workspace without
       reconstructing it.
+    * `:chain_action` — the stricter chain-action bucket from
+      #221's fourth slice. Applies ONLY to `/v1/security/*`
+      (pause / resume / revoke_delegation). Bucket key is the
+      calling api_key.id; the lower threshold reflects that a
+      legitimate operator does not pause the runtime 5+ times
+      per minute.
 
-  Same event_type and subject_id (the calling key) in both cases
+  Same event_type and subject_id (the calling key) in all cases
   — minimal schema surface, single query for "all rate-limit
   events". The discriminator lives in `after_ref.scope` so SDK
   consumers and replay tools can filter without inventing a new
@@ -1135,12 +1141,13 @@ defmodule Bank.Audit.Events do
       when is_integer(window_start_unix) and is_integer(window_end_unix) and
              is_integer(limit) and is_integer(retry_after) and is_list(opts) do
     scope = Keyword.get(opts, :scope, :key)
-    true = scope in [:key, :workspace]
+    true = scope in [:key, :workspace, :chain_action]
 
     bucket_id =
       case scope do
         :key -> api_key.id
         :workspace -> api_key.workspace_id
+        :chain_action -> api_key.id
       end
 
     %{
