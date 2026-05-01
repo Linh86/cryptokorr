@@ -15,11 +15,15 @@ defmodule BankWeb.API.V1.ConnectControllerTest do
   setup :setup_api_key_admin
   use Oban.Testing, repo: Bank.Repo
 
+  alias Bank.APIKeys
   alias Bank.Audit.AuditEvent
   alias Bank.Repo
   alias Bank.Runtime.Workers.GrantDelegation
+  alias Bank.Workspaces.Workspace
+  alias BankWeb.API.V1.ConnectController
 
   import Ecto.Query
+  import Plug.Conn, only: [assign: 3]
 
   describe "POST /v1/connect/smart_account" do
     test "accepts a valid payload, audits, and enqueues the grant worker", %{conn: conn} do
@@ -96,6 +100,74 @@ defmodule BankWeb.API.V1.ConnectControllerTest do
       body = json_response(conn, 422)
       assert body["error"]["code"] == "invalid_body"
       assert body["error"]["message"] =~ "chain_id"
+    end
+
+    # --- #231-d block-new-grants gate -----------------------------------
+
+    test "BLOCKED — paused workspace returns 422 workspace_paused via the in-flight race",
+         %{workspace: %Workspace{} = ws, current_user: user} do
+      # The auth pipeline rejects API keys for paused workspaces with
+      # 401, so a pure-HTTP test for THIS controller-level gate is
+      # structurally unreachable: VerifyAPIKey's preload sees the
+      # paused state and short-circuits before the controller runs.
+      # The gate exists for the narrow race where auth's preload
+      # happened BEFORE the pause landed but the controller runs AFTER.
+      # We synthesize that race here by directly invoking the
+      # controller with an unpaused stale `current_scope.workspace`
+      # while the DB row is paused — pins the freshness reload.
+      {:ok, :paused, _} = APIKeys.pause_workspace(ws, user, reason: "block-new-grants test")
+
+      stale_unpaused = %{ws | agent_keys_paused_at: nil, agent_keys_paused_reason: nil}
+
+      conn =
+        build_conn()
+        |> assign(:current_scope, %{workspace: stale_unpaused})
+        |> ConnectController.request(%{
+          "smart_account_id" => "sa_blocked",
+          "account" => "0xabc000000000000000000000000000000000dead",
+          "chain_id" => 84_532
+        })
+
+      body = json_response(conn, 422)
+      assert body["error"]["code"] == "workspace_paused"
+      assert body["error"]["message"] =~ "agent keys are paused"
+
+      # No `delegation.connect_requested` audit row emitted — the gate
+      # runs before `Delegations.request_connect/1`.
+      audit_rows =
+        Repo.all(
+          from e in AuditEvent,
+            where:
+              e.event_type == "delegation.connect_requested" and
+                e.subject_id == "sa_blocked"
+        )
+
+      assert audit_rows == []
+
+      # No GrantDelegation worker enqueued either.
+      refute_enqueued(worker: GrantDelegation, args: %{"smart_account_id" => "sa_blocked"})
+    end
+
+    test "fresh-load gate is load-bearing: paused state in DB blocks even an unpaused scope",
+         %{workspace: %Workspace{} = ws, current_user: user} do
+      # Tighter version of the previous test: the synthesized scope is
+      # explicitly unpaused, but the DB row is paused. Without the
+      # `Repo.get(Workspace, ws_id)` reload inside `request/2`, this
+      # request would proceed.
+      {:ok, :paused, _} = APIKeys.pause_workspace(ws, user, reason: "freshness pin")
+
+      stale = %{ws | agent_keys_paused_at: nil}
+
+      conn =
+        build_conn()
+        |> assign(:current_scope, %{workspace: stale})
+        |> ConnectController.request(%{
+          "smart_account_id" => "sa_freshness",
+          "account" => "0xabc000000000000000000000000000000000dead",
+          "chain_id" => 84_532
+        })
+
+      assert json_response(conn, 422)["error"]["code"] == "workspace_paused"
     end
 
     test "accepts a re-connect after a prior grant_failed callback", %{conn: conn} do
