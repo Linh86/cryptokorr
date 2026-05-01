@@ -219,4 +219,126 @@ defmodule BankWeb.SecurityLiveTest do
       assert html =~ "bg-primary/10 text-primary"
     end
   end
+
+  # --- Agent-key pause panel (#231-c) -------------------------------------
+
+  describe "agent-keys pause panel" do
+    alias Bank.APIKeys
+
+    test "admin sees pause panel + pause form when unpaused, no resume button",
+         %{conn: conn} do
+      {:ok, view, html} = live(conn, "/security")
+
+      assert html =~ ~s(id="agent-keys-pause-panel")
+      assert html =~ ~s(id="agent-keys-pause-form")
+      assert has_element?(view, "#agent-keys-pause-submit")
+      refute has_element?(view, "#agent-keys-resume")
+      refute has_element?(view, "#agent-keys-paused-badge")
+    end
+
+    test "admin pauses with reason → flash + paused panel renders",
+         %{conn: conn, current_user: user, workspace: ws} do
+      {:ok, view, _html} = live(conn, "/security")
+
+      html =
+        view
+        |> form("#agent-keys-pause-form", %{"reason" => "credential leak smoke"})
+        |> render_submit()
+
+      assert html =~ "Agent keys paused"
+      assert has_element?(view, "#agent-keys-paused-badge")
+      assert has_element?(view, "#agent-keys-paused-since")
+      assert has_element?(view, "#agent-keys-paused-reason")
+      assert html =~ "credential leak smoke"
+      assert html =~ user.email
+
+      reloaded = Bank.Repo.get!(Bank.Workspaces.Workspace, ws.id)
+      assert %DateTime{} = reloaded.agent_keys_paused_at
+      assert reloaded.agent_keys_paused_reason == "credential leak smoke"
+      assert reloaded.agent_keys_paused_by_user_id == user.id
+    end
+
+    test "admin clicks resume → panel returns to unpaused render",
+         %{conn: conn, current_user: user, workspace: ws} do
+      # Seed a paused workspace so resume is the first action.
+      {:ok, :paused, _} = APIKeys.pause_workspace(ws, user, reason: "seed")
+
+      {:ok, view, html} = live(conn, "/security")
+      assert html =~ ~s(id="agent-keys-resume")
+
+      after_resume =
+        view |> element("#agent-keys-resume") |> render_click()
+
+      assert after_resume =~ "Agent keys resumed"
+      refute has_element?(view, "#agent-keys-paused-badge")
+      refute has_element?(view, "#agent-keys-resume")
+
+      reloaded = Bank.Repo.get!(Bank.Workspaces.Workspace, ws.id)
+      assert is_nil(reloaded.agent_keys_paused_at)
+    end
+
+    test "operator-tier user sees the panel read-only (no pause form, no resume)" do
+      # Build a fresh operator-tier conn (override the file-level
+      # admin setup) and confirm read-only render.
+      {:ok, op_ctx} = register_and_log_in_user_with_role(%{conn: build_conn()}, :operator)
+      {:ok, view, html} = live(op_ctx[:conn], "/security")
+
+      assert html =~ ~s(id="agent-keys-pause-panel")
+      refute has_element?(view, "#agent-keys-pause-form")
+      refute has_element?(view, "#agent-keys-pause-submit")
+      refute has_element?(view, "#agent-keys-resume")
+    end
+
+    test "hostile pause from operator-tier socket is refused with flash, DB unchanged" do
+      {:ok, op_ctx} = register_and_log_in_user_with_role(%{conn: build_conn()}, :operator)
+      ws_id = op_ctx[:workspace].id
+
+      {:ok, view, _html} = live(op_ctx[:conn], "/security")
+
+      # Bypass the form by firing the event directly.
+      html = render_click(view, "pause_agent_keys", %{"reason" => "hostile"})
+      assert html =~ "Admin role required"
+
+      reloaded = Bank.Repo.get!(Bank.Workspaces.Workspace, ws_id)
+      assert is_nil(reloaded.agent_keys_paused_at)
+    end
+
+    test "paused state survives re-mount (loaded from DB)",
+         %{conn: conn, current_user: user, workspace: ws} do
+      {:ok, :paused, _} = APIKeys.pause_workspace(ws, user, reason: "persist test")
+
+      {:ok, _view, html} = live(conn, "/security")
+      assert html =~ ~s(id="agent-keys-paused-badge")
+      assert html =~ "persist test"
+    end
+
+    test "cross-workspace isolation: pausing A leaves B unpaused in B's panel" do
+      # Set up TWO workspaces and confirm B's panel is unaffected.
+      {:ok, ctx_a} = register_and_log_in_user_with_role(%{conn: build_conn()}, :admin)
+      {:ok, ctx_b} = register_and_log_in_user_with_role(%{conn: build_conn()}, :admin)
+
+      {:ok, :paused, _} =
+        APIKeys.pause_workspace(ctx_a[:workspace], ctx_a[:current_user], reason: "ws-a only")
+
+      {:ok, view_b, html_b} = live(ctx_b[:conn], "/security")
+
+      refute html_b =~ ~s(id="agent-keys-paused-badge")
+      refute html_b =~ "ws-a only"
+      assert has_element?(view_b, "#agent-keys-pause-form")
+    end
+
+    test "rendered HTML never contains api-key prefix / secret_hash / Bearer",
+         %{conn: conn, current_user: user, workspace: ws} do
+      # Mint a key so the workspace has something to leak, then pause.
+      {:ok, key, raw} = APIKeys.create_key(ws, user, :viewer, "leak-canary")
+      {:ok, :paused, _} = APIKeys.pause_workspace(ws, user, reason: "incident")
+
+      {:ok, _view, html} = live(conn, "/security")
+
+      refute html =~ raw, "raw bearer must NOT appear in security console"
+      refute html =~ key.prefix, "api-key prefix must NOT appear in security console"
+      refute html =~ "secret_hash"
+      refute html =~ "Bearer "
+    end
+  end
 end
