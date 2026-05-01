@@ -173,32 +173,40 @@ defmodule Bank.APIKeys do
   """
   @spec pause_workspace(Workspace.t(), Bank.Accounts.User.t(), keyword()) ::
           {:ok, :paused | :already_paused, Workspace.t()} | {:error, term()}
-  def pause_workspace(%Workspace{} = workspace, %Bank.Accounts.User{} = actor, opts \\ []) do
-    if Workspace.agent_keys_paused?(workspace) do
-      {:ok, :already_paused, workspace}
-    else
-      reason = Keyword.get(opts, :reason)
-      now = DateTime.utc_now()
+  def pause_workspace(%Workspace{id: id}, %Bank.Accounts.User{} = actor, opts \\ []) do
+    # The idempotency check runs INSIDE the transaction against a
+    # `FOR UPDATE`-locked row, NOT against the caller's in-memory
+    # `%Workspace{}`. A stale struct (e.g. a LiveView that hasn't
+    # re-fetched, or a long-lived API connection that paused once
+    # already) would otherwise overwrite the existing pause
+    # metadata and emit a second `agent_keys.paused` event.
+    Repo.transaction(fn ->
+      locked = Repo.get!(Workspace, id, lock: "FOR UPDATE")
 
-      attrs = %{
-        agent_keys_paused_at: now,
-        agent_keys_paused_reason: reason,
-        agent_keys_paused_by_user_id: actor.id
-      }
+      if Workspace.agent_keys_paused?(locked) do
+        {:already_paused, locked}
+      else
+        reason = Keyword.get(opts, :reason)
+        now = DateTime.utc_now()
 
-      Repo.transaction(fn ->
-        with {:ok, paused} <- workspace |> Workspace.pause_changeset(attrs) |> Repo.update(),
+        attrs = %{
+          agent_keys_paused_at: now,
+          agent_keys_paused_reason: reason,
+          agent_keys_paused_by_user_id: actor.id
+        }
+
+        with {:ok, paused} <- locked |> Workspace.pause_changeset(attrs) |> Repo.update(),
              {:ok, _event} <-
                Audit.append_event(Bank.Audit.Events.agent_keys_paused(paused, actor: actor)) do
           {:paused, paused}
         else
           {:error, reason} -> Repo.rollback(reason)
         end
-      end)
-      |> case do
-        {:ok, {result, paused}} -> {:ok, result, paused}
-        {:error, reason} -> {:error, reason}
       end
+    end)
+    |> case do
+      {:ok, {result, ws}} -> {:ok, result, ws}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -215,21 +223,28 @@ defmodule Bank.APIKeys do
   """
   @spec resume_workspace(Workspace.t(), Bank.Accounts.User.t(), keyword()) ::
           {:ok, :resumed | :already_unpaused, Workspace.t()} | {:error, term()}
-  def resume_workspace(%Workspace{} = workspace, %Bank.Accounts.User{} = actor, _opts \\ []) do
-    if Workspace.agent_keys_paused?(workspace) do
-      prior = %{
-        paused_at: workspace.agent_keys_paused_at,
-        paused_by_user_id: workspace.agent_keys_paused_by_user_id
-      }
+  def resume_workspace(%Workspace{id: id}, %Bank.Accounts.User{} = actor, _opts \\ []) do
+    # Same idempotency contract as `pause_workspace/3`: decision
+    # runs against a `FOR UPDATE`-locked row inside the transaction,
+    # not the caller's in-memory struct. A stale paused struct
+    # would otherwise emit a second `agent_keys.resumed` event when
+    # the underlying row has already been resumed.
+    Repo.transaction(fn ->
+      locked = Repo.get!(Workspace, id, lock: "FOR UPDATE")
 
-      attrs = %{
-        agent_keys_paused_at: nil,
-        agent_keys_paused_reason: nil,
-        agent_keys_paused_by_user_id: nil
-      }
+      if Workspace.agent_keys_paused?(locked) do
+        prior = %{
+          paused_at: locked.agent_keys_paused_at,
+          paused_by_user_id: locked.agent_keys_paused_by_user_id
+        }
 
-      Repo.transaction(fn ->
-        with {:ok, resumed} <- workspace |> Workspace.pause_changeset(attrs) |> Repo.update(),
+        attrs = %{
+          agent_keys_paused_at: nil,
+          agent_keys_paused_reason: nil,
+          agent_keys_paused_by_user_id: nil
+        }
+
+        with {:ok, resumed} <- locked |> Workspace.pause_changeset(attrs) |> Repo.update(),
              {:ok, _event} <-
                Audit.append_event(
                  Bank.Audit.Events.agent_keys_resumed(resumed, prior, actor: actor)
@@ -238,13 +253,13 @@ defmodule Bank.APIKeys do
         else
           {:error, reason} -> Repo.rollback(reason)
         end
-      end)
-      |> case do
-        {:ok, {result, resumed}} -> {:ok, result, resumed}
-        {:error, reason} -> {:error, reason}
+      else
+        {:already_unpaused, locked}
       end
-    else
-      {:ok, :already_unpaused, workspace}
+    end)
+    |> case do
+      {:ok, {result, ws}} -> {:ok, result, ws}
+      {:error, reason} -> {:error, reason}
     end
   end
 

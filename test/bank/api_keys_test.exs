@@ -771,6 +771,56 @@ defmodule Bank.APIKeysTest do
       refute json =~ "secret_hash"
       refute json =~ "Bearer "
     end
+
+    test "stale unpaused struct after first pause does NOT overwrite or re-emit",
+         %{workspace: ws, user: user} do
+      # `ws` is the original (unpaused) struct. First call pauses
+      # it via `ws`. The struct in the test scope still reads as
+      # unpaused. A second call with the same stale `ws` MUST
+      # reload+lock the row inside the transaction, see the
+      # paused state, and short-circuit without overwriting the
+      # original reason / actor or emitting a duplicate event.
+      {:ok, :paused, paused} = APIKeys.pause_workspace(ws, user, reason: "first")
+
+      # `ws` is still unpaused in memory.
+      refute Bank.Workspaces.Workspace.agent_keys_paused?(ws)
+
+      assert {:ok, :already_paused, locked} =
+               APIKeys.pause_workspace(ws, user, reason: "second-different")
+
+      # The locked row carries the FIRST pause's metadata, not
+      # the second call's "second-different" reason.
+      assert locked.agent_keys_paused_at == paused.agent_keys_paused_at
+      assert locked.agent_keys_paused_reason == "first"
+      assert locked.agent_keys_paused_by_user_id == user.id
+
+      # Exactly ONE audit row.
+      %{events: events} = Audit.list_events(%{event_type: "agent_keys.paused"})
+      ws_events = Enum.filter(events, &(&1.workspace_id == ws.id))
+      assert length(ws_events) == 1
+      [event] = ws_events
+      assert event.after_ref["reason"] == "first"
+    end
+
+    test "stale paused struct after first resume does NOT re-emit",
+         %{workspace: ws, user: user} do
+      # Pause then resume; `paused` is now stale (reads as paused
+      # in memory but the underlying row has been resumed).
+      {:ok, :paused, paused} = APIKeys.pause_workspace(ws, user)
+      assert {:ok, :resumed, _} = APIKeys.resume_workspace(paused, user)
+
+      # `paused` still reads as paused in memory.
+      assert Bank.Workspaces.Workspace.agent_keys_paused?(paused)
+
+      assert {:ok, :already_unpaused, locked} = APIKeys.resume_workspace(paused, user)
+
+      refute Bank.Workspaces.Workspace.agent_keys_paused?(locked)
+
+      # Exactly ONE resumed audit row.
+      %{events: events} = Audit.list_events(%{event_type: "agent_keys.resumed"})
+      ws_events = Enum.filter(events, &(&1.workspace_id == ws.id))
+      assert length(ws_events) == 1
+    end
   end
 
   # --- verify_key with workspace pause (#231-a) ---------------------------
