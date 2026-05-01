@@ -517,6 +517,84 @@ defmodule BankWeb.DashboardLiveTest do
     end
   end
 
+  # --- Stat-card click-through (#229 follow-up) ----------------------------
+  #
+  # Zero-count behavior decision: the link is rendered regardless of count
+  # so the affordance stays consistent. The destination page renders an
+  # empty section at zero, so the click is harmless and lets operators
+  # confirm the count by inspecting the queue page directly.
+
+  describe "stat card click-through" do
+    test "pending-approvals-card links to /queue#pending-approvals-section (count > 0)",
+         %{conn: conn} do
+      intent = agent_intent()
+
+      _envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      {:ok, view, _html} = live(conn, "/dashboard")
+
+      assert has_element?(view, "#pending-approvals-card")
+
+      assert has_element?(
+               view,
+               ~s|#pending-approvals-card a[href="/queue#pending-approvals-section"]|
+             )
+    end
+
+    test "pending-approvals-card stays linked at zero count", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/dashboard")
+
+      assert has_element?(view, "#pending-approvals-card")
+
+      assert has_element?(
+               view,
+               ~s|#pending-approvals-card a[href="/queue#pending-approvals-section"]|
+             )
+    end
+
+    test "active-executions-card links to /queue#active-executions-section (count > 0)",
+         %{conn: conn, workspace: ws} do
+      _plan = execution_plan(execution_status: :prepared, workspace_id: ws.id)
+
+      {:ok, view, _html} = live(conn, "/dashboard")
+
+      assert has_element?(view, "#active-executions-card")
+
+      assert has_element?(
+               view,
+               ~s|#active-executions-card a[href="/queue#active-executions-section"]|
+             )
+    end
+
+    test "active-executions-card stays linked at zero count", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/dashboard")
+
+      assert has_element?(view, "#active-executions-card")
+
+      assert has_element?(
+               view,
+               ~s|#active-executions-card a[href="/queue#active-executions-section"]|
+             )
+    end
+
+    test "non-linked cards (runtime, delegation) render without an inner link",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/dashboard")
+
+      assert has_element?(view, "#runtime-status-card")
+      assert has_element?(view, "#delegation-status-card")
+
+      refute has_element?(view, ~s|#runtime-status-card a[href]|)
+      refute has_element?(view, ~s|#delegation-status-card a[href]|)
+    end
+  end
+
   # --- Layouts.app current_scope (admin nav visibility, mirrors #308) ------
 
   describe "layout current_scope wiring" do
