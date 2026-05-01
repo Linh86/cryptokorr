@@ -81,6 +81,56 @@ returns 503 with `adapter: error`.
 **Signal**: `bank.ops.health.stuck_plans > 0` for 5+ min, or partner
 reports a transfer hanging.
 
+### Detection sources
+
+Two independent signals fire on stuck plans:
+
+- **Telemetry gauge `bank.ops.health.stuck_plans`** — a single
+  workspace-agnostic count emitted on the readiness deep-check
+  poller. Surfaces in `/v1/health/deep` and your metrics backend.
+- **Audit event `ops.stuck_plan_detected`** — emitted per stuck plan
+  by `Bank.Runtime.Workers.ScanStuckPlans` (#230-b). The cron fires
+  every 2 minutes; per-plan emissions are deduped on a 5-minute
+  aligned `window_start` so a single legitimately-stuck plan
+  generates one alert per 5 min, not every tick. Per-status
+  thresholds (in seconds, tunable via
+  `config :bank, Bank.Ops.Health, stuck_plan_thresholds: [...]`):
+
+  | status                    | default threshold |
+  | ------------------------- | ----------------- |
+  | `:prepared`               | 600 (10 min)      |
+  | `:signing`                | 300 (5 min)       |
+  | `:broadcasting`           | 600 (10 min)      |
+  | `:pending_confirmation`   | 1800 (30 min)     |
+
+  Audit `after_ref` carries `execution_status`, `stuck_for_seconds`,
+  `threshold_seconds`, `window_start`. `subject_type` is
+  `execution_plan`; `subject_id` is the plan UUID;
+  `correlation_id` is the parent intent.
+
+### Audit grep recipe
+
+```sh
+# All currently-active detector signals across the workspace.
+curl -sS "http://localhost:4000/v1/audit?event_type=ops.stuck_plan_detected" \
+  -H "Authorization: Bearer cb_<…redacted…>" \
+  | jq '.data[] | {plan: .subject_id, after: .after_ref}'
+```
+
+Pivot from a flagged plan to the manual-abort audit row by
+`subject_id`:
+
+```sh
+curl -sS "http://localhost:4000/v1/audit?event_type=execution.aborted&subject_id=<plan-uuid>" \
+  -H "Authorization: Bearer cb_<…redacted…>" | jq '.data[0]'
+```
+
+The `execution.aborted` row's `after_ref.final_reason` echoes the
+operator-supplied reason; `actor` distinguishes a runtime-emitted
+abort (`:runtime`, e.g. `RunExecution`'s pause/delegation guards)
+from an operator-emitted one (`:user`, the manual abort path
+below).
+
 ### Immediate actions
 
 1. List stuck plans:
@@ -166,13 +216,29 @@ reports a transfer hanging.
   Same workspace boundary, same `FOR UPDATE` row lock, same audit
   emission as the HTTP path — just no role gate (you're already in
   IEx) and no rate cap.
-- After the abort, advise the partner to re-submit the intent. The
-  superseded plan stays `active: true` per repo convention; the
-  terminal state guard is the source of truth, not the boolean
-  flag.
-- The `ConfirmExecution` safety-net poller ages stuck plans out to
-  `:aborted` after its own timeout; let it run unless the backlog is
-  large.
+- After the abort, advise the partner to re-submit the intent.
+  The aborted plan flips to `active: false` so the partial unique
+  index `execution_plans_decision_active_idx (WHERE active)`
+  releases the slot — `request_manual_execution/3` for the same
+  decision can land a fresh `:prepared, active: true` plan.
+- Two safety nets cover the residual long tail:
+  `Bank.Runtime.Workers.ScanStuckPlans` (#230-b) re-emits
+  `ops.stuck_plan_detected` audit rows so the operator keeps
+  seeing flags until the row leaves a non-terminal status; the
+  legacy `ConfirmExecution` poller ages stuck plans out to
+  `:aborted` after its own timeout. Let both run unless the
+  backlog is large.
+
+### Bulk-abort rate-limit caveat
+
+The HTTP path is gated by the `:api_chain_action` rate limit
+(default 5 req / 60 s per calling key, see
+`config :bank, Bank.RateLimit, chain_action_per_window: 5`).
+If a single incident produces more than 5 stuck plans in one
+detection window (e.g., adapter cascade), the 6th `curl` returns
+`429 rate_limited`. Drop to the IEx fallback above — same
+workspace boundary, same `FOR UPDATE` row lock, same audit
+emission, no rate cap.
 
 ---
 
