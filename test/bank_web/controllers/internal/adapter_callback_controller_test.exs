@@ -482,6 +482,52 @@ defmodule BankWeb.Internal.AdapterCallbackControllerTest do
       assert body["status"] == "accepted_with_warning"
       assert body["warning"] == "plan_not_found"
     end
+
+    test "callback against a terminal-state plan returns accepted_with_warning, no audit emitted",
+         %{conn: conn} do
+      # Pin the wire shape for the #212 P2 fix: a stale or duplicate
+      # adapter callback against an already-finalised plan must
+      # acknowledge with `terminal_state:<status>` so the adapter
+      # does not retry, and must not emit a spurious
+      # execution.* audit row.
+      %{plan: plan} = in_flight_plan(:confirmed)
+
+      Repo.update_all(
+        from(p in ExecutionPlan, where: p.id == ^plan.id),
+        set: [final_outcome: :confirmed, active: false]
+      )
+
+      conn =
+        post(conn, "/internal/adapter/callback", %{
+          "contract_version" => 1,
+          "kind" => "execution.confirmed",
+          "execution_plan_id" => plan.id,
+          "tx_hashes" => ["0xduplicate"]
+        })
+
+      body = json_response(conn, 200)
+      assert body["status"] == "accepted_with_warning"
+      assert body["kind"] == "execution.confirmed"
+      assert body["warning"] == "terminal_state:confirmed"
+
+      # Plan untouched.
+      reloaded = Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :confirmed
+      assert reloaded.final_outcome == :confirmed
+
+      # No execution.* audit row was emitted by the callback path.
+      audit_count =
+        Repo.aggregate(
+          from(e in AuditEvent,
+            where:
+              e.subject_id == ^plan.id and
+                e.event_type in ["execution.confirmed", "execution.reverted", "execution.aborted"]
+          ),
+          :count
+        )
+
+      assert audit_count == 0
+    end
   end
 
   describe "POST /internal/adapter/callback — validation" do
