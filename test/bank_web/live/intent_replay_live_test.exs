@@ -27,6 +27,39 @@ defmodule BankWeb.IntentReplayLiveTest do
       assert %{"error" => message} = flash
       assert message =~ "not found"
     end
+
+    test "treats a sibling workspace's intent id as not_found", %{conn: conn} do
+      # Logged-in user belongs to workspace A (per
+      # `register_and_log_in_user`). Create a sibling workspace B
+      # and an intent that lives only in B. Mounting
+      # `/audit/replay/<intent_b_id>` must NOT render B's bundle —
+      # `Audit.replay/1` itself does an unscoped `Repo.get` so the
+      # LiveView has to gate via `Intents.get_in_workspace/2` first.
+      {:ok, ws_b} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "iso-replay-b-#{System.unique_integer([:positive])}",
+          name: "Replay sibling"
+        })
+
+      cp_b = counterparty(workspace_id: ws_b.id)
+
+      intent_b =
+        agent_intent(workspace_id: ws_b.id, target_counterparty_id: cp_b.id)
+
+      assert {:error, {:live_redirect, %{to: "/audit", flash: flash}}} =
+               live(conn, "/audit/replay/#{intent_b.id}")
+
+      assert %{"error" => message} = flash
+      assert message =~ "not found"
+    end
+
+    test "redirects when intent_id is not a uuid", %{conn: conn} do
+      assert {:error, {:live_redirect, %{to: "/audit", flash: flash}}} =
+               live(conn, "/audit/replay/not-a-uuid")
+
+      assert %{"error" => message} = flash
+      assert message =~ "not found"
+    end
   end
 
   describe "intent with no children" do

@@ -21,6 +21,8 @@ defmodule BankWeb.DashboardLive do
   alias Bank.Decisions
   alias Bank.Delegations
   alias Bank.Security
+  alias Bank.Workspaces
+  alias Bank.Workspaces.Workspace
 
   @impl true
   def mount(_params, _session, socket) do
@@ -67,6 +69,16 @@ defmodule BankWeb.DashboardLive do
     workspace_id = socket.assigns.current_scope.workspace.id
     scope_opts = [workspace_id: workspace_id]
 
+    # Re-fetch the workspace fresh so that an `agent_keys.paused`
+    # event from another tab is reflected on the next PubSub tick;
+    # `current_scope.workspace` is mount-time only. Mirrors the
+    # SecurityLive pattern.
+    workspace =
+      Workspaces.get_workspace(workspace_id) ||
+        socket.assigns.current_scope.workspace
+
+    agent_keys_paused? = Workspace.agent_keys_paused?(workspace)
+
     delegations = Delegations.list_active(scope_opts)
     paused? = Security.paused?(:global)
 
@@ -96,6 +108,7 @@ defmodule BankWeb.DashboardLive do
     attention_items =
       build_attention_items(
         paused?,
+        agent_keys_paused?,
         delegations,
         pending_approvals,
         active_executions,
@@ -104,6 +117,7 @@ defmodule BankWeb.DashboardLive do
 
     socket
     |> assign(:paused, paused?)
+    |> assign(:agent_keys_paused, agent_keys_paused?)
     |> assign(:delegations, delegations)
     |> assign(:executable_count, executable_count)
     |> assign(:execution_ready, execution_ready?)
@@ -116,6 +130,7 @@ defmodule BankWeb.DashboardLive do
 
   defp build_attention_items(
          paused?,
+         agent_keys_paused?,
          delegations,
          pending_approvals,
          active_executions,
@@ -127,6 +142,23 @@ defmodule BankWeb.DashboardLive do
       if paused?,
         do: [
           %{severity: :warning, text: "Runtime is paused — no new executions will proceed"}
+          | items
+        ],
+        else: items
+
+    # Workspace-level kill-switch (#229 dashboard surfacing). Distinct
+    # from runtime pause: workspace agent-key pause refuses /v1 traffic
+    # for this workspace's API keys only. Linked to the destination
+    # card that owns the resume action.
+    items =
+      if agent_keys_paused?,
+        do: [
+          %{
+            id: "attention-agent-keys-paused",
+            severity: :warning,
+            text: "Workspace API keys paused — all /v1 traffic is refused",
+            link: "/security#agent-keys-pause-panel"
+          }
           | items
         ],
         else: items
