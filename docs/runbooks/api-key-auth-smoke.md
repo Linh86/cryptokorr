@@ -917,10 +917,13 @@ come from one of:
    ```elixir
    # In IEx
    ws = Bank.Repo.get!(Bank.Workspaces.Workspace, "<workspace-uuid>")
-   {:ok, _resumed} = Bank.Workspaces.create_membership(...)  # if needed
    actor = Bank.Accounts.get_user("<admin-user-uuid>")
    {:ok, :resumed, _} = Bank.APIKeys.resume_workspace(ws, actor)
    ```
+
+   No membership re-creation is required — `resume_workspace/2`
+   only flips the workspace's `agent_keys_paused_at` back to `nil`
+   (and audits the resume).
 
 After resume, retry the previously-failing key:
 
@@ -944,6 +947,78 @@ prior pause snapshot for replay. Hygiene tests in
 JSON-scan the events for raw bearer / API-key prefix /
 `secret_hash` / `Bearer ` substrings.
 
+## Step 16b — block-new-grants while paused (#231-d)
+
+The connect endpoint refuses **new** delegation grants while the
+workspace's agent keys are paused. Re-pause the workspace from
+Step 16 and try to start a connect:
+
+```sh
+# Workspace still paused from Step 16. Same admin key as Step 0.
+curl -sS -i http://localhost:4000/v1/connect/smart_account \
+  -H "Authorization: Bearer $ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"smart_account_id":"sa_smoke_grant",
+       "account":"0xabc000000000000000000000000000000000dead",
+       "chain_id":84532}' \
+  | head -5
+# HTTP/1.1 401 Unauthorized
+# {"error":{"code":"invalid_credentials"}}
+```
+
+The visible response is `401 invalid_credentials` from
+`VerifyAPIKey` — every paused workspace's keys lose `/v1` access at
+the auth boundary, so the request never reaches
+`ConnectController`. **No** `delegation.connect_requested` audit
+row is written and **no** `Bank.Runtime.Workers.GrantDelegation`
+job is enqueued. Confirm the latter by querying Oban directly (in
+IEx):
+
+```elixir
+import Ecto.Query
+Bank.Repo.aggregate(
+  from(j in Oban.Job,
+    where: j.worker == "Bank.Runtime.Workers.GrantDelegation"),
+  :count
+)
+# Should be unchanged from before the curl call.
+```
+
+There is a second, narrower defense in
+[`lib/bank_web/controllers/api/v1/connect_controller.ex:128-142`](../../lib/bank_web/controllers/api/v1/connect_controller.ex):
+the controller reloads the workspace from the DB and returns
+`422 workspace_paused` if a pause raced in between auth's preload
+and the controller. That 422 is **not directly observable via
+curl** — by the time auth would have admitted the request, the
+gate has already returned 401. The 422 path is exercised by
+direct-controller tests in
+[`test/bank_web/controllers/api/v1/connect_controller_test.exs`](../../test/bank_web/controllers/api/v1/connect_controller_test.exs)
+to pin the freshness reload. Operators should not expect to see
+the 422 in normal smoke output; the contract is "401 wins, 422
+exists as a backstop."
+
+## Step 16c — `/security` console reflects #231-e
+
+While still paused, load `/security` in a browser
+(Google-OAuth-authenticated admin session — NOT routed through
+`VerifyAPIKey`):
+
+1. **Agent keys card** shows the `Paused` badge and the reason
+   from Step 16.
+2. **Active delegation risk summary card**
+   (`#risk-summary-card`, see
+   [`lib/bank_web/live/security_live.ex`](../../lib/bank_web/live/security_live.ex))
+   shows total tracked / executable counts; per-state rows
+   collapse to nothing when no delegations exist.
+3. **Recent safety events** card includes the
+   `agent_keys.paused` row from Step 16. After the IEx resume
+   step above, refresh the page and confirm an `agent_keys.resumed`
+   row appears.
+
+The console is the operator-recommended resume path because it
+authenticates via session cookie, not bearer — so the bootstrap
+caveat does not apply.
+
 ## What this smoke does NOT exercise
 
 - **Chain / adapter / Base Sepolia / `.env` secrets.** None of
@@ -959,8 +1034,16 @@ JSON-scan the events for raw bearer / API-key prefix /
   `BankWeb.LiveAuth.{:require_role, role}` against a session
   cookie, NOT a bearer token. This smoke covers the `/v1`
   surface only.
-- **OpenAPI impact: none.** This runbook documents existing
-  contract; no schema changes.
+- **Schema additions in this runbook's scope.** This runbook
+  documents existing contract — but the underlying
+  `/v1/security/pause_agent_keys`, `/v1/security/resume_agent_keys`
+  (#231-b), and the `workspace_paused` 422 case on
+  `/v1/connect/smart_account` (#231-d) ARE new operations /
+  response codes shipped with #231. Their OpenAPI descriptions
+  live in `priv/openapi/openapi.json` and are kept in sync via
+  `mix openapi.gen`. This runbook does not introduce additional
+  schema drift; rerun `mix openapi.check` after any controller
+  change.
 
 ## Recovery
 
@@ -983,3 +1066,11 @@ JSON-scan the events for raw bearer / API-key prefix /
 - **Curl exit code is non-zero on a 4xx.** That's expected;
   curl returns 0 unless the network errored. Inspect the body
   with `jq`.
+- **Locked out after Step 16.** Pausing a workspace's agent keys
+  refuses the calling key too — every `/v1` request from that
+  workspace's keys returns `401 invalid_credentials` until
+  resumed. There is no API-side bypass. Resume from one of:
+  1. The `/security` LiveView console (Google OAuth admin
+     session — not routed through `VerifyAPIKey`).
+  2. `Bank.APIKeys.resume_workspace/2` from IEx (snippet under
+     Step 16's bootstrap caveat).
