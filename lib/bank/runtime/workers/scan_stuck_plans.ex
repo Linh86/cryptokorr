@@ -62,10 +62,21 @@ defmodule Bank.Runtime.Workers.ScanStuckPlans do
 
   @impl Oban.Worker
   def perform(%Oban.Job{args: args}) do
-    window_start = resolve_window_start(args)
+    # `now` and `window_start` are independent on purpose:
+    #   * `now` is the real wall clock the threshold check evaluates
+    #     against, so a plan stuck at `12:33:30` with a 10-min
+    #     threshold is detected at `12:34` (cutoff `12:24`) and is
+    #     not delayed until the next bucket boundary.
+    #   * `window_start` is the 5-min aligned bucket used purely as
+    #     the audit-row dedupe key — same value across two ticks in
+    #     the same bucket so a re-fire does not double-emit.
+    # Tests can override either with the corresponding "now" /
+    # "window_start" args (ISO 8601).
+    now = resolve_now(args)
+    window_start = resolve_window_start(args, now)
     window_start_iso = DateTime.to_iso8601(window_start)
 
-    details = Health.stuck_plan_details(now: window_start)
+    details = Health.stuck_plan_details(now: now)
 
     {emitted, skipped, errors} =
       Enum.reduce(details, {0, 0, 0}, fn detail, {emitted, skipped, errors} ->
@@ -111,20 +122,28 @@ defmodule Bank.Runtime.Workers.ScanStuckPlans do
     :ok
   end
 
-  defp resolve_window_start(args) do
-    case Map.get(args, "window_start") do
-      iso when is_binary(iso) ->
-        case DateTime.from_iso8601(iso) do
-          {:ok, dt, _} ->
-            dt
+  defp resolve_now(args) do
+    case Map.get(args, "now") do
+      iso when is_binary(iso) -> parse_iso!(iso, "now")
+      _ -> DateTime.utc_now()
+    end
+  end
 
-          _ ->
-            raise ArgumentError,
-                  "ScanStuckPlans: invalid window_start (expected ISO 8601): " <> inspect(iso)
-        end
+  defp resolve_window_start(args, now) do
+    case Map.get(args, "window_start") do
+      iso when is_binary(iso) -> parse_iso!(iso, "window_start")
+      _ -> Health.detection_window_start(now)
+    end
+  end
+
+  defp parse_iso!(iso, field) do
+    case DateTime.from_iso8601(iso) do
+      {:ok, dt, _} ->
+        dt
 
       _ ->
-        Health.detection_window_start()
+        raise ArgumentError,
+              "ScanStuckPlans: invalid #{field} (expected ISO 8601): " <> inspect(iso)
     end
   end
 end

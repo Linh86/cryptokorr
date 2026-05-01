@@ -162,6 +162,36 @@ defmodule Bank.Ops.HealthTest do
 
       assert length(Health.stuck_plan_details(now: now, limit: 3)) == 3
     end
+
+    test "selects oldest stuck rows deterministically when more than :limit match (#230 P2 Finding B)" do
+      # Pre-fix the per-status query had no `order_by`, so `LIMIT N`
+      # returned an arbitrary slice and a younger row could be
+      # selected over an older one. Pin the corrected behavior:
+      # `:limit` MUST keep the oldest rows.
+      now = DateTime.utc_now()
+
+      ages_seconds = [3600, 1500, 1200, 900, 800, 700, 605]
+
+      plans =
+        Enum.map(ages_seconds, fn age ->
+          stale_plan(:prepared, DateTime.add(now, -age, :second))
+        end)
+
+      details = Health.stuck_plan_details(now: now, limit: 3)
+
+      assert length(details) == 3
+
+      ids = Enum.map(details, & &1.id)
+      # The three oldest ages [3600, 1500, 1200] correspond to the
+      # first three plans inserted.
+      expected_oldest = plans |> Enum.take(3) |> Enum.map(& &1.id)
+
+      assert MapSet.new(ids) == MapSet.new(expected_oldest)
+
+      # Returned in oldest-first order across the merged list.
+      assert details |> Enum.map(& &1.stuck_for_seconds) ==
+               details |> Enum.map(& &1.stuck_for_seconds) |> Enum.sort(:desc)
+    end
   end
 
   describe "detection_window_start/1 + stuck_plan_event_exists?/2" do
