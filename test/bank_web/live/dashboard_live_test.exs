@@ -345,6 +345,62 @@ defmodule BankWeb.DashboardLiveTest do
     end
   end
 
+  # --- Agent-keys paused attention line (#229) -----------------------------
+
+  describe "agent-keys paused attention line" do
+    test "no workspace pause → no attention row", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/dashboard")
+
+      refute has_element?(view, "#attention-agent-keys-paused")
+    end
+
+    test "current workspace agent-keys paused → row appears with link",
+         %{conn: conn, workspace: ws, current_user: user} do
+      {:ok, :paused, _} = Bank.APIKeys.pause_workspace(ws, user, reason: "incident smoke")
+
+      {:ok, view, _html} = live(conn, "/dashboard")
+
+      assert has_element?(view, "#attention-agent-keys-paused")
+
+      assert has_element?(
+               view,
+               "#attention-agent-keys-paused",
+               "Workspace API keys paused"
+             )
+
+      assert has_element?(
+               view,
+               ~s|#attention-agent-keys-paused a[href="/security#agent-keys-pause-panel"]|
+             )
+    end
+
+    test "agent-keys pause in sibling workspace does NOT appear on current dashboard",
+         %{conn: conn} do
+      suffix = System.unique_integer([:positive])
+
+      {:ok, other_ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "sibling-keys-paused-#{suffix}",
+          name: "Sibling"
+        })
+
+      {:ok, other_user} =
+        Bank.Accounts.find_or_create_from_oauth(%{
+          provider: :google,
+          subject: "sibling-user-#{suffix}",
+          email: "sibling-user-#{suffix}@example.com",
+          name: "Sibling User #{suffix}"
+        })
+
+      {:ok, :paused, _} =
+        Bank.APIKeys.pause_workspace(other_ws, other_user, reason: "sibling incident")
+
+      {:ok, view, _html} = live(conn, "/dashboard")
+
+      refute has_element?(view, "#attention-agent-keys-paused")
+    end
+  end
+
   # --- Layouts.app current_scope (admin nav visibility, mirrors #308) ------
 
   describe "layout current_scope wiring" do
