@@ -18,6 +18,10 @@ defmodule BankWeb.Plugs.RateLimit.ChainAction do
     * `POST /v1/security/resume` — paired with pause
     * `POST /v1/security/revoke_delegation` — chain-affecting
       delegation revoke
+    * `POST /v1/security/pause_agent_keys` — workspace-wide
+      agent-key pause (#231-b)
+    * `POST /v1/security/resume_agent_keys` — workspace-wide
+      agent-key resume (#231-b)
 
   Other admin routes (policy CRUD, API key management) are NOT
   chain-affecting and ride only the standard per-key + per-

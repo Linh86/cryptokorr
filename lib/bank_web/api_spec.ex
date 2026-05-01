@@ -165,6 +165,8 @@ defmodule BankWeb.ApiSpec do
     RevisePolicyRequest,
     RevokeDelegationRequest,
     RevokeDelegationResponse,
+    AgentKeysPauseRequest,
+    AgentKeysPauseStateResponse,
     SecurityPauseRequest,
     SecurityResumeRequest,
     SecurityStateResponse,
@@ -353,6 +355,9 @@ defmodule BankWeb.ApiSpec do
       "SecurityStateResponse" => SecurityStateResponse.schema(),
       "RevokeDelegationRequest" => RevokeDelegationRequest.schema(),
       "RevokeDelegationResponse" => RevokeDelegationResponse.schema(),
+      # Per-domain shapes added in #231-b.
+      "AgentKeysPauseRequest" => AgentKeysPauseRequest.schema(),
+      "AgentKeysPauseStateResponse" => AgentKeysPauseStateResponse.schema(),
       "ConnectSmartAccountRequest" => ConnectSmartAccountRequest.schema(),
       "ConnectSmartAccountResponse" => ConnectSmartAccountResponse.schema(),
 

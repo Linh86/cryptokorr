@@ -434,6 +434,56 @@
         "title": "AddressLabelResponse",
         "type": "object"
       },
+      "AgentKeysPauseRequest": {
+        "description": "Request body for `pause_agent_keys`. Only the optional `reason`\nfield is read — `workspace_id` from the body is silently\nignored; the workspace is taken from the calling key's\n`current_scope`. `reason` is capped at 256 characters by the\nschema CHECK; longer values return `422 invalid_reason`.\n",
+        "properties": {
+          "reason": {
+            "description": "Optional operator-supplied reason persisted to both the\nworkspace row and the `agent_keys.paused` audit event.\nEmpty/whitespace-only is treated as `nil`.\n",
+            "example": "credential leak under investigation",
+            "maxLength": 256,
+            "type": "string"
+          }
+        },
+        "title": "AgentKeysPauseRequest",
+        "type": "object"
+      },
+      "AgentKeysPauseStateResponse": {
+        "description": "Workspace agent-key pause state. Returned by both pause and\nresume on `200`. Idempotent re-call returns the same payload\nas the original transition.\n\n`paused` is the boolean source of truth; the timestamp /\nuser / reason fields are populated only when `paused: true`.\n\n## Bootstrap caveat (load-bearing)\n\nOnce paused, every API key in this workspace returns\n`401 invalid_credentials` from `/v1` — including the key that\njust made the pause call. Resume MUST come from a non-API-key\npath: the LiveView Security console at `/security` (Google\nOAuth session) or `Bank.APIKeys.resume_workspace/3` from IEx.\nThere is no API-side resume bypass.\n",
+        "properties": {
+          "data": {
+            "properties": {
+              "agent_keys_paused_at": {
+                "$ref": "#/components/schemas/Timestamp"
+              },
+              "paused": {
+                "example": true,
+                "type": "boolean"
+              },
+              "paused_by_user_id": {
+                "$ref": "#/components/schemas/Id"
+              },
+              "reason": {
+                "description": "Operator-supplied reason recorded at pause time. Null when `paused: false` or when no reason was supplied.",
+                "example": "credential leak under investigation",
+                "type": "string"
+              },
+              "workspace_id": {
+                "$ref": "#/components/schemas/Id"
+              }
+            },
+            "required": [
+              "workspace_id",
+              "paused"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "title": "AgentKeysPauseStateResponse",
+        "type": "object"
+      },
       "AmountString": {
         "description": "Decimal amount as a plain string (no scientific notation,\nno thousands separators). The `/v1` contract transmits amounts\nas strings so JavaScript clients and scale-sensitive asset\nmath do not silently round through 64-bit floats. Example:\n`\"250.00\"`.\n",
         "example": "250.00",
@@ -4197,6 +4247,56 @@
         ]
       }
     },
+    "/v1/security/pause_agent_keys": {
+      "post": {
+        "callbacks": {},
+        "description": "Refuses every `/v1` request from this workspace's API keys with\n`401 invalid_credentials` until resumed. Operates on the calling\nkey's workspace (taken from `current_scope.workspace.id`); a\n`workspace_id` field in the request body is silently ignored.\n\nIdempotent: calling on an already-paused workspace returns the\nsame `200` payload as the original pause (no second audit row).\n\n## Bootstrap caveat (load-bearing)\n\nOnce paused, every API key in this workspace returns\n`401 invalid_credentials` from `/v1` — including the calling\nkey. Resume MUST come from a non-API-key path:\n\n  * the LiveView Security console at `/security` (Google OAuth\n    session, signed-in admin operator), or\n  * `Bank.APIKeys.resume_workspace/3` from IEx.\n\nThere is no API-side resume bypass. Deployments that authenticate\nonly via API keys (CI / IEx-only) lose access; document this in\nyour pause runbook.\n",
+        "operationId": "BankWeb.API.V1.SecurityController.pause_agent_keys",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": "Elixir.BankWeb.OpenApi.Schemas.AgentKeysPauseRequest"
+            }
+          },
+          "description": "Pause body",
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.AgentKeysPauseStateResponse"
+              }
+            },
+            "description": "Workspace agent-key pause state"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        },
+        "summary": "Pause workspace-wide agent-key auth",
+        "tags": [
+          "Security"
+        ]
+      }
+    },
     "/v1/security/resume": {
       "post": {
         "callbacks": {},
@@ -4242,6 +4342,47 @@
           }
         },
         "summary": "Resume automation",
+        "tags": [
+          "Security"
+        ]
+      }
+    },
+    "/v1/security/resume_agent_keys": {
+      "post": {
+        "callbacks": {},
+        "description": "Clears the workspace pause set by `pause_agent_keys`.\n\n> **Bootstrap note:** if this workspace's API keys are currently\n> paused, calls to this endpoint return `401 invalid_credentials`\n> because `VerifyAPIKey` short-circuits before the controller.\n> Use the LiveView Security console at `/security` or\n> `Bank.APIKeys.resume_workspace/3` from IEx instead.\n\nIdempotent: calling on an unpaused workspace returns the same\n`200` payload as the original resume (no second audit row).\n",
+        "operationId": "BankWeb.API.V1.SecurityController.resume_agent_keys",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.AgentKeysPauseStateResponse"
+              }
+            },
+            "description": "Workspace agent-key pause state (now unpaused)"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        },
+        "summary": "Resume workspace-wide agent-key auth",
         "tags": [
           "Security"
         ]

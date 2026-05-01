@@ -503,8 +503,17 @@ the auth-failure side.
 Every reject path of `BankWeb.Plugs.VerifyAPIKey` emits a
 `api_key.denied` audit row, deduped per (prefix-or-id, reason,
 minute) so a brute-force probe cannot flood storage. Each of
-the five audit reasons is observable by sending a request that
-trips the corresponding internal verify_key/1 path:
+the **six** audit reasons is observable by sending a request
+that trips the corresponding internal verify_key/1 path:
+
+  * `missing` — header absent or wrong scheme
+  * `malformed` — token did not match `cb_<base32>` shape
+  * `invalid_credentials` — prefix lookup missed OR hash compare failed
+  * `revoked` — key found and revoked
+  * `expired` — key found and expired
+  * `workspace_paused` — key valid, but its workspace has
+    `agent_keys_paused_at` set (#231 — exercised in Step 16 below)
+
 
 ```sh
 # 1. Missing header → reason="missing".
@@ -840,6 +849,100 @@ Bank.RateLimit.reset()
 > been given to exercise a staging environment — the
 > `Application.put_env/3` overrides above mutate runtime config
 > and would affect every concurrent request on a shared node.
+
+## Step 16 — workspace agent-key pause + `agent_keys.paused` audit
+
+The workspace-wide agent-key pause (#231-a UI in #294, HTTP API in
+this slice) refuses **every** `/v1` API key for one workspace at
+once. Trip it via the new admin-tier endpoints:
+
+```sh
+# Pause this workspace's agent keys via the admin API.
+curl -sS -X POST http://localhost:4000/v1/security/pause_agent_keys \
+  -H "Authorization: Bearer $ADMIN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"reason": "smoke incident"}' \
+  | jq
+# {
+#   "data": {
+#     "workspace_id": "<...uuid...>",
+#     "paused": true,
+#     "agent_keys_paused_at": "2026-05-01T...Z",
+#     "paused_by_user_id": "<...uuid...>",
+#     "reason": "smoke incident"
+#   }
+# }
+```
+
+Confirm the audit row:
+
+```sh
+curl -sS "http://localhost:4000/v1/audit?event_type=agent_keys.paused" \
+  -H "Authorization: Bearer $ADMIN_KEY" \
+  | jq '.data[0]'
+```
+
+This call will return `401` because the calling key is now in
+the paused workspace too — see the bootstrap caveat below. To
+inspect the audit row, query from a session-authenticated
+LiveView path or directly via IEx (`Bank.Audit.list_events/1`).
+
+A previously-valid lower-tier key now fails 401:
+
+```sh
+curl -sS -i http://localhost:4000/v1/policies \
+  -H "Authorization: Bearer $VIEWER_KEY" \
+  | head -10
+# HTTP/1.1 401 Unauthorized
+# {"error":{"code":"invalid_credentials"}}
+```
+
+The `api_key.denied` audit row carries reason `workspace_paused`
+(see Step 12 for the full reason taxonomy).
+
+### Bootstrap caveat (load-bearing)
+
+**Once paused, every API key in this workspace returns
+`401 invalid_credentials` from `/v1` — including the calling
+admin key.** The HTTP `POST /v1/security/resume_agent_keys`
+endpoint exists, but it is itself behind `VerifyAPIKey`, so a
+paused workspace cannot resume via the HTTP API. Resume MUST
+come from one of:
+
+1. **The LiveView Security console at `/security`** — Google
+   OAuth session admin, NOT routed through `VerifyAPIKey`.
+   This is the operator-recommended path (#294).
+2. **`Bank.APIKeys.resume_workspace/3` from IEx**:
+
+   ```elixir
+   # In IEx
+   ws = Bank.Repo.get!(Bank.Workspaces.Workspace, "<workspace-uuid>")
+   {:ok, _resumed} = Bank.Workspaces.create_membership(...)  # if needed
+   actor = Bank.Accounts.get_user("<admin-user-uuid>")
+   {:ok, :resumed, _} = Bank.APIKeys.resume_workspace(ws, actor)
+   ```
+
+After resume, retry the previously-failing key:
+
+```sh
+curl -sS -o /dev/null -w "%{http_code}\n" \
+  http://localhost:4000/v1/policies \
+  -H "Authorization: Bearer $VIEWER_KEY"
+# 200
+```
+
+Confirm the resumed audit row (now from a working key):
+
+```sh
+curl -sS "http://localhost:4000/v1/audit?event_type=agent_keys.resumed" \
+  -H "Authorization: Bearer $ADMIN_KEY" | jq '.data[0]'
+```
+
+`after_ref` carries `paused_at: nil`; `before_ref` captures the
+prior pause snapshot for replay. Hygiene tests in
+[`test/bank/api_keys_test.exs`](../../test/bank/api_keys_test.exs)
+JSON-scan the events for raw bearer / API-key prefix /
+`secret_hash` / `Bearer ` substrings.
 
 ## What this smoke does NOT exercise
 

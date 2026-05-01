@@ -283,4 +283,42 @@ defmodule BankWeb.OpenApiComponentsTest do
       end
     end
   end
+
+  describe "agent-key pause schemas (#231-b)" do
+    test "AgentKeysPauseRequest registered with optional reason capped at 256" do
+      schema = components().schemas["AgentKeysPauseRequest"]
+
+      assert %Schema{title: "AgentKeysPauseRequest", type: :object} = schema
+      # Single optional `reason` field; no `required` list.
+      assert schema.required == nil or schema.required == []
+
+      reason = schema.properties[:reason]
+      assert %Schema{type: :string, maxLength: 256} = reason
+    end
+
+    test "AgentKeysPauseStateResponse wraps a `data` object with workspace_id + paused" do
+      schema = components().schemas["AgentKeysPauseStateResponse"]
+
+      assert %Schema{title: "AgentKeysPauseStateResponse", type: :object} = schema
+      assert schema.required == [:data]
+
+      data = schema.properties[:data]
+      assert %Schema{type: :object} = data
+      assert Enum.sort(data.required) == [:paused, :workspace_id]
+
+      # All four nullable-on-resume fields are present as properties.
+      for key <- [:workspace_id, :paused, :agent_keys_paused_at, :paused_by_user_id, :reason] do
+        assert Map.has_key?(data.properties, key),
+               "AgentKeysPauseStateResponse.data missing property #{key}"
+      end
+    end
+
+    test "AgentKeysPauseStateResponse description carries the bootstrap caveat" do
+      desc = components().schemas["AgentKeysPauseStateResponse"].description
+      # Operators reading the spec must see the API-side resume
+      # bypass non-existence — load-bearing wording.
+      assert desc =~ "Bootstrap"
+      assert desc =~ "no API-side resume bypass"
+    end
+  end
 end
