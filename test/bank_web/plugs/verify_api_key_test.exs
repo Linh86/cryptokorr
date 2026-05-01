@@ -737,4 +737,112 @@ defmodule BankWeb.Plugs.VerifyAPIKeyTest do
       assert list_auth_failure_limited_events() == []
     end
   end
+
+  # --- Workspace agent-key pause (#231-a) ---------------------------------
+
+  describe "workspace pause" do
+    setup do
+      Bank.Audit.DedupeWindow.reset()
+      Bank.RateLimit.reset()
+      :ok
+    end
+
+    test "paused workspace key returns 401 invalid_credentials (same wire as revoked)" do
+      {ws, user, _key, raw} = ws_user_key(:operator)
+      {:ok, :paused, _} = APIKeys.pause_workspace(ws, user)
+
+      conn = raw |> build_conn_with_bearer() |> VerifyAPIKey.call(VerifyAPIKey.init([]))
+
+      assert conn.halted
+      assert conn.status == 401
+      assert %{"error" => %{"code" => "invalid_credentials"}} = Jason.decode!(conn.resp_body)
+    end
+
+    test "unpaused workspace key continues to authenticate" do
+      {_ws, _user, _key, raw} = ws_user_key(:operator)
+
+      conn = raw |> build_conn_with_bearer() |> VerifyAPIKey.call(VerifyAPIKey.init([]))
+
+      refute conn.halted
+      assert is_map(conn.assigns[:current_scope])
+    end
+
+    test "pausing workspace A does not block workspace B's keys" do
+      {ws_a, user_a, _key_a, _raw_a} = ws_user_key(:operator)
+      {_ws_b, _user_b, _key_b, raw_b} = ws_user_key(:operator)
+
+      {:ok, :paused, _} = APIKeys.pause_workspace(ws_a, user_a)
+
+      conn = raw_b |> build_conn_with_bearer() |> VerifyAPIKey.call(VerifyAPIKey.init([]))
+
+      refute conn.halted
+      assert is_map(conn.assigns[:current_scope])
+    end
+
+    test "paused rejection emits api_key.denied with reason 'workspace_paused'" do
+      {ws, user, key, raw} = ws_user_key(:operator)
+      {:ok, :paused, _} = APIKeys.pause_workspace(ws, user)
+
+      _conn = raw |> build_conn_with_bearer() |> VerifyAPIKey.call(VerifyAPIKey.init([]))
+
+      [event] = list_denied_events()
+
+      assert event.after_ref["reason"] == "workspace_paused"
+      assert event.subject_id == key.id
+      assert event.workspace_id == ws.id
+    end
+
+    test "paused rejection does NOT advance last_used_at" do
+      {ws, user, key, raw} = ws_user_key(:operator)
+      {:ok, :paused, _} = APIKeys.pause_workspace(ws, user)
+
+      assert is_nil(key.last_used_at)
+      _conn = raw |> build_conn_with_bearer() |> VerifyAPIKey.call(VerifyAPIKey.init([]))
+
+      reloaded = Bank.Repo.get!(Bank.APIKeys.APIKey, key.id)
+      assert is_nil(reloaded.last_used_at), "last_used_at must NOT advance on paused rejection"
+    end
+
+    test "paused rejection does NOT increment the auth-failure bucket" do
+      original = Application.get_env(:bank, Bank.RateLimit)
+
+      Application.put_env(
+        :bank,
+        Bank.RateLimit,
+        Keyword.merge(original,
+          auth_failure_per_window: 3,
+          auth_failure_window_seconds: 300,
+          auth_failure_enabled?: true
+        )
+      )
+
+      Bank.RateLimit.reset()
+      on_exit(fn -> Application.put_env(:bank, Bank.RateLimit, original) end)
+
+      {ws, user, _key, raw} = ws_user_key(:operator)
+      {:ok, :paused, _} = APIKeys.pause_workspace(ws, user)
+
+      # 10 paused-rejection attempts must NEVER escalate to 429 —
+      # workspace pause is operator overlay, not auth pressure.
+      for _ <- 1..10 do
+        conn = raw |> build_conn_with_bearer() |> VerifyAPIKey.call(VerifyAPIKey.init([]))
+        assert conn.status == 401
+      end
+
+      assert list_auth_failure_limited_events() == []
+    end
+
+    test "resume restores authentication" do
+      {ws, user, _key, raw} = ws_user_key(:operator)
+      {:ok, :paused, paused} = APIKeys.pause_workspace(ws, user)
+      conn1 = raw |> build_conn_with_bearer() |> VerifyAPIKey.call(VerifyAPIKey.init([]))
+      assert conn1.status == 401
+
+      {:ok, :resumed, _} = APIKeys.resume_workspace(paused, user)
+
+      conn2 = raw |> build_conn_with_bearer() |> VerifyAPIKey.call(VerifyAPIKey.init([]))
+      refute conn2.halted
+      assert is_map(conn2.assigns[:current_scope])
+    end
+  end
 end

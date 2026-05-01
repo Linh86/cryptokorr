@@ -677,4 +677,143 @@ defmodule Bank.APIKeysTest do
              "api_key.revoked event MUST NOT include the raw secret anywhere"
     end
   end
+
+  # --- Workspace agent-key pause (#231-a) ---------------------------------
+
+  describe "pause_workspace/3 + resume_workspace/3" do
+    test "first pause flips the flag and emits agent_keys.paused once",
+         %{workspace: ws, user: user} do
+      assert {:ok, :paused, paused} = APIKeys.pause_workspace(ws, user, reason: "smoke")
+
+      assert %DateTime{} = paused.agent_keys_paused_at
+      assert paused.agent_keys_paused_reason == "smoke"
+      assert paused.agent_keys_paused_by_user_id == user.id
+
+      %{events: events} = Audit.list_events(%{event_type: "agent_keys.paused"})
+      [event] = Enum.filter(events, &(&1.workspace_id == ws.id))
+
+      assert event.actor == :user
+      assert event.actor_id == user.id
+      assert event.subject_type == "workspace"
+      assert event.subject_id == ws.id
+      assert event.correlation_id == ws.id
+      assert event.after_ref["paused_by_user_id"] == user.id
+      assert event.after_ref["reason"] == "smoke"
+    end
+
+    test "second pause on already-paused workspace is a no-op (no second audit)",
+         %{workspace: ws, user: user} do
+      {:ok, :paused, paused} = APIKeys.pause_workspace(ws, user)
+
+      assert {:ok, :already_paused, ^paused} = APIKeys.pause_workspace(paused, user)
+
+      %{events: events} = Audit.list_events(%{event_type: "agent_keys.paused"})
+      assert length(Enum.filter(events, &(&1.workspace_id == ws.id))) == 1
+    end
+
+    test "resume on an unpaused workspace is a no-op (no audit)",
+         %{workspace: ws, user: user} do
+      assert {:ok, :already_unpaused, _} = APIKeys.resume_workspace(ws, user)
+
+      %{events: events} = Audit.list_events(%{event_type: "agent_keys.resumed"})
+      assert Enum.filter(events, &(&1.workspace_id == ws.id)) == []
+    end
+
+    test "resume after pause clears the flag and emits agent_keys.resumed",
+         %{workspace: ws, user: user} do
+      {:ok, :paused, paused} = APIKeys.pause_workspace(ws, user)
+      paused_at = paused.agent_keys_paused_at
+
+      assert {:ok, :resumed, resumed} = APIKeys.resume_workspace(paused, user)
+
+      assert is_nil(resumed.agent_keys_paused_at)
+      assert is_nil(resumed.agent_keys_paused_reason)
+      assert is_nil(resumed.agent_keys_paused_by_user_id)
+
+      %{events: events} = Audit.list_events(%{event_type: "agent_keys.resumed"})
+      [event] = Enum.filter(events, &(&1.workspace_id == ws.id))
+
+      assert event.actor == :user
+      assert event.actor_id == user.id
+      assert event.before_ref["paused_at"] == DateTime.to_iso8601(paused_at)
+      assert event.before_ref["paused_by_user_id"] == user.id
+      assert event.after_ref == %{"paused_at" => nil}
+    end
+
+    test "pausing workspace A does not affect workspace B",
+         %{workspace: ws_a, user: user} do
+      {:ok, ws_b} = Workspaces.create_workspace(%{slug: "ak-pause-b", name: "B"})
+
+      {:ok, _} =
+        Workspaces.create_membership(%{user_id: user.id, workspace_id: ws_b.id, role: :admin})
+
+      assert {:ok, :paused, _} = APIKeys.pause_workspace(ws_a, user)
+
+      reloaded_b = Bank.Repo.get!(Bank.Workspaces.Workspace, ws_b.id)
+      refute Bank.Workspaces.Workspace.agent_keys_paused?(reloaded_b)
+    end
+
+    test "audit event JSON contains NO api key prefix / secret_hash / Bearer",
+         %{workspace: ws, user: user} do
+      # Mint a key so the workspace has something concrete to leak.
+      {:ok, key, raw} = APIKeys.create_key(ws, user, :viewer, "leak-canary")
+
+      {:ok, :paused, _} = APIKeys.pause_workspace(ws, user, reason: "incident")
+
+      %{events: events} = Audit.list_events(%{event_type: "agent_keys.paused"})
+      [event] = Enum.filter(events, &(&1.workspace_id == ws.id))
+
+      sanitized = event |> Map.from_struct() |> Map.drop([:__meta__, :workspace])
+      json = Jason.encode!(sanitized)
+
+      refute json =~ raw, "raw bearer must NOT appear in agent_keys.paused audit"
+      refute json =~ key.prefix, "api key prefix must NOT appear in workspace-level audit"
+      refute json =~ "secret_hash"
+      refute json =~ "Bearer "
+    end
+  end
+
+  # --- verify_key with workspace pause (#231-a) ---------------------------
+
+  describe "verify_key/1 with workspace pause" do
+    test "returns :workspace_paused when the workspace is paused",
+         %{workspace: ws, user: user} do
+      {:ok, _key, raw} = APIKeys.create_key(ws, user, :operator, "paused-target")
+      {:ok, :paused, _} = APIKeys.pause_workspace(ws, user)
+
+      assert {:error, :workspace_paused} = APIKeys.verify_key(raw)
+    end
+
+    test "still returns :revoked when the key is revoked AND workspace is paused",
+         %{workspace: ws, user: user} do
+      # Revoke wins: the row's terminal state takes precedence over
+      # the workspace overlay so audit replay surfaces the durable
+      # revocation rather than a transient pause.
+      {:ok, key, raw} = APIKeys.create_key(ws, user, :operator, "revoked-and-paused")
+      {:ok, _} = APIKeys.revoke_key(key, actor: user)
+      {:ok, :paused, _} = APIKeys.pause_workspace(ws, user)
+
+      assert {:error, :revoked} = APIKeys.verify_key(raw)
+    end
+
+    test "still returns :expired when the key is expired AND workspace is paused",
+         %{workspace: ws, user: user} do
+      past = ~U[2000-01-01 00:00:00.000000Z]
+      {:ok, _key, raw} = APIKeys.create_key(ws, user, :operator, "expired", expires_at: past)
+      {:ok, :paused, _} = APIKeys.pause_workspace(ws, user)
+
+      assert {:error, :expired} = APIKeys.verify_key(raw)
+    end
+
+    test "resume restores authentication for the same key",
+         %{workspace: ws, user: user} do
+      {:ok, _key, raw} = APIKeys.create_key(ws, user, :operator, "resumable")
+      {:ok, :paused, paused} = APIKeys.pause_workspace(ws, user)
+      assert {:error, :workspace_paused} = APIKeys.verify_key(raw)
+
+      {:ok, :resumed, _} = APIKeys.resume_workspace(paused, user)
+
+      assert {:ok, _key, _ws} = APIKeys.verify_key(raw)
+    end
+  end
 end

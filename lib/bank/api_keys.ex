@@ -135,6 +135,120 @@ defmodule Bank.APIKeys do
   end
 
   @doc """
+  Pause workspace-wide agent-key auth (#231-a).
+
+  Sets `workspace.agent_keys_paused_at` so that
+  `BankWeb.Plugs.VerifyAPIKey` rejects EVERY API key for this
+  workspace with `401 invalid_credentials` (same wire shape as
+  revoked / expired). Individual key rows are NOT mutated —
+  pause is a workspace-level overlay; resume restores all keys
+  to their normal lifecycle state.
+
+  Idempotent: pausing an already-paused workspace returns
+  `{:ok, :already_paused, workspace}` without writing or auditing.
+
+  ## Operator unpause path
+
+  Pause MUST NOT lock out the operator. Browser/session admin
+  access goes through `BankWeb.LiveAuth` (Google OAuth + Plug
+  session), NOT `BankWeb.Plugs.VerifyAPIKey`. An admin signed in
+  at `/security` can call `resume_workspace/2` from a LiveView
+  even when every API key is paused.
+
+  Pure-API-key bootstraps (CI / IEx-only deployments with no
+  human session path) lose access — document this as a known
+  v0.1 limitation. A future "pause-bypass" admin role for
+  `/v1/security/resume_agent_keys` is a separate slice.
+
+  ## Audit
+
+  Emits `agent_keys.paused` (subject: workspace) on the actual
+  transition. Idempotent re-pause does not re-emit.
+
+  ## Options
+
+    * `:reason` — optional operator-supplied free string,
+      capped at 256 chars by the schema. Recorded in the audit
+      `after_ref`.
+  """
+  @spec pause_workspace(Workspace.t(), Bank.Accounts.User.t(), keyword()) ::
+          {:ok, :paused | :already_paused, Workspace.t()} | {:error, term()}
+  def pause_workspace(%Workspace{} = workspace, %Bank.Accounts.User{} = actor, opts \\ []) do
+    if Workspace.agent_keys_paused?(workspace) do
+      {:ok, :already_paused, workspace}
+    else
+      reason = Keyword.get(opts, :reason)
+      now = DateTime.utc_now()
+
+      attrs = %{
+        agent_keys_paused_at: now,
+        agent_keys_paused_reason: reason,
+        agent_keys_paused_by_user_id: actor.id
+      }
+
+      Repo.transaction(fn ->
+        with {:ok, paused} <- workspace |> Workspace.pause_changeset(attrs) |> Repo.update(),
+             {:ok, _event} <-
+               Audit.append_event(Bank.Audit.Events.agent_keys_paused(paused, actor: actor)) do
+          {:paused, paused}
+        else
+          {:error, reason} -> Repo.rollback(reason)
+        end
+      end)
+      |> case do
+        {:ok, {result, paused}} -> {:ok, result, paused}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
+  @doc """
+  Resume workspace-wide agent-key auth (#231-a).
+
+  Clears the three pause columns. Idempotent: resuming an
+  unpaused workspace returns `{:ok, :already_unpaused, workspace}`
+  without writing or auditing.
+
+  Emits `agent_keys.resumed` (subject: workspace) on the actual
+  transition. Before-ref captures the prior pause snapshot for
+  replay.
+  """
+  @spec resume_workspace(Workspace.t(), Bank.Accounts.User.t(), keyword()) ::
+          {:ok, :resumed | :already_unpaused, Workspace.t()} | {:error, term()}
+  def resume_workspace(%Workspace{} = workspace, %Bank.Accounts.User{} = actor, _opts \\ []) do
+    if Workspace.agent_keys_paused?(workspace) do
+      prior = %{
+        paused_at: workspace.agent_keys_paused_at,
+        paused_by_user_id: workspace.agent_keys_paused_by_user_id
+      }
+
+      attrs = %{
+        agent_keys_paused_at: nil,
+        agent_keys_paused_reason: nil,
+        agent_keys_paused_by_user_id: nil
+      }
+
+      Repo.transaction(fn ->
+        with {:ok, resumed} <- workspace |> Workspace.pause_changeset(attrs) |> Repo.update(),
+             {:ok, _event} <-
+               Audit.append_event(
+                 Bank.Audit.Events.agent_keys_resumed(resumed, prior, actor: actor)
+               ) do
+          {:resumed, resumed}
+        else
+          {:error, reason} -> Repo.rollback(reason)
+        end
+      end)
+      |> case do
+        {:ok, {result, resumed}} -> {:ok, result, resumed}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      {:ok, :already_unpaused, workspace}
+    end
+  end
+
+  @doc """
   Soft-revoke a key. Idempotent — calling on an already-revoked
   key is a no-op (returns `{:ok, api_key}` without re-emitting
   the audit event or moving `revoked_at`).
@@ -293,7 +407,8 @@ defmodule Bank.APIKeys do
   """
   @spec verify_key(String.t()) ::
           {:ok, APIKey.t(), Bank.Workspaces.Workspace.t()}
-          | {:error, :malformed | :not_found | :hash_mismatch | :revoked | :expired}
+          | {:error,
+             :malformed | :not_found | :hash_mismatch | :revoked | :expired | :workspace_paused}
   def verify_key(@namespace <> body) when byte_size(body) > @prefix_chars do
     prefix = String.slice(body, 0, @prefix_chars)
 
@@ -313,6 +428,15 @@ defmodule Bank.APIKeys do
 
           APIKey.expired?(key, DateTime.utc_now()) ->
             {:error, :expired}
+
+          # Workspace-wide agent-key pause (#231-a) — checked AFTER
+          # revoke/expiry so a key that's both revoked AND in a
+          # paused workspace surfaces the row's own terminal state
+          # first. Pause is a workspace-level overlay on
+          # otherwise-valid keys; revoke wins because it's the
+          # row's permanent state.
+          Bank.Workspaces.Workspace.agent_keys_paused?(key.workspace) ->
+            {:error, :workspace_paused}
 
           true ->
             {:ok, key, key.workspace}

@@ -918,6 +918,8 @@ defmodule Bank.Audit.Events do
       failed (collapsed; same as the 401 wire code)
     * `:revoked` — key found and revoked
     * `:expired` — key found and expired
+    * `:workspace_paused` — key valid, but its workspace has
+      `agent_keys_paused_at` set (#231-a)
 
   ## Subject identity
 
@@ -950,7 +952,14 @@ defmodule Bank.Audit.Events do
   """
   @spec api_key_denied(atom(), keyword()) :: attrs()
   def api_key_denied(reason, opts \\ [])
-      when reason in [:missing, :malformed, :invalid_credentials, :revoked, :expired] do
+      when reason in [
+             :missing,
+             :malformed,
+             :invalid_credentials,
+             :revoked,
+             :expired,
+             :workspace_paused
+           ] do
     api_key = Keyword.get(opts, :api_key)
     prefix = Keyword.get(opts, :prefix)
 
@@ -1064,6 +1073,92 @@ defmodule Bank.Audit.Events do
       workspace_id: workspace_id
     }
   end
+
+  @doc """
+  `agent_keys.paused` — operator paused workspace-wide agent-key
+  auth (#231-a, parent epic #212).
+
+  Subject is the **workspace**, not any individual key. Pause is a
+  workspace-level state flip; the per-key rows are unchanged. The
+  per-request `api_key.denied` events from `VerifyAPIKey` carry
+  the per-key context for the actual reject traffic.
+
+  Emitted ONLY on the actual transition (NULL → paused). A repeat
+  pause on an already-paused workspace is a no-op and does not
+  emit. Mirrors `revoke_key/2`'s "first-transition only" rule.
+
+  ## Actor
+
+  Always `:user` — pause is an operator action, not service-account
+  traffic. From a session caller (Google OAuth / LiveView),
+  `actor_id = current_user.id`. From an API-key caller (a future
+  admin-tier `/v1/security/pause_agent_keys` endpoint), the
+  controller resolves `calling_api_key.created_by_user_id` and
+  passes that. Every pause stays chained to a human.
+
+  ## after_ref allowlist
+
+  Hard-coded: `:paused_at`, `:paused_by_user_id`, `:reason` only.
+  No API key prefixes, ids, secrets, or hashes — the events are
+  workspace-level. JSON-scan tests refute every leakable substring.
+  """
+  @spec agent_keys_paused(Bank.Workspaces.Workspace.t(), keyword()) :: attrs()
+  def agent_keys_paused(%Bank.Workspaces.Workspace{} = workspace, opts \\ []) do
+    actor = Keyword.fetch!(opts, :actor)
+    actor_id = actor_id(actor)
+
+    %{
+      actor: :user,
+      actor_id: actor_id,
+      event_type: "agent_keys.paused",
+      subject_type: "workspace",
+      subject_id: workspace.id,
+      correlation_id: workspace.id,
+      before_ref: %{paused_at: nil},
+      after_ref: %{
+        paused_at: workspace.agent_keys_paused_at,
+        paused_by_user_id: workspace.agent_keys_paused_by_user_id,
+        reason: workspace.agent_keys_paused_reason
+      },
+      workspace_id: workspace.id
+    }
+  end
+
+  @doc """
+  `agent_keys.resumed` — operator cleared the workspace-wide
+  agent-key pause (#231-a).
+
+  Emitted ONLY on the actual transition (paused → NULL). Repeat
+  resume on an unpaused workspace is a no-op.
+
+  `before_ref` carries the prior `paused_at` + `paused_by_user_id`
+  so replay can reconstruct who initiated the pause that this
+  resume cleared. `after_ref` is the empty resumed marker.
+  """
+  @spec agent_keys_resumed(Bank.Workspaces.Workspace.t(), map(), keyword()) :: attrs()
+  def agent_keys_resumed(%Bank.Workspaces.Workspace{} = workspace, prior, opts \\ [])
+      when is_map(prior) do
+    actor = Keyword.fetch!(opts, :actor)
+    actor_id = actor_id(actor)
+
+    %{
+      actor: :user,
+      actor_id: actor_id,
+      event_type: "agent_keys.resumed",
+      subject_type: "workspace",
+      subject_id: workspace.id,
+      correlation_id: workspace.id,
+      before_ref: %{
+        paused_at: Map.get(prior, :paused_at),
+        paused_by_user_id: Map.get(prior, :paused_by_user_id)
+      },
+      after_ref: %{paused_at: nil},
+      workspace_id: workspace.id
+    }
+  end
+
+  defp actor_id(%User{id: id}), do: id
+  defp actor_id(id) when is_binary(id), do: id
 
   @doc """
   `api_key.rate_limited` — the rate-limit plug refused a request

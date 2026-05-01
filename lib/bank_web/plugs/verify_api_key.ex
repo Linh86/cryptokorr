@@ -98,7 +98,14 @@ defmodule BankWeb.Plugs.VerifyAPIKey do
         halt_with(conn, Atom.to_string(scheme_error))
 
       {:error, verify_error}
-      when verify_error in [:malformed, :not_found, :hash_mismatch, :revoked, :expired] ->
+      when verify_error in [
+             :malformed,
+             :not_found,
+             :hash_mismatch,
+             :revoked,
+             :expired,
+             :workspace_paused
+           ] ->
         Logger.warning(
           "BankWeb.Plugs.VerifyAPIKey: rejecting from #{peer_for_log(conn)} (#{verify_error})"
         )
@@ -176,6 +183,7 @@ defmodule BankWeb.Plugs.VerifyAPIKey do
   defp audit_reason(:hash_mismatch), do: :invalid_credentials
   defp audit_reason(:revoked), do: :revoked
   defp audit_reason(:expired), do: :expired
+  defp audit_reason(:workspace_paused), do: :workspace_paused
 
   # Returns the bearer token body if it could be extracted from
   # the request, else nil. Used by the denied-event path to
@@ -245,9 +253,15 @@ defmodule BankWeb.Plugs.VerifyAPIKey do
   # has tripped (caller proceeds to 429 + audit).
   #
   # `:missing` / `:invalid_authorization_scheme` rejects never
-  # reach this function — they're filtered above. The five
-  # branches here cover `:malformed`, `:not_found`, `:hash_mismatch`,
-  # `:revoked`, and `:expired`.
+  # reach this function — they're filtered above. The branches
+  # here cover `:malformed`, `:not_found`, `:hash_mismatch`,
+  # `:revoked`, `:expired`, and `:workspace_paused`. The last is
+  # explicitly EXEMPT from the lockout: a workspace pause is an
+  # operator overlay on legitimate keys, not credential-correctness
+  # pressure, and counting paused-rejections against the bucket
+  # would penalize the operator's recovery path (#231-a).
+  defp maybe_check_auth_failure(:workspace_paused, _prefix, _api_key, _conn), do: :ok
+
   defp maybe_check_auth_failure(verify_error, prefix, api_key, conn) do
     cfg = Application.get_env(:bank, Bank.RateLimit, [])
 
