@@ -354,7 +354,7 @@ defmodule BankWeb.PoliciesLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} active_page={:policies}>
+    <Layouts.app flash={@flash} current_scope={@current_scope} active_page={:policies}>
       <%!-- Header --%>
       <div class="flex items-center justify-between mb-6">
         <div>
