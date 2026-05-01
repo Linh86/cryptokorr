@@ -337,6 +337,7 @@ defmodule BankWeb.DashboardLive do
           value={@pending_approvals}
           icon="hero-clock"
           color={if @pending_approvals > 0, do: "info", else: "ghost"}
+          navigate="/queue#pending-approvals-section"
         />
         <.stat_card
           id="active-executions-card"
@@ -344,6 +345,7 @@ defmodule BankWeb.DashboardLive do
           value={@active_executions}
           icon="hero-bolt"
           color={if @active_executions > 0, do: "info", else: "ghost"}
+          navigate="/queue#active-executions-section"
         />
       </div>
 
@@ -407,18 +409,42 @@ defmodule BankWeb.DashboardLive do
   attr :value, :any, required: true
   attr :icon, :string, required: true
   attr :color, :string, default: "ghost"
+  attr :navigate, :string, default: nil
 
   defp stat_card(assigns) do
     ~H"""
-    <div id={@id} class="rounded-xl border border-base-300 bg-base-100 shadow-sm p-4">
-      <div class="flex items-center gap-2 mb-2">
-        <div class={["w-8 h-8 rounded-lg flex items-center justify-center", stat_icon_bg(@color)]}>
-          <.icon name={@icon} class="size-4" />
-        </div>
-        <span class="text-xs text-base-content/50 uppercase tracking-wider">{@label}</span>
+    <div
+      id={@id}
+      class="rounded-xl border border-base-300 bg-base-100 shadow-sm overflow-hidden"
+    >
+      <.link
+        :if={@navigate}
+        navigate={@navigate}
+        class="block p-4 transition hover:bg-base-200/40 focus:outline-none focus:ring-2 focus:ring-primary/40"
+      >
+        <.stat_card_body label={@label} value={@value} icon={@icon} color={@color} />
+      </.link>
+      <div :if={!@navigate} class="p-4">
+        <.stat_card_body label={@label} value={@value} icon={@icon} color={@color} />
       </div>
-      <p class={["text-xl font-bold", stat_value_class(@color)]}>{@value}</p>
     </div>
+    """
+  end
+
+  attr :label, :string, required: true
+  attr :value, :any, required: true
+  attr :icon, :string, required: true
+  attr :color, :string, required: true
+
+  defp stat_card_body(assigns) do
+    ~H"""
+    <div class="flex items-center gap-2 mb-2">
+      <div class={["w-8 h-8 rounded-lg flex items-center justify-center", stat_icon_bg(@color)]}>
+        <.icon name={@icon} class="size-4" />
+      </div>
+      <span class="text-xs text-base-content/50 uppercase tracking-wider">{@label}</span>
+    </div>
+    <p class={["text-xl font-bold", stat_value_class(@color)]}>{@value}</p>
     """
   end
 
