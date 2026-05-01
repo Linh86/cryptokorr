@@ -70,7 +70,7 @@ Stricter per-key rate limit applied to `/v1/security/*` (pause, resume, revoke_d
 - **Chain adapter internals.** The TS adapter side is untouched; pause sits in the Phoenix dispatch path.
 - **Broadcast / signing path.** No change to `RunExecution`'s adapter call shape, the contract in `priv/adapter/contract.md`, or the dispatch envelope.
 - **`.env` / Sepolia / mainnet / network rotation.** Out of scope; this is a control-plane gate, not a network change.
-- **NOT NULL columns or production backfills.** Per AGENTS.md cross-cutting checklist, every new column is nullable-first and any backfill is dry-run, batched, logged. The recommended schema (§6) ships with zero NOT NULL adds.
+- **NOT NULL adds to existing tables / production backfills.** No NOT NULL adds to existing tables and no production backfills. The new `pauses` table is created from scratch, so load-bearing columns such as `workspace_id` may be `null: false` as specified in §6.
 - **#158e workspace_id audit backfill** is explicitly out of scope. The legacy-NULL audit tail described in `lib/bank_web/live/security_live.ex:425-437` stays as-is; new pause events are workspace-stamped via the envelope passthrough from day one and require no historical fix.
 - **Replacing `RateLimit.ChainAction`.** That plug stays exactly as it is.
 
