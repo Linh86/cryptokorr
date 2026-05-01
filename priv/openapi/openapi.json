@@ -334,6 +334,85 @@
         "title": "APIKeyListResponse",
         "type": "object"
       },
+      "AbortExecutionRequest": {
+        "description": "Manually abort a stuck execution plan. The runtime forces the\nplan to the terminal `aborted` state and persists `final_reason`\non the audit row. Only `:prepared` plans are abortable here —\nplans that have already been dispatched (`:signing`,\n`:broadcasting`, `:pending_confirmation`) return\n`409 not_safe_to_abort`. Already-terminal plans return `200`\nidempotently with no second audit row.\n",
+        "properties": {
+          "execution_plan_id": {
+            "$ref": "#/components/schemas/Id"
+          },
+          "reason": {
+            "description": "Audit-persisted reason. Server allowlists three values; any other value collapses to `\"operator_requested\"`. Defaults to `\"operator_requested\"` when absent.",
+            "enum": [
+              "operator_requested",
+              "stuck_pending",
+              "adapter_unrecoverable"
+            ],
+            "example": "stuck_pending",
+            "type": "string"
+          }
+        },
+        "required": [
+          "execution_plan_id"
+        ],
+        "title": "AbortExecutionRequest",
+        "type": "object"
+      },
+      "AbortExecutionResponse": {
+        "description": "Synchronous terminal-state response. Unlike\n`revoke_delegation` (which is a `202` chain-side receipt),\nabort is a DB-only state-machine flip that completes inside\nthe request — by the time `200` returns, the plan row is\n`aborted` and the `execution.aborted` audit row has been\nappended.\n\nTop-level `status` discriminates between a fresh abort and an\nidempotent re-call against an already-terminal plan:\n\n  * `\"aborted\"` — the call performed the transition.\n  * `\"already_terminal\"` — the plan was already in\n    `:aborted`, `:confirmed`, or `:reverted` when the call\n    landed; no second audit row was emitted. Callers MUST\n    read `data.execution_status` to learn the actual terminal\n    state — it may be `confirmed` or `reverted`, NOT `aborted`,\n    in this branch.\n\nBoth branches return `200` so callers can safely retry on\npartial network failures without branching on the response\ncode; the `status` discriminator carries the truth.\n",
+        "properties": {
+          "data": {
+            "properties": {
+              "decision_id": {
+                "$ref": "#/components/schemas/Id"
+              },
+              "execution_plan_id": {
+                "$ref": "#/components/schemas/Id"
+              },
+              "execution_status": {
+                "description": "Terminal status of the plan after the call. `aborted` for a fresh abort; `aborted`, `confirmed`, or `reverted` in the `already_terminal` branch depending on the prior terminal transition.",
+                "example": "aborted",
+                "type": "string"
+              },
+              "final_outcome": {
+                "description": "Mirrors the plan's `final_outcome` enum value. Always set to match `execution_status` once terminal.",
+                "example": "aborted",
+                "nullable": true,
+                "type": "string"
+              },
+              "final_reason": {
+                "description": "Operator-supplied reason; null on already-terminal idempotent paths.",
+                "example": "stuck_pending",
+                "nullable": true,
+                "type": "string"
+              },
+              "workspace_id": {
+                "$ref": "#/components/schemas/Id"
+              }
+            },
+            "required": [
+              "execution_plan_id",
+              "decision_id",
+              "execution_status",
+              "workspace_id"
+            ],
+            "type": "object"
+          },
+          "status": {
+            "enum": [
+              "aborted",
+              "already_terminal"
+            ],
+            "example": "aborted",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "data"
+        ],
+        "title": "AbortExecutionResponse",
+        "type": "object"
+      },
       "AddEvidenceRequest": {
         "description": "Pin a new evidence artifact to a counterparty. Append-only: this endpoint never edits prior artifacts.",
         "properties": {
@@ -4194,6 +4273,62 @@
         "summary": "Revise a policy rule",
         "tags": [
           "Policies"
+        ]
+      }
+    },
+    "/v1/security/abort_execution": {
+      "post": {
+        "callbacks": {},
+        "description": "Forces an execution plan currently in `:prepared` to the\nterminal `:aborted` state and (when present) transitions the\nparent intent `:decided | :executing → :blocked`. The\ntransition completes synchronously inside the request — by the\ntime `200` returns, the plan row is `aborted` and a single\n`execution.aborted` audit row has been appended.\n\n## Safety contract\n\nOnly `:prepared` plans are abortable on this endpoint. A plan\nin `:signing`, `:broadcasting`, or `:pending_confirmation` has\nalready been dispatched to the chain adapter and aborting it\nlocally would orphan a real chain operation; those cases\nreturn `409 not_safe_to_abort` with `details.execution_status`\ncarrying the current state. The future\n\"abort dispatched plan\" flow belongs in a separate slice\npaired with an adapter cancel callback path.\n\nAlready-terminal plans (`:confirmed`, `:reverted`, `:aborted`)\nreturn a `200` response idempotently — the same body shape as\na fresh abort, with no second audit row written. Operators\ncan rely on safely re-issuing the call after a partial network\nfailure.\n\n## Workspace boundary\n\nThe plan lookup is filtered by `workspace_id` in a locked\nSELECT. Cross-workspace and missing-id collapse to the same\n`404 not_found` so existence is never disclosed across\nworkspaces.\n\n## Reason allowlist\n\nThe optional `reason` field is allowlisted server-side. Known\nvalues: `operator_requested` (default), `stuck_pending`,\n`adapter_unrecoverable`. Any other value collapses to\n`operator_requested` (mirrors the `revoke_delegation` pattern\nfrom #298). The resolved reason is persisted on the plan's\n`final_reason` and on the audit `after_ref`.\n\nChain-action rate-limited: the same 5-req/60s cap that covers\n`/v1/security/pause` and `/v1/security/revoke_delegation`\napplies here. For bulk-abort scenarios during an incident,\nuse `Bank.Decisions.abort_plan/3` from IEx (see runbook).\n",
+        "operationId": "BankWeb.API.V1.SecurityController.abort_execution",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": "Elixir.BankWeb.OpenApi.Schemas.AbortExecutionRequest"
+            }
+          },
+          "description": "Abort body",
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.AbortExecutionResponse"
+              }
+            },
+            "description": "Plan aborted (or already terminal)"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        },
+        "summary": "Manually abort a stuck execution plan",
+        "tags": [
+          "Security"
         ]
       }
     },

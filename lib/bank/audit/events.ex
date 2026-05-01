@@ -235,6 +235,7 @@ defmodule Bank.Audit.Events do
         id: plan.id,
         execution_status: atom_or_nil(plan.execution_status),
         final_outcome: atom_or_nil(plan.final_outcome),
+        final_reason: plan.final_reason,
         tx_refs: plan.tx_refs || []
       },
       workspace_id: plan.workspace_id

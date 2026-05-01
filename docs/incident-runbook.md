@@ -117,12 +117,59 @@ reports a transfer hanging.
 ### Recovery
 
 - If the callback was lost, the adapter should be able to re-emit it.
-  If it cannot, a one-off operator fix is needed — do NOT
-  manually force-set `:confirmed`. Instead, abort:
-  ```elixir
-  Bank.Decisions.abort_plan!(plan_id, reason: "manual_abort_after_incident")
+  If it cannot, a one-off operator fix is needed — do NOT manually
+  force-set `:confirmed`. Abort the stuck plan instead.
+- **HTTP path (`POST /v1/security/abort_execution`, #230).** Admin
+  API key, chain-action rate-limited (5 req / 60 s):
+  ```sh
+  curl -sS -X POST http://localhost:4000/v1/security/abort_execution \
+    -H "Authorization: Bearer $ADMIN_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{"execution_plan_id":"<plan-uuid>","reason":"stuck_pending"}' \
+    | jq
+  # 200 — plan moved to :aborted; intent moved :decided|:executing → :blocked
+  # {
+  #   "status": "aborted",
+  #   "data": {
+  #     "execution_plan_id": "...",
+  #     "decision_id":       "...",
+  #     "execution_status":  "aborted",
+  #     "final_outcome":     "aborted",
+  #     "final_reason":      "stuck_pending",
+  #     "workspace_id":      "..."
+  #   }
+  # }
   ```
-  and advise the partner to re-submit the intent.
+  Only `:prepared` plans are abortable on this endpoint. Plans
+  already dispatched (`:signing`, `:broadcasting`,
+  `:pending_confirmation`) return `409 not_safe_to_abort` with
+  `details.execution_status` carrying the current state — those need
+  an adapter-side cancel + callback path that this v0.1 surface
+  deliberately does not own. Already-terminal plans (`:confirmed`,
+  `:reverted`, `:aborted`) return `200` idempotently with the same
+  body shape and **no** second audit row, so re-issuing the call
+  after a partial network failure is safe.
+- **IEx fallback** for incidents that need to abort more than 5
+  plans in a minute (e.g., adapter-side outage cascade) or for
+  plans the chain-action rate cap has gated:
+  ```elixir
+  ws = Bank.Repo.get!(Bank.Workspaces.Workspace, "<workspace-uuid>")
+  user = Bank.Accounts.get_user("<admin-user-uuid>")
+
+  Bank.Decisions.abort_plan(plan_id, ws,
+    reason: :stuck_pending,
+    actor: :user,
+    actor_id: user.id
+  )
+  # → {:ok, :aborted, %ExecutionPlan{...}, {:transitioned, prior_state, %AgentIntent{...}}}
+  ```
+  Same workspace boundary, same `FOR UPDATE` row lock, same audit
+  emission as the HTTP path — just no role gate (you're already in
+  IEx) and no rate cap.
+- After the abort, advise the partner to re-submit the intent. The
+  superseded plan stays `active: true` per repo convention; the
+  terminal state guard is the source of truth, not the boolean
+  flag.
 - The `ConfirmExecution` safety-net poller ages stuck plans out to
   `:aborted` after its own timeout; let it run unless the backlog is
   large.

@@ -4,6 +4,8 @@ defmodule Bank.Runtime.Workers.RunExecutionTest do
   use Bank.DataCase, async: false
   use Oban.Testing, repo: Bank.Repo
 
+  import Ecto.Query
+
   alias Bank.Audit.AuditEvent
   alias Bank.Decisions.{DecisionEnvelope, ExecutionPlan}
   alias Bank.Fixtures
@@ -434,6 +436,145 @@ defmodule Bank.Runtime.Workers.RunExecutionTest do
     test "cancels :malformed_args on bad job args" do
       assert {:cancel, :malformed_args} =
                perform_job(RunExecution, %{"wrong" => "shape"})
+    end
+  end
+
+  # --- #230 P1 worker-vs-abort race -----------------------------------------
+
+  describe "abort race protection" do
+    alias Bank.Decisions
+    alias Bank.Decisions.ExecutionPlan
+
+    test "operator abort that lands BEFORE the worker claim cancels without an adapter call" do
+      # Stamp a workspace on the fixtures so the operator's
+      # `abort_plan/3` can find the row by workspace.
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "abort-race-#{System.unique_integer([:positive])}",
+          name: "Abort Race"
+        })
+
+      Process.put(:bank_test_workspace_id, ws.id)
+      on_exit(fn -> Process.delete(:bank_test_workspace_id) end)
+
+      %{decision: decision, plan: plan, intent: intent} = scenario()
+
+      # Trap any adapter call: if the race fix breaks, the stub fires
+      # and `flunk/1` makes the test fail with a clear message rather
+      # than the worker passing because the network was simply
+      # unreachable.
+      Req.Test.stub(Bank.AdapterClient, fn _conn ->
+        flunk("adapter must not be called after a committed abort")
+      end)
+
+      {:ok, user} =
+        Bank.Accounts.find_or_create_from_oauth(%{
+          provider: :google,
+          subject: "abort-race-#{System.unique_integer([:positive])}",
+          email: "abort-race-#{System.unique_integer([:positive])}@example.com",
+          name: "Abort Race Operator"
+        })
+
+      assert {:ok, :aborted, _aborted_plan, _intent_transition} =
+               Decisions.abort_plan(plan.id, ws,
+                 reason: :stuck_pending,
+                 actor: :user,
+                 actor_id: user.id
+               )
+
+      # The worker cancels without ever calling the adapter. Two
+      # cancel reasons are valid here: `:no_active_plan` (because
+      # manual abort flips `active: false`, so `load_active_plan`'s
+      # `active == true` filter short-circuits) OR
+      # `{:already_dispatched, :aborted}` (if `active: false` were
+      # ever relaxed in the future, the claim step's lock-then-status
+      # check is the second line of defence). Either outcome is safe;
+      # the load-bearing assertion is "no adapter call" — the
+      # adapter stub above flunks if it fires.
+      result = perform_job(RunExecution, %{"decision_id" => decision.id})
+
+      assert result in [
+               {:cancel, :no_active_plan},
+               {:cancel, {:already_dispatched, :aborted}}
+             ]
+
+      reloaded = Bank.Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :aborted
+      assert reloaded.final_outcome == :aborted
+
+      reloaded_intent = Bank.Repo.get!(AgentIntent, intent.id)
+      assert reloaded_intent.state == :blocked
+
+      # No `execution.signing` audit row was emitted by the worker —
+      # the only execution-status audit was the abort.
+      types =
+        Bank.Repo.all(
+          from(e in AuditEvent,
+            where: e.subject_id == ^plan.id and like(e.event_type, "execution.%"),
+            select: e.event_type
+          )
+        )
+
+      assert "execution.aborted" in types
+      refute "execution.signing" in types
+    end
+
+    test "claim transitions :prepared → :signing with FOR UPDATE; revert flips back when adapter fails" do
+      # Direct context-level coverage for `Decisions.claim_plan_for_dispatch/1`
+      # and `Decisions.revert_claim/1`. Tests the happy claim + revert
+      # round-trip without going through the Oban worker.
+      %{plan: plan} = scenario()
+
+      assert {:ok, %ExecutionPlan{execution_status: :signing} = claimed} =
+               Decisions.claim_plan_for_dispatch(plan)
+
+      reloaded = Bank.Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :signing
+
+      # Revert should flip back to :prepared so a retry can re-claim.
+      assert {:ok, :reverted} = Decisions.revert_claim(claimed)
+
+      re_reloaded = Bank.Repo.get!(ExecutionPlan, plan.id)
+      assert re_reloaded.execution_status == :prepared
+
+      # Second claim should succeed.
+      assert {:ok, %ExecutionPlan{execution_status: :signing}} =
+               Decisions.claim_plan_for_dispatch(plan)
+    end
+
+    test "revert is a no-op when the row is already terminal (no resurrection)" do
+      %{plan: plan} = scenario()
+
+      assert {:ok, claimed} = Decisions.claim_plan_for_dispatch(plan)
+
+      # Force the plan to a terminal state from elsewhere (simulates a
+      # callback or operator action arriving while the worker still
+      # held the claimed struct).
+      {:ok, _} =
+        claimed
+        |> ExecutionPlan.progress_changeset(%{
+          execution_status: :aborted,
+          final_outcome: :aborted,
+          final_reason: "external_abort"
+        })
+        |> Bank.Repo.update()
+
+      assert {:ok, {:no_revert, :aborted}} = Decisions.revert_claim(claimed)
+
+      reloaded = Bank.Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :aborted
+    end
+
+    test "claim returns :cancel when the row is already past :prepared" do
+      %{plan: plan} = scenario()
+
+      {:ok, _} =
+        plan
+        |> ExecutionPlan.progress_changeset(%{execution_status: :broadcasting})
+        |> Bank.Repo.update()
+
+      assert {:cancel, {:not_prepared, :broadcasting}} =
+               Decisions.claim_plan_for_dispatch(plan)
     end
   end
 end
