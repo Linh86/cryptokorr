@@ -11,7 +11,8 @@ defmodule BankWeb.SecurityLive do
     * **Delegation status + risk summary** — per-state counts and
       revoke action for every active delegation in the workspace.
     * **Recent safety events** — pause/resume/revoke + workspace
-      agent-key pause audit slice (#231-e).
+      agent-key pause audit slice (#231-e), with operator
+      filter form for event type / actor / time range (#212).
 
   ## Design decisions
 
@@ -58,6 +59,27 @@ defmodule BankWeb.SecurityLive do
     "agent_keys.resumed"
   ]
 
+  # Default safety-timeline filter (#212). `range: "7d"` matches the
+  # operator's "what happened this week?" reflex; "all" is reachable
+  # via the dropdown but stays capped at 15 rows so a long history
+  # doesn't drown the card.
+  @default_safety_filters %{event_type: "all", actor: "all", range: "7d"}
+
+  @safety_actor_options [
+    {"All actors", "all"},
+    {"user", "user"},
+    {"agent", "agent"},
+    {"runtime", "runtime"},
+    {"adapter", "adapter"}
+  ]
+
+  @safety_range_options [
+    {"Last 24 hours", "24h"},
+    {"Last 7 days", "7d"},
+    {"Last 30 days", "30d"},
+    {"All time", "all"}
+  ]
+
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
@@ -68,6 +90,7 @@ defmodule BankWeb.SecurityLive do
     socket =
       socket
       |> assign(page_title: "Security")
+      |> assign(:safety_filters, @default_safety_filters)
       |> load_state()
 
     {:ok, socket}
@@ -195,6 +218,35 @@ defmodule BankWeb.SecurityLive do
     end
   end
 
+  # --- Safety timeline filters (#212) --------------------------------------
+
+  def handle_event("filter_safety_events", %{"filter" => params}, socket) do
+    filters = merge_safety_filters(socket.assigns.safety_filters, params)
+    {:noreply, socket |> assign(:safety_filters, filters) |> load_state()}
+  end
+
+  def handle_event("clear_safety_filters", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:safety_filters, @default_safety_filters)
+     |> load_state()}
+  end
+
+  defp merge_safety_filters(current, params) do
+    %{
+      event_type: filter_value(params, "event_type", current.event_type),
+      actor: filter_value(params, "actor", current.actor),
+      range: filter_value(params, "range", current.range)
+    }
+  end
+
+  defp filter_value(params, key, fallback) do
+    case Map.get(params, key) do
+      v when is_binary(v) and v != "" -> v
+      _ -> fallback
+    end
+  end
+
   defp clean_reason(value) when is_binary(value) do
     case String.trim(value) do
       "" -> nil
@@ -252,7 +304,15 @@ defmodule BankWeb.SecurityLive do
 
     risk_summary = Enum.frequencies_by(delegations, & &1.state)
 
-    safety_events = load_safety_events(delegations, workspace_id)
+    filters = socket.assigns[:safety_filters] || @default_safety_filters
+    safety_events = load_safety_events(delegations, workspace_id, filters)
+
+    # Phoenix forms require string-keyed params; the filter map is
+    # atom-keyed in our state for clarity. Convert at the boundary.
+    safety_filter_form =
+      filters
+      |> Map.new(fn {k, v} -> {Atom.to_string(k), v} end)
+      |> to_form(as: :filter)
 
     socket
     |> assign(:paused, paused?)
@@ -265,6 +325,8 @@ defmodule BankWeb.SecurityLive do
     |> assign(:execution_ready, execution_ready?)
     |> assign(:risk_summary, risk_summary)
     |> assign(:safety_events, safety_events)
+    |> assign(:safety_filters, filters)
+    |> assign(:safety_filter_form, safety_filter_form)
   end
 
   defp paused_by_user(%Workspace{agent_keys_paused_by_user_id: nil}), do: nil
@@ -291,21 +353,65 @@ defmodule BankWeb.SecurityLive do
   #     legacy events. Once a backfill closes the legacy tail (a
   #     future PR), the query can switch to `WHERE workspace_id`
   #     directly.
-  defp load_safety_events(workspace_delegations, workspace_id) do
+  defp load_safety_events(workspace_delegations, workspace_id, filters) do
     delegation_ids =
       workspace_delegations
       |> Enum.map(& &1.id)
       |> MapSet.new()
 
-    @safety_event_types
+    types_to_fetch = restrict_event_types(filters.event_type)
+    cutoff = range_cutoff(filters.range)
+    actor_filter = parse_actor_filter(filters.actor)
+
+    types_to_fetch
     |> Enum.flat_map(fn type ->
       %{events: events} = Audit.list_events(%{event_type: type}, limit: 10, order: :desc)
       events
     end)
     |> Enum.filter(&visible_to_workspace?(&1, delegation_ids, workspace_id))
+    |> Enum.filter(&matches_actor?(&1, actor_filter))
+    |> Enum.filter(&within_range?(&1, cutoff))
     |> Enum.sort_by(& &1.ts, {:desc, DateTime})
     |> Enum.take(15)
   end
+
+  # Restrict the set of event_types to fetch based on the filter.
+  # `"all"` (or any unrecognised value) keeps the full safety set.
+  defp restrict_event_types("all"), do: @safety_event_types
+
+  defp restrict_event_types(type) when is_binary(type) do
+    if type in @safety_event_types, do: [type], else: @safety_event_types
+  end
+
+  defp restrict_event_types(_), do: @safety_event_types
+
+  # `actor` is stored as an enum atom on `AuditEvent`. Coerce to atom
+  # via the documented allowlist; anything else collapses to `:any`.
+  defp parse_actor_filter("user"), do: :user
+  defp parse_actor_filter("agent"), do: :agent
+  defp parse_actor_filter("runtime"), do: :runtime
+  defp parse_actor_filter("adapter"), do: :adapter
+  defp parse_actor_filter(_), do: :any
+
+  defp matches_actor?(_event, :any), do: true
+  defp matches_actor?(%{actor: actor}, expected), do: actor == expected
+  defp matches_actor?(_event, _expected), do: false
+
+  # `cutoff` is `nil` for the "all" range, so every event passes.
+  # Otherwise compare against the event `ts` (utc_datetime_usec).
+  defp range_cutoff("24h"), do: DateTime.add(DateTime.utc_now(), -24 * 3600, :second)
+  defp range_cutoff("7d"), do: DateTime.add(DateTime.utc_now(), -7 * 86_400, :second)
+  defp range_cutoff("30d"), do: DateTime.add(DateTime.utc_now(), -30 * 86_400, :second)
+  defp range_cutoff(_), do: nil
+
+  defp within_range?(_event, nil), do: true
+
+  defp within_range?(%{ts: %DateTime{} = ts}, %DateTime{} = cutoff),
+    do: DateTime.compare(ts, cutoff) != :lt
+
+  # Defensive: if `ts` is somehow nil and a cutoff is set, keep the
+  # event out of the filtered slice rather than crashing the sort.
+  defp within_range?(_event, _cutoff), do: false
 
   # `security.*` rows are runtime-global and always visible.
   # `delegation.*` rows are visible only when the subject_id (the
@@ -373,7 +479,11 @@ defmodule BankWeb.SecurityLive do
 
         <%!-- Right column: safety events --%>
         <div>
-          <.safety_events_card events={@safety_events} />
+          <.safety_events_card
+            events={@safety_events}
+            filter_form={@safety_filter_form}
+            filters={@safety_filters}
+          />
         </div>
       </div>
     </Layouts.app>
@@ -824,6 +934,8 @@ defmodule BankWeb.SecurityLive do
   # --- Component: safety events card ---------------------------------------
 
   attr :events, :list, required: true
+  attr :filter_form, :map, required: true
+  attr :filters, :map, required: true
 
   defp safety_events_card(assigns) do
     ~H"""
@@ -837,7 +949,51 @@ defmodule BankWeb.SecurityLive do
         </h2>
         <span class="badge badge-sm badge-ghost">{length(@events)}</span>
       </header>
-      <div :if={@events == []} class="px-6 py-8 text-center text-sm text-base-content/50">
+
+      <.form
+        for={@filter_form}
+        id="safety-filters-form"
+        phx-change="filter_safety_events"
+        class="px-6 py-3 border-b border-base-300 bg-base-200/30 grid grid-cols-1 sm:grid-cols-3 gap-3"
+      >
+        <.input
+          field={@filter_form[:event_type]}
+          id="filter-event-type"
+          type="select"
+          label="Event type"
+          options={event_type_filter_options()}
+        />
+        <.input
+          field={@filter_form[:actor]}
+          id="filter-actor"
+          type="select"
+          label="Actor"
+          options={actor_filter_options()}
+        />
+        <.input
+          field={@filter_form[:range]}
+          id="filter-range"
+          type="select"
+          label="Time range"
+          options={range_filter_options()}
+        />
+        <div class="sm:col-span-3 flex justify-end">
+          <button
+            id="filter-clear"
+            type="button"
+            phx-click="clear_safety_filters"
+            class="btn btn-ghost btn-xs"
+          >
+            <.icon name="hero-x-mark" class="size-3" /> Clear filters
+          </button>
+        </div>
+      </.form>
+
+      <div
+        :if={@events == []}
+        id="safety-events-empty"
+        class="px-6 py-8 text-center text-sm text-base-content/50"
+      >
         No safety events recorded yet.
       </div>
       <ol :if={@events != []} class="divide-y divide-base-300">
@@ -871,6 +1027,18 @@ defmodule BankWeb.SecurityLive do
   end
 
   # --- View helpers ---------------------------------------------------------
+
+  # Filter dropdown options. `<.input type="select">` expects
+  # `[{label, value}, ...]`; the placeholder "All ..." sentinel maps
+  # to value `"all"` which `restrict_event_types/1` /
+  # `parse_actor_filter/1` / `range_cutoff/1` collapse to a no-op.
+  defp event_type_filter_options do
+    [{"All event types", "all"} | Enum.map(@safety_event_types, fn t -> {t, t} end)]
+  end
+
+  defp actor_filter_options, do: @safety_actor_options
+
+  defp range_filter_options, do: @safety_range_options
 
   defp delegation_badge_class(:active), do: "badge-success"
   defp delegation_badge_class(:pending), do: "badge-warning"

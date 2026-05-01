@@ -252,10 +252,13 @@ defmodule BankWeb.SecurityLiveTest do
         actor: :user
       )
 
-      {:ok, _view, html} = live(conn, "/security")
+      {:ok, view, _html} = live(conn, "/security")
 
-      refute html =~ "agent_keys.paused"
-      assert html =~ "No safety events recorded yet"
+      # `#safety-events-empty` only renders when the events list is
+      # empty; the substring "agent_keys.paused" appears in the
+      # filter dropdown labels so refuting on raw HTML is unsafe.
+      assert has_element?(view, "#safety-events-empty")
+      assert has_element?(view, "#safety-events-empty", "No safety events recorded yet")
     end
   end
 
@@ -318,6 +321,170 @@ defmodule BankWeb.SecurityLiveTest do
       # Total stays at 0 for the current workspace's view.
       assert html =~ ~s(data-total="0")
       assert html =~ "No active delegations to monitor"
+    end
+  end
+
+  # --- Safety timeline filters (#212) -------------------------------------
+
+  describe "safety timeline filters" do
+    test "renders the filter form with default range=7d", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#safety-filters-form")
+      assert has_element?(view, "#filter-event-type")
+      assert has_element?(view, "#filter-actor")
+      assert has_element?(view, "#filter-range")
+      assert has_element?(view, "#filter-clear")
+      # Default selection: 7d.
+      assert has_element?(view, "#filter-range option[value='7d'][selected]")
+    end
+
+    test "filtering by event_type=security.paused hides delegation rows",
+         %{conn: conn} do
+      del = delegation(state: :active)
+
+      audit_event(
+        event_type: "security.paused",
+        subject_type: "runtime",
+        subject_id: "global",
+        actor: :user
+      )
+
+      audit_event(
+        event_type: "delegation.revoke_requested",
+        subject_type: "delegation",
+        subject_id: del.id,
+        actor: :user
+      )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      view
+      |> form("#safety-filters-form", %{
+        filter: %{event_type: "security.paused", actor: "all", range: "all"}
+      })
+      |> render_change()
+
+      # Both safety events would otherwise show; only security.paused
+      # should remain after the filter. Use the badge class as a stable
+      # selector that doesn't collide with dropdown labels.
+      html = render(view)
+      # Empty-state must NOT render — at least one row must remain.
+      refute has_element?(view, "#safety-events-empty")
+      # The remaining list does not contain a delegation.revoke_requested
+      # badge.
+      refute html =~
+               ~s(class="badge badge-sm font-mono badge-error">delegation.revoke_requested</span>)
+    end
+
+    test "filtering by actor=runtime hides user-actor events", %{conn: conn} do
+      audit_event(
+        event_type: "security.paused",
+        subject_type: "runtime",
+        subject_id: "global",
+        actor: :user
+      )
+
+      audit_event(
+        event_type: "delegation.state_changed",
+        subject_type: "delegation",
+        subject_id: Ecto.UUID.generate(),
+        actor: :runtime
+      )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      view
+      |> form("#safety-filters-form", %{
+        filter: %{event_type: "all", actor: "runtime", range: "all"}
+      })
+      |> render_change()
+
+      # The user-actor security.paused row no longer renders, but the
+      # runtime-actor delegation.state_changed event whose subject id
+      # is unrelated to a known delegation will be filtered out by the
+      # workspace boundary too — what we really want to assert is that
+      # NO row whose actor pill says "user" remains.
+      html = render(view)
+
+      refute html =~
+               ~s(<span class="badge badge-sm badge-ghost gap-1"><span class="hero-user size-3"></span>\n                  user)
+    end
+
+    test "range=24h drops a 10-day-old event", %{conn: conn} do
+      old_ts = DateTime.add(DateTime.utc_now(), -10 * 86_400, :second)
+
+      audit_event(
+        event_type: "security.paused",
+        subject_type: "runtime",
+        subject_id: "global",
+        actor: :user,
+        ts: old_ts
+      )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      view
+      |> form("#safety-filters-form", %{
+        filter: %{event_type: "all", actor: "all", range: "24h"}
+      })
+      |> render_change()
+
+      assert has_element?(view, "#safety-events-empty")
+    end
+
+    test "clear button resets to defaults", %{conn: conn} do
+      audit_event(
+        event_type: "security.paused",
+        subject_type: "runtime",
+        subject_id: "global",
+        actor: :user
+      )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      # Apply a non-default filter that hides the only event.
+      view
+      |> form("#safety-filters-form", %{
+        filter: %{event_type: "delegation.revoked", actor: "all", range: "all"}
+      })
+      |> render_change()
+
+      assert has_element?(view, "#safety-events-empty")
+
+      # Clear → defaults restored, security.paused reappears.
+      view
+      |> element("#filter-clear")
+      |> render_click()
+
+      refute has_element?(view, "#safety-events-empty")
+      assert has_element?(view, "#filter-range option[value='7d'][selected]")
+    end
+
+    test "workspace isolation still holds with filters applied",
+         %{conn: conn} do
+      {:ok, other_ws} =
+        Bank.Workspaces.create_workspace(%{slug: "other-ws-filtered", name: "Other"})
+
+      audit_event(
+        event_type: "agent_keys.paused",
+        subject_type: "workspace",
+        subject_id: other_ws.id,
+        workspace_id: other_ws.id,
+        actor: :user
+      )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      # Even with the filter narrowed to agent_keys.paused, the row
+      # belongs to another workspace and must not appear.
+      view
+      |> form("#safety-filters-form", %{
+        filter: %{event_type: "agent_keys.paused", actor: "all", range: "all"}
+      })
+      |> render_change()
+
+      assert has_element?(view, "#safety-events-empty")
     end
   end
 
