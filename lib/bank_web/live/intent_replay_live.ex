@@ -27,26 +27,37 @@ defmodule BankWeb.IntentReplayLive do
 
   use BankWeb, :live_view
 
-  alias Bank.Audit
+  alias Bank.{Audit, Intents}
 
   @impl true
   def mount(%{"intent_id" => intent_id}, _session, socket) do
-    if connected?(socket) do
-      Bank.Runtime.PubSub.subscribe(Bank.Runtime.PubSub.audit_stream())
-      Bank.Runtime.PubSub.subscribe(Bank.Runtime.PubSub.intent(intent_id))
-    end
+    workspace_id = socket.assigns.current_scope.workspace.id
 
-    case Audit.replay(intent_id) do
-      {:ok, bundle} ->
-        socket =
-          socket
-          |> assign(page_title: "Replay")
-          |> assign(:intent_id, intent_id)
-          |> assign(:bundle, bundle)
+    # Workspace-scope guard. Without this, any viewer+ in any
+    # workspace could navigate to `/audit/replay/<intent_id>` and
+    # render a sibling workspace's full intent bundle (intent,
+    # decisions, plans, audit, screening evidence) — `Audit.replay/1`
+    # itself does an unscoped `Repo.get(AgentIntent, intent_id)`. The
+    # API counterpart at `IntentController.replay/2` already gates
+    # via `Intents.get_in_workspace/2`; mirror that here so cross-
+    # workspace ids resolve to `:not_found` instead of leaking.
+    with {:ok, uuid} <- Ecto.UUID.cast(intent_id),
+         %_{} <- Intents.get_in_workspace(uuid, workspace_id),
+         {:ok, bundle} <- Audit.replay(uuid) do
+      if connected?(socket) do
+        Bank.Runtime.PubSub.subscribe(Bank.Runtime.PubSub.audit_stream())
+        Bank.Runtime.PubSub.subscribe(Bank.Runtime.PubSub.intent(uuid))
+      end
 
-        {:ok, socket}
+      socket =
+        socket
+        |> assign(page_title: "Replay")
+        |> assign(:intent_id, uuid)
+        |> assign(:bundle, bundle)
 
-      {:error, :not_found} ->
+      {:ok, socket}
+    else
+      _ ->
         {:ok,
          socket
          |> put_flash(:error, "Intent #{short_id(intent_id)} not found")
