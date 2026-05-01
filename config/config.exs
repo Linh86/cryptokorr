@@ -99,11 +99,22 @@ config :bank, Oban,
 # Per-key rate limit for /v1 (#221, first slice). Defaults to 1 RPS
 # sustained per key (60 requests / 60 second window). Operators can
 # tune downward via runtime config when product calibration data
-# arrives. Per-workspace, chain-action, and auth-failure caps land
-# in subsequent slices.
+# arrives. Per-workspace and chain-action caps land in subsequent
+# slices.
+#
+# Auth-failure lockout (#221, second slice). Independently tunable
+# from the success-path bucket. Default ceiling is 10 failed auth
+# attempts per 5 minutes per (id-or-prefix-or-ip), high enough that
+# a real user can re-paste a typo a few times and low enough that
+# automated probing trips quickly. Set `auth_failure_enabled?:
+# false` to disable in environments that have edge-level WAF
+# protection instead.
 config :bank, Bank.RateLimit,
   requests_per_window: 60,
-  window_seconds: 60
+  window_seconds: 60,
+  auth_failure_per_window: 10,
+  auth_failure_window_seconds: 300,
+  auth_failure_enabled?: true
 
 # Bank.AdapterClient: connection to the TypeScript chain adapter is
 # configured per-environment. dev/test set local defaults below;

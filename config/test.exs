@@ -116,8 +116,12 @@ config :bank, :admin_emails, []
 
 # Rate limit (#221) — high default in test env so ordinary controller
 # tests that fire many requests against the same api_key do not
-# accidentally trip the limiter. Tests that exercise rate-limit
-# behavior override this via `Application.put_env/3` per case.
+# accidentally trip the limiter. Tests that exercise rate-limit /
+# auth-failure-lockout behavior override these via
+# `Application.put_env/3` per case.
 config :bank, Bank.RateLimit,
   requests_per_window: 10_000,
-  window_seconds: 60
+  window_seconds: 60,
+  auth_failure_per_window: 10_000,
+  auth_failure_window_seconds: 300,
+  auth_failure_enabled?: true
