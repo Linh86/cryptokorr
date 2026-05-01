@@ -172,10 +172,10 @@ defmodule BankWeb.API.V1.SecurityController do
         |> json(%{error: %{code: "invalid_body", message: "smart_account_id is required"}})
 
       smart_account_id ->
-        reason = Map.get(params, "reason", "operator_requested")
+        reason_atom = parse_revoke_reason(Map.get(params, "reason"))
 
         case Security.revoke_delegation(smart_account_id,
-               reason: String.to_atom(reason),
+               reason: reason_atom,
                actor: :user
              ) do
           {:ok, _job} ->
@@ -193,6 +193,22 @@ defmodule BankWeb.API.V1.SecurityController do
         end
     end
   end
+
+  # Pattern-matched allowlist for revoke reasons. Pre-#212 patch the
+  # controller did `String.to_atom(reason)` on the request body, which
+  # would mint a fresh atom for any caller-controlled string and
+  # exhaust the atom table over time. The clauses below dispatch to
+  # baked-in atom literals — no `String.to_atom/1`,
+  # `String.to_existing_atom/1`, or `Module.concat/1` is reachable
+  # from request bytes. Any value not on the list (including `nil`,
+  # empty string, or junk) collapses to `:operator_requested`,
+  # matching the prior default behavior. The whitelist mirrors the
+  # operator-facing values documented on
+  # `Bank.Runtime.enqueue_delegation_revoke/3`.
+  defp parse_revoke_reason("operator_requested"), do: :operator_requested
+  defp parse_revoke_reason("agent_offboarded"), do: :agent_offboarded
+  defp parse_revoke_reason("pause_policy"), do: :pause_policy
+  defp parse_revoke_reason(_), do: :operator_requested
 
   # --- POST /v1/security/pause_agent_keys (#231-b) -----------------------
 

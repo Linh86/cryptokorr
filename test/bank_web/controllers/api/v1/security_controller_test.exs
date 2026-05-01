@@ -101,6 +101,55 @@ defmodule BankWeb.API.V1.SecurityControllerTest do
       assert body["status"] == "revoke_enqueued"
       assert body["smart_account_id"] == "sa_test"
     end
+
+    # --- Atom-creation safety on `reason` (#212 P2 patch) -----------
+
+    test "arbitrary reason in body does NOT create a new atom and still 202s",
+         %{conn: conn} do
+      # Pre-#212-fix this called `String.to_atom/1` on the request body,
+      # which would have minted a fresh atom for any caller-controlled
+      # string. Confirm the byte sequence below was not previously a
+      # known atom and STAYS unknown after the request.
+      probe = "p2_atom_probe_#{System.unique_integer([:positive])}"
+
+      assert_raise ArgumentError, fn -> String.to_existing_atom(probe) end
+
+      conn =
+        post(conn, ~p"/v1/security/revoke_delegation", %{
+          "smart_account_id" => "sa_test_probe",
+          "reason" => probe
+        })
+
+      assert json_response(conn, 202)["status"] == "revoke_enqueued"
+
+      # Same `String.to_existing_atom/1` after the request — would not
+      # raise iff the controller had created the atom.
+      assert_raise ArgumentError, fn -> String.to_existing_atom(probe) end
+    end
+
+    test "known reason on the allowlist passes through (sanity)", %{conn: conn} do
+      # `:agent_offboarded` is one of the documented operator-facing
+      # reasons (`Bank.Runtime.enqueue_delegation_revoke/3`). The
+      # controller sanitizes via `String.to_existing_atom/1` only after
+      # an allowlist match, so this should still 202.
+      conn =
+        post(conn, ~p"/v1/security/revoke_delegation", %{
+          "smart_account_id" => "sa_known_reason",
+          "reason" => "agent_offboarded"
+        })
+
+      assert json_response(conn, 202)["status"] == "revoke_enqueued"
+    end
+
+    test "missing reason still defaults to operator_requested (no regression)",
+         %{conn: conn} do
+      conn =
+        post(conn, ~p"/v1/security/revoke_delegation", %{
+          "smart_account_id" => "sa_default_reason"
+        })
+
+      assert json_response(conn, 202)["status"] == "revoke_enqueued"
+    end
   end
 
   # --- POST /v1/security/pause_agent_keys (#231-b) ------------------------
