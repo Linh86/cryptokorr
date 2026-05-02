@@ -30,6 +30,15 @@ pauses, and revocation gone wrong. Pairs with
 | Postgres unreachable                                 | [Database outage](#database-outage)                      |
 | Verifying recovery after any pause / abort / revoke   | [Resume checklist](#resume-checklist)                    |
 
+> **Not yet supported (tracked under #228):** per-chain, per-smart-account,
+> and per-api-key scoped pauses are still design/implementation work. Today
+> the fail-closed pause levers are the global / counterparty
+> [Emergency pause](#emergency-pause) and the
+> [Workspace agent-key lockdown](#workspace-agent-key-lockdown). If an
+> incident would benefit from a narrower scope, use the available wider
+> pause and record the desired narrower scope in the incident notes until
+> #228 Phase 1 lands. Design memo: PR #310.
+
 ---
 
 ## Adapter outage
