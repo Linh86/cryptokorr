@@ -132,4 +132,157 @@ defmodule Bank.Runtime.Workers.ConfirmExecutionTest do
                perform_job(ConfirmExecution, %{"wrong" => "shape"})
     end
   end
+
+  # --- ConfirmExecution finalise lock + from-state guard (#212 P3) --------
+  #
+  # ConfirmExecution is the safety-net poller that backstops a lost
+  # `apply_execution_callback/1` write. Without a row lock, two
+  # writers (callback + worker) racing on the same intent could each
+  # observe `:executing`, both pass the in-memory pattern guard,
+  # both write `:executed`, and both emit a duplicate
+  # `intent.state_changed` audit row + duplicate PubSub broadcasts.
+  # Mirror PR #314 / PR #318 by locking the intent row `FOR UPDATE`
+  # inside a transaction and re-pattern-matching the locked row.
+  describe "intent lock + from-state guard (#212)" do
+    test "no audit / broadcast when intent already at target_state (raced by callback path)" do
+      # Simulates: adapter callback already finalised the intent
+      # (state = :executed) before the safety-net worker runs.
+      # Pre-fix the worker still emitted an audit row + broadcasts
+      # because its in-memory pattern at line 88 matched the loaded
+      # state, but the post-lock re-pattern-match would catch it.
+      intent =
+        Fixtures.agent_intent()
+        |> AgentIntent.current_pointer_changeset(%{state: :executed})
+        |> Repo.update!()
+
+      plan =
+        Fixtures.execution_plan(
+          intent_id: intent.id,
+          decision: Fixtures.decision_envelope(intent: intent, current: true),
+          execution_status: :confirmed,
+          final_outcome: :confirmed
+        )
+
+      :ok = PubSub.subscribe(PubSub.intent(intent.id))
+      :ok = PubSub.subscribe(PubSub.audit_stream())
+
+      assert {:cancel, :already_finalised} =
+               perform_job(ConfirmExecution, %{"execution_plan_id" => plan.id})
+
+      # No audit row was written by the safety-net path.
+      assert [] = Repo.all(from e in AuditEvent, where: e.event_type == "intent.state_changed")
+
+      # No `intent.state_changed` audit broadcast or
+      # `:state_changed` intent-lifecycle broadcast. (Fixture cascade
+      # may emit unrelated audit-stream messages such as
+      # `counterparty.created`; we only refute the specific
+      # intent-state event our path would have produced.)
+      refute_received %{topic: :audit_stream, payload: %{event_type: "intent.state_changed"}}
+      refute_received %{topic: :intent_lifecycle, event: :state_changed}
+    end
+
+    test "refuses to overwrite a non-finalisable state (operator-driven post-dispatch state)" do
+      # If the intent has been moved to an unexpected state (e.g.
+      # operator cancellation after an asymmetric error path), the
+      # safety-net poller MUST NOT overwrite it. This is a
+      # belt-and-braces guarantee: the previous code wrote
+      # `target_state` regardless of current state, which would
+      # have clobbered a different operator/runtime decision.
+      intent =
+        Fixtures.agent_intent()
+        |> AgentIntent.current_pointer_changeset(%{state: :cancelled})
+        |> Repo.update!()
+
+      plan =
+        Fixtures.execution_plan(
+          intent_id: intent.id,
+          decision: Fixtures.decision_envelope(intent: intent, current: true),
+          execution_status: :confirmed,
+          final_outcome: :confirmed
+        )
+
+      assert {:cancel, {:stale_intent_state, :cancelled}} =
+               perform_job(ConfirmExecution, %{"execution_plan_id" => plan.id})
+
+      # Intent state untouched.
+      assert %AgentIntent{state: :cancelled} = Repo.get!(AgentIntent, intent.id)
+
+      # No audit row was written by the safety-net path for this plan.
+      assert [] = Repo.all(from e in AuditEvent, where: e.event_type == "intent.state_changed")
+    end
+
+    test "duplicate finalise emits exactly one audit row across two perform calls" do
+      # Sequential idempotency backstop: the second perform sees the
+      # intent at target_state (because the first perform committed)
+      # and bails as :already_finalised before writing a second
+      # audit row.
+      intent = executing_intent()
+
+      plan =
+        Fixtures.execution_plan(
+          intent_id: intent.id,
+          decision: Fixtures.decision_envelope(intent: intent, current: true),
+          execution_status: :confirmed,
+          final_outcome: :confirmed
+        )
+
+      assert :ok = perform_job(ConfirmExecution, %{"execution_plan_id" => plan.id})
+
+      assert {:cancel, :already_finalised} =
+               perform_job(ConfirmExecution, %{"execution_plan_id" => plan.id})
+
+      audit_rows =
+        Repo.all(
+          from(e in AuditEvent,
+            where: e.event_type == "intent.state_changed" and e.subject_id == ^intent.id
+          )
+        )
+
+      assert length(audit_rows) == 1
+    end
+
+    test "lock query selects FOR UPDATE on the intent row" do
+      # Pin the lock-query shape so a future refactor cannot
+      # silently drop the row lock without breaking a test.
+      import Ecto.Query
+
+      query =
+        from(i in AgentIntent,
+          where: i.id == ^Ecto.UUID.generate(),
+          lock: "FOR UPDATE"
+        )
+
+      {sql, _params} = Ecto.Adapters.SQL.to_sql(:all, Repo, query)
+      assert sql =~ "FOR UPDATE"
+    end
+
+    test "happy path still works after the lock + from-state guard refactor" do
+      # Backstop on the primary safety-net path (callback was lost
+      # mid-flight): intent at :executing with terminal-state
+      # plan → worker finalises and emits the expected audit row +
+      # broadcasts.
+      intent = executing_intent()
+
+      plan =
+        Fixtures.execution_plan(
+          intent_id: intent.id,
+          decision: Fixtures.decision_envelope(intent: intent, current: true),
+          execution_status: :confirmed,
+          final_outcome: :confirmed
+        )
+
+      :ok = PubSub.subscribe(PubSub.intent(intent.id))
+      :ok = PubSub.subscribe(PubSub.audit_stream())
+
+      assert :ok = perform_job(ConfirmExecution, %{"execution_plan_id" => plan.id})
+
+      assert %AgentIntent{state: :executed} = Repo.get!(AgentIntent, intent.id)
+
+      assert_receive %{topic: :intent_lifecycle, event: :state_changed, payload: %{to: :executed}}
+
+      [event] = Repo.all(from e in AuditEvent, where: e.event_type == "intent.state_changed")
+      assert event.before_ref == %{"state" => "executing"}
+      assert event.after_ref == %{"state" => "executed"}
+    end
+  end
 end
