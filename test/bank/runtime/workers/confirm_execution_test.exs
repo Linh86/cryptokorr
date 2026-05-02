@@ -173,11 +173,19 @@ defmodule Bank.Runtime.Workers.ConfirmExecutionTest do
       assert [] = Repo.all(from e in AuditEvent, where: e.event_type == "intent.state_changed")
 
       # No `intent.state_changed` audit broadcast or
-      # `:state_changed` intent-lifecycle broadcast. (Fixture cascade
-      # may emit unrelated audit-stream messages such as
-      # `counterparty.created`; we only refute the specific
-      # intent-state event our path would have produced.)
-      refute_received %{topic: :audit_stream, payload: %{event_type: "intent.state_changed"}}
+      # `:state_changed` intent-lifecycle broadcast for THIS intent.
+      # Fixture cascade emits unrelated `counterparty.created`
+      # audits, and concurrent async tests can broadcast
+      # `intent.state_changed` for OTHER intents on the same global
+      # `audit_stream` topic — both must be excluded from the refute
+      # so the test does not false-fail under parallelism.
+      intent_id = intent.id
+
+      refute_received %{
+        topic: :audit_stream,
+        payload: %{event_type: "intent.state_changed", subject_id: ^intent_id}
+      }
+
       refute_received %{topic: :intent_lifecycle, event: :state_changed}
     end
 
