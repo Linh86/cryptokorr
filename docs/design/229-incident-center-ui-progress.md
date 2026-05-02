@@ -25,6 +25,33 @@ This is a working map of progress as of the most recent `main`.
   surface failed/retrying jobs, does NOT add provider/adapter health,
   does NOT add chain-pause UI controls, and does NOT close #229 by
   itself.
+- [PR #327](https://github.com/Linh86/cryptobank/pull/327) — SecurityLive
+  emergency action confirmations (`data-confirm` audit). Originally
+  listed under *Remaining likely slices*; moved into *Shipped surfaces*
+  below. Closes the *"All emergency actions confirm before applying"*
+  acceptance bullet for the `/security` surface only — does not by
+  itself close #229.
+- [PR #329](https://github.com/Linh86/cryptobank/pull/329) — SecurityLive
+  pending approvals card (`#pending-approvals-card`). Originally listed
+  under *Remaining likely slices*; moved into *Shipped surfaces* below.
+  Read-only inline panel; the dedicated `/queue#pending-approvals-section`
+  remains the operator workhorse for triage.
+- [PR #330](https://github.com/Linh86/cryptobank/pull/330) — SecurityLive
+  incident summary snapshot (`#incident-summary-card` +
+  `#incident-summary-copy-block`). The original *"Richer incident summary
+  / export"* slice has been narrowed: this PR ships read-only operational
+  counts and a copy-block; reasons, payloads, token material, tx refs,
+  and signing material are intentionally excluded. Any further
+  enrichment is reframed as optional below.
+- [PR #326](https://github.com/Linh86/cryptobank/pull/326) — DB-backed
+  per-chain pause gate (#228 Phase 1, backend). Backend-only: new
+  `pauses` table, `Bank.Security.Pauses` context, dispatch gates at
+  `Decisions.validate_not_paused/2` and
+  `RunExecution.verify_not_paused/1`, audit builders
+  `security.scope_paused`/`_resumed`, and the `visible_to_workspace?/3`
+  clauses + `@safety_event_types` entries that wire the new events into
+  the `/security` safety timeline. **Not** a chain-pause UI card; the
+  operator-facing per-chain pause card remains a follow-up slice.
 
 ## Shipped surfaces
 
@@ -70,6 +97,50 @@ organized by the LiveView they live on.
   Landed in [#324](https://github.com/Linh86/cryptobank/pull/324)
   ("SecurityLive: show in-flight execution plans (#229)"), merge SHA
   `9f8bdbc`.
+- **Emergency-action confirmation audit** — every mutating control on
+  `/security` carries a `data-confirm` attribute so a JS click handler
+  can prompt before applying. `#resume-btn` gained `data-confirm` in
+  this slice; the existing mutating buttons already had it pinned:
+  `#pause-btn`, `#agent-keys-pause-submit`, `#agent-keys-resume`,
+  `#revoke-btn-<smart_account_id>`, `#revoke-retry-btn-<smart_account_id>`,
+  and `#abort-plan-btn-<plan_id>`. Read-side controls (`refresh`,
+  `clear_safety_filters`) intentionally remain unconfirmed and are
+  pinned negative so a future drive-by edit cannot silently regress
+  the audit. Eight tests in `SecurityLiveTest` use stable
+  `#id[data-confirm]` selectors. Landed in
+  [#327](https://github.com/Linh86/cryptobank/pull/327) ("SecurityLive:
+  confirm emergency actions (#229)"), merge SHA `8eba1b3`. Closes the
+  *"All emergency actions confirm before applying"* acceptance bullet
+  for `/security`; does not close #229 by itself.
+- **Pending approvals card** — operator-visible read-only card that
+  surfaces the current workspace's pending approvals inline so the
+  operator can see triage demand without leaving `/security`. Stable
+  element id `#pending-approvals-card`. Reads from
+  `Bank.Decisions.list_pending_approvals/1` with `:workspace_id`
+  pushed into the DB query. Each row links into
+  `/queue#pending-approvals-section`, which remains the dedicated
+  triage surface. Landed in
+  [#329](https://github.com/Linh86/cryptobank/pull/329) ("SecurityLive:
+  show pending approvals card (#229)"), merge SHA `89f6698`.
+- **Incident summary snapshot** — read-only operational-counts panel
+  rendered above `#safety-events-card`. Stable element id
+  `#incident-summary-card` for the panel and
+  `#incident-summary-copy-block` for the operator copy/export block
+  underneath. Counts only — no reasons, no payloads, no policy
+  snapshot, no API keys, no bearer tokens, no tx refs, no signing
+  material. Landed in [#330](https://github.com/Linh86/cryptobank/pull/330)
+  ("SecurityLive: add incident summary snapshot (#229)"), merge SHA
+  `4f0d64b`.
+- **`security.scope_paused` / `security.scope_resumed` on the safety
+  timeline** — additive audit-event types for DB-backed scoped pauses
+  (`#228` Phase 1: chain). Wired into `@safety_event_types` and into
+  `visible_to_workspace?/3` with workspace-id-gated clauses placed
+  BEFORE the existing `"security." <> _` catch-all so workspace-scoped
+  scope events do not leak across workspaces. Backend gate landed in
+  [#326](https://github.com/Linh86/cryptobank/pull/326) ("Add DB-backed
+  per-chain pause gate (#228 phase 1)"), merge SHA `9083bc3`. The
+  per-chain pause card with operator controls is still a follow-up
+  slice (see *Remaining likely slices* below).
 
 ### `BankWeb.DashboardLive` (`/`)
 
@@ -106,17 +177,6 @@ These are probable next pieces under #229 based on the issue body's
 scope list and the surfaces not yet present. They are *suggestions*,
 not commitments — a human owner should triage before assigning.
 
-- **Confirmation modals / emergency-action confirmation audit** —
-  `#229` acceptance: *"All emergency actions confirm before
-  applying."* Pause / resume / revoke flows already work admin-side;
-  a quick audit of every emergency button to confirm a click-through
-  confirmation is wired would close that acceptance bullet.
-- **Pending approvals surface on `/security`** — `#229` lists
-  "pending approvals" as a section. Approval queue counts already
-  appear on dashboard stat cards (#316/#320) and `/approvals` exists
-  as the dedicated queue surface; a small inline panel on `/security`
-  could close the issue-body bullet if still desired, or this slice
-  may be deemed redundant given the existing `/approvals` route.
 - **Failed/retrying jobs surface** — `#229` lists "failed/retrying
   jobs". **Blocked on backend Oban/read API** — today the operator
   drops into Oban LiveDashboard or queries the DB. A workspace-scoped
@@ -127,38 +187,58 @@ not commitments — a human owner should triage before assigning.
   `bank.ops.health.adapter_up` / `database_up` / `stuck_plans` exist
   via `/v1/health/deep`, but the LiveView surface needs a cached /
   push-driven source rather than re-running the deep probe per render.
-- **Richer incident summary / export** — operator-facing "what
-  happened in the last N minutes" summary that pulls from the safety
-  timeline and the audit log. Useful for handoff at end of an
-  incident and for the post-mortem writeup that
-  [`docs/incident-runbook.md`](../incident-runbook.md) already
-  references in its communication checklist.
 - **Chain-pause UI card** — operator card for per-chain pause
-  controls. **Blocked on #228 Phase 1 backend** / [PR #326](https://github.com/Linh86/cryptobank/pull/326);
-  the UI cannot ship before the backend pause table, context API,
-  and dispatch gates land. Once #326 (or its successor) merges, the
-  UI work is bounded by the [PR #310](https://github.com/Linh86/cryptobank/pull/310)
-  design memo §9.
+  controls (pause / resume buttons, current paused-chains list,
+  workspace-scoped). The DB-backed Phase 1 backend has now LANDED in
+  [PR #326](https://github.com/Linh86/cryptobank/pull/326) (merge SHA
+  `9083bc3`), so the gate is no longer "blocked on backend" — what
+  remains for the UI slice is a controller / OpenAPI surface for
+  pause/resume (or an admin-only LiveView form path), then the card
+  itself. UI work bounded by the
+  [PR #310](https://github.com/Linh86/cryptobank/pull/310) design memo
+  §9.
+
+## Optional enhancements
+
+These are nice-to-haves that go BEYOND the #229 issue-body section
+list as already addressed by shipped surfaces. Triage to a follow-up
+issue if pursued; do not bundle into a #229 closeout.
+
+- **Richer incident summary beyond the snapshot card** — the basic
+  read-only operational-counts snapshot landed in
+  [PR #330](https://github.com/Linh86/cryptobank/pull/330). Further
+  enrichment (e.g., a curated "what happened in the last N minutes"
+  narrative pulled from the safety timeline + audit log, or a
+  structured export the post-mortem checklist in
+  [`docs/incident-runbook.md`](../incident-runbook.md) can paste
+  directly) is a follow-up; the current snapshot is intentionally
+  counts-only with no reasons/payloads/token material/tx refs/signing
+  material. Any enhancement must preserve those redaction guarantees.
 
 ## Blocked by #228
 
-These cannot ship until the per-scope pause backend lands under
-#228 / [PR #310](https://github.com/Linh86/cryptobank/pull/310) (design
-memo) plus the corresponding implementation PRs:
+The per-scope pause backend is being delivered under #228 across the
+slices below. As of the last refresh, the design memo
+([PR #310](https://github.com/Linh86/cryptobank/pull/310)) is open and
+Phase 1 backend ([PR #326](https://github.com/Linh86/cryptobank/pull/326))
+is merged.
 
-- **Per-chain pause card** — Phase 1 of #228. Backend in flight at
-  [PR #326](https://github.com/Linh86/cryptobank/pull/326) ("Add
-  DB-backed per-chain pause gate (#228 phase 1)"); UI card is the
-  follow-up slice.
-- **Per-smart-account pause toggle on the delegations card** — Phase 2.
+- **Per-chain pause card** — Phase 1 of #228. Backend gate is **MERGED**
+  ([PR #326](https://github.com/Linh86/cryptobank/pull/326), SHA
+  `9083bc3`). Remaining for UI: a controller / OpenAPI surface (or
+  admin LiveView form) and the card itself. `expires_at`, the
+  auto-resume sweeper, and any ETS projection are explicitly deferred
+  to Phase 1.5+ per the design memo §6 / §13.
+- **Per-smart-account pause toggle on the delegations card** — Phase 2;
+  no backend yet.
 - **Per-api-key pause toggle on the API-keys management surface** —
-  Phase 3.
+  Phase 3; no backend yet.
 - **Aggregate scoped-pause badge** on the security console header —
   also part of #228 §9 UI impact.
 
 The design memo §9 ([PR #310](https://github.com/Linh86/cryptobank/pull/310))
-documents exactly which `SecurityLive` slots get touched, so the UI
-work is bounded and reviewable once the backend slice lands.
+documents exactly which `SecurityLive` slots get touched, so each UI
+slice is bounded and reviewable once its backend half lands.
 
 ## Not in scope for #229 (and therefore not in this map)
 
