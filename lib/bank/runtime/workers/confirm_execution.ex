@@ -46,11 +46,11 @@ defmodule Bank.Runtime.Workers.ConfirmExecution do
 
   import Ecto.Query
 
+  alias Bank.Audit
   alias Bank.Audit.Events
   alias Bank.Decisions.ExecutionPlan
   alias Bank.Intents.AgentIntent
   alias Bank.Repo
-  alias Bank.Runtime
   alias Bank.Runtime.Notifier
 
   require Logger
@@ -101,7 +101,23 @@ defmodule Bank.Runtime.Workers.ConfirmExecution do
   #     etc.) → leave it alone; this safety-net must never overwrite
   #     a different operator/runtime decision.
   #   * intent in `:executing` / `:decided` → atomic update + audit
-  #     inside the transaction; PubSub broadcasts emitted post-commit.
+  #     inside the transaction; ALL PubSub broadcasts (audit_stream,
+  #     execution_progressed, intent_lifecycle) emitted post-commit.
+  #
+  # ## Why audit_stream is also post-commit
+  #
+  # `Bank.Runtime.emit_audit/1` is the convenient one-shot
+  # write-and-broadcast helper, but it broadcasts *before* the
+  # surrounding transaction commits. For the safety-net path we
+  # write the audit row inside the transaction via
+  # `Bank.Audit.append_event/1` (silent insert) and broadcast it
+  # via `Notifier.audit_stream/1` after commit. That keeps the
+  # three broadcasts (`audit_stream`, `execution_progressed`,
+  # `intent_lifecycle`) consistent: subscribers either see all
+  # three (commit succeeded) or none (rollback). A subscriber that
+  # reacted to a pre-commit audit broadcast and then queried the DB
+  # for the persisted row could otherwise observe a phantom event
+  # if the txn rolled back.
   defp finalise(%ExecutionPlan{} = plan) do
     target_state = target_intent_state(plan.final_outcome)
 
@@ -121,12 +137,12 @@ defmodule Bank.Runtime.Workers.ConfirmExecution do
       end
     end)
     |> case do
-      {:ok, {updated_intent, prior_state}} ->
-        # PubSub broadcasts are intentionally outside the
-        # transaction: subscribers should only see them after the
-        # write is durably committed. The audit row itself was
-        # written inside the txn so it cannot be observed without
-        # the state transition.
+      {:ok, {updated_intent, prior_state, audit_event}} ->
+        # All three broadcasts intentionally fire post-commit:
+        # subscribers should only ever see them after the audit row
+        # and intent update are durably committed. If the txn rolled
+        # back, NONE of these run.
+        Notifier.audit_stream(audit_event)
         Notifier.execution_progressed(plan, plan.execution_status)
 
         Notifier.intent_lifecycle(updated_intent, :state_changed, %{
@@ -181,14 +197,14 @@ defmodule Bank.Runtime.Workers.ConfirmExecution do
              current_execution_plan_id: plan.id
            })
            |> Repo.update(),
-         {:ok, _audit} <-
-           Runtime.emit_audit(
+         {:ok, audit_event} <-
+           Audit.append_event(
              Events.intent_state_changed(updated_intent, intent.state, target_state)
            ) do
-      # Return the prior state alongside the updated struct so the
-      # post-commit PubSub broadcast can report the correct `from:`
-      # without a second DB read.
-      {updated_intent, intent.state}
+      # Return the prior state and the persisted audit event
+      # alongside the updated struct so the post-commit broadcast
+      # can use them without a second DB read.
+      {updated_intent, intent.state, audit_event}
     else
       {:error, %Ecto.Changeset{} = cs} -> Repo.rollback(cs)
       {:error, reason} -> Repo.rollback(reason)
