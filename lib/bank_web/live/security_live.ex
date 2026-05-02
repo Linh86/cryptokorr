@@ -658,8 +658,19 @@ defmodule BankWeb.SecurityLive do
           <.delegations_card delegations={@delegations} />
         </div>
 
-        <%!-- Right column: safety events --%>
-        <div>
+        <%!-- Right column: incident snapshot + safety events --%>
+        <div class="space-y-6">
+          <.incident_summary_card
+            workspace={@current_scope.workspace}
+            paused={@paused}
+            agent_keys_paused={@agent_keys_paused}
+            delegations={@delegations}
+            executable_count={@executable_count}
+            stuck_plans={@stuck_plans}
+            in_flight_plans={@in_flight_plans}
+            pending_approvals={@pending_approvals}
+            safety_events={@safety_events}
+          />
           <.safety_events_card
             events={@safety_events}
             filter_form={@safety_filter_form}
@@ -1382,6 +1393,143 @@ defmodule BankWeb.SecurityLive do
     do: "#{kind} #{amount} #{asset}"
 
   defp pending_approval_intent_label(_), do: "-"
+
+  # --- Component: incident summary card ------------------------------------
+  #
+  # Read-only "what's the current incident posture?" snapshot. All
+  # values come from existing `load_state/1` assigns — the card is
+  # pure projection. Renders human-readable counts plus a
+  # copy/export-friendly plaintext block an operator can paste into
+  # a handoff message or a post-mortem doc.
+  #
+  # Field selection deliberately keeps the snapshot to public
+  # operational counts — no reasons, no payloads, no API keys, no
+  # tx refs, no signing material. The destination cards on the same
+  # page already render any human-readable detail.
+
+  attr :workspace, :map, required: true
+  attr :paused, :boolean, required: true
+  attr :agent_keys_paused, :boolean, required: true
+  attr :delegations, :list, required: true
+  attr :executable_count, :integer, required: true
+  attr :stuck_plans, :list, required: true
+  attr :in_flight_plans, :list, required: true
+  attr :pending_approvals, :list, required: true
+  attr :safety_events, :list, required: true
+
+  defp incident_summary_card(assigns) do
+    counts = %{
+      delegations: length(assigns.delegations),
+      executable: assigns.executable_count,
+      stuck: length(assigns.stuck_plans),
+      in_flight: length(assigns.in_flight_plans),
+      pending_approvals: length(assigns.pending_approvals),
+      safety_events: length(assigns.safety_events)
+    }
+
+    assigns =
+      assign(assigns,
+        counts: counts,
+        copy_block:
+          incident_summary_copy_block(
+            assigns.workspace,
+            assigns.paused,
+            assigns.agent_keys_paused,
+            counts
+          )
+      )
+
+    ~H"""
+    <section
+      id="incident-summary-card"
+      class="rounded-xl border border-base-300 bg-base-100 shadow-sm overflow-hidden"
+    >
+      <header class="px-6 py-4 border-b border-base-300 flex items-center justify-between">
+        <h2 class="text-sm font-semibold flex items-center gap-1.5">
+          <.icon name="hero-clipboard-document-list" class="size-4" /> Incident snapshot
+        </h2>
+        <span class="text-xs text-base-content/40 font-mono">
+          {short_id(@workspace.id)}
+        </span>
+      </header>
+
+      <dl class="px-6 py-4 grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
+        <div id="incident-summary-runtime" class="flex items-center justify-between gap-2">
+          <dt class="text-base-content/50">Runtime</dt>
+          <dd class={[
+            "font-mono",
+            if(@paused, do: "text-warning", else: "text-success")
+          ]}>
+            {if @paused, do: "paused", else: "running"}
+          </dd>
+        </div>
+        <div id="incident-summary-agent-keys" class="flex items-center justify-between gap-2">
+          <dt class="text-base-content/50">Agent keys</dt>
+          <dd class={[
+            "font-mono",
+            if(@agent_keys_paused, do: "text-warning", else: "text-success")
+          ]}>
+            {if @agent_keys_paused, do: "paused", else: "active"}
+          </dd>
+        </div>
+        <div id="incident-summary-delegations" class="flex items-center justify-between gap-2">
+          <dt class="text-base-content/50">Delegations</dt>
+          <dd class="font-mono">
+            {@counts.executable}/{@counts.delegations} executable
+          </dd>
+        </div>
+        <div id="incident-summary-plans" class="flex items-center justify-between gap-2">
+          <dt class="text-base-content/50">Plans</dt>
+          <dd class="font-mono">
+            {@counts.stuck} stuck, {@counts.in_flight} in-flight
+          </dd>
+        </div>
+        <div id="incident-summary-approvals" class="flex items-center justify-between gap-2">
+          <dt class="text-base-content/50">Approvals</dt>
+          <dd class="font-mono">{@counts.pending_approvals} pending</dd>
+        </div>
+        <div id="incident-summary-events" class="flex items-center justify-between gap-2">
+          <dt class="text-base-content/50">Safety events</dt>
+          <dd class="font-mono">{@counts.safety_events} shown</dd>
+        </div>
+      </dl>
+
+      <div class="px-6 pb-4">
+        <p class="text-xs text-base-content/40 mb-1.5">
+          Copy snapshot for handoff or post-mortem:
+        </p>
+        <pre
+          id="incident-summary-copy-block"
+          class="text-[11px] leading-snug font-mono whitespace-pre-wrap break-words rounded-lg bg-base-200/60 border border-base-300 px-3 py-2 max-h-64 overflow-auto"
+        ><%= @copy_block %></pre>
+      </div>
+    </section>
+    """
+  end
+
+  # Builds the plaintext snapshot rendered inside
+  # `#incident-summary-copy-block`. Kept as a pure helper so the
+  # component stays curly-brace-free in HEEx and so tests can
+  # eyeball the format without rendering.
+  defp incident_summary_copy_block(workspace, paused?, agent_keys_paused?, counts) do
+    runtime = if paused?, do: "paused", else: "running"
+    agent_keys = if agent_keys_paused?, do: "paused", else: "active"
+    workspace_slug = workspace.slug || "-"
+    workspace_short = short_id(workspace.id)
+    generated = DateTime.utc_now() |> DateTime.to_iso8601()
+
+    """
+    Incident snapshot
+    Workspace: #{workspace_slug} (#{workspace_short})
+    Runtime: #{runtime}
+    Agent keys: #{agent_keys}
+    Delegations: #{counts.delegations} active, #{counts.executable} executable
+    Plans: #{counts.stuck} stuck, #{counts.in_flight} in-flight
+    Approvals: #{counts.pending_approvals} pending
+    Safety events shown: #{counts.safety_events}
+    Generated: #{generated}
+    """
+  end
 
   # --- Component: delegations card -----------------------------------------
 

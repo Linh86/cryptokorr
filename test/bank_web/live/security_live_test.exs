@@ -1158,6 +1158,159 @@ defmodule BankWeb.SecurityLiveTest do
     end
   end
 
+  # --- Incident summary card (#229) ----------------------------------------
+
+  describe "incident summary card" do
+    test "renders default summary with stable ids and copy block",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#incident-summary-card")
+      assert has_element?(view, "#incident-summary-runtime", "running")
+      assert has_element?(view, "#incident-summary-agent-keys", "active")
+      assert has_element?(view, "#incident-summary-delegations", "0/0 executable")
+      assert has_element?(view, "#incident-summary-plans", "0 stuck, 0 in-flight")
+      assert has_element?(view, "#incident-summary-approvals", "0 pending")
+      assert has_element?(view, "#incident-summary-events", "0 shown")
+      assert has_element?(view, "#incident-summary-copy-block")
+    end
+
+    test "runtime paused state is reflected in card and copy block",
+         %{conn: conn} do
+      {:ok, _} = Security.pause(:global, reason: :test, actor: :user)
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#incident-summary-runtime", "paused")
+      assert has_element?(view, "#incident-summary-copy-block", "Runtime: paused")
+    end
+
+    test "agent-key paused state is reflected in card and copy block",
+         %{conn: conn, workspace: ws, current_user: user} do
+      {:ok, :paused, _} = Bank.APIKeys.pause_workspace(ws, user, reason: "incident-summary-test")
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#incident-summary-agent-keys", "paused")
+      assert has_element?(view, "#incident-summary-copy-block", "Agent keys: paused")
+    end
+
+    test "counts update for delegations, stuck/in-flight plans, and pending approvals",
+         %{conn: conn, workspace: ws} do
+      _del = delegation(state: :active)
+
+      stuck = stuck_prepared_plan(ws.id)
+      _another_in_flight = fresh_plan(:signing, ws.id)
+
+      intent = agent_intent()
+
+      _envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          risk_tier: :moderate,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      # 1 active delegation; depending on whether `executable?/1`
+      # short-circuits without on-chain confirmation in test env
+      # the executable count may be 0 or 1 — assert the trailing
+      # "/1 executable" half which is what matters operationally.
+      assert has_element?(view, "#incident-summary-delegations", "/1 executable")
+
+      # stuck plan is also in-flight (active, non-terminal), so the
+      # in-flight count is 2 (stuck `:prepared` + fresh `:signing`).
+      assert has_element?(view, "#incident-summary-plans", "1 stuck, 2 in-flight")
+
+      assert has_element?(view, "#incident-summary-approvals", "1 pending")
+
+      # Copy block reflects the same counts so a paste-into-handoff
+      # message is the same picture as the on-screen card.
+      assert has_element?(view, "#incident-summary-copy-block", "Plans: 1 stuck, 2 in-flight")
+      assert has_element?(view, "#incident-summary-copy-block", "Approvals: 1 pending")
+
+      # stuck plan id used to bypass the unused-variable warning.
+      assert is_binary(stuck.id)
+    end
+
+    test "sibling-workspace data does NOT inflate the summary counts",
+         %{conn: conn} do
+      {:ok, sibling_ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "sibling-incident-#{System.unique_integer([:positive])}",
+          name: "Sibling"
+        })
+
+      # sibling stuck + in-flight plan
+      _sibling_plan = fresh_plan(:prepared, sibling_ws.id)
+
+      # sibling pending approval (its intent rooted in sibling ws)
+      sibling_intent = agent_intent(workspace_id: sibling_ws.id)
+
+      _sibling_envelope =
+        decision_envelope(
+          intent: sibling_intent,
+          outcome: :approval_required,
+          risk_tier: :elevated,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      # All counts remain at 0 for the current workspace.
+      assert has_element?(view, "#incident-summary-plans", "0 stuck, 0 in-flight")
+      assert has_element?(view, "#incident-summary-approvals", "0 pending")
+    end
+
+    test "copy block does not include obvious secret-bearing substrings",
+         %{conn: conn, workspace: ws, current_user: user} do
+      # Pause workspace agent keys with a distinctive reason; reason
+      # text MUST NOT appear in the copy block (only the boolean
+      # paused/active state is exported).
+      {:ok, :paused, _} =
+        Bank.APIKeys.pause_workspace(ws, user, reason: "EXPORT_LEAK_PROBE_REASON_DO_NOT_LEAK")
+
+      {:ok, view, html} = live(conn, "/security")
+
+      assert has_element?(view, "#incident-summary-copy-block")
+
+      # Pull just the copy-block text out of the rendered HTML to
+      # avoid matching mentions in unrelated cards (the agent-keys
+      # pause panel itself does render the reason — that is its
+      # job).
+      copy_text =
+        view
+        |> element("#incident-summary-copy-block")
+        |> render()
+
+      refute copy_text =~ "EXPORT_LEAK_PROBE_REASON_DO_NOT_LEAK"
+      refute copy_text =~ "Bearer "
+      refute copy_text =~ "cb_"
+      refute copy_text =~ "BEGIN "
+
+      # And the wider page still shows the reason on the pause
+      # panel where it belongs (this asserts the negative pin
+      # above is meaningful — the reason did get rendered
+      # somewhere on the page, just not inside the copy block).
+      assert html =~ "EXPORT_LEAK_PROBE_REASON_DO_NOT_LEAK"
+    end
+
+    test "coexists with safety-events / pending-approvals / in-flight / delegations cards",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#incident-summary-card")
+      assert has_element?(view, "#safety-events-card")
+      assert has_element?(view, "#pending-approvals-card")
+      assert has_element?(view, "#in-flight-plans-card")
+      assert has_element?(view, "#delegations-card")
+    end
+  end
+
   # Insert an `ExecutionPlan` whose `updated_at` is overwritten via a
   # raw SQL update so it appears stuck without depending on Ecto's
   # automatic timestamp behavior.
