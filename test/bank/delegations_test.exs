@@ -231,6 +231,264 @@ defmodule Bank.DelegationsTest do
     end
   end
 
+  # --- Adapter callback race / late-callback resurrection guard (#212 P1) ---
+  #
+  # Without `FOR UPDATE` and a from-state guard inside the lock,
+  # two concurrent adapter callbacks for the same `smart_account_id`
+  # can both read the row at `:revoking`, both pass their in-memory
+  # pattern guards, and the second `Repo.update/1` to commit can
+  # overwrite a terminal `:revoked` with `:revoke_failed` (or any
+  # other late-arriving stale transition). Mirror PR #314's pattern:
+  # transaction + `lock: "FOR UPDATE"` + re-pattern-match inside the
+  # lock window. These tests pin the post-fix from-state behaviour;
+  # the under-the-hood lock prevents the race window itself.
+  describe "callback transition lock guard against late writes (#212)" do
+    alias Bank.Delegations.Delegation
+    alias Bank.Repo
+
+    test "record_revoke_failed: late callback after :revoked succeeded returns :not_found" do
+      # Simulates: callback A (`revoked`) committed first; callback B
+      # (`revoke_failed`) arrives stale. Pre-fix B's `get/1` saw the
+      # delegation at :revoking inside its own snapshot and would
+      # transition :revoked -> :revoke_failed, resurrecting a
+      # terminal row. Post-fix: lock_active_delegation excludes
+      # terminal :revoked rows, so B sees `nil` and returns
+      # :not_found.
+      {:ok, _} = Delegations.grant("sa_late_revfail", "del_late_revfail")
+      {:ok, _} = Delegations.record_revoke_requested("sa_late_revfail")
+      {:ok, _} = Delegations.record_revoked("sa_late_revfail")
+
+      assert {:error, :not_found} =
+               Delegations.record_revoke_failed("sa_late_revfail", %{
+                 last_reason: "send_failed:rpc",
+                 last_tx_hash: "0xstaleA"
+               })
+
+      # Row remains in terminal :revoked.
+      reloaded = Repo.get_by(Delegation, smart_account_id: "sa_late_revfail")
+      assert reloaded.state == :revoked
+    end
+
+    test "record_revoked: late callback after :revoke_failed returns :invalid_transition" do
+      # Symmetric scenario: A (`revoke_failed`) committed first; B
+      # (`revoked`) arrives stale. lock_active_delegation finds the
+      # :revoke_failed row (still non-terminal), but the from-state
+      # guard rejects because :revoked requires prior :revoking.
+      {:ok, _} = Delegations.grant("sa_late_revoked", "del_late_revoked")
+      {:ok, _} = Delegations.record_revoke_requested("sa_late_revoked")
+      {:ok, _} = Delegations.record_revoke_failed("sa_late_revoked")
+
+      assert {:error, :invalid_transition} =
+               Delegations.record_revoked("sa_late_revoked")
+
+      reloaded = Repo.get_by(Delegation, smart_account_id: "sa_late_revoked")
+      assert reloaded.state == :revoke_failed
+    end
+
+    test "record_revoke_failed: idempotent after :revoke_failed already recorded" do
+      # Adapter at-least-once delivery: a duplicate `revoke_failed`
+      # for an already-:revoke_failed row must not crash and must
+      # not transition. Pre-fix this returned :invalid_transition
+      # (in-memory state guard), which is still the correct answer
+      # post-fix (same guard, now under the lock).
+      {:ok, _} = Delegations.grant("sa_dup_revfail", "del_dup_revfail")
+      {:ok, _} = Delegations.record_revoke_requested("sa_dup_revfail")
+      {:ok, _} = Delegations.record_revoke_failed("sa_dup_revfail")
+
+      assert {:error, :invalid_transition} =
+               Delegations.record_revoke_failed("sa_dup_revfail", %{
+                 last_reason: "send_failed:rpc"
+               })
+
+      reloaded = Repo.get_by(Delegation, smart_account_id: "sa_dup_revfail")
+      assert reloaded.state == :revoke_failed
+    end
+
+    test "record_expired: late callback after :revoked returns :not_found" do
+      # An :expired callback that arrives after the chain confirmed
+      # revoke must not resurrect the terminal row.
+      {:ok, _} = Delegations.grant("sa_late_expired", "del_late_expired")
+      {:ok, _} = Delegations.record_revoke_requested("sa_late_expired")
+      {:ok, _} = Delegations.record_revoked("sa_late_expired")
+
+      assert {:error, :not_found} = Delegations.record_expired("sa_late_expired")
+
+      reloaded = Repo.get_by(Delegation, smart_account_id: "sa_late_expired")
+      assert reloaded.state == :revoked
+    end
+
+    test "lock query selects FOR UPDATE on the active delegation row" do
+      # Pin the query shape so a future refactor can't accidentally
+      # drop the row lock without breaking a test. This is the only
+      # deterministic assertion we can make against single-process
+      # ExUnit; the lock's race-prevention value shows up only with
+      # two concurrent DB connections.
+      import Ecto.Query
+
+      query =
+        from(d in Delegation,
+          where:
+            d.smart_account_id == ^"sa_lock_check" and
+              d.state in [:pending, :active, :revoking, :revoke_failed],
+          order_by: [desc: d.inserted_at],
+          limit: 1,
+          lock: "FOR UPDATE"
+        )
+
+      {sql, _params} = Ecto.Adapters.SQL.to_sql(:all, Repo, query)
+      assert sql =~ "FOR UPDATE"
+    end
+  end
+
+  # --- Stale callback for retired delegation_id must not mutate the
+  # ---  freshly-granted current row (#212 / #318 review finding) ----
+  #
+  # The lock added in PR #318 only filtered by `smart_account_id`, so
+  # an adapter callback for a retired `del_old` delegation could lock
+  # and mutate the *current* `del_new` row that happens to share the
+  # same `smart_account_id` (the unique slot is per-SA for
+  # non-terminal rows; once the prior delegation reaches a terminal
+  # state, the slot frees up for re-grant). The callback path now
+  # also matches on `delegation_id` so stale callbacks for retired
+  # rows collapse to `:not_found` and the controller acks with
+  # `accepted_with_warning` without touching the active row.
+  describe "callback delegation_id guard against stale-after-regrant (#212 / #318 review)" do
+    alias Bank.Delegations.Delegation
+    alias Bank.Repo
+
+    setup do
+      {:ok, _} = Delegations.grant("sa_regrant", "del_old")
+      {:ok, _} = Delegations.record_revoke_requested("sa_regrant")
+      {:ok, _} = Delegations.record_revoked("sa_regrant")
+      {:ok, granted_new} = Delegations.grant("sa_regrant", "del_new")
+
+      original_attrs = %{
+        delegation_id: granted_new.delegation_id,
+        state: granted_new.state,
+        last_reason: granted_new.last_reason,
+        revoke_requested_at: granted_new.revoke_requested_at,
+        last_tx_hash: granted_new.last_tx_hash
+      }
+
+      %{new_delegation: granted_new, original_attrs: original_attrs}
+    end
+
+    defp assert_active_row_unchanged(original_attrs) do
+      reloaded = Delegations.get("sa_regrant")
+      assert reloaded.delegation_id == original_attrs.delegation_id
+      assert reloaded.state == :active
+      assert reloaded.last_reason == original_attrs.last_reason
+      assert reloaded.revoke_requested_at == original_attrs.revoke_requested_at
+      assert reloaded.last_tx_hash == original_attrs.last_tx_hash
+    end
+
+    test "late `revoking` callback for retired delegation_id is :not_found",
+         %{original_attrs: original} do
+      assert {:error, :not_found} =
+               Delegations.apply_callback(%{
+                 "smart_account_id" => "sa_regrant",
+                 "delegation_id" => "del_old",
+                 "state" => "revoking",
+                 "reason" => "stale_old_callback"
+               })
+
+      assert_active_row_unchanged(original)
+    end
+
+    test "late `revoke_failed` callback for retired delegation_id is :not_found",
+         %{original_attrs: original} do
+      assert {:error, :not_found} =
+               Delegations.apply_callback(%{
+                 "smart_account_id" => "sa_regrant",
+                 "delegation_id" => "del_old",
+                 "state" => "revoke_failed",
+                 "reason" => "stale_old_callback",
+                 "tx_refs" => [
+                   %{
+                     "chain" => "base",
+                     "hash" => "0x" <> String.duplicate("99", 32),
+                     "block_number" => 1,
+                     "status" => "reverted"
+                   }
+                 ]
+               })
+
+      assert_active_row_unchanged(original)
+    end
+
+    test "late `revoked` callback for retired delegation_id is :not_found",
+         %{original_attrs: original} do
+      assert {:error, :not_found} =
+               Delegations.apply_callback(%{
+                 "smart_account_id" => "sa_regrant",
+                 "delegation_id" => "del_old",
+                 "state" => "revoked",
+                 "reason" => "stale_old_callback",
+                 "tx_refs" => [
+                   %{
+                     "chain" => "base",
+                     "hash" => "0x" <> String.duplicate("88", 32),
+                     "block_number" => 2,
+                     "status" => "success"
+                   }
+                 ]
+               })
+
+      assert_active_row_unchanged(original)
+    end
+
+    test "late `expired` callback for retired delegation_id is :not_found",
+         %{original_attrs: original} do
+      assert {:error, :not_found} =
+               Delegations.apply_callback(%{
+                 "smart_account_id" => "sa_regrant",
+                 "delegation_id" => "del_old",
+                 "state" => "expired",
+                 "reason" => "stale_old_callback"
+               })
+
+      assert_active_row_unchanged(original)
+    end
+
+    test "stale `granted` callback for retired delegation_id does not silently ack the current row",
+         %{original_attrs: original} do
+      # Pre-fix the `granted` branch returned `{:ok, current_row}` if
+      # the current row was :active, regardless of whether the
+      # callback's delegation_id matched. That silently
+      # acknowledged a callback for the WRONG delegation as if it
+      # were the right one — and would also mutate :pending → :active
+      # using the stale callback's `last_reason` if the current row
+      # were :pending. Both behaviours are now refused with
+      # :not_found.
+      assert {:error, :not_found} =
+               Delegations.apply_callback(%{
+                 "smart_account_id" => "sa_regrant",
+                 "delegation_id" => "del_old",
+                 "state" => "granted",
+                 "reason" => "stale_old_callback",
+                 "permission" => %{},
+                 "scope" => %{}
+               })
+
+      assert_active_row_unchanged(original)
+    end
+
+    test "happy path still works: matching delegation_id revoke transitions current row" do
+      # Regression backstop: the delegation_id guard must not break
+      # the normal callback path for the current delegation.
+      assert {:ok, %Delegation{state: :revoking, delegation_id: "del_new"}} =
+               Delegations.apply_callback(%{
+                 "smart_account_id" => "sa_regrant",
+                 "delegation_id" => "del_new",
+                 "state" => "revoking",
+                 "reason" => "operator_requested"
+               })
+
+      reloaded = Repo.get_by(Delegation, smart_account_id: "sa_regrant", state: :revoking)
+      assert reloaded.delegation_id == "del_new"
+    end
+  end
+
   describe "executable?/2" do
     test "true only for active + non-expired" do
       now = ~U[2026-04-15 12:00:00Z]

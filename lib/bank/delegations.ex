@@ -267,22 +267,21 @@ defmodule Bank.Delegations do
   @spec record_revoke_requested(smart_account_id(), map()) ::
           {:ok, Delegation.t()} | {:error, :not_found | :invalid_transition}
   def record_revoke_requested(smart_account_id, attrs \\ %{}) do
-    case get(smart_account_id) do
-      nil ->
-        {:error, :not_found}
+    transition_locked(smart_account_id, fn delegation ->
+      case delegation do
+        %Delegation{state: state}
+        when state in [:active, :pending, :revoke_failed] ->
+          delegation
+          |> Delegation.revoke_requested_changeset(attrs)
+          |> Repo.update()
 
-      %Delegation{state: state} = delegation
-      when state in [:active, :pending, :revoke_failed] ->
-        delegation
-        |> Delegation.revoke_requested_changeset(attrs)
-        |> Repo.update()
+        %Delegation{state: :revoking} ->
+          {:ok, delegation}
 
-      %Delegation{state: :revoking} = delegation ->
-        {:ok, delegation}
-
-      %Delegation{} ->
-        {:error, :invalid_transition}
-    end
+        %Delegation{} ->
+          {:error, :invalid_transition}
+      end
+    end)
   end
 
   @doc """
@@ -299,18 +298,17 @@ defmodule Bank.Delegations do
   @spec record_revoke_failed(smart_account_id(), map()) ::
           {:ok, Delegation.t()} | {:error, :not_found | :invalid_transition}
   def record_revoke_failed(smart_account_id, attrs \\ %{}) do
-    case get(smart_account_id) do
-      nil ->
-        {:error, :not_found}
+    transition_locked(smart_account_id, fn delegation ->
+      case delegation do
+        %Delegation{state: :revoking} ->
+          delegation
+          |> Delegation.revoke_failed_changeset(attrs)
+          |> Repo.update()
 
-      %Delegation{state: :revoking} = delegation ->
-        delegation
-        |> Delegation.revoke_failed_changeset(attrs)
-        |> Repo.update()
-
-      %Delegation{} ->
-        {:error, :invalid_transition}
-    end
+        %Delegation{} ->
+          {:error, :invalid_transition}
+      end
+    end)
   end
 
   @doc """
@@ -323,36 +321,191 @@ defmodule Bank.Delegations do
   @spec record_revoked(smart_account_id(), map()) ::
           {:ok, Delegation.t()} | {:error, :not_found | :invalid_transition}
   def record_revoked(smart_account_id, attrs \\ %{}) do
-    case get(smart_account_id) do
-      nil ->
-        {:error, :not_found}
+    transition_locked(smart_account_id, fn delegation ->
+      case delegation do
+        %Delegation{state: :revoking} ->
+          delegation
+          |> Delegation.revoked_changeset(attrs)
+          |> Repo.update()
 
-      %Delegation{state: :revoking} = delegation ->
-        delegation
-        |> Delegation.revoked_changeset(attrs)
-        |> Repo.update()
-
-      %Delegation{} ->
-        {:error, :invalid_transition}
-    end
+        %Delegation{} ->
+          {:error, :invalid_transition}
+      end
+    end)
   end
 
   @doc "Mark a delegation as expired."
   @spec record_expired(smart_account_id()) ::
           {:ok, Delegation.t()} | {:error, :not_found | :invalid_transition}
   def record_expired(smart_account_id) do
-    case get(smart_account_id) do
-      nil ->
-        {:error, :not_found}
+    transition_locked(smart_account_id, fn delegation ->
+      case delegation do
+        %Delegation{state: :active} ->
+          delegation
+          |> Delegation.expired_changeset()
+          |> Repo.update()
 
-      %Delegation{state: :active} = delegation ->
-        delegation
-        |> Delegation.expired_changeset()
-        |> Repo.update()
+        %Delegation{} ->
+          {:error, :invalid_transition}
+      end
+    end)
+  end
 
-      %Delegation{} ->
-        {:error, :invalid_transition}
+  # Adapter callbacks for the same `smart_account_id` can race when
+  # the chain emits two events close together (e.g. `revoke_failed`
+  # and a delayed-but-now-confirmed `revoked`). Without a row lock,
+  # both writers read the row at `:revoking`, both pass their
+  # in-memory pattern guards, and whichever `Repo.update/1` commits
+  # last wins — including overwriting a terminal `:revoked` with
+  # `:revoke_failed`. Mirror the `Bank.Decisions.apply_execution_callback/1`
+  # fix (#314): wrap the transition in a transaction, lock the
+  # current non-terminal row `FOR UPDATE`, then re-pattern-match
+  # against the locked row inside the lock window. A late callback
+  # whose target row has already moved to a terminal state collapses
+  # to `{:error, :not_found}` (the terminal-state filter on the lock
+  # query hides it) so the controller acks with
+  # `accepted_with_warning` and the adapter does not retry.
+  defp transition_locked(smart_account_id, transition_fn) when is_binary(smart_account_id) do
+    Repo.transaction(fn ->
+      case lock_active_delegation(smart_account_id) do
+        nil ->
+          Repo.rollback(:not_found)
+
+        %Delegation{} = delegation ->
+          case transition_fn.(delegation) do
+            {:ok, %Delegation{} = updated} -> updated
+            {:error, %Ecto.Changeset{} = cs} -> Repo.rollback(cs)
+            {:error, reason} -> Repo.rollback(reason)
+          end
+      end
+    end)
+    |> case do
+      {:ok, %Delegation{} = d} -> {:ok, d}
+      {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp lock_active_delegation(smart_account_id) do
+    Repo.one(
+      from(d in Delegation,
+        where:
+          d.smart_account_id == ^smart_account_id and
+            d.state in [:pending, :active, :revoking, :revoke_failed],
+        order_by: [desc: d.inserted_at],
+        limit: 1,
+        lock: "FOR UPDATE"
+      )
+    )
+  end
+
+  # Callback-specific lock variant that ALSO matches `delegation_id`.
+  # Adapter callbacks identify the target delegation by both
+  # `smart_account_id` and `delegation_id`, but the prior callback
+  # path only filtered by `smart_account_id` and could land an old
+  # `del_1` callback on a freshly-granted `del_2` for the same SA
+  # (revoke/re-grant turnaround). Filtering on both fields makes
+  # stale callbacks for retired delegations collapse to `nil` →
+  # `{:error, :not_found}`, leaving the current `del_2` row
+  # untouched.
+  defp lock_delegation_for_callback(smart_account_id, delegation_id)
+       when is_binary(smart_account_id) and is_binary(delegation_id) do
+    Repo.one(
+      from(d in Delegation,
+        where:
+          d.smart_account_id == ^smart_account_id and
+            d.delegation_id == ^delegation_id and
+            d.state in [:pending, :active, :revoking, :revoke_failed],
+        order_by: [desc: d.inserted_at],
+        limit: 1,
+        lock: "FOR UPDATE"
+      )
+    )
+  end
+
+  # Callback-driven transition: identical envelope to
+  # `transition_locked/2` but the lock query also filters on
+  # `delegation_id` so a stale callback for an old delegation
+  # cannot mutate a freshly-granted current row that happens to
+  # share the same `smart_account_id`.
+  defp transition_locked_for_callback(smart_account_id, delegation_id, transition_fn)
+       when is_binary(smart_account_id) and is_binary(delegation_id) do
+    Repo.transaction(fn ->
+      case lock_delegation_for_callback(smart_account_id, delegation_id) do
+        nil ->
+          Repo.rollback(:not_found)
+
+        %Delegation{} = delegation ->
+          case transition_fn.(delegation) do
+            {:ok, %Delegation{} = updated} -> updated
+            {:error, %Ecto.Changeset{} = cs} -> Repo.rollback(cs)
+            {:error, reason} -> Repo.rollback(reason)
+          end
+      end
+    end)
+    |> case do
+      {:ok, %Delegation{} = d} -> {:ok, d}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp record_revoke_requested_for_callback(smart_account_id, delegation_id, attrs) do
+    transition_locked_for_callback(smart_account_id, delegation_id, fn delegation ->
+      case delegation do
+        %Delegation{state: state}
+        when state in [:active, :pending, :revoke_failed] ->
+          delegation
+          |> Delegation.revoke_requested_changeset(attrs)
+          |> Repo.update()
+
+        %Delegation{state: :revoking} ->
+          {:ok, delegation}
+
+        %Delegation{} ->
+          {:error, :invalid_transition}
+      end
+    end)
+  end
+
+  defp record_revoke_failed_for_callback(smart_account_id, delegation_id, attrs) do
+    transition_locked_for_callback(smart_account_id, delegation_id, fn delegation ->
+      case delegation do
+        %Delegation{state: :revoking} ->
+          delegation
+          |> Delegation.revoke_failed_changeset(attrs)
+          |> Repo.update()
+
+        %Delegation{} ->
+          {:error, :invalid_transition}
+      end
+    end)
+  end
+
+  defp record_revoked_for_callback(smart_account_id, delegation_id, attrs) do
+    transition_locked_for_callback(smart_account_id, delegation_id, fn delegation ->
+      case delegation do
+        %Delegation{state: :revoking} ->
+          delegation
+          |> Delegation.revoked_changeset(attrs)
+          |> Repo.update()
+
+        %Delegation{} ->
+          {:error, :invalid_transition}
+      end
+    end)
+  end
+
+  defp record_expired_for_callback(smart_account_id, delegation_id) do
+    transition_locked_for_callback(smart_account_id, delegation_id, fn delegation ->
+      case delegation do
+        %Delegation{state: :active} ->
+          delegation
+          |> Delegation.expired_changeset()
+          |> Repo.update()
+
+        %Delegation{} ->
+          {:error, :invalid_transition}
+      end
+    end)
   end
 
   @doc """
@@ -400,6 +553,17 @@ defmodule Bank.Delegations do
                   })
                 )
 
+              # Refuse to apply a `granted` callback whose
+              # `delegation_id` does not match the current
+              # non-terminal row. Without this guard a stale
+              # callback for retired `del_old` could land on a
+              # freshly-granted `del_new` and either return
+              # `{:ok, del_new}` (silently acknowledging the wrong
+              # delegation) or upgrade `:pending` → `:active` with
+              # the stale callback's `last_reason`.
+              %Delegation{delegation_id: current_id} when current_id != delegation_id ->
+                {:error, :not_found}
+
               %Delegation{state: :pending} = delegation ->
                 delegation
                 |> Delegation.changeset(Map.merge(artifact_attrs, %{last_reason: reason}))
@@ -422,24 +586,24 @@ defmodule Bank.Delegations do
         {:error, :grant_failed}
 
       "revoking" ->
-        record_revoke_requested(smart_account_id, %{
+        record_revoke_requested_for_callback(smart_account_id, delegation_id, %{
           last_reason: reason
         })
 
       "revoke_failed" ->
-        record_revoke_failed(smart_account_id, %{
+        record_revoke_failed_for_callback(smart_account_id, delegation_id, %{
           last_reason: reason,
           last_tx_hash: tx_hash
         })
 
       "revoked" ->
-        record_revoked(smart_account_id, %{
+        record_revoked_for_callback(smart_account_id, delegation_id, %{
           last_reason: reason,
           last_tx_hash: tx_hash
         })
 
       "expired" ->
-        record_expired(smart_account_id)
+        record_expired_for_callback(smart_account_id, delegation_id)
 
       _ ->
         {:error, :unknown_state}
