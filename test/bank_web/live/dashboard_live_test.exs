@@ -583,15 +583,40 @@ defmodule BankWeb.DashboardLiveTest do
              )
     end
 
-    test "non-linked cards (runtime, delegation) render without an inner link",
-         %{conn: conn} do
+    test "runtime-status-card links to /security#runtime-card", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/dashboard")
 
       assert has_element?(view, "#runtime-status-card")
+
+      assert has_element?(
+               view,
+               ~s|#runtime-status-card a[href="/security#runtime-card"]|
+             )
+    end
+
+    test "delegation-status-card links to /security#delegations-card", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/dashboard")
+
       assert has_element?(view, "#delegation-status-card")
 
-      refute has_element?(view, ~s|#runtime-status-card a[href]|)
-      refute has_element?(view, ~s|#delegation-status-card a[href]|)
+      assert has_element?(
+               view,
+               ~s|#delegation-status-card a[href="/security#delegations-card"]|
+             )
+    end
+
+    test "recent-decisions-card and readiness-card remain unlinked", %{conn: conn} do
+      # Negative pin: only the four stat cards are click-through. The
+      # recent-decisions and readiness cards have no obvious shipped
+      # destination and stay informational so a future drive-by edit
+      # cannot silently link them in by mistake.
+      {:ok, view, _html} = live(conn, "/dashboard")
+
+      assert has_element?(view, "#recent-decisions-card")
+      assert has_element?(view, "#readiness-card")
+
+      refute has_element?(view, ~s|#recent-decisions-card a[href]|)
+      refute has_element?(view, ~s|#readiness-card a[href]|)
     end
   end
 

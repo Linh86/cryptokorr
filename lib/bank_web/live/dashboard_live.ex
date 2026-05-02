@@ -323,6 +323,7 @@ defmodule BankWeb.DashboardLive do
           value={if @paused, do: "Paused", else: "Running"}
           icon="hero-cog-6-tooth"
           color={if @paused, do: "warning", else: "success"}
+          navigate="/security#runtime-card"
         />
         <.stat_card
           id="delegation-status-card"
@@ -330,6 +331,7 @@ defmodule BankWeb.DashboardLive do
           value={delegation_stat_value(@delegations, @executable_count)}
           icon="hero-signal"
           color={delegation_stat_color(@delegations, @executable_count)}
+          navigate="/security#delegations-card"
         />
         <.stat_card
           id="pending-approvals-card"
