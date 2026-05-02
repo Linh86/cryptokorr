@@ -463,6 +463,93 @@ defmodule BankWeb.API.V1.ApprovalControllerTest do
       body = json_response(conn, 409)
       assert body["error"]["code"] == "wrong_outcome"
     end
+
+    test "approve response carries screening evidence resolved through the workspace-scoped intent lookup (#212 P2)",
+         %{conn: conn} do
+      # Pre-fix `screening_evidence/1` did `Repo.get(AgentIntent,
+      # intent_id)` with no workspace filter. Today the upstream
+      # `Decisions.get_envelope_in_workspace/2` gate makes that
+      # untriggerable cross-workspace via the public API, but the
+      # helper is now `screening_evidence/2` with `workspace_id`
+      # threaded explicitly through `success_body/3` and
+      # `summarize/2`, so a future refactor that bypasses the gate
+      # cannot leak a sibling workspace's screening evidence.
+      #
+      # This regression locks the response shape: when the caller's
+      # workspace owns the intent, the screening evidence appears
+      # exactly as before.
+      target = "0xWsScopedScreeningEvidence001"
+
+      intent =
+        agent_intent(
+          target_counterparty_id: nil,
+          target_raw_address: target,
+          chain: "ethereum"
+        )
+
+      {:ok, _record} =
+        WalletScreening.upsert_record(%{
+          chain: "ethereum",
+          address: target,
+          control_tier: :challenge,
+          source: "scamsniffer",
+          source_record_id: "approve-ws-scope-001",
+          category: "phishing",
+          reason: "ScamSniffer: approve-ws-scope evidence"
+        })
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      conn = post(conn, ~p"/v1/approvals/#{envelope.id}/approve", %{"actor_id" => "op-ws"})
+      body = json_response(conn, 200)
+
+      assert %{"screening_evidence" => evidence} = body["decision"]
+      assert evidence["outcome"] == "challenge"
+      assert evidence["winning_tier"] == "challenge"
+      assert evidence["screened_address"] == target
+      assert [%{"control_tier" => "challenge", "source" => "scamsniffer"}] = evidence["records"]
+    end
+
+    test "approve from workspace A cannot reach a sibling workspace B's envelope (#212 P2 upstream gate backstop)",
+         %{conn: conn} do
+      # Sanity backstop: even though the screening_evidence helper is
+      # now workspace-scoped (defense-in-depth), the public surface
+      # is still gated by `Decisions.get_envelope_in_workspace/2`
+      # before the helper ever runs. Confirm the gate still 404s on
+      # sibling-workspace envelope ids so the helper-layer guard is
+      # belt-and-braces, not a behaviour change.
+      {:ok, ws_b} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "sibling-approve-ws-#{System.unique_integer([:positive])}",
+          name: "Sibling B"
+        })
+
+      cp_b = counterparty(workspace_id: ws_b.id)
+
+      intent_b =
+        agent_intent(
+          workspace_id: ws_b.id,
+          target_counterparty_id: cp_b.id
+        )
+
+      envelope_b =
+        decision_envelope(
+          intent: intent_b,
+          outcome: :approval_required,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      conn = post(conn, ~p"/v1/approvals/#{envelope_b.id}/approve", %{"actor_id" => "op-leak"})
+      body = json_response(conn, 404)
+      assert body["error"]["code"] == "not_found"
+    end
   end
 
   describe "POST /v1/approvals/:id/reject" do
