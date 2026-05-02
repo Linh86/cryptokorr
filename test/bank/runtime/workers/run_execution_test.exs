@@ -63,6 +63,57 @@ defmodule Bank.Runtime.Workers.RunExecutionTest do
     %{intent: intent, decision: decision, plan: plan, label: label, counterparty: counterparty}
   end
 
+  # Workspace-stamped variant of `scenario/1` for #228-Phase-1
+  # chain-pause tests. Stamps `workspace_id` on every workspace-scoped
+  # row (intent, decision, plan, delegation) so the dispatch gate can
+  # consult `Security.paused?(workspace_id, {:chain, _})` correctly.
+  defp scenario_for_workspace(ws_id) when is_binary(ws_id) do
+    counterparty = Fixtures.counterparty(workspace_id: ws_id)
+    label = Fixtures.address_label(counterparty: counterparty, chain: "base")
+
+    intent =
+      Fixtures.agent_intent(
+        counterparty: counterparty,
+        target_address_label_id: label.id,
+        amount: Decimal.new("25"),
+        workspace_id: ws_id
+      )
+
+    {:ok, intent} =
+      intent
+      |> AgentIntent.current_pointer_changeset(%{state: :decided})
+      |> Repo.update()
+
+    decision =
+      Fixtures.decision_envelope(
+        intent: intent,
+        outcome: :auto_exec,
+        state: :decided,
+        current: true
+      )
+
+    smart_account_id = "sa_run_exec_ws_#{System.unique_integer([:positive])}"
+
+    plan =
+      Fixtures.execution_plan(
+        decision: decision,
+        intent_id: intent.id,
+        smart_account_id: smart_account_id,
+        signing_requirements: %{"delegation_id" => "del_primary"},
+        workspace_id: ws_id
+      )
+
+    _delegation =
+      Fixtures.delegation(
+        smart_account_id: smart_account_id,
+        delegation_id: "del_#{smart_account_id}",
+        state: :active,
+        workspace_id: ws_id
+      )
+
+    %{intent: intent, decision: decision, plan: plan, label: label, counterparty: counterparty}
+  end
+
   defp insert_delegation(smart_account_id, :active) do
     Fixtures.delegation(
       smart_account_id: smart_account_id,
@@ -368,6 +419,70 @@ defmodule Bank.Runtime.Workers.RunExecutionTest do
       assert :ok = perform_job(RunExecution, %{"decision_id" => decision.id})
 
       assert %ExecutionPlan{execution_status: :signing} = Repo.get!(ExecutionPlan, plan.id)
+    end
+
+    test "chain pause aborts before adapter dispatch with reason chain_paused (#228 phase 1)" do
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{slug: "rx-chain-a", name: "RX chain A"})
+
+      %{decision: decision, plan: plan, intent: intent} = scenario_for_workspace(ws.id)
+
+      Req.Test.stub(Bank.AdapterClient, fn _ ->
+        flunk("AdapterClient called despite chain pause")
+      end)
+
+      {:ok, :paused, _} = Bank.Security.pause(ws.id, {:chain, "base"}, [])
+
+      assert {:cancel, :chain_paused} =
+               perform_job(RunExecution, %{"decision_id" => decision.id})
+
+      assert %ExecutionPlan{
+               execution_status: :aborted,
+               final_outcome: :aborted,
+               final_reason: "chain_paused"
+             } = Repo.get!(ExecutionPlan, plan.id)
+
+      assert %AgentIntent{state: :blocked} = Repo.get!(AgentIntent, intent.id)
+    end
+
+    test "sibling workspace's chain pause does not abort this plan (#228 phase 1)" do
+      {:ok, ws_a} =
+        Bank.Workspaces.create_workspace(%{slug: "rx-iso-a", name: "RX iso A"})
+
+      {:ok, ws_b} =
+        Bank.Workspaces.create_workspace(%{slug: "rx-iso-b", name: "RX iso B"})
+
+      %{decision: decision, plan: plan} = scenario_for_workspace(ws_b.id)
+
+      stub_adapter_response(202, %{"accepted" => true, "execution_plan_id" => plan.id})
+
+      # Workspace A pauses base; B's plan must still dispatch.
+      {:ok, :paused, _} = Bank.Security.pause(ws_a.id, {:chain, "base"}, [])
+
+      assert :ok = perform_job(RunExecution, %{"decision_id" => decision.id})
+
+      assert %ExecutionPlan{execution_status: :signing} = Repo.get!(ExecutionPlan, plan.id)
+    end
+
+    test "global pause precedence preserved (still aborts with runtime_paused)" do
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{slug: "rx-precedence", name: "RX precedence"})
+
+      %{decision: decision, plan: plan} = scenario_for_workspace(ws.id)
+
+      Req.Test.stub(Bank.AdapterClient, fn _ ->
+        flunk("AdapterClient called")
+      end)
+
+      # Both global and chain paused — global must win for parity with the
+      # existing audit/replay shape.
+      {:ok, :paused, _} = Bank.Security.pause(ws.id, {:chain, "base"}, [])
+      {:ok, :paused} = Security.pause(:global)
+
+      assert {:cancel, :runtime_paused} =
+               perform_job(RunExecution, %{"decision_id" => decision.id})
+
+      assert %ExecutionPlan{final_reason: "runtime_paused"} = Repo.get!(ExecutionPlan, plan.id)
     end
   end
 

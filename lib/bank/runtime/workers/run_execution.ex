@@ -185,22 +185,33 @@ defmodule Bank.Runtime.Workers.RunExecution do
     end
   end
 
+  # Pre-dispatch pause gate. Global pause keeps its existing
+  # `"runtime_paused"` reason and `{:cancel, :runtime_paused}`
+  # cancellation shape so existing audit/replay consumers see no
+  # change. The chain-pause check (#228 Phase 1) layers on top:
+  # when the plan's workspace+chain is paused at the DB level, we
+  # abort with `"chain_paused"` and `{:cancel, :chain_paused}`.
   defp verify_not_paused(%ExecutionPlan{} = plan) do
-    if Security.paused?(:global) do
-      abort_for_pause(plan)
-    else
-      :ok
+    cond do
+      Security.paused?(:global) ->
+        abort_for_pause(plan, "runtime_paused", :runtime_paused)
+
+      is_binary(plan.workspace_id) and is_binary(plan.chain) and
+          Security.paused?(plan.workspace_id, {:chain, plan.chain}) ->
+        abort_for_pause(plan, "chain_paused", :chain_paused)
+
+      true ->
+        :ok
     end
   end
 
-  defp abort_for_pause(%ExecutionPlan{} = plan) do
+  defp abort_for_pause(%ExecutionPlan{} = plan, reason, cancel_tag) do
     prior_status = plan.execution_status
-    reason = "runtime_paused"
 
     case mark_plan_aborted(plan, reason) do
       {:ok, updated_plan, intent_transition} ->
         emit_aborted_side_effects(updated_plan, prior_status, intent_transition, reason)
-        {:cancel, :runtime_paused}
+        {:cancel, cancel_tag}
 
       {:error, changeset} ->
         Logger.error(

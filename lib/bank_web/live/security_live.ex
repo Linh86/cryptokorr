@@ -52,6 +52,15 @@ defmodule BankWeb.SecurityLive do
   @safety_event_types [
     "security.paused",
     "security.resumed",
+    # DB-backed scoped pauses (#228 Phase 1: chain). These rows
+    # stamp `workspace_id` on the audit envelope directly, so the
+    # `visible_to_workspace?/3` clause matches on
+    # `event.workspace_id` rather than the existing blanket
+    # `"security." <> _` rule (which is correct for the
+    # runtime-global `security.paused`/`security.resumed` events
+    # but would leak workspace-scoped scope events).
+    "security.scope_paused",
+    "security.scope_resumed",
     "delegation.revoke_requested",
     "delegation.revoked",
     "delegation.state_changed",
@@ -570,6 +579,30 @@ defmodule BankWeb.SecurityLive do
   # so they are visible iff that subject equals the current
   # workspace — keeps the timeline from leaking another workspace's
   # pause activity.
+  #
+  # `security.scope_paused` / `security.scope_resumed` (#228 Phase
+  # 1) are workspace-scoped: they stamp `event.workspace_id` and
+  # MUST be gated on it BEFORE the blanket `"security." <> _`
+  # rule below. Elixir matches first-clause-wins, so the order of
+  # these clauses is load-bearing — moving them after the catch-
+  # all would silently make every workspace see every other
+  # workspace's chain pauses.
+  defp visible_to_workspace?(
+         %{event_type: "security.scope_paused", workspace_id: row_ws},
+         _ids,
+         ws_id
+       )
+       when is_binary(row_ws) and is_binary(ws_id),
+       do: row_ws == ws_id
+
+  defp visible_to_workspace?(
+         %{event_type: "security.scope_resumed", workspace_id: row_ws},
+         _ids,
+         ws_id
+       )
+       when is_binary(row_ws) and is_binary(ws_id),
+       do: row_ws == ws_id
+
   defp visible_to_workspace?(%{event_type: "security." <> _}, _ids, _ws_id), do: true
 
   defp visible_to_workspace?(%{event_type: "delegation." <> _, subject_id: id}, ids, _ws_id)

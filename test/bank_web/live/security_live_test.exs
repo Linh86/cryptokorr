@@ -262,6 +262,63 @@ defmodule BankWeb.SecurityLiveTest do
       assert has_element?(view, "#safety-events-empty")
       assert has_element?(view, "#safety-events-empty", "No safety events recorded yet")
     end
+
+    test "shows security.scope_paused / security.scope_resumed for the current workspace (#228 phase 1)",
+         %{conn: conn, workspace: ws} do
+      audit_event(
+        event_type: "security.scope_paused",
+        subject_type: "chain",
+        subject_id: "base",
+        workspace_id: ws.id,
+        actor: :user
+      )
+
+      audit_event(
+        event_type: "security.scope_resumed",
+        subject_type: "chain",
+        subject_id: "base",
+        workspace_id: ws.id,
+        actor: :user
+      )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      refute has_element?(view, "#safety-events-empty")
+      assert has_element?(view, "#safety-events-card", "security.scope_paused")
+      assert has_element?(view, "#safety-events-card", "security.scope_resumed")
+    end
+
+    test "does NOT leak another workspace's security.scope_* events (#228 phase 1)",
+         %{conn: conn} do
+      # Cross-workspace timeline isolation regression. Without the
+      # specific `visible_to_workspace?/3` clause for
+      # `security.scope_*` (placed BEFORE the catch-all
+      # `"security." <> _` rule), every workspace would see every
+      # other workspace's scoped pauses.
+      {:ok, other_ws} =
+        Bank.Workspaces.create_workspace(%{slug: "other-ws-scope-leak", name: "Other Scope"})
+
+      audit_event(
+        event_type: "security.scope_paused",
+        subject_type: "chain",
+        subject_id: "base",
+        workspace_id: other_ws.id,
+        actor: :user
+      )
+
+      audit_event(
+        event_type: "security.scope_resumed",
+        subject_type: "chain",
+        subject_id: "base",
+        workspace_id: other_ws.id,
+        actor: :user
+      )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#safety-events-empty")
+      assert has_element?(view, "#safety-events-empty", "No safety events recorded yet")
+    end
   end
 
   # --- Risk summary card (#231-e) -----------------------------------------

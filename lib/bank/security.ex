@@ -63,13 +63,24 @@ defmodule Bank.Security do
 
   alias Bank.Delegations
   alias Bank.Runtime
+  alias Bank.Security.Pause
+  alias Bank.Security.Pauses
   alias Bank.Security.PauseState
 
   @type scope :: :global | {:counterparty, String.t()}
+  @type chain_scope :: {:chain, String.t()}
   @type reason :: atom() | String.t()
   @type actor :: :user | :agent | :runtime | :adapter
   @type pause_result :: {:ok, :paused | :already_paused} | {:error, term()}
   @type resume_result :: {:ok, :resumed | :already_running} | {:error, term()}
+  @type scope_pause_result ::
+          {:ok, :paused, Pause.t()}
+          | {:ok, :already_paused, Pause.t()}
+          | {:error, term()}
+  @type scope_resume_result ::
+          {:ok, :resumed, Pause.t()}
+          | {:ok, :already_running}
+          | {:error, term()}
 
   @doc """
   Apply a pause.
@@ -140,6 +151,59 @@ defmodule Bank.Security do
   """
   @spec paused?(scope()) :: boolean()
   def paused?(scope), do: PauseState.paused?(scope)
+
+  @doc """
+  Apply a workspace-scoped DB-backed pause (#228 Phase 1: `:chain`).
+
+  `workspace_id` MUST be a binary UUID. Nil/non-binary
+  `workspace_id` returns `{:error, :invalid_workspace}` — Phase 1
+  has no workspace-less pause.
+
+  Idempotent: re-pausing an already-active `(workspace_id, :chain,
+  chain)` returns `{:ok, :already_paused, existing_pause}` without
+  emitting a second audit event. See `Bank.Security.Pauses` for
+  the full idempotency contract.
+
+  Existing in-memory `:global` and `{:counterparty, _}` APIs are
+  unchanged; this clause is additive.
+  """
+  @spec pause(String.t() | nil, chain_scope(), keyword()) :: scope_pause_result()
+  def pause(workspace_id, {:chain, chain}, opts) when is_binary(chain) and is_list(opts) do
+    Pauses.create_pause(workspace_id, :chain, chain, opts)
+  end
+
+  @doc """
+  Lift a workspace-scoped DB-backed pause (#228 Phase 1: `:chain`).
+
+  Idempotent: resuming a non-paused scope returns
+  `{:ok, :already_running}` without writing or auditing.
+  """
+  @spec resume(String.t() | nil, chain_scope(), keyword()) :: scope_resume_result()
+  def resume(workspace_id, {:chain, chain}, opts) when is_binary(chain) and is_list(opts) do
+    Pauses.resume(workspace_id, :chain, chain, opts)
+  end
+
+  @doc """
+  Is the given workspace's chain scope currently paused?
+
+  Composes global precedence with the workspace-scoped DB lookup:
+
+    * If `paused?(:global)` is true, returns `true` immediately
+      without touching the DB. Mirrors the inheritance contract
+      that `{:counterparty, _}` already follows in `PauseState`.
+    * Else `Bank.Security.Pauses.paused?/3` answers from the DB.
+
+  `workspace_id` may be `nil` for legacy unscoped intents (#158
+  tail). In that case, only the global check applies; the chain
+  DB read is skipped (returns `false` if not globally paused).
+  """
+  @spec paused?(String.t() | nil, chain_scope()) :: boolean()
+  def paused?(workspace_id, {:chain, chain}) when is_binary(chain) do
+    cond do
+      PauseState.paused?(:global) -> true
+      true -> Pauses.paused?(workspace_id, :chain, chain)
+    end
+  end
 
   @doc "Return the full pause state (for operator dashboard)."
   @spec snapshot() :: map()

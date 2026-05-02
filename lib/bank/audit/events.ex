@@ -1194,6 +1194,102 @@ defmodule Bank.Audit.Events do
     }
   end
 
+  @doc """
+  `security.scope_paused` — operator paused a DB-backed
+  workspace-scoped resource (#228 Phase 1: `:chain`; later phases
+  extend to `:smart_account` / `:api_key`).
+
+  Subject is the **resource being paused**, not the workspace —
+  `subject_type` is the scope kind (e.g. `"chain"`) and
+  `subject_id` is the scope value (e.g. `"base"`). Workspace
+  isolation rides on the envelope `:workspace_id` field so that
+  `BankWeb.SecurityLive`'s `visible_to_workspace?/3` clause can
+  gate timeline visibility on the row's `workspace_id` rather than
+  overloading `subject_id`.
+
+  Emitted ONLY on the actual transition. Idempotent re-pause does
+  not emit a second event (the context returns the existing row).
+
+  ## `after_ref` allowlist
+
+  Hard-coded: `:scope_type`, `:scope_value`, `:paused_at`,
+  `:reason`, `:created_by_user_id`. No secrets, no API key
+  prefixes/hashes, no tx hashes — pause events live above the
+  chain layer. JSON-scan tests refute every leakable substring.
+
+  No `expires_at` in Phase 1; the column itself is deferred to
+  Phase 1.5 (column + sweeper land together).
+  """
+  @spec security_scope_paused(Bank.Security.Pause.t(), keyword()) :: attrs()
+  def security_scope_paused(%Bank.Security.Pause{} = pause, opts \\ []) do
+    actor = Keyword.get(opts, :actor, :user)
+    actor_id = Keyword.get(opts, :actor_id) || actor_id_or_nil(actor)
+
+    %{
+      actor: :user,
+      actor_id: actor_id,
+      event_type: "security.scope_paused",
+      subject_type: subject_type_for(pause.scope_type),
+      subject_id: pause.scope_value,
+      correlation_id: nil,
+      before_ref: %{paused_at: nil},
+      after_ref: %{
+        scope_type: subject_type_for(pause.scope_type),
+        scope_value: pause.scope_value,
+        paused_at: pause.paused_at,
+        reason: pause.reason,
+        created_by_user_id: pause.created_by_user_id
+      },
+      workspace_id: pause.workspace_id
+    }
+  end
+
+  @doc """
+  `security.scope_resumed` — operator cleared a DB-backed
+  workspace-scoped pause (#228 Phase 1: `:chain`).
+
+  `before_ref` carries the prior pause snapshot (paused_at,
+  reason, created_by_user_id) so replay can reconstruct the pause
+  this resume cleared. `after_ref` records the resume terminator.
+
+  Emitted ONLY on the actual transition. Idempotent re-resume on
+  an already-running scope does not emit.
+  """
+  @spec security_scope_resumed(Bank.Security.Pause.t(), map(), keyword()) :: attrs()
+  def security_scope_resumed(%Bank.Security.Pause{} = pause, prior, opts \\ [])
+      when is_map(prior) do
+    actor = Keyword.get(opts, :actor, :user)
+    actor_id = Keyword.get(opts, :actor_id) || actor_id_or_nil(actor)
+
+    %{
+      actor: :user,
+      actor_id: actor_id,
+      event_type: "security.scope_resumed",
+      subject_type: subject_type_for(pause.scope_type),
+      subject_id: pause.scope_value,
+      correlation_id: nil,
+      before_ref: %{
+        paused_at: Map.get(prior, :paused_at),
+        reason: Map.get(prior, :reason),
+        created_by_user_id: Map.get(prior, :created_by_user_id)
+      },
+      after_ref: %{
+        scope_type: subject_type_for(pause.scope_type),
+        scope_value: pause.scope_value,
+        resumed_at: pause.resumed_at,
+        resumed_by_user_id: pause.resumed_by_user_id
+      },
+      workspace_id: pause.workspace_id
+    }
+  end
+
+  defp subject_type_for(:chain), do: "chain"
+  defp subject_type_for(scope_type) when is_atom(scope_type), do: Atom.to_string(scope_type)
+
+  defp actor_id_or_nil(%User{id: id}), do: id
+  defp actor_id_or_nil(id) when is_binary(id), do: id
+  defp actor_id_or_nil(_), do: nil
+
   defp actor_id(%User{id: id}), do: id
   defp actor_id(id) when is_binary(id), do: id
 
