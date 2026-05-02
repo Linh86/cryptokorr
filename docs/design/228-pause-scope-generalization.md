@@ -196,10 +196,30 @@ create table(:pauses, primary_key: false) do
   # later schema change (relax the column + add a CHECK or
   # COALESCE-based unique-index expression to keep the invariant).
   # Phase 1 does not allow NULL.
+  #
+  # FK delete behavior — `on_delete: :restrict` matches the repo's
+  # workspace-FK convention (see `priv/repo/migrations/20260430160000_create_api_keys.exs`,
+  # `20260429202112_create_access_invites.exs`,
+  # `20260429170100_create_memberships.exs`,
+  # `20260430095904_add_workspace_id_scoping_foundation.exs`). It is
+  # also the only correct choice given `null: false`: `:nilify_all`
+  # would attempt to set a NOT NULL column to NULL on workspace
+  # deletion and the migration would silently encode an unreachable
+  # state. Workspaces in v0.1 are not deleted as part of normal
+  # operations; if a real workspace-deletion flow ships later, it
+  # must explicitly resume / drop dependent pause rows before the
+  # delete (same posture as `api_keys`, `memberships`, and
+  # `access_invites`).
   add :workspace_id, references(:workspaces, type: :binary_id,
-       on_delete: :nilify_all), null: false
+       on_delete: :restrict), null: false
 
   add :reason, :text, null: true
+  # `created_by_user_id` is nullable, so `:nilify_all` is safe and
+  # matches the workspace agent-keys precedent
+  # (`priv/repo/migrations/20260501101355_add_agent_keys_pause_to_workspaces.exs`'s
+  # `agent_keys_paused_by_user_id`). Deleting a user must not cascade
+  # to losing the pause row's audit-relevant existence, so the row
+  # survives the user delete with a NULL attribution column.
   add :created_by_user_id, references(:users, type: :binary_id,
        on_delete: :nilify_all), null: true
 
@@ -333,6 +353,7 @@ Explicit commitments enforced in every phase's PR:
 - **Migration generated via `mix ecto.gen.migration`** per AGENTS.md.
 - **Reversible.** The `down/0` clause drops the table and indexes; nothing else is touched.
 - **Index discipline.** The active-pause partial unique index is created in the same migration. The hot-path index is included so the first deploy does not see a DB-scan regression on `paused?/3`.
+- **FK delete behavior.** `workspace_id` uses `on_delete: :restrict` — both because that is the repo's workspace-FK convention (`api_keys`, `memberships`, `access_invites`, `add_workspace_id_scoping_foundation`) and because the column is `null: false`, so `:nilify_all` would be invalid on the only delete path it could fire. `created_by_user_id` keeps `:nilify_all` because the column is nullable and matches the agent-keys-pause precedent (`agent_keys_paused_by_user_id` on `workspaces`).
 
 ## 11. Tests
 
