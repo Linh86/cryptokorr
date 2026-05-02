@@ -1199,25 +1199,25 @@ defmodule Bank.Decisions do
 
   defp create_execution_plan(envelope, smart_account_id, source, opts)
        when source in [:manual, :auto] do
+    # Resolve the workspace_id up front so the chain-pause gate
+    # (#228 Phase 1) can consult `Bank.Security.paused?/2` with a
+    # workspace key. Legacy unscoped intents (#158 tail) leave
+    # `workspace_id` as `nil`; the chain-pause check tolerates that
+    # and falls through to the global-pause result.
+    workspace_id = lookup_intent_workspace_id(envelope.intent_id)
+    chain = "base"
+
     with :ok <- validate_executable_envelope(envelope),
          :ok <- validate_no_active_plan(envelope.id),
          :ok <- validate_stablecoin_adapter_ready(envelope),
-         :ok <- validate_not_paused(),
+         :ok <- validate_not_paused(workspace_id, chain),
          :ok <- validate_delegation_active(smart_account_id) do
       reason = Keyword.get(opts, :reason, default_reason_for(source))
-
-      # Stamp the plan with the parent intent's workspace_id (#158d).
-      # `execution_plans.workspace_id` is a nullable read hint added
-      # by #158a so adapter callbacks can resolve workspace context
-      # without joining through the intent. Loading just the
-      # workspace_id field keeps this lightweight; if the intent is
-      # somehow unscoped (legacy nil), the plan stays unscoped too.
-      workspace_id = lookup_intent_workspace_id(envelope.intent_id)
 
       plan_attrs = %{
         decision_id: envelope.id,
         intent_id: envelope.intent_id,
-        chain: "base",
+        chain: chain,
         asset: "USDC",
         smart_account_id: smart_account_id,
         execution_status: :prepared,
@@ -1319,11 +1319,21 @@ defmodule Bank.Decisions do
   defp route_requires_adapter?(%{execution_state: :requires_adapter}), do: true
   defp route_requires_adapter?(_), do: false
 
-  defp validate_not_paused do
-    if Security.paused?(:global) do
-      {:error, :runtime_paused}
-    else
-      :ok
+  # Chain-pause gate (#228 Phase 1) — global pause wins first to
+  # preserve the existing `{:error, :runtime_paused}` shape;
+  # workspace-scoped chain pauses surface as `{:error,
+  # :chain_paused}`. Nil workspace_id is legacy-safe: the chain
+  # check is skipped and only the global gate applies.
+  defp validate_not_paused(workspace_id, chain) when is_binary(chain) do
+    cond do
+      Security.paused?(:global) ->
+        {:error, :runtime_paused}
+
+      is_binary(workspace_id) and Security.paused?(workspace_id, {:chain, chain}) ->
+        {:error, :chain_paused}
+
+      true ->
+        :ok
     end
   end
 

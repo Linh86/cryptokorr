@@ -489,6 +489,92 @@ defmodule Bank.DecisionsTest do
                Decisions.dispatch_auto_exec(envelope.id, "sa-auto-pause")
     end
 
+    test "rejects with :chain_paused when the workspace's chain is paused (#228 phase 1)" do
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{slug: "chain-pause-a", name: "Chain pause A"})
+
+      intent = agent_intent(workspace_id: ws.id)
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :auto_exec,
+          current: true
+        )
+
+      {:ok, _del} = Delegations.grant("sa-chain-pause-a", "del-chain-pause-a")
+      {:ok, :paused, _} = Bank.Security.pause(ws.id, {:chain, "base"}, [])
+
+      assert {:error, :chain_paused} =
+               Decisions.dispatch_auto_exec(envelope.id, "sa-chain-pause-a")
+
+      refute_enqueued(worker: RunExecution)
+    end
+
+    test "sibling workspace's chain pause does not block (#228 phase 1)" do
+      {:ok, ws_a} =
+        Bank.Workspaces.create_workspace(%{slug: "chain-iso-a", name: "Chain iso A"})
+
+      {:ok, ws_b} =
+        Bank.Workspaces.create_workspace(%{slug: "chain-iso-b", name: "Chain iso B"})
+
+      intent_b = agent_intent(workspace_id: ws_b.id)
+
+      envelope_b =
+        decision_envelope(
+          intent: intent_b,
+          outcome: :auto_exec,
+          current: true
+        )
+
+      {:ok, _del} = Delegations.grant("sa-chain-iso-b", "del-chain-iso-b")
+
+      # Workspace A pauses base; B's plan must still dispatch.
+      {:ok, :paused, _} = Bank.Security.pause(ws_a.id, {:chain, "base"}, [])
+
+      assert {:ok, plan} = Decisions.dispatch_auto_exec(envelope_b.id, "sa-chain-iso-b")
+      assert plan.workspace_id == ws_b.id
+    end
+
+    test "global pause still beats chain pause when both fire (preserves :runtime_paused)" do
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{slug: "chain-global", name: "Chain global"})
+
+      intent = agent_intent(workspace_id: ws.id)
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :auto_exec,
+          current: true
+        )
+
+      {:ok, _del} = Delegations.grant("sa-chain-global", "del-chain-global")
+      {:ok, :paused, _} = Bank.Security.pause(ws.id, {:chain, "base"}, [])
+      {:ok, :paused} = Bank.Security.pause(:global)
+
+      assert {:error, :runtime_paused} =
+               Decisions.dispatch_auto_exec(envelope.id, "sa-chain-global")
+    end
+
+    test "legacy nil workspace_id intent does not crash and skips chain check (#228 phase 1)" do
+      # Intent without workspace_id (#158 tail). The chain-pause gate must
+      # be legacy-safe: only the global gate applies.
+      intent = agent_intent(workspace_id: nil)
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :auto_exec,
+          current: true
+        )
+
+      {:ok, _del} = Delegations.grant("sa-chain-legacy", "del-chain-legacy")
+
+      assert {:ok, plan} = Decisions.dispatch_auto_exec(envelope.id, "sa-chain-legacy")
+      assert is_nil(plan.workspace_id)
+    end
+
     test "reuses the manual-path gates: rejects when delegation is not active" do
       envelope = decision_envelope(outcome: :auto_exec, current: true)
 

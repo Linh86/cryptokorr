@@ -112,6 +112,62 @@ defmodule Bank.SecurityTest do
     end
   end
 
+  describe "pause/3 + resume/3 + paused?/2 — workspace-scoped chain" do
+    test "DB-backed pause/resume happy path through Bank.Security" do
+      ws = create_workspace_for_security_test!()
+      user = create_user_for_security_test!()
+
+      assert {:ok, :paused, pause} =
+               Security.pause(ws.id, {:chain, "base"}, actor: user, reason: "rpc outage")
+
+      assert pause.workspace_id == ws.id
+      assert pause.scope_type == :chain
+      assert pause.scope_value == "base"
+
+      assert Security.paused?(ws.id, {:chain, "base"})
+      refute Security.paused?(ws.id, {:chain, "optimism"})
+
+      assert {:ok, :resumed, _} = Security.resume(ws.id, {:chain, "base"}, actor: user)
+      refute Security.paused?(ws.id, {:chain, "base"})
+    end
+
+    test "global pause precedence — paused?/2 returns true even with no DB row" do
+      ws = create_workspace_for_security_test!()
+
+      refute Security.paused?(ws.id, {:chain, "base"})
+      {:ok, :paused} = Security.pause(:global)
+
+      assert Security.paused?(ws.id, {:chain, "base"})
+      assert Security.paused?(ws.id, {:chain, "anything"})
+    end
+
+    test "nil workspace_id is legacy-safe and respects global precedence" do
+      refute Security.paused?(nil, {:chain, "base"})
+
+      {:ok, :paused} = Security.pause(:global)
+      assert Security.paused?(nil, {:chain, "base"})
+    end
+
+    test "pause/3 with nil workspace_id rejects with :invalid_workspace" do
+      assert {:error, :invalid_workspace} =
+               Security.pause(nil, {:chain, "base"}, [])
+
+      assert {:error, :invalid_workspace} =
+               Security.resume(nil, {:chain, "base"}, [])
+    end
+
+    test "sibling workspaces are isolated" do
+      ws_a = create_workspace_for_security_test!()
+      ws_b = create_workspace_for_security_test!()
+      user = create_user_for_security_test!()
+
+      {:ok, :paused, _} = Security.pause(ws_a.id, {:chain, "base"}, actor: user)
+
+      assert Security.paused?(ws_a.id, {:chain, "base"})
+      refute Security.paused?(ws_b.id, {:chain, "base"})
+    end
+  end
+
   describe "snapshot/0" do
     test "returns the current pause shape" do
       cp_id = Ecto.UUID.generate()
@@ -138,5 +194,31 @@ defmodule Bank.SecurityTest do
     AuditEvent
     |> where([e], e.event_type == ^event_type)
     |> Repo.aggregate(:count, :id)
+  end
+
+  defp create_workspace_for_security_test! do
+    suffix = System.unique_integer([:positive])
+
+    {:ok, ws} =
+      Bank.Workspaces.create_workspace(%{
+        slug: "sec-test-#{suffix}",
+        name: "Security Test #{suffix}"
+      })
+
+    ws
+  end
+
+  defp create_user_for_security_test! do
+    suffix = System.unique_integer([:positive])
+
+    {:ok, user} =
+      Bank.Accounts.find_or_create_from_oauth(%{
+        provider: :google,
+        subject: "sec-test-user-#{suffix}",
+        email: "sec-test-user-#{suffix}@example.com",
+        name: "Sec Test User #{suffix}"
+      })
+
+    user
   end
 end

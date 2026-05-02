@@ -78,4 +78,138 @@ defmodule Bank.Audit.EventsTest do
       assert attrs.after_ref.version == 2
     end
   end
+
+  describe "security_scope_paused/2" do
+    test "builds a security.scope_paused envelope keyed by chain + workspace_id" do
+      pause =
+        build_chain_pause(%{
+          workspace_id: "ws-aaaa-1111",
+          scope_value: "base",
+          reason: "rpc outage",
+          created_by_user_id: "user-1"
+        })
+
+      attrs = Events.security_scope_paused(pause, actor_id: "user-1")
+
+      assert attrs.event_type == "security.scope_paused"
+      assert attrs.subject_type == "chain"
+      assert attrs.subject_id == "base"
+      assert attrs.workspace_id == "ws-aaaa-1111"
+      assert attrs.actor == :user
+      assert attrs.actor_id == "user-1"
+      assert is_nil(attrs.correlation_id)
+      assert attrs.before_ref == %{paused_at: nil}
+
+      assert attrs.after_ref == %{
+               scope_type: "chain",
+               scope_value: "base",
+               paused_at: pause.paused_at,
+               reason: "rpc outage",
+               created_by_user_id: "user-1"
+             }
+    end
+
+    test "non-user actor (e.g. :runtime) is preserved, not collapsed to :user" do
+      pause =
+        build_chain_pause(%{
+          workspace_id: "ws-actor-runtime",
+          scope_value: "base"
+        })
+
+      attrs = Events.security_scope_paused(pause, actor: :runtime)
+
+      assert attrs.actor == :runtime
+      # No actor_id supplied, no User struct — actor_id stays nil.
+      assert is_nil(attrs.actor_id)
+    end
+
+    test "%User{} actor rolls up to :user with actor_id from the struct" do
+      user = %Bank.Accounts.User{id: "user-from-struct"}
+
+      pause =
+        build_chain_pause(%{
+          workspace_id: "ws-actor-user-struct",
+          scope_value: "base"
+        })
+
+      attrs = Events.security_scope_paused(pause, actor: user)
+
+      assert attrs.actor == :user
+      assert attrs.actor_id == "user-from-struct"
+    end
+
+    test "after_ref carries no secret-bearing substrings (JSON-scan)" do
+      pause =
+        build_chain_pause(%{
+          workspace_id: "ws-secrets",
+          scope_value: "base",
+          reason: "looks fine",
+          created_by_user_id: "user-secrets"
+        })
+
+      attrs = Events.security_scope_paused(pause, actor_id: "user-secrets")
+      json = Jason.encode!(attrs)
+
+      for needle <- ["Bearer", "Authorization", "0x", "sk_", "pk_", "http"] do
+        refute String.contains?(json, needle),
+               "security.scope_paused envelope must not leak #{needle}: #{inspect(json)}"
+      end
+    end
+  end
+
+  describe "security_scope_resumed/3" do
+    test "non-user actor (e.g. :adapter) is preserved" do
+      pause =
+        build_chain_pause(%{
+          workspace_id: "ws-resume-actor",
+          scope_value: "base",
+          resumed_at: DateTime.utc_now()
+        })
+
+      attrs = Events.security_scope_resumed(pause, %{}, actor: :adapter)
+
+      assert attrs.actor == :adapter
+    end
+
+    test "carries before_ref pause snapshot and after_ref resume marker" do
+      pause =
+        build_chain_pause(%{
+          workspace_id: "ws-resume-1",
+          scope_value: "optimism",
+          resumed_at: DateTime.utc_now(),
+          resumed_by_user_id: "user-resume"
+        })
+
+      prior = %{
+        paused_at: pause.paused_at,
+        reason: "old reason",
+        created_by_user_id: "user-pause"
+      }
+
+      attrs = Events.security_scope_resumed(pause, prior, actor_id: "user-resume")
+
+      assert attrs.event_type == "security.scope_resumed"
+      assert attrs.subject_type == "chain"
+      assert attrs.subject_id == "optimism"
+      assert attrs.workspace_id == "ws-resume-1"
+      assert attrs.before_ref.paused_at == pause.paused_at
+      assert attrs.before_ref.reason == "old reason"
+      assert attrs.before_ref.created_by_user_id == "user-pause"
+      assert attrs.after_ref.scope_type == "chain"
+      assert attrs.after_ref.scope_value == "optimism"
+      assert attrs.after_ref.resumed_at == pause.resumed_at
+      assert attrs.after_ref.resumed_by_user_id == "user-resume"
+    end
+  end
+
+  defp build_chain_pause(attrs) do
+    base = %Bank.Security.Pause{
+      id: Ecto.UUID.generate(),
+      scope_type: :chain,
+      scope_value: "base",
+      paused_at: DateTime.utc_now()
+    }
+
+    Map.merge(base, attrs)
+  end
 end
