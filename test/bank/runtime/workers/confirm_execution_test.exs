@@ -285,4 +285,147 @@ defmodule Bank.Runtime.Workers.ConfirmExecutionTest do
       assert event.after_ref == %{"state" => "executed"}
     end
   end
+
+  # --- Audit broadcast happens AFTER finalise commits (#212) -------------
+  #
+  # Pre-fix the safety-net used `Runtime.emit_audit/1` which writes
+  # the audit row inside the transaction but broadcasts on
+  # `audit:stream` synchronously, before the surrounding
+  # `Repo.transaction` commits. A subscriber that reacted to the
+  # broadcast and queried the DB could observe a phantom event if
+  # the txn rolled back.
+  #
+  # Post-fix the safety-net uses `Bank.Audit.append_event/1` (silent
+  # insert) inside the txn and emits `Notifier.audit_stream/1` only
+  # after commit, alongside the lifecycle/progress broadcasts.
+  describe "audit broadcast post-commit (#212)" do
+    test "happy path: persisted audit row + audit-stream broadcast for the intent.state_changed event" do
+      intent = executing_intent()
+
+      plan =
+        Fixtures.execution_plan(
+          intent_id: intent.id,
+          decision: Fixtures.decision_envelope(intent: intent, current: true),
+          execution_status: :confirmed,
+          final_outcome: :confirmed
+        )
+
+      :ok = PubSub.subscribe(PubSub.audit_stream())
+      :ok = PubSub.subscribe(PubSub.intent(intent.id))
+
+      assert :ok = perform_job(ConfirmExecution, %{"execution_plan_id" => plan.id})
+
+      # Audit row persisted (txn committed).
+      [event] =
+        Repo.all(
+          from(e in AuditEvent,
+            where: e.event_type == "intent.state_changed" and e.subject_id == ^intent.id
+          )
+        )
+
+      assert event.before_ref == %{"state" => "executing"}
+      assert event.after_ref == %{"state" => "executed"}
+
+      # Audit broadcast fired post-commit and references the same
+      # persisted row id.
+      event_id = event.id
+
+      assert_receive %{
+        topic: :audit_stream,
+        event: :appended,
+        payload: %{event_type: "intent.state_changed", id: ^event_id}
+      }
+
+      # Lifecycle broadcast also fired post-commit.
+      assert_receive %{topic: :intent_lifecycle, event: :state_changed, payload: %{to: :executed}}
+    end
+
+    test "already-finalised path: no audit row, no audit-stream broadcast for intent.state_changed, no lifecycle broadcast" do
+      # Pin the negative case: when the safety-net is beaten by the
+      # callback path, we must emit zero broadcasts and persist zero
+      # audit rows for THIS plan's transition.
+      intent =
+        Fixtures.agent_intent()
+        |> AgentIntent.current_pointer_changeset(%{state: :executed})
+        |> Repo.update!()
+
+      plan =
+        Fixtures.execution_plan(
+          intent_id: intent.id,
+          decision: Fixtures.decision_envelope(intent: intent, current: true),
+          execution_status: :confirmed,
+          final_outcome: :confirmed
+        )
+
+      :ok = PubSub.subscribe(PubSub.audit_stream())
+      :ok = PubSub.subscribe(PubSub.intent(intent.id))
+
+      assert {:cancel, :already_finalised} =
+               perform_job(ConfirmExecution, %{"execution_plan_id" => plan.id})
+
+      assert [] =
+               Repo.all(
+                 from(e in AuditEvent,
+                   where: e.event_type == "intent.state_changed" and e.subject_id == ^intent.id
+                 )
+               )
+
+      # Match the exact event_type so unrelated fixture broadcasts
+      # (e.g. counterparty.created) on the same audit_stream topic
+      # do not falsely fail the refute.
+      # Match the exact subject_id so unrelated async tests'
+      # intent.state_changed broadcasts on the global audit_stream
+      # topic do not falsely fail the refute.
+      intent_id = intent.id
+
+      refute_received %{
+        topic: :audit_stream,
+        event: :appended,
+        payload: %{event_type: "intent.state_changed", subject_id: ^intent_id}
+      }
+
+      refute_received %{topic: :intent_lifecycle, event: :state_changed}
+    end
+
+    test "stale-state path: no audit row, no audit-stream broadcast" do
+      intent =
+        Fixtures.agent_intent()
+        |> AgentIntent.current_pointer_changeset(%{state: :cancelled})
+        |> Repo.update!()
+
+      plan =
+        Fixtures.execution_plan(
+          intent_id: intent.id,
+          decision: Fixtures.decision_envelope(intent: intent, current: true),
+          execution_status: :confirmed,
+          final_outcome: :confirmed
+        )
+
+      :ok = PubSub.subscribe(PubSub.audit_stream())
+      :ok = PubSub.subscribe(PubSub.intent(intent.id))
+
+      assert {:cancel, {:stale_intent_state, :cancelled}} =
+               perform_job(ConfirmExecution, %{"execution_plan_id" => plan.id})
+
+      assert [] =
+               Repo.all(
+                 from(e in AuditEvent,
+                   where: e.event_type == "intent.state_changed" and e.subject_id == ^intent.id
+                 )
+               )
+
+      # Match the exact subject_id so unrelated async tests'
+      # intent.state_changed broadcasts on the global audit_stream
+      # topic do not falsely fail the refute.
+      intent_id = intent.id
+
+      refute_received %{
+        topic: :audit_stream,
+        event: :appended,
+        payload: %{event_type: "intent.state_changed", subject_id: ^intent_id}
+      }
+
+      refute_received %{topic: :intent_lifecycle, event: :state_changed}
+    end
+  end
 end
