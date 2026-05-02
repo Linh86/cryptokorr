@@ -1014,6 +1014,150 @@ defmodule BankWeb.SecurityLiveTest do
     end
   end
 
+  # --- Pending approvals card (#229) ---------------------------------------
+
+  describe "pending approvals card" do
+    test "renders empty state when no current-workspace approvals exist",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#pending-approvals-card")
+      assert has_element?(view, "#pending-approvals-empty")
+      assert has_element?(view, ~s|#pending-approvals-card[data-count="0"]|)
+    end
+
+    test "current-workspace pending approval renders in #pending-approvals-card",
+         %{conn: conn} do
+      intent = agent_intent()
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          risk_tier: :moderate,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#pending-approvals-card")
+      refute has_element?(view, "#pending-approvals-empty")
+
+      assert has_element?(view, "#pending-approval-#{envelope.id}")
+
+      assert has_element?(
+               view,
+               ~s|#pending-approval-risk-#{envelope.id}[data-risk-tier="moderate"]|
+             )
+    end
+
+    test "card data-count matches rendered rows when multiple approvals exist",
+         %{conn: conn} do
+      for risk <- [:low, :elevated, :severe] do
+        intent = agent_intent()
+
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          risk_tier: risk,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+      end
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, ~s|#pending-approvals-card[data-count="3"]|)
+    end
+
+    test "sibling-workspace pending approval does NOT appear",
+         %{conn: conn} do
+      {:ok, sibling_ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "sibling-pending-#{System.unique_integer([:positive])}",
+          name: "Sibling"
+        })
+
+      intent = agent_intent(workspace_id: sibling_ws.id)
+
+      _sibling_envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          risk_tier: :elevated,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#pending-approvals-empty")
+      assert has_element?(view, ~s|#pending-approvals-card[data-count="0"]|)
+    end
+
+    test "non-current decision envelope (superseded) does NOT appear",
+         %{conn: conn} do
+      intent = agent_intent()
+
+      _superseded =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          risk_tier: :moderate,
+          current: false,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#pending-approvals-empty")
+    end
+
+    test "card includes a link to /queue#pending-approvals-section",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(
+               view,
+               ~s|#pending-approvals-queue-link[href="/queue#pending-approvals-section"]|
+             )
+    end
+
+    test "coexists with stuck-plans, in-flight, and delegations cards",
+         %{conn: conn, workspace: ws} do
+      # Stuck plan
+      stuck = stuck_prepared_plan(ws.id)
+
+      # Active delegation (renders #delegations-card row)
+      del = delegation(state: :active)
+
+      # Pending approval
+      intent = agent_intent()
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          risk_tier: :moderate,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#stuck-plans-card")
+      assert has_element?(view, "#in-flight-plans-card")
+      assert has_element?(view, "#pending-approvals-card")
+      assert has_element?(view, "#delegations-card")
+
+      assert has_element?(view, "#stuck-plan-#{stuck.id}")
+      assert has_element?(view, "#in-flight-plan-#{stuck.id}")
+      assert has_element?(view, "#pending-approval-#{envelope.id}")
+      assert has_element?(view, "#revoke-btn-#{del.smart_account_id}")
+    end
+  end
+
   # Insert an `ExecutionPlan` whose `updated_at` is overwritten via a
   # raw SQL update so it appears stuck without depending on Ecto's
   # automatic timestamp behavior.

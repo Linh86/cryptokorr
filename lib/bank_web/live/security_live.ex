@@ -387,6 +387,17 @@ defmodule BankWeb.SecurityLive do
     in_flight_plans =
       Bank.Decisions.list_active_executions(workspace_id: workspace_id)
 
+    # Pending approvals for the current workspace (#229 incident-
+    # center surface). Read-only mirror of the
+    # `/queue#pending-approvals-section` data — operators triaging
+    # an incident on `/security` see approval pressure without
+    # leaving the page. Mutating approve/reject still happens on
+    # `/queue` so the safety console stays read-side.
+    # `Bank.Decisions.list_pending_approvals/1` already pushes
+    # `:workspace_id` into the DB query (no in-memory post-filter).
+    pending_approvals =
+      Bank.Decisions.list_pending_approvals(workspace_id: workspace_id)
+
     filters = socket.assigns[:safety_filters] || @default_safety_filters
     safety_events = load_safety_events(delegations, workspace_id, filters)
 
@@ -410,6 +421,8 @@ defmodule BankWeb.SecurityLive do
     |> assign(:stuck_plans, stuck_plans)
     |> assign(:in_flight_plans, in_flight_plans)
     |> assign(:in_flight_plan_count, length(in_flight_plans))
+    |> assign(:pending_approvals, pending_approvals)
+    |> assign(:pending_approval_count, length(pending_approvals))
     |> assign(:safety_events, safety_events)
     |> assign(:safety_filters, filters)
     |> assign(:safety_filter_form, safety_filter_form)
@@ -641,6 +654,7 @@ defmodule BankWeb.SecurityLive do
             current_role={@current_scope.role}
           />
           <.in_flight_plans_card plans={@in_flight_plans} />
+          <.pending_approvals_card approvals={@pending_approvals} />
           <.delegations_card delegations={@delegations} />
         </div>
 
@@ -1256,6 +1270,118 @@ defmodule BankWeb.SecurityLive do
   end
 
   defp format_age(_), do: "-"
+
+  # --- Component: pending approvals card -----------------------------------
+  #
+  # Read-only operator view of decisions currently awaiting approval
+  # for the current workspace (#229). Mirrors the data shown on
+  # `/queue#pending-approvals-section` so an incident operator can
+  # see approval pressure without leaving `/security`. Mutating
+  # approve/reject still happens on `/queue` — keeping the safety
+  # console read-side avoids duplicating the approve transaction
+  # across two surfaces.
+  #
+  # Field selection deliberately excludes `reasons`,
+  # `policy_snapshot`, and other free-form decision payload that
+  # could leak sensitive context; operators get the handle, risk
+  # tier, intent summary, and timing — enough to triage.
+
+  attr :approvals, :list, required: true
+
+  defp pending_approvals_card(assigns) do
+    ~H"""
+    <section
+      id="pending-approvals-card"
+      data-count={length(@approvals)}
+      class="rounded-xl border border-base-300 bg-base-100 shadow-sm overflow-hidden"
+    >
+      <header class="px-6 py-4 border-b border-base-300 flex items-center justify-between">
+        <h2 class="text-sm font-semibold flex items-center gap-1.5">
+          <.icon name="hero-clock" class="size-4" /> Pending approvals
+        </h2>
+        <div class="flex items-center gap-2">
+          <span class="badge badge-sm badge-ghost">{length(@approvals)}</span>
+          <.link
+            id="pending-approvals-queue-link"
+            navigate="/queue#pending-approvals-section"
+            class="link link-primary text-xs"
+          >
+            Review in queue
+          </.link>
+        </div>
+      </header>
+
+      <div
+        :if={@approvals == []}
+        id="pending-approvals-empty"
+        class="px-6 py-8 text-center text-sm text-base-content/50"
+      >
+        No decisions awaiting approval for this workspace.
+      </div>
+
+      <ul :if={@approvals != []} class="divide-y divide-base-300">
+        <li
+          :for={envelope <- @approvals}
+          id={"pending-approval-#{envelope.id}"}
+          class="px-6 py-4"
+        >
+          <.pending_approval_row envelope={envelope} />
+        </li>
+      </ul>
+    </section>
+    """
+  end
+
+  attr :envelope, :map, required: true
+
+  defp pending_approval_row(assigns) do
+    ~H"""
+    <div class="flex items-start justify-between gap-3">
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="text-sm font-mono">{short_id(@envelope.id)}</span>
+          <span
+            id={"pending-approval-risk-#{@envelope.id}"}
+            class={[
+              "badge badge-sm font-mono",
+              pending_approval_risk_badge_class(@envelope.risk_tier)
+            ]}
+            data-risk-tier={@envelope.risk_tier}
+          >
+            {@envelope.risk_tier}
+          </span>
+        </div>
+        <div class="mt-1 text-xs text-base-content/50 flex items-center gap-3 flex-wrap">
+          <span :if={@envelope.intent}>
+            intent <span class="font-mono">{pending_approval_intent_label(@envelope.intent)}</span>
+          </span>
+          <span :if={@envelope.decided_at}>
+            decided
+            <span id={"pending-approval-age-#{@envelope.id}"} class="font-mono">
+              {format_age(@envelope.decided_at)}
+            </span>
+            ago
+          </span>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
+  defp pending_approval_risk_badge_class(:low), do: "badge-ghost"
+  defp pending_approval_risk_badge_class(:moderate), do: "badge-info"
+  defp pending_approval_risk_badge_class(:elevated), do: "badge-warning"
+  defp pending_approval_risk_badge_class(:severe), do: "badge-error"
+  defp pending_approval_risk_badge_class(_), do: "badge-ghost"
+
+  # Compact intent description for the approval row. Mirrors the
+  # shape used by QueueLive's `intent_summary/1` without importing
+  # the queue module — kept inline so the safety console doesn't
+  # depend on an unrelated LiveView's helpers.
+  defp pending_approval_intent_label(%{kind: kind, asset: asset, amount: amount}),
+    do: "#{kind} #{amount} #{asset}"
+
+  defp pending_approval_intent_label(_), do: "-"
 
   # --- Component: delegations card -----------------------------------------
 
