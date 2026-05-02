@@ -551,4 +551,216 @@ defmodule BankWeb.API.V1.SecurityControllerTest do
       assert_raise ArgumentError, fn -> String.to_existing_atom(probe) end
     end
   end
+
+  # --- POST /v1/security/pause_chain + /resume_chain (#228 phase 1) -------
+
+  describe "POST /v1/security/pause_chain" do
+    alias Bank.Audit.AuditEvent
+    alias Bank.Repo
+
+    test "admin pauses a chain in own workspace and returns 200 with safe data",
+         %{conn: conn, workspace: ws, current_user: user} do
+      conn =
+        post(conn, ~p"/v1/security/pause_chain", %{
+          "chain" => "base",
+          "reason" => "rpc outage"
+        })
+
+      body = json_response(conn, 200)
+
+      assert body["status"] == "paused"
+      assert body["data"]["scope_type"] == "chain"
+      assert body["data"]["scope_value"] == "base"
+      assert body["data"]["workspace_id"] == ws.id
+      assert body["data"]["paused_at"]
+      assert body["data"]["resumed_at"] == nil
+      assert body["data"]["reason"] == "rpc outage"
+      assert body["data"]["created_by_user_id"] == user.id
+
+      assert Bank.Security.paused?(ws.id, {:chain, "base"})
+    end
+
+    test "idempotent re-pause returns 200 already_paused with no second audit row",
+         %{conn: conn, workspace: ws} do
+      conn1 = post(conn, ~p"/v1/security/pause_chain", %{"chain" => "base"})
+      assert json_response(conn1, 200)["status"] == "paused"
+
+      conn2 = post(conn, ~p"/v1/security/pause_chain", %{"chain" => "base"})
+      body = json_response(conn2, 200)
+
+      assert body["status"] == "already_paused"
+      assert body["data"]["scope_value"] == "base"
+      assert body["data"]["workspace_id"] == ws.id
+
+      assert audit_count("security.scope_paused", ws.id) == 1
+    end
+
+    test "missing chain returns 422 invalid_body", %{conn: conn} do
+      conn = post(conn, ~p"/v1/security/pause_chain", %{})
+      body = json_response(conn, 422)
+
+      assert body["error"]["code"] == "invalid_body"
+    end
+
+    test "blank chain returns 422 invalid_body", %{conn: conn} do
+      conn = post(conn, ~p"/v1/security/pause_chain", %{"chain" => "   "})
+      body = json_response(conn, 422)
+      assert body["error"]["code"] == "invalid_body"
+    end
+
+    test "reason longer than 256 returns 422 invalid_reason", %{conn: conn} do
+      long = String.duplicate("x", 257)
+
+      conn =
+        post(conn, ~p"/v1/security/pause_chain", %{
+          "chain" => "base",
+          "reason" => long
+        })
+
+      body = json_response(conn, 422)
+      assert body["error"]["code"] == "invalid_reason"
+    end
+
+    test "operator (non-admin) key is rejected with 403 insufficient_role" do
+      {:ok, fields} = setup_api_key_operator(%{conn: Phoenix.ConnTest.build_conn()})
+      conn = post(fields[:conn], ~p"/v1/security/pause_chain", %{"chain" => "base"})
+
+      assert json_response(conn, 403)["error"]["code"] == "insufficient_role"
+    end
+
+    test "request without auth returns 401", %{conn: _conn} do
+      anon = Phoenix.ConnTest.build_conn()
+      conn = post(anon, ~p"/v1/security/pause_chain", %{"chain" => "base"})
+
+      assert json_response(conn, 401)
+    end
+
+    test "ignores body workspace_id; uses current_scope workspace",
+         %{conn: conn, workspace: ws} do
+      sibling_id = Ecto.UUID.generate()
+
+      conn =
+        post(conn, ~p"/v1/security/pause_chain", %{
+          "chain" => "base",
+          "workspace_id" => sibling_id
+        })
+
+      body = json_response(conn, 200)
+
+      assert body["data"]["workspace_id"] == ws.id
+      refute body["data"]["workspace_id"] == sibling_id
+    end
+
+    test "response carries no secret-bearing substrings", %{conn: conn} do
+      conn =
+        post(conn, ~p"/v1/security/pause_chain", %{
+          "chain" => "base",
+          "reason" => "looks fine"
+        })
+
+      raw = response(conn, 200)
+
+      for needle <- ["Bearer", "Authorization", "0x", "sk_", "pk_", "http"] do
+        refute String.contains?(raw, needle),
+               "pause_chain response must not leak #{needle}: #{inspect(raw)}"
+      end
+    end
+
+    defp audit_count(event_type, workspace_id) do
+      AuditEvent
+      |> where([e], e.event_type == ^event_type and e.workspace_id == ^workspace_id)
+      |> Repo.aggregate(:count, :id)
+    end
+  end
+
+  describe "POST /v1/security/resume_chain" do
+    alias Bank.Audit.AuditEvent
+    alias Bank.Repo
+
+    test "admin resumes a paused chain and returns 200 with safe data",
+         %{conn: conn, workspace: ws} do
+      _ = post(conn, ~p"/v1/security/pause_chain", %{"chain" => "base"})
+
+      conn = post(conn, ~p"/v1/security/resume_chain", %{"chain" => "base"})
+      body = json_response(conn, 200)
+
+      assert body["status"] == "resumed"
+      assert body["data"]["scope_value"] == "base"
+      assert body["data"]["workspace_id"] == ws.id
+      assert body["data"]["resumed_at"]
+
+      refute Bank.Security.paused?(ws.id, {:chain, "base"})
+    end
+
+    test "idempotent re-resume returns 200 already_running with null data and no second audit",
+         %{conn: conn, workspace: ws} do
+      conn = post(conn, ~p"/v1/security/resume_chain", %{"chain" => "base"})
+      body = json_response(conn, 200)
+
+      assert body["status"] == "already_running"
+      assert is_nil(body["data"])
+
+      assert resume_audit_count(ws.id) == 0
+    end
+
+    test "missing chain returns 422 invalid_body", %{conn: conn} do
+      conn = post(conn, ~p"/v1/security/resume_chain", %{})
+      body = json_response(conn, 422)
+      assert body["error"]["code"] == "invalid_body"
+    end
+
+    test "operator (non-admin) key is rejected with 403", %{conn: _conn} do
+      operator_ctx = setup_api_key_operator(%{conn: Phoenix.ConnTest.build_conn()})
+      {:ok, fields} = operator_ctx
+      conn = post(fields[:conn], ~p"/v1/security/resume_chain", %{"chain" => "base"})
+
+      assert json_response(conn, 403)["error"]["code"] == "insufficient_role"
+    end
+
+    defp resume_audit_count(workspace_id) do
+      AuditEvent
+      |> where([e], e.event_type == "security.scope_resumed" and e.workspace_id == ^workspace_id)
+      |> Repo.aggregate(:count, :id)
+    end
+  end
+
+  describe "/v1/security/pause_chain — cross-workspace isolation" do
+    test "sibling workspace's paused chain does not affect this workspace",
+         %{conn: conn, workspace: ws} do
+      {:ok, sibling} =
+        Bank.Workspaces.create_workspace(%{slug: "sibling-iso", name: "Sibling iso"})
+
+      {:ok, sibling_user} =
+        Bank.Accounts.find_or_create_from_oauth(%{
+          provider: :google,
+          subject: "sibling-iso-user-#{System.unique_integer([:positive])}",
+          email: "sibling-iso-user@example.com",
+          name: "Sibling Iso User"
+        })
+
+      {:ok, _} =
+        Bank.Workspaces.create_membership(%{
+          user_id: sibling_user.id,
+          workspace_id: sibling.id,
+          role: :admin
+        })
+
+      # Pause base in the sibling workspace via the context (bypasses HTTP).
+      {:ok, :paused, _} =
+        Bank.Security.pause(sibling.id, {:chain, "base"}, actor: sibling_user)
+
+      # Caller (admin in `ws`) sees their own chain as not paused.
+      assert Bank.Security.paused?(sibling.id, {:chain, "base"})
+      refute Bank.Security.paused?(ws.id, {:chain, "base"})
+
+      # Caller can pause base in their own workspace independently and the
+      # response carries their workspace_id only.
+      conn = post(conn, ~p"/v1/security/pause_chain", %{"chain" => "base"})
+      body = json_response(conn, 200)
+
+      assert body["status"] == "paused"
+      assert body["data"]["workspace_id"] == ws.id
+      refute body["data"]["workspace_id"] == sibling.id
+    end
+  end
 end

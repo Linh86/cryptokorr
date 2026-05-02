@@ -895,6 +895,78 @@
         "title": "Chain",
         "type": "string"
       },
+      "ChainPauseStateResponse": {
+        "description": "Per-chain pause state for the calling workspace. Returned by\nboth `pause_chain` and `resume_chain` on `200`. `status`\ndiscriminates between a real transition and the idempotent\nno-op:\n\n  * `\"paused\"` — the call inserted a fresh active pause row.\n  * `\"already_paused\"` — an active pause was already in place\n    for this `(workspace, chain)`; no second audit row was\n    emitted.\n  * `\"resumed\"` — the call cleared the active pause.\n  * `\"already_running\"` — no active pause existed; no audit row\n    emitted.\n\nThe `data` block carries the safe pause-row fields (no secrets,\nno API-key data, no chain-side artefacts). On the\n`already_running` branch `data` is null.\n",
+        "properties": {
+          "data": {
+            "nullable": true,
+            "properties": {
+              "created_by_user_id": {
+                "description": "User id of the operator who initiated the pause, if known.",
+                "format": "uuid",
+                "nullable": true,
+                "type": "string"
+              },
+              "paused_at": {
+                "$ref": "#/components/schemas/Timestamp"
+              },
+              "reason": {
+                "description": "Operator-supplied reason recorded at pause time. Null when no reason was supplied.",
+                "example": "RPC outage on Base",
+                "nullable": true,
+                "type": "string"
+              },
+              "resumed_at": {
+                "description": "Set when the pause has been resumed; null on active pauses.",
+                "format": "date-time",
+                "nullable": true,
+                "type": "string"
+              },
+              "resumed_by_user_id": {
+                "description": "User id of the operator who lifted the pause, if applicable.",
+                "format": "uuid",
+                "nullable": true,
+                "type": "string"
+              },
+              "scope_type": {
+                "enum": [
+                  "chain"
+                ],
+                "example": "chain",
+                "type": "string"
+              },
+              "scope_value": {
+                "example": "base",
+                "type": "string"
+              },
+              "workspace_id": {
+                "$ref": "#/components/schemas/Id"
+              }
+            },
+            "required": [
+              "scope_type",
+              "scope_value",
+              "workspace_id"
+            ],
+            "type": "object"
+          },
+          "status": {
+            "enum": [
+              "paused",
+              "already_paused",
+              "resumed",
+              "already_running"
+            ],
+            "example": "paused",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "ChainPauseStateResponse",
+        "type": "object"
+      },
       "ConnectSmartAccountRequest": {
         "description": "Browser-built smart-account connect payload. The three required\nfields identify the smart account, the signer, and the chain;\n`delegation_payload` is the signed delegation object from the JS\nhook (see `assets/js/hooks/wallet_connect.js` and\n`docs/wallet-connect.md`).\n",
         "properties": {
@@ -2114,6 +2186,29 @@
         "title": "Links",
         "type": "object"
       },
+      "PauseChainRequest": {
+        "description": "Pause execution dispatch for a chain inside the calling key's\nworkspace. Workspace-scoped: a pause set here only affects this\nworkspace's plans — sibling workspaces continue dispatching on\nthe same chain. Idempotent: re-pausing an already-paused chain\nreturns `200` with `status: \"already_paused\"` and does not\nemit a second audit row.\n\n`workspace_id` from the body (if present) is ignored — the\nworkspace is resolved from `current_scope`.\n",
+        "properties": {
+          "chain": {
+            "description": "Chain identifier to pause. v0.1 ships `\"base\"` only; future phases extend the supported set without changing this wire shape.",
+            "example": "base",
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          },
+          "reason": {
+            "description": "Optional operator-supplied reason persisted to the `pauses`\nrow and the `security.scope_paused` audit event. Empty or\nwhitespace-only is treated as `nil`.\n",
+            "example": "RPC outage on Base",
+            "maxLength": 256,
+            "type": "string"
+          }
+        },
+        "required": [
+          "chain"
+        ],
+        "title": "PauseChainRequest",
+        "type": "object"
+      },
       "PolicyListResponse": {
         "properties": {
           "data": {
@@ -2230,6 +2325,23 @@
           "params"
         ],
         "title": "PolicyRuleEntity",
+        "type": "object"
+      },
+      "ResumeChainRequest": {
+        "description": "Resume execution dispatch for a chain inside the calling key's\nworkspace. Workspace-scoped — only clears the pause this\nworkspace set. Idempotent: resuming a chain that is not paused\nreturns `200` with `status: \"already_running\"` and does not\nemit a second audit row.\n\n`workspace_id` from the body (if present) is ignored.\n",
+        "properties": {
+          "chain": {
+            "description": "Chain identifier to resume.",
+            "example": "base",
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "chain"
+        ],
+        "title": "ResumeChainRequest",
         "type": "object"
       },
       "RevisePolicyRequest": {
@@ -4432,6 +4544,56 @@
         ]
       }
     },
+    "/v1/security/pause_chain": {
+      "post": {
+        "callbacks": {},
+        "description": "Pauses execution dispatch for the requested chain inside the\ncalling key's workspace. Workspace-scoped: the pause does NOT\naffect sibling workspaces. The pause persists across\ncontrol-plane restarts.\n\nIdempotent: re-pausing an already-paused chain returns `200`\nwith `status: \"already_paused\"` and emits no second audit\nrow. The workspace is taken from `current_scope`; any\n`workspace_id` in the body is ignored.\n\nRequest body must include `chain` (e.g. `\"base\"`); v0.1 ships\n`:chain` scope only. Future phases extend the supported scope\nset without changing this wire shape.\n",
+        "operationId": "BankWeb.API.V1.SecurityController.pause_chain",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": "Elixir.BankWeb.OpenApi.Schemas.PauseChainRequest"
+            }
+          },
+          "description": "Pause body",
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.ChainPauseStateResponse"
+              }
+            },
+            "description": "Per-chain pause state"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        },
+        "summary": "Pause execution dispatch for a chain (workspace-scoped)",
+        "tags": [
+          "Security"
+        ]
+      }
+    },
     "/v1/security/resume": {
       "post": {
         "callbacks": {},
@@ -4518,6 +4680,56 @@
           }
         },
         "summary": "Resume workspace-wide agent-key auth",
+        "tags": [
+          "Security"
+        ]
+      }
+    },
+    "/v1/security/resume_chain": {
+      "post": {
+        "callbacks": {},
+        "description": "Resumes execution dispatch for the requested chain inside the\ncalling key's workspace. Idempotent: resuming a chain that is\nnot paused returns `200` with `status: \"already_running\"` and\nemits no second audit row. The workspace is taken from\n`current_scope`.\n",
+        "operationId": "BankWeb.API.V1.SecurityController.resume_chain",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": "Elixir.BankWeb.OpenApi.Schemas.ResumeChainRequest"
+            }
+          },
+          "description": "Resume body",
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.ChainPauseStateResponse"
+              }
+            },
+            "description": "Per-chain pause state"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        },
+        "summary": "Resume execution dispatch for a chain (workspace-scoped)",
         "tags": [
           "Security"
         ]

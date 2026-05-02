@@ -258,6 +258,14 @@ defmodule BankWeb.Router do
     # `:prepared` plans; other non-terminal states return 409
     # `not_safe_to_abort`.
     post "/security/abort_execution", SecurityController, :abort_execution
+
+    # DB-backed per-chain pause (#228 phase 1). Workspace-scoped:
+    # the pause only blocks dispatch for the calling key's
+    # workspace, never sibling workspaces. Idempotent re-pause /
+    # re-resume return success without emitting a duplicate audit
+    # row. The pause persists across control-plane restarts.
+    post "/security/pause_chain", SecurityController, :pause_chain
+    post "/security/resume_chain", SecurityController, :resume_chain
   end
 
   # Internal adapter callback — private network, not part of /v1/.

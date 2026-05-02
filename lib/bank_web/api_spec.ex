@@ -169,6 +169,9 @@ defmodule BankWeb.ApiSpec do
     AgentKeysPauseStateResponse,
     AbortExecutionRequest,
     AbortExecutionResponse,
+    ChainPauseStateResponse,
+    PauseChainRequest,
+    ResumeChainRequest,
     SecurityPauseRequest,
     SecurityResumeRequest,
     SecurityStateResponse,
@@ -363,6 +366,10 @@ defmodule BankWeb.ApiSpec do
       # Manual execution-plan abort (#230).
       "AbortExecutionRequest" => AbortExecutionRequest.schema(),
       "AbortExecutionResponse" => AbortExecutionResponse.schema(),
+      # DB-backed per-chain pause (#228 phase 1).
+      "PauseChainRequest" => PauseChainRequest.schema(),
+      "ResumeChainRequest" => ResumeChainRequest.schema(),
+      "ChainPauseStateResponse" => ChainPauseStateResponse.schema(),
       "ConnectSmartAccountRequest" => ConnectSmartAccountRequest.schema(),
       "ConnectSmartAccountResponse" => ConnectSmartAccountResponse.schema(),
 
