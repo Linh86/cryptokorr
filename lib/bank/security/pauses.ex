@@ -44,6 +44,8 @@ defmodule Bank.Security.Pauses do
   alias Bank.Audit
   alias Bank.Audit.Events
   alias Bank.Repo
+  alias Bank.Runtime.Notifier
+  alias Bank.Runtime.Telemetry, as: RuntimeTelemetry
   alias Bank.Security.Pause
 
   @typedoc """
@@ -117,50 +119,69 @@ defmodule Bank.Security.Pauses do
     actor_id = resolve_actor_id(actor, Keyword.get(opts, :actor_id))
     reason = Keyword.get(opts, :reason)
 
-    Repo.transaction(fn ->
-      case lock_active(workspace_id, scope_type, scope_value) do
-        %Pause{} = existing ->
-          {:already_paused, existing}
+    txn_result =
+      Repo.transaction(fn ->
+        case lock_active(workspace_id, scope_type, scope_value) do
+          %Pause{} = existing ->
+            # Idempotent: row already active. No insert, no audit, no
+            # broadcast. The caller observes the existing record.
+            {:already_paused, existing, nil}
 
-        nil ->
-          attrs = %{
-            workspace_id: workspace_id,
-            scope_type: scope_type,
-            scope_value: scope_value,
-            reason: reason,
-            created_by_user_id: actor_id_or_nil(actor_id),
-            paused_at: DateTime.utc_now()
-          }
+          nil ->
+            attrs = %{
+              workspace_id: workspace_id,
+              scope_type: scope_type,
+              scope_value: scope_value,
+              reason: reason,
+              created_by_user_id: actor_id_or_nil(actor_id),
+              paused_at: DateTime.utc_now()
+            }
 
-          changeset = Pause.create_changeset(%Pause{}, attrs)
+            changeset = Pause.create_changeset(%Pause{}, attrs)
 
-          case Repo.insert(changeset) do
-            {:ok, %Pause{} = pause} ->
-              event_attrs = Events.security_scope_paused(pause, actor: actor, actor_id: actor_id)
+            case Repo.insert(changeset) do
+              {:ok, %Pause{} = pause} ->
+                event_attrs =
+                  Events.security_scope_paused(pause, actor: actor, actor_id: actor_id)
 
-              case Audit.append_event(event_attrs) do
-                {:ok, _event} -> {:paused, pause}
-                {:error, audit_error} -> Repo.rollback(audit_error)
-              end
-
-            {:error, %Ecto.Changeset{} = cs} ->
-              if unique_active_violation?(cs) do
-                # Lost the race: another transaction inserted between
-                # our `lock_active` call and the insert. Re-fetch the
-                # winning row inside the same transaction so the caller
-                # observes a stable already_paused shape with no second
-                # audit row.
-                case lock_active(workspace_id, scope_type, scope_value) do
-                  %Pause{} = winner -> {:already_paused, winner}
-                  nil -> Repo.rollback(cs)
+                case Audit.append_event(event_attrs) do
+                  {:ok, audit_event} -> {:paused, pause, audit_event}
+                  {:error, audit_error} -> Repo.rollback(audit_error)
                 end
-              else
-                Repo.rollback(cs)
-              end
-          end
-      end
-    end)
-    |> normalize_pause_result()
+
+              {:error, %Ecto.Changeset{} = cs} ->
+                if unique_active_violation?(cs) do
+                  # Lost the race: another transaction inserted between
+                  # our `lock_active` call and the insert. Re-fetch the
+                  # winning row inside the same transaction so the caller
+                  # observes a stable already_paused shape with no second
+                  # audit row.
+                  case lock_active(workspace_id, scope_type, scope_value) do
+                    %Pause{} = winner -> {:already_paused, winner, nil}
+                    nil -> Repo.rollback(cs)
+                  end
+                else
+                  Repo.rollback(cs)
+                end
+            end
+        end
+      end)
+
+    # Broadcast happens AFTER commit so subscribers never observe a
+    # `:scope_paused` event for a row that ended up rolled back. Also
+    # fires only on a real `:paused` transition, never for the
+    # idempotent re-pause / unique-race path.
+    case txn_result do
+      {:ok, {:paused, pause, audit_event}} ->
+        broadcast_scope_paused(pause, audit_event, actor, actor_id)
+        {:ok, :paused, pause}
+
+      {:ok, {:already_paused, pause, _nil_audit}} ->
+        {:ok, :already_paused, pause}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   @doc """
@@ -192,41 +213,57 @@ defmodule Bank.Security.Pauses do
     actor = Keyword.get(opts, :actor, :user)
     actor_id = resolve_actor_id(actor, Keyword.get(opts, :actor_id))
 
-    Repo.transaction(fn ->
-      case lock_active(workspace_id, scope_type, scope_value) do
-        nil ->
-          :already_running
+    txn_result =
+      Repo.transaction(fn ->
+        case lock_active(workspace_id, scope_type, scope_value) do
+          nil ->
+            # Idempotent: nothing to resume. No write, no audit, no
+            # broadcast.
+            {:already_running, nil, nil}
 
-        %Pause{} = active ->
-          prior = %{
-            paused_at: active.paused_at,
-            reason: active.reason,
-            created_by_user_id: active.created_by_user_id
-          }
+          %Pause{} = active ->
+            prior = %{
+              paused_at: active.paused_at,
+              reason: active.reason,
+              created_by_user_id: active.created_by_user_id
+            }
 
-          attrs = %{
-            resumed_at: DateTime.utc_now(),
-            resumed_by_user_id: actor_id_or_nil(actor_id)
-          }
+            attrs = %{
+              resumed_at: DateTime.utc_now(),
+              resumed_by_user_id: actor_id_or_nil(actor_id)
+            }
 
-          changeset = Pause.resume_changeset(active, attrs)
+            changeset = Pause.resume_changeset(active, attrs)
 
-          case Repo.update(changeset) do
-            {:ok, %Pause{} = resumed} ->
-              event_attrs =
-                Events.security_scope_resumed(resumed, prior, actor: actor, actor_id: actor_id)
+            case Repo.update(changeset) do
+              {:ok, %Pause{} = resumed} ->
+                event_attrs =
+                  Events.security_scope_resumed(resumed, prior, actor: actor, actor_id: actor_id)
 
-              case Audit.append_event(event_attrs) do
-                {:ok, _event} -> {:resumed, resumed}
-                {:error, audit_error} -> Repo.rollback(audit_error)
-              end
+                case Audit.append_event(event_attrs) do
+                  {:ok, audit_event} -> {:resumed, resumed, audit_event}
+                  {:error, audit_error} -> Repo.rollback(audit_error)
+                end
 
-            {:error, cs} ->
-              Repo.rollback(cs)
-          end
-      end
-    end)
-    |> normalize_resume_result()
+              {:error, cs} ->
+                Repo.rollback(cs)
+            end
+        end
+      end)
+
+    # Broadcast happens AFTER commit so subscribers never observe a
+    # `:scope_resumed` event for a transaction that rolled back.
+    case txn_result do
+      {:ok, {:resumed, resumed, audit_event}} ->
+        broadcast_scope_resumed(resumed, audit_event, actor, actor_id)
+        {:ok, :resumed, resumed}
+
+      {:ok, {:already_running, _nil_pause, _nil_audit}} ->
+        {:ok, :already_running}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   @doc """
@@ -332,11 +369,48 @@ defmodule Bank.Security.Pauses do
   defp actor_id_or_nil(id) when is_binary(id), do: id
   defp actor_id_or_nil(_), do: nil
 
-  defp normalize_pause_result({:ok, {:paused, pause}}), do: {:ok, :paused, pause}
-  defp normalize_pause_result({:ok, {:already_paused, pause}}), do: {:ok, :already_paused, pause}
-  defp normalize_pause_result({:error, reason}), do: {:error, reason}
+  # --- post-commit broadcasts -------------------------------------------
+  #
+  # `Bank.Audit.append_event/1` is called inside the transaction (so the
+  # pause row + audit row land atomically), but the realtime fan-out to
+  # `audit:stream` and `security:events` happens AFTER `Repo.transaction`
+  # commits. If the transaction rolled back, no broadcast fires.
+  # Idempotent re-pause / re-resume return `nil` for the audit-event slot
+  # and skip broadcasts entirely so subscribers never see duplicate
+  # notifications.
 
-  defp normalize_resume_result({:ok, {:resumed, pause}}), do: {:ok, :resumed, pause}
-  defp normalize_resume_result({:ok, :already_running}), do: {:ok, :already_running}
-  defp normalize_resume_result({:error, reason}), do: {:error, reason}
+  defp broadcast_scope_paused(%Pause{} = pause, audit_event, actor, actor_id) do
+    Notifier.audit_stream(audit_event)
+
+    Notifier.security_event(:scope_paused, %{
+      scope: scope_payload(pause),
+      reason: pause.reason,
+      actor: actor,
+      actor_id: actor_id
+    })
+
+    RuntimeTelemetry.security(:scope_paused, pause.scope_type)
+    :ok
+  end
+
+  defp broadcast_scope_resumed(%Pause{} = pause, audit_event, actor, actor_id) do
+    Notifier.audit_stream(audit_event)
+
+    Notifier.security_event(:scope_resumed, %{
+      scope: scope_payload(pause),
+      actor: actor,
+      actor_id: actor_id
+    })
+
+    RuntimeTelemetry.security(:scope_resumed, pause.scope_type)
+    :ok
+  end
+
+  defp scope_payload(%Pause{
+         scope_type: scope_type,
+         scope_value: scope_value,
+         workspace_id: ws_id
+       }) do
+    %{kind: scope_type, value: scope_value, workspace_id: ws_id}
+  end
 end

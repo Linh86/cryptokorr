@@ -1222,11 +1222,12 @@ defmodule Bank.Audit.Events do
   """
   @spec security_scope_paused(Bank.Security.Pause.t(), keyword()) :: attrs()
   def security_scope_paused(%Bank.Security.Pause{} = pause, opts \\ []) do
-    actor = Keyword.get(opts, :actor, :user)
-    actor_id = Keyword.get(opts, :actor_id) || actor_id_or_nil(actor)
+    raw_actor = Keyword.get(opts, :actor, :user)
+    actor = normalize_actor(raw_actor)
+    actor_id = Keyword.get(opts, :actor_id) || actor_id_or_nil(raw_actor)
 
     %{
-      actor: :user,
+      actor: actor,
       actor_id: actor_id,
       event_type: "security.scope_paused",
       subject_type: subject_type_for(pause.scope_type),
@@ -1258,11 +1259,12 @@ defmodule Bank.Audit.Events do
   @spec security_scope_resumed(Bank.Security.Pause.t(), map(), keyword()) :: attrs()
   def security_scope_resumed(%Bank.Security.Pause{} = pause, prior, opts \\ [])
       when is_map(prior) do
-    actor = Keyword.get(opts, :actor, :user)
-    actor_id = Keyword.get(opts, :actor_id) || actor_id_or_nil(actor)
+    raw_actor = Keyword.get(opts, :actor, :user)
+    actor = normalize_actor(raw_actor)
+    actor_id = Keyword.get(opts, :actor_id) || actor_id_or_nil(raw_actor)
 
     %{
-      actor: :user,
+      actor: actor,
       actor_id: actor_id,
       event_type: "security.scope_resumed",
       subject_type: subject_type_for(pause.scope_type),
@@ -1282,6 +1284,18 @@ defmodule Bank.Audit.Events do
       workspace_id: pause.workspace_id
     }
   end
+
+  # Normalize the `:actor` opt into the atom enum stored on
+  # `audit_events.actor`. A `%User{}` value rolls up to `:user`; the
+  # atomic actor kinds (`:user`, `:agent`, `:runtime`, `:adapter`)
+  # pass through unchanged so internal callers (the runtime worker,
+  # the adapter callback path) record the right actor kind on the
+  # scoped pause/resume event. Anything else collapses to `:user`
+  # rather than crashing — operator-driven flows are the dominant
+  # case.
+  defp normalize_actor(%User{}), do: :user
+  defp normalize_actor(actor) when actor in [:user, :agent, :runtime, :adapter], do: actor
+  defp normalize_actor(_), do: :user
 
   defp subject_type_for(:chain), do: "chain"
   defp subject_type_for(scope_type) when is_atom(scope_type), do: Atom.to_string(scope_type)

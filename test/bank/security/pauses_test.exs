@@ -7,6 +7,7 @@ defmodule Bank.Security.PausesTest do
 
   alias Bank.Audit.AuditEvent
   alias Bank.Repo
+  alias Bank.Runtime.PubSub
   alias Bank.Security.Pause
   alias Bank.Security.Pauses
   alias Bank.Security.PauseState
@@ -104,6 +105,93 @@ defmodule Bank.Security.PausesTest do
 
       assert count_active(ws_id, :chain, "base") == 1
       assert count_events("security.scope_paused", ws_id) == 1
+    end
+  end
+
+  describe "realtime broadcast" do
+    test "create_pause emits :scope_paused on security:events and :appended on audit:stream" do
+      %{id: ws_id} = create_workspace!("bcast-pause")
+      user = create_user!()
+
+      :ok = Phoenix.PubSub.subscribe(Bank.PubSub, PubSub.security_events())
+      :ok = Phoenix.PubSub.subscribe(Bank.PubSub, PubSub.audit_stream())
+
+      {:ok, :paused, pause} =
+        Pauses.create_pause(ws_id, :chain, "base", actor: user, reason: "rpc outage")
+
+      assert_receive %{
+        topic: :security_events,
+        event: :scope_paused,
+        payload: %{
+          scope: %{kind: :chain, value: "base", workspace_id: ^ws_id},
+          reason: "rpc outage"
+        }
+      }
+
+      pause_id = pause.id
+
+      assert_receive %{
+        topic: :audit_stream,
+        event: :appended,
+        payload: %{event_type: "security.scope_paused", subject_id: "base"}
+      }
+
+      _ = pause_id
+    end
+
+    test "resume emits :scope_resumed on security:events and :appended on audit:stream" do
+      %{id: ws_id} = create_workspace!("bcast-resume")
+      user = create_user!()
+
+      {:ok, :paused, _} = Pauses.create_pause(ws_id, :chain, "base", actor: user)
+
+      :ok = Phoenix.PubSub.subscribe(Bank.PubSub, PubSub.security_events())
+      :ok = Phoenix.PubSub.subscribe(Bank.PubSub, PubSub.audit_stream())
+
+      {:ok, :resumed, _} = Pauses.resume(ws_id, :chain, "base", actor: user)
+
+      assert_receive %{
+        topic: :security_events,
+        event: :scope_resumed,
+        payload: %{scope: %{kind: :chain, value: "base", workspace_id: ^ws_id}}
+      }
+
+      assert_receive %{
+        topic: :audit_stream,
+        event: :appended,
+        payload: %{event_type: "security.scope_resumed"}
+      }
+    end
+
+    test "idempotent re-pause does NOT broadcast a second :scope_paused" do
+      %{id: ws_id} = create_workspace!("bcast-idem-pause")
+      user = create_user!()
+
+      {:ok, :paused, _} = Pauses.create_pause(ws_id, :chain, "base", actor: user)
+
+      :ok = Phoenix.PubSub.subscribe(Bank.PubSub, PubSub.security_events())
+      :ok = Phoenix.PubSub.subscribe(Bank.PubSub, PubSub.audit_stream())
+
+      {:ok, :already_paused, _} = Pauses.create_pause(ws_id, :chain, "base", actor: user)
+
+      refute_receive %{topic: :security_events, event: :scope_paused}, 50
+      refute_receive %{topic: :audit_stream, event: :appended}, 50
+    end
+
+    test "idempotent re-resume does NOT broadcast a second :scope_resumed" do
+      %{id: ws_id} = create_workspace!("bcast-idem-resume")
+      user = create_user!()
+
+      {:ok, :paused, _} = Pauses.create_pause(ws_id, :chain, "base", actor: user)
+      {:ok, :resumed, _} = Pauses.resume(ws_id, :chain, "base", actor: user)
+
+      :ok = Phoenix.PubSub.subscribe(Bank.PubSub, PubSub.security_events())
+      :ok = Phoenix.PubSub.subscribe(Bank.PubSub, PubSub.audit_stream())
+
+      {:ok, :already_running} = Pauses.resume(ws_id, :chain, "base", actor: user)
+
+      refute_receive %{topic: :security_events, event: :scope_resumed}, 50
+      refute_receive %{topic: :audit_stream, event: :appended}, 50
     end
   end
 

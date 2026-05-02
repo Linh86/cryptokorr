@@ -109,6 +109,35 @@ defmodule Bank.Audit.EventsTest do
              }
     end
 
+    test "non-user actor (e.g. :runtime) is preserved, not collapsed to :user" do
+      pause =
+        build_chain_pause(%{
+          workspace_id: "ws-actor-runtime",
+          scope_value: "base"
+        })
+
+      attrs = Events.security_scope_paused(pause, actor: :runtime)
+
+      assert attrs.actor == :runtime
+      # No actor_id supplied, no User struct — actor_id stays nil.
+      assert is_nil(attrs.actor_id)
+    end
+
+    test "%User{} actor rolls up to :user with actor_id from the struct" do
+      user = %Bank.Accounts.User{id: "user-from-struct"}
+
+      pause =
+        build_chain_pause(%{
+          workspace_id: "ws-actor-user-struct",
+          scope_value: "base"
+        })
+
+      attrs = Events.security_scope_paused(pause, actor: user)
+
+      assert attrs.actor == :user
+      assert attrs.actor_id == "user-from-struct"
+    end
+
     test "after_ref carries no secret-bearing substrings (JSON-scan)" do
       pause =
         build_chain_pause(%{
@@ -129,6 +158,19 @@ defmodule Bank.Audit.EventsTest do
   end
 
   describe "security_scope_resumed/3" do
+    test "non-user actor (e.g. :adapter) is preserved" do
+      pause =
+        build_chain_pause(%{
+          workspace_id: "ws-resume-actor",
+          scope_value: "base",
+          resumed_at: DateTime.utc_now()
+        })
+
+      attrs = Events.security_scope_resumed(pause, %{}, actor: :adapter)
+
+      assert attrs.actor == :adapter
+    end
+
     test "carries before_ref pause snapshot and after_ref resume marker" do
       pause =
         build_chain_pause(%{
