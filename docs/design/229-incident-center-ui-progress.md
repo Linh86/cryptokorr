@@ -16,6 +16,16 @@ This doc is **not** a #229 closeout — closing #229 belongs to whoever
 maps every acceptance criterion in the issue body to landed evidence.
 This is a working map of progress as of the most recent `main`.
 
+## Recently landed since this map opened
+
+- [PR #324](https://github.com/Linh86/cryptobank/pull/324) — SecurityLive
+  in-flight execution plans card (`#in-flight-plans-card`). Originally
+  listed under *Remaining likely slices*; moved into *Shipped surfaces*
+  below. Read-only: it does NOT add abort/pause controls, does NOT
+  surface failed/retrying jobs, does NOT add provider/adapter health,
+  does NOT add chain-pause UI controls, and does NOT close #229 by
+  itself.
+
 ## Shipped surfaces
 
 Each entry cites the merged PR(s) that landed the surface. Surfaces are
@@ -43,6 +53,23 @@ organized by the LiveView they live on.
   workspace-scoped via
   [#308](https://github.com/Linh86/cryptobank/pull/308) ("SecurityLive:
   workspace-scoped stuck-plan query + Layouts.app current_scope").
+- **In-flight execution plans card** — operator-visible card listing
+  the current workspace's non-terminal execution plans (the superset
+  of which the stuck-plans card is a subset). Stable element id
+  `#in-flight-plans-card`, rendered between `#stuck-plans-card` and
+  `#delegations-card`. Reads from `Bank.Decisions.list_active_executions/1`
+  with `:workspace_id` pushed into the DB query (no in-memory
+  post-filter). Surfaces `:prepared`, `:signing`, `:broadcasting`,
+  and `:pending_confirmation` rows ordered `inserted_at desc`;
+  terminal statuses (`:confirmed`, `:reverted`, `:aborted`) are
+  excluded by the query. Read-only — no abort/pause controls in this
+  slice. Tests cover empty state, present rows, all four non-terminal
+  statuses rendering with `data-status`, terminal exclusion,
+  sibling-workspace isolation, and stuck/in-flight coexistence (a
+  stuck plan appears in BOTH cards because in-flight is the superset).
+  Landed in [#324](https://github.com/Linh86/cryptobank/pull/324)
+  ("SecurityLive: show in-flight execution plans (#229)"), merge SHA
+  `9f8bdbc`.
 
 ### `BankWeb.DashboardLive` (`/`)
 
@@ -79,42 +106,50 @@ These are probable next pieces under #229 based on the issue body's
 scope list and the surfaces not yet present. They are *suggestions*,
 not commitments — a human owner should triage before assigning.
 
-- **In-flight execution plans card on `SecurityLive`** — `#229` body
-  lists "in-flight execution plans" as a section. The stuck-plans card
-  exists; a healthier "currently executing" surface (active plan list
-  with adapter status, queue position, and a deep link into the
-  per-plan inspector) would round it out.
-- **Pending approvals surface** — `#229` lists "pending approvals" as a
-  section. Approval queue counts already appear on dashboard stat
-  cards (#316/#320); a dedicated panel showing pending approval rows
-  with per-row inspect/decide affordances would close that bullet.
+- **Confirmation modals / emergency-action confirmation audit** —
+  `#229` acceptance: *"All emergency actions confirm before
+  applying."* Pause / resume / revoke flows already work admin-side;
+  a quick audit of every emergency button to confirm a click-through
+  confirmation is wired would close that acceptance bullet.
+- **Pending approvals surface on `/security`** — `#229` lists
+  "pending approvals" as a section. Approval queue counts already
+  appear on dashboard stat cards (#316/#320) and `/approvals` exists
+  as the dedicated queue surface; a small inline panel on `/security`
+  could close the issue-body bullet if still desired, or this slice
+  may be deemed redundant given the existing `/approvals` route.
 - **Failed/retrying jobs surface** — `#229` lists "failed/retrying
-  jobs". Today the operator must drop into Oban LiveDashboard or query
-  the DB. A small per-queue retry panel on the security console would
-  match the surface inventory in the issue.
-- **Provider/adapter health summary** — `#229` lists this as a section.
-  `bank.ops.health.adapter_up` / `database_up` / `stuck_plans` already
-  surface via `/v1/health/deep` and the deep-health response shape; a
-  single-row "current health snapshot" panel on the security console
-  would let the operator confirm posture without leaving the page.
+  jobs". **Blocked on backend Oban/read API** — today the operator
+  drops into Oban LiveDashboard or queries the DB. A workspace-scoped
+  read API for the relevant Oban queues would unlock a small per-queue
+  retry panel on the security console.
+- **Provider/adapter health summary** — `#229` lists this as a
+  section. **Blocked on a cached backend health source** —
+  `bank.ops.health.adapter_up` / `database_up` / `stuck_plans` exist
+  via `/v1/health/deep`, but the LiveView surface needs a cached /
+  push-driven source rather than re-running the deep probe per render.
 - **Richer incident summary / export** — operator-facing "what
   happened in the last N minutes" summary that pulls from the safety
-  timeline and the audit log. Useful for handoff at end of an incident
-  and for the post-mortem writeup that
+  timeline and the audit log. Useful for handoff at end of an
+  incident and for the post-mortem writeup that
   [`docs/incident-runbook.md`](../incident-runbook.md) already
   references in its communication checklist.
-- **Confirmation modals for emergency actions** — `#229` acceptance:
-  *"All emergency actions confirm before applying."* Pause / resume /
-  revoke flows already work admin-side; a quick audit of every
-  emergency button to confirm a click-through confirmation is wired
-  would close this acceptance bullet.
+- **Chain-pause UI card** — operator card for per-chain pause
+  controls. **Blocked on #228 Phase 1 backend** / [PR #326](https://github.com/Linh86/cryptobank/pull/326);
+  the UI cannot ship before the backend pause table, context API,
+  and dispatch gates land. Once #326 (or its successor) merges, the
+  UI work is bounded by the [PR #310](https://github.com/Linh86/cryptobank/pull/310)
+  design memo §9.
 
 ## Blocked by #228
 
 These cannot ship until the per-scope pause backend lands under
-#228 / [PR #310](https://github.com/Linh86/cryptobank/pull/310):
+#228 / [PR #310](https://github.com/Linh86/cryptobank/pull/310) (design
+memo) plus the corresponding implementation PRs:
 
-- **Per-chain pause card** — Phase 1 of #228.
+- **Per-chain pause card** — Phase 1 of #228. Backend in flight at
+  [PR #326](https://github.com/Linh86/cryptobank/pull/326) ("Add
+  DB-backed per-chain pause gate (#228 phase 1)"); UI card is the
+  follow-up slice.
 - **Per-smart-account pause toggle on the delegations card** — Phase 2.
 - **Per-api-key pause toggle on the API-keys management surface** —
   Phase 3.
