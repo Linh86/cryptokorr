@@ -54,10 +54,23 @@ defmodule BankWeb.PoliciesLive do
   end
 
   def handle_event("filter_state", %{"state" => state}, socket) do
-    {:noreply,
-     socket
-     |> assign(:filter_state, state)
-     |> load_rules()}
+    # `state` arrives as the raw `phx-value-state` string. The four
+    # buttons hard-code one of `"active"`, `"all"`, `"archived"`,
+    # `"draft"`, but a crafted DOM/event injection could supply
+    # anything. Validate against the allowlist before assigning so
+    # `load_rules/1` never feeds an arbitrary string into
+    # `String.to_existing_atom/1` (which would raise `ArgumentError`
+    # and crash the LiveView session).
+    case policy_filter_state(state) do
+      {:ok, _atom} ->
+        {:noreply,
+         socket
+         |> assign(:filter_state, state)
+         |> load_rules()}
+
+      :error ->
+        {:noreply, socket}
+    end
   end
 
   def handle_event("validate_rule", %{"rule" => params}, socket) do
@@ -169,9 +182,10 @@ defmodule BankWeb.PoliciesLive do
 
   defp load_rules(socket) do
     filters =
-      case socket.assigns.filter_state do
-        "all" -> %{}
-        state -> %{state: String.to_existing_atom(state)}
+      case policy_filter_state(socket.assigns.filter_state) do
+        {:ok, :all} -> %{}
+        {:ok, atom} -> %{state: atom}
+        :error -> %{}
       end
 
     %{entries: entries} =
@@ -182,6 +196,16 @@ defmodule BankWeb.PoliciesLive do
 
     assign(socket, :rules, entries)
   end
+
+  # Allowlist for the policies-filter buttons. Centralised so both
+  # `handle_event("filter_state", ...)` and `load_rules/1` use the
+  # same string→atom mapping and an unknown value can never reach
+  # `String.to_existing_atom/1`.
+  defp policy_filter_state("active"), do: {:ok, :active}
+  defp policy_filter_state("draft"), do: {:ok, :draft}
+  defp policy_filter_state("archived"), do: {:ok, :archived}
+  defp policy_filter_state("all"), do: {:ok, :all}
+  defp policy_filter_state(_), do: :error
 
   defp assign_create_form(socket, params, action \\ nil) do
     changeset =

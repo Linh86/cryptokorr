@@ -259,6 +259,41 @@ defmodule BankWeb.PoliciesLiveTest do
       assert html =~ "Amount limit"
       assert html =~ "Allowed chain"
     end
+
+    test "invalid filter_state event does not crash the LiveView (#212 P2)", %{conn: conn} do
+      # The four buttons hard-code valid state strings, but a crafted
+      # DOM/event injection can supply anything as `phx-value-state`.
+      # Pre-fix this routed the raw string into
+      # `String.to_existing_atom/1` and raised `ArgumentError`,
+      # crashing the LiveView session (per-session DoS).
+      {:ok, view, _html} = live(conn, "/policies")
+
+      html = render_click(view, "filter_state", %{"state" => "definitely-not-a-state"})
+
+      # The LiveView is still alive (render_click returns the new
+      # markup; if the process had crashed this would raise).
+      assert is_binary(html)
+
+      # Default filter ("active") was preserved — invalid state is
+      # ignored, not assigned.
+      assert has_element?(view, "button.btn-primary", "Active")
+      refute has_element?(view, "button.btn-primary", "All")
+
+      # Same data is still rendered as before the bogus event.
+      assert html =~ "Amount limit"
+      refute html =~ "Allowed chain"
+    end
+
+    test "valid filter_state events keep working after the allowlist guard", %{conn: conn} do
+      # Backstop: the per-button click path is unchanged.
+      {:ok, view, _html} = live(conn, "/policies")
+
+      html = render_click(view, "filter_state", %{"state" => "archived"})
+
+      assert has_element?(view, "button.btn-primary", "Archived")
+      refute html =~ "Amount limit"
+      assert html =~ "Allowed chain"
+    end
   end
 
   # --- Navigation -----------------------------------------------------------

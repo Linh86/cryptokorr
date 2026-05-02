@@ -48,8 +48,8 @@ defmodule BankWeb.API.V1.ApprovalController do
 
   alias Bank.Decisions
   alias Bank.Decisions.{DecisionEnvelope, ExecutionPlan}
+  alias Bank.Intents
   alias Bank.Intents.AgentIntent
-  alias Bank.Repo
   alias Bank.WalletScreening.Evidence
   alias OpenApiSpex.{Parameter, Reference}
 
@@ -93,7 +93,7 @@ defmodule BankWeb.API.V1.ApprovalController do
   def index(conn, _params) do
     workspace_id = conn.assigns.current_scope.workspace.id
     decisions = Decisions.list_pending_approvals(workspace_id: workspace_id)
-    json(conn, %{decisions: Enum.map(decisions, &summarize/1)})
+    json(conn, %{decisions: Enum.map(decisions, &summarize(&1, workspace_id))})
   end
 
   operation(:approve,
@@ -166,7 +166,7 @@ defmodule BankWeb.API.V1.ApprovalController do
              {:ok, successor, dispatch} <- apply_action(action, id, opts) do
           conn
           |> put_status(:ok)
-          |> json(success_body(successor, dispatch))
+          |> json(success_body(successor, dispatch, workspace_id))
         else
           {:error, reason} ->
             render_action_error(conn, reason)
@@ -218,9 +218,13 @@ defmodule BankWeb.API.V1.ApprovalController do
     |> json(%{error: %{code: "approval_failed", message: inspect(reason)}})
   end
 
-  defp success_body(%DecisionEnvelope{} = successor, {:dispatched, %ExecutionPlan{} = plan}) do
+  defp success_body(
+         %DecisionEnvelope{} = successor,
+         {:dispatched, %ExecutionPlan{} = plan},
+         workspace_id
+       ) do
     %{
-      decision: summarize(successor),
+      decision: summarize(successor, workspace_id),
       dispatch: "dispatched",
       execution_plan: %{
         id: plan.id,
@@ -230,9 +234,9 @@ defmodule BankWeb.API.V1.ApprovalController do
     }
   end
 
-  defp success_body(%DecisionEnvelope{} = successor, {:held, reason}) do
+  defp success_body(%DecisionEnvelope{} = successor, {:held, reason}, workspace_id) do
     %{
-      decision: summarize(successor),
+      decision: summarize(successor, workspace_id),
       dispatch: "held",
       held_reason: Atom.to_string(reason),
       next_step: %{
@@ -244,14 +248,14 @@ defmodule BankWeb.API.V1.ApprovalController do
     }
   end
 
-  defp success_body(%DecisionEnvelope{} = successor, :no_dispatch) do
+  defp success_body(%DecisionEnvelope{} = successor, :no_dispatch, workspace_id) do
     %{
-      decision: summarize(successor),
+      decision: summarize(successor, workspace_id),
       dispatch: "no_dispatch"
     }
   end
 
-  defp summarize(%DecisionEnvelope{} = e) do
+  defp summarize(%DecisionEnvelope{} = e, workspace_id) do
     %{
       id: e.id,
       intent_id: e.intent_id,
@@ -261,20 +265,28 @@ defmodule BankWeb.API.V1.ApprovalController do
       decided_by: e.decided_by,
       approval_expires_at: e.approval_expires_at,
       reasons: e.reasons,
-      screening_evidence: screening_evidence(e)
+      screening_evidence: screening_evidence(e, workspace_id)
     }
   end
 
-  defp screening_evidence(%DecisionEnvelope{intent: %AgentIntent{} = intent}) do
+  # Defense-in-depth (#212 P2): even though the surrounding
+  # `handle_action/3` already validated the decision via
+  # `Decisions.get_envelope_in_workspace/2`, fetch the intent through
+  # the workspace-scoped getter so a future refactor that bypasses
+  # the upstream gate cannot leak a sibling workspace's screening
+  # evidence. Response shape is unchanged: `nil` for "no evidence
+  # available" matches the prior `Repo.get → nil` branch.
+  defp screening_evidence(%DecisionEnvelope{intent: %AgentIntent{} = intent}, _workspace_id) do
     Evidence.for_intent(intent)
   end
 
-  defp screening_evidence(%DecisionEnvelope{intent_id: intent_id}) when is_binary(intent_id) do
-    case Repo.get(AgentIntent, intent_id) do
+  defp screening_evidence(%DecisionEnvelope{intent_id: intent_id}, workspace_id)
+       when is_binary(intent_id) and is_binary(workspace_id) do
+    case Intents.get_in_workspace(intent_id, workspace_id) do
       nil -> nil
       %AgentIntent{} = intent -> Evidence.for_intent(intent)
     end
   end
 
-  defp screening_evidence(_envelope), do: nil
+  defp screening_evidence(_envelope, _workspace_id), do: nil
 end
