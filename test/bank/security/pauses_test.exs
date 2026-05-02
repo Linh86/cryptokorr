@@ -166,32 +166,59 @@ defmodule Bank.Security.PausesTest do
     test "idempotent re-pause does NOT broadcast a second :scope_paused" do
       %{id: ws_id} = create_workspace!("bcast-idem-pause")
       user = create_user!()
+      # Unique scope_value per test so the refute matchers can pin the
+      # exact (event, subject_id, workspace_id) we care about and not
+      # accidentally false-positive on unrelated audit_stream traffic.
+      chain = "idem-pause-#{System.unique_integer([:positive])}"
 
-      {:ok, :paused, _} = Pauses.create_pause(ws_id, :chain, "base", actor: user)
+      {:ok, :paused, _} = Pauses.create_pause(ws_id, :chain, chain, actor: user)
 
       :ok = Phoenix.PubSub.subscribe(Bank.PubSub, PubSub.security_events())
       :ok = Phoenix.PubSub.subscribe(Bank.PubSub, PubSub.audit_stream())
 
-      {:ok, :already_paused, _} = Pauses.create_pause(ws_id, :chain, "base", actor: user)
+      {:ok, :already_paused, _} = Pauses.create_pause(ws_id, :chain, chain, actor: user)
 
-      refute_receive %{topic: :security_events, event: :scope_paused}, 50
-      refute_receive %{topic: :audit_stream, event: :appended}, 50
+      refute_receive %{
+                       topic: :security_events,
+                       event: :scope_paused,
+                       payload: %{scope: %{kind: :chain, value: ^chain, workspace_id: ^ws_id}}
+                     },
+                     50
+
+      refute_receive %{
+                       topic: :audit_stream,
+                       event: :appended,
+                       payload: %{event_type: "security.scope_paused", subject_id: ^chain}
+                     },
+                     50
     end
 
     test "idempotent re-resume does NOT broadcast a second :scope_resumed" do
       %{id: ws_id} = create_workspace!("bcast-idem-resume")
       user = create_user!()
+      chain = "idem-resume-#{System.unique_integer([:positive])}"
 
-      {:ok, :paused, _} = Pauses.create_pause(ws_id, :chain, "base", actor: user)
-      {:ok, :resumed, _} = Pauses.resume(ws_id, :chain, "base", actor: user)
+      {:ok, :paused, _} = Pauses.create_pause(ws_id, :chain, chain, actor: user)
+      {:ok, :resumed, _} = Pauses.resume(ws_id, :chain, chain, actor: user)
 
       :ok = Phoenix.PubSub.subscribe(Bank.PubSub, PubSub.security_events())
       :ok = Phoenix.PubSub.subscribe(Bank.PubSub, PubSub.audit_stream())
 
-      {:ok, :already_running} = Pauses.resume(ws_id, :chain, "base", actor: user)
+      {:ok, :already_running} = Pauses.resume(ws_id, :chain, chain, actor: user)
 
-      refute_receive %{topic: :security_events, event: :scope_resumed}, 50
-      refute_receive %{topic: :audit_stream, event: :appended}, 50
+      refute_receive %{
+                       topic: :security_events,
+                       event: :scope_resumed,
+                       payload: %{scope: %{kind: :chain, value: ^chain, workspace_id: ^ws_id}}
+                     },
+                     50
+
+      refute_receive %{
+                       topic: :audit_stream,
+                       event: :appended,
+                       payload: %{event_type: "security.scope_resumed", subject_id: ^chain}
+                     },
+                     50
     end
   end
 
