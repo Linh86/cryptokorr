@@ -192,6 +192,43 @@ defmodule Bank.APIKeysTest do
 
       assert event.actor_id == user.id
     end
+
+    test "stale-struct duplicate revoke does not emit a second audit row",
+         %{workspace: ws, user: user} do
+      # Two callers can hold the SAME pre-revoke `%APIKey{}` struct
+      # (e.g. loaded by a controller, then a UI double-click sends
+      # two POST /revoke requests in quick succession). Pre-fix
+      # both calls passed the in-memory `revoked_at: nil` guard,
+      # both entered the transaction, both `Repo.update` succeeded,
+      # and TWO `api_key.revoked` audit rows were written for the
+      # same key. Post-fix the inner `FOR UPDATE` lock + re-check
+      # ensures only the first commit emits the audit event; the
+      # second observes `revoked_at` set and returns idempotently.
+      #
+      # Simulate the race deterministically by:
+      #   1. Loading `key` (pristine, `revoked_at: nil`).
+      #   2. Independently committing the first revoke via the API.
+      #   3. Calling `revoke_key/2` again with the STALE pristine
+      #      struct from step 1 (mimics caller B's snapshot from
+      #      before A committed).
+      {:ok, key, _raw} = APIKeys.create_key(ws, user, :operator, "stale-revoke-race")
+      stale_struct = key
+
+      assert {:ok, %APIKey{revoked_at: %DateTime{} = first_ts}} =
+               APIKeys.revoke_key(key, actor: user)
+
+      assert {:ok, %APIKey{revoked_at: %DateTime{} = second_ts}} =
+               APIKeys.revoke_key(stale_struct, actor: user)
+
+      # Same `revoked_at` — caller B sees the locked / authoritative
+      # row, not its own stale struct.
+      assert second_ts == first_ts
+
+      # Exactly one `api_key.revoked` audit row across both calls.
+      %{events: events} = Audit.list_events(%{event_type: "api_key.revoked"})
+      events = Enum.filter(events, &(&1.subject_id == key.id))
+      assert length(events) == 1
+    end
   end
 
   # --- rotate_key/3 ---------------------------------------------------------
