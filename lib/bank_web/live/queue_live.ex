@@ -161,7 +161,7 @@ defmodule BankWeb.QueueLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} active_page={:queue}>
+    <Layouts.app flash={@flash} current_scope={@current_scope} active_page={:queue}>
       <%!-- Page header --%>
       <div class="flex items-center justify-between mb-8">
         <div>

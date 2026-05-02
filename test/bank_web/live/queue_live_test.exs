@@ -386,4 +386,32 @@ defmodule BankWeb.QueueLiveTest do
       _html = render(view)
     end
   end
+
+  # --- Layouts.app current_scope (admin nav visibility, mirrors #308 / #311)
+  #
+  # Representative admin-nav test for the sweep that added
+  # `current_scope={@current_scope}` to <Layouts.app> across eight
+  # LiveViews (audit / control / counterparties / counterparty_detail
+  # / intent_replay / intents / policies / queue). Without the assign,
+  # `admin_visible?/1` always returns `false` and the
+  # `/admin/api_keys` sidebar link is hidden from legitimate admins.
+  # Pinning the wiring here keeps a future drive-by edit from silently
+  # breaking it again on the highest-traffic operator surface.
+
+  describe "layout current_scope wiring" do
+    test "admin user sees /admin/api_keys nav link when allowlisted",
+         %{conn: conn, current_user: user} do
+      original_admin_emails = Application.get_env(:bank, :admin_emails)
+
+      try do
+        Application.put_env(:bank, :admin_emails, [user.email])
+
+        {:ok, _view, html} = live(conn, "/queue")
+
+        assert html =~ ~s(href="/admin/api_keys")
+      after
+        Application.put_env(:bank, :admin_emails, original_admin_emails)
+      end
+    end
+  end
 end

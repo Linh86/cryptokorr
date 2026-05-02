@@ -134,7 +134,7 @@ defmodule BankWeb.IntentsLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} active_page={:intents}>
+    <Layouts.app flash={@flash} current_scope={@current_scope} active_page={:intents}>
       <div class="flex items-center justify-between mb-8">
         <div>
           <h1 id="page-title" class="text-2xl font-bold tracking-tight">Intents</h1>

@@ -340,7 +340,7 @@ defmodule BankWeb.CounterpartyDetailLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} active_page={:counterparties}>
+    <Layouts.app flash={@flash} current_scope={@current_scope} active_page={:counterparties}>
       <%!-- Back link + header --%>
       <div class="mb-6">
         <.link

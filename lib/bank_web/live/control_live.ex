@@ -208,7 +208,7 @@ defmodule BankWeb.ControlLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} active_page={:connection}>
+    <Layouts.app flash={@flash} current_scope={@current_scope} active_page={:connection}>
       <%!-- System status bar --%>
       <.system_status_bar paused={@paused} execution_ready={@execution_ready} />
 
