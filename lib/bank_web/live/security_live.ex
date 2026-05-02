@@ -376,6 +376,17 @@ defmodule BankWeb.SecurityLive do
     stuck_plans =
       Bank.Ops.Health.stuck_plan_details(limit: 10, workspace_id: workspace_id)
 
+    # Full set of non-terminal execution plans for the current
+    # workspace (#229 incident-center surface). Stuck plans are a
+    # threshold-filtered subset of this list; the in-flight card
+    # gives operators the rest of the active pipeline so they can
+    # see what is actually executing right now (`:prepared`,
+    # `:signing`, `:broadcasting`, `:pending_confirmation`).
+    # `Bank.Decisions.list_active_executions/1` already pushes
+    # `:workspace_id` into the DB query (no in-memory post-filter).
+    in_flight_plans =
+      Bank.Decisions.list_active_executions(workspace_id: workspace_id)
+
     filters = socket.assigns[:safety_filters] || @default_safety_filters
     safety_events = load_safety_events(delegations, workspace_id, filters)
 
@@ -397,6 +408,8 @@ defmodule BankWeb.SecurityLive do
     |> assign(:execution_ready, execution_ready?)
     |> assign(:risk_summary, risk_summary)
     |> assign(:stuck_plans, stuck_plans)
+    |> assign(:in_flight_plans, in_flight_plans)
+    |> assign(:in_flight_plan_count, length(in_flight_plans))
     |> assign(:safety_events, safety_events)
     |> assign(:safety_filters, filters)
     |> assign(:safety_filter_form, safety_filter_form)
@@ -627,6 +640,7 @@ defmodule BankWeb.SecurityLive do
             rows={@stuck_plans}
             current_role={@current_scope.role}
           />
+          <.in_flight_plans_card plans={@in_flight_plans} />
           <.delegations_card delegations={@delegations} />
         </div>
 
@@ -1130,6 +1144,117 @@ defmodule BankWeb.SecurityLive do
   end
 
   defp format_duration(_), do: "-"
+
+  # --- Component: in-flight execution plans card --------------------------
+  #
+  # Read-only operator view of the full non-terminal execution plan
+  # set for the current workspace (#229). This is the superset of
+  # `#stuck-plans-card`: stuck plans are filtered by per-status age
+  # threshold, while this card shows everything in
+  # `Bank.Decisions.list_active_executions/1` — the actual active
+  # pipeline. No actions are wired in this slice; abort affordance
+  # already lives on the stuck-plans card and is bound to the same
+  # `Decisions.abort_plan/3` safe-state guard.
+  #
+  # Field selection deliberately avoids signing material, adapter
+  # payloads, and chain refs. Operators get the handle (short id),
+  # routing context (chain / asset / smart account), the lifecycle
+  # state, and an updated-at age — enough to triage without leaking
+  # anything that doesn't already render elsewhere on /security.
+
+  attr :plans, :list, required: true
+
+  defp in_flight_plans_card(assigns) do
+    ~H"""
+    <section
+      id="in-flight-plans-card"
+      data-count={length(@plans)}
+      class="rounded-xl border border-base-300 bg-base-100 shadow-sm overflow-hidden"
+    >
+      <header class="px-6 py-4 border-b border-base-300 flex items-center justify-between">
+        <h2 class="text-sm font-semibold flex items-center gap-1.5">
+          <.icon name="hero-bolt" class="size-4" /> In-flight execution plans
+        </h2>
+        <span class="badge badge-sm badge-ghost">{length(@plans)}</span>
+      </header>
+
+      <div
+        :if={@plans == []}
+        id="in-flight-plans-empty"
+        class="px-6 py-8 text-center text-sm text-base-content/50"
+      >
+        No in-flight execution plans for this workspace.
+      </div>
+
+      <ul :if={@plans != []} class="divide-y divide-base-300">
+        <li :for={plan <- @plans} id={"in-flight-plan-#{plan.id}"} class="px-6 py-4">
+          <.in_flight_plan_row plan={plan} />
+        </li>
+      </ul>
+    </section>
+    """
+  end
+
+  attr :plan, :map, required: true
+
+  defp in_flight_plan_row(assigns) do
+    ~H"""
+    <div class="flex items-start justify-between gap-3">
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="text-sm font-mono">{short_id(@plan.id)}</span>
+          <span
+            id={"in-flight-plan-status-#{@plan.id}"}
+            class={[
+              "badge badge-sm font-mono",
+              in_flight_status_badge_class(@plan.execution_status)
+            ]}
+            data-status={@plan.execution_status}
+          >
+            {@plan.execution_status}
+          </span>
+        </div>
+        <div class="mt-1 text-xs text-base-content/50 flex items-center gap-3 flex-wrap">
+          <span :if={@plan.chain}>
+            chain <span class="font-mono">{@plan.chain}</span>
+          </span>
+          <span :if={@plan.asset}>
+            asset <span class="font-mono">{@plan.asset}</span>
+          </span>
+          <span :if={@plan.smart_account_id}>
+            sa <span class="font-mono">{short_id(@plan.smart_account_id)}</span>
+          </span>
+          <span>
+            updated
+            <span id={"in-flight-plan-age-#{@plan.id}"} class="font-mono">
+              {format_age(@plan.updated_at)}
+            </span>
+            ago
+          </span>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
+  defp in_flight_status_badge_class(:prepared), do: "badge-info"
+  defp in_flight_status_badge_class(:signing), do: "badge-warning"
+  defp in_flight_status_badge_class(:broadcasting), do: "badge-warning"
+  defp in_flight_status_badge_class(:pending_confirmation), do: "badge-warning"
+  defp in_flight_status_badge_class(_), do: "badge-ghost"
+
+  # Computes a coarse human-readable age from a `DateTime`. Mirrors
+  # `format_duration/1` shape but takes a timestamp so the in-flight
+  # row can be rendered without the per-status threshold context the
+  # stuck-plans helper carries.
+  defp format_age(%DateTime{} = ts) do
+    DateTime.utc_now()
+    |> DateTime.diff(ts, :second)
+    |> max(0)
+    |> format_duration()
+  end
+
+  defp format_age(_), do: "-"
 
   # --- Component: delegations card -----------------------------------------
 

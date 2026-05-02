@@ -842,6 +842,94 @@ defmodule BankWeb.SecurityLiveTest do
     end
   end
 
+  # --- In-flight execution plans card (#229) -------------------------------
+
+  describe "in-flight execution plans card" do
+    test "renders empty state when no active plans exist", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#in-flight-plans-card")
+      assert has_element?(view, "#in-flight-plans-empty")
+    end
+
+    test "renders one row per active workspace plan with status badge",
+         %{conn: conn, workspace: ws} do
+      prepared = fresh_plan(:prepared, ws.id)
+      signing = fresh_plan(:signing, ws.id)
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#in-flight-plans-card")
+      refute has_element?(view, "#in-flight-plans-empty")
+
+      assert has_element?(view, "#in-flight-plan-#{prepared.id}")
+      assert has_element?(view, "#in-flight-plan-#{signing.id}")
+
+      assert has_element?(
+               view,
+               ~s|#in-flight-plan-status-#{prepared.id}[data-status="prepared"]|
+             )
+
+      assert has_element?(
+               view,
+               ~s|#in-flight-plan-status-#{signing.id}[data-status="signing"]|
+             )
+    end
+
+    test "renders all four non-terminal statuses",
+         %{conn: conn, workspace: ws} do
+      for status <- [:prepared, :signing, :broadcasting, :pending_confirmation] do
+        fresh_plan(status, ws.id)
+      end
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, ~s|#in-flight-plans-card[data-count="4"]|)
+    end
+
+    test "terminal-status plans (confirmed/reverted/aborted) do NOT appear",
+         %{conn: conn, workspace: ws} do
+      _confirmed = Bank.Fixtures.execution_plan(execution_status: :confirmed, workspace_id: ws.id)
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#in-flight-plans-empty")
+    end
+
+    test "sibling-workspace plan does NOT appear on current workspace",
+         %{conn: conn} do
+      {:ok, sibling_ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "sibling-in-flight-#{System.unique_integer([:positive])}",
+          name: "Sibling"
+        })
+
+      _sibling = fresh_plan(:prepared, sibling_ws.id)
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#in-flight-plans-empty")
+    end
+
+    test "stuck-plans card and in-flight card coexist (stuck plan appears in both)",
+         %{conn: conn, workspace: ws} do
+      # A stuck `:prepared` plan still satisfies the in-flight predicate
+      # (`active = true`, status non-terminal), so it should appear in
+      # BOTH cards. The in-flight card is the superset.
+      stuck = stuck_prepared_plan(ws.id)
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#stuck-plans-card")
+      assert has_element?(view, "#in-flight-plans-card")
+      assert has_element?(view, "#stuck-plan-#{stuck.id}")
+      assert has_element?(view, "#in-flight-plan-#{stuck.id}")
+
+      refute has_element?(view, "#stuck-plans-empty")
+      refute has_element?(view, "#in-flight-plans-empty")
+    end
+  end
+
   # Insert an `ExecutionPlan` whose `updated_at` is overwritten via a
   # raw SQL update so it appears stuck without depending on Ecto's
   # automatic timestamp behavior.
