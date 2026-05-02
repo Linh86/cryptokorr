@@ -930,6 +930,90 @@ defmodule BankWeb.SecurityLiveTest do
     end
   end
 
+  # --- Emergency action confirmations (#229 acceptance) -------------------
+
+  describe "emergency action confirmations" do
+    # Each mutating action button on /security must carry a
+    # `data-confirm` attribute so a misclick cannot apply
+    # immediately. Non-mutating controls (refresh, filter clear)
+    # must NOT carry a confirm prompt — they are read-side only.
+    # Pinned via stable id selectors, not raw HTML strings.
+
+    test "pause-runtime button has data-confirm in normal state",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#pause-btn[data-confirm]")
+      refute has_element?(view, "#resume-btn")
+    end
+
+    test "resume-runtime button has data-confirm when paused",
+         %{conn: conn} do
+      {:ok, _} = Security.pause(:global, reason: :test, actor: :user)
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#resume-btn[data-confirm]")
+      refute has_element?(view, "#pause-btn")
+    end
+
+    test "agent-keys pause submit button has data-confirm when unpaused",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#agent-keys-pause-submit[data-confirm]")
+      refute has_element?(view, "#agent-keys-resume")
+    end
+
+    test "agent-keys resume button has data-confirm when paused",
+         %{conn: conn, workspace: ws, current_user: user} do
+      {:ok, :paused, _} = Bank.APIKeys.pause_workspace(ws, user, reason: "confirm-test")
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#agent-keys-resume[data-confirm]")
+      refute has_element?(view, "#agent-keys-pause-submit")
+    end
+
+    test "revoke delegation button has data-confirm for active delegation",
+         %{conn: conn} do
+      del = delegation(state: :active)
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#revoke-btn-#{del.smart_account_id}[data-confirm]")
+    end
+
+    test "revoke retry button has data-confirm for revoke_failed delegation",
+         %{conn: conn} do
+      del = delegation(state: :revoke_failed)
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#revoke-retry-btn-#{del.smart_account_id}[data-confirm]")
+    end
+
+    test "abort-plan button has data-confirm for stuck :prepared plan",
+         %{conn: conn, workspace: ws} do
+      plan = stuck_prepared_plan(ws.id)
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#abort-plan-btn-#{plan.id}[data-confirm]")
+    end
+
+    test "non-mutating controls do NOT require confirmation",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/security")
+
+      # Refresh button is read-side; reloading the page is harmless.
+      refute has_element?(view, ~s|button[phx-click="refresh"][data-confirm]|)
+
+      # Filter-clear button is read-side; resetting filters is harmless.
+      refute has_element?(view, ~s|button[phx-click="clear_safety_filters"][data-confirm]|)
+    end
+  end
+
   # Insert an `ExecutionPlan` whose `updated_at` is overwritten via a
   # raw SQL update so it appears stuck without depending on Ecto's
   # automatic timestamp behavior.

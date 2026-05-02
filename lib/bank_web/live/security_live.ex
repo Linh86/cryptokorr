@@ -822,6 +822,7 @@ defmodule BankWeb.SecurityLive do
           :if={@paused}
           id="resume-btn"
           phx-click="resume_runtime"
+          data-confirm="Resume runtime? New executions may start again immediately."
           class="btn btn-success btn-soft btn-sm gap-1.5"
         >
           <.icon name="hero-play" class="size-3.5" /> Resume runtime
