@@ -101,10 +101,15 @@ config :bank, Oban,
     # and emits one `ops.stuck_plan_detected` audit row per plan
     # past its per-status threshold (deduped on a 5-minute aligned
     # window).
+    # Auto-resume sweeper for scoped chain pauses with `expires_at`
+    # set (#228 Phase 1.5). Runs every minute; per-row idempotency
+    # is owned by `Bank.Security.Pauses.expire/2` so an extra tick
+    # is harmless.
     {Oban.Plugins.Cron,
      crontab: [
        {"30 0 * * *", Bank.Runtime.Workers.AggregateAPIKeyUsage},
-       {"*/2 * * * *", Bank.Runtime.Workers.ScanStuckPlans}
+       {"*/2 * * * *", Bank.Runtime.Workers.ScanStuckPlans},
+       {"* * * * *", Bank.Runtime.Workers.SweepExpiredPauses}
      ]}
   ]
 

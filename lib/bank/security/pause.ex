@@ -50,6 +50,7 @@ defmodule Bank.Security.Pause do
     field :reason, :string
     field :paused_at, :utc_datetime_usec
     field :resumed_at, :utc_datetime_usec
+    field :expires_at, :utc_datetime_usec
 
     belongs_to :workspace, Workspace
     belongs_to :created_by_user, User, foreign_key: :created_by_user_id
@@ -62,10 +63,16 @@ defmodule Bank.Security.Pause do
   Changeset for inserting a brand-new pause row.
 
   Required: `:workspace_id`, `:scope_type`, `:scope_value`,
-  `:paused_at`. Optional: `:reason`, `:created_by_user_id`.
+  `:paused_at`. Optional: `:reason`, `:created_by_user_id`,
+  `:expires_at`.
 
   `:resumed_at` and `:resumed_by_user_id` are NOT castable here —
   resume goes through `resume_changeset/2` against an existing row.
+
+  When `:expires_at` is supplied it MUST be strictly after
+  `:paused_at` (defaults to "after now" when paused_at is omitted).
+  A nil expires_at means "manual resume only" — the historical
+  pre-#228-Phase-1.5 behavior.
   """
   @spec create_changeset(t() | %__MODULE__{}, map()) :: Ecto.Changeset.t()
   def create_changeset(%__MODULE__{} = pause, attrs) do
@@ -76,17 +83,38 @@ defmodule Bank.Security.Pause do
       :scope_value,
       :reason,
       :created_by_user_id,
-      :paused_at
+      :paused_at,
+      :expires_at
     ])
     |> validate_required([:workspace_id, :scope_type, :scope_value, :paused_at])
     |> validate_length(:scope_value, min: 1, max: 64)
     |> validate_length(:reason, max: @reason_max_length)
+    |> validate_expires_at_after_paused_at()
     |> assoc_constraint(:workspace)
     |> assoc_constraint(:created_by_user)
     |> unique_constraint([:workspace_id, :scope_type, :scope_value],
       name: :pauses_active_uniq,
       message: "is already paused"
     )
+  end
+
+  defp validate_expires_at_after_paused_at(changeset) do
+    expires_at = get_field(changeset, :expires_at)
+    paused_at = get_field(changeset, :paused_at)
+
+    cond do
+      is_nil(expires_at) ->
+        changeset
+
+      is_nil(paused_at) ->
+        changeset
+
+      DateTime.compare(expires_at, paused_at) in [:gt] ->
+        changeset
+
+      true ->
+        add_error(changeset, :expires_at, "must be after paused_at")
+    end
   end
 
   @doc """

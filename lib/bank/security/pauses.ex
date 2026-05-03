@@ -89,6 +89,12 @@ defmodule Bank.Security.Pauses do
       audit envelope.
     * `:actor_id` — explicit user UUID; overrides the actor's id
       when both are supplied.
+    * `:expires_at` — optional `%DateTime{}` after which
+      `Bank.Runtime.Workers.SweepExpiredPauses` will auto-resume
+      the pause. MUST be strictly in the future relative to the
+      `:paused_at` set inside this call. Idempotent re-pause does
+      NOT mutate an existing active pause's `expires_at` — the
+      first writer's expiry wins for the lifetime of that pause.
 
   ## Errors
 
@@ -96,7 +102,7 @@ defmodule Bank.Security.Pauses do
   `workspace_id`. Returns `{:error, :invalid_scope_type}` for
   scope_types not yet supported (Phase 1 accepts `:chain` only).
   Returns `{:error, %Ecto.Changeset{}}` for changeset failures
-  (reason length, etc.).
+  (reason length, expires_at not after paused_at, etc.).
   """
   @spec create_pause(String.t() | nil, scope_type(), String.t(), keyword()) :: pause_result()
   def create_pause(workspace_id, scope_type, scope_value, opts \\ [])
@@ -118,13 +124,16 @@ defmodule Bank.Security.Pauses do
     actor = Keyword.get(opts, :actor, :user)
     actor_id = resolve_actor_id(actor, Keyword.get(opts, :actor_id))
     reason = Keyword.get(opts, :reason)
+    expires_at = Keyword.get(opts, :expires_at)
 
     txn_result =
       Repo.transaction(fn ->
         case lock_active(workspace_id, scope_type, scope_value) do
           %Pause{} = existing ->
             # Idempotent: row already active. No insert, no audit, no
-            # broadcast. The caller observes the existing record.
+            # broadcast. The caller observes the existing record —
+            # including the FIRST writer's `expires_at`, never a
+            # caller's later override.
             {:already_paused, existing, nil}
 
           nil ->
@@ -134,7 +143,8 @@ defmodule Bank.Security.Pauses do
               scope_value: scope_value,
               reason: reason,
               created_by_user_id: actor_id_or_nil(actor_id),
-              paused_at: DateTime.utc_now()
+              paused_at: DateTime.utc_now(),
+              expires_at: expires_at
             }
 
             changeset = Pause.create_changeset(%Pause{}, attrs)
@@ -336,6 +346,120 @@ defmodule Bank.Security.Pauses do
     |> Repo.all()
   end
 
+  @doc """
+  System-wide list of active pauses whose `expires_at <= now`.
+
+  Used by `Bank.Runtime.Workers.SweepExpiredPauses`. Returns at
+  most `:limit` rows (default 100) ordered by `expires_at` ASC so
+  the sweeper drains the oldest expirations first. Crosses
+  workspaces — the sweeper is system-wide.
+  """
+  @spec list_active_expired(DateTime.t(), keyword()) :: [Pause.t()]
+  def list_active_expired(%DateTime{} = now, opts \\ []) do
+    limit = Keyword.get(opts, :limit, 100)
+
+    from(p in Pause,
+      where:
+        is_nil(p.resumed_at) and not is_nil(p.expires_at) and
+          p.expires_at <= ^now,
+      order_by: [asc: p.expires_at, asc: p.id],
+      limit: ^limit
+    )
+    |> Repo.all()
+  end
+
+  @typedoc "Result shape from `expire/2`."
+  @type expire_result ::
+          {:ok, :expired, Pause.t()}
+          | {:ok, :already_resumed}
+          | {:ok, :not_yet_expired}
+          | {:error, term()}
+
+  @doc """
+  Auto-resume a pause whose `expires_at <= now` because the expiry
+  fired. Called by `Bank.Runtime.Workers.SweepExpiredPauses`.
+
+  Re-locks the row inside a transaction and re-checks both invariants:
+  the row is still active (`resumed_at IS NULL`) and `expires_at`
+  has indeed passed. Either condition can flip between the
+  sweeper's `list_active_expired/2` snapshot and the call (operator
+  resume in the meantime, or the sweeper running with a stale `now`)
+  — both are reported back as `{:ok, :already_resumed}` /
+  `{:ok, :not_yet_expired}` and emit no audit / no broadcast.
+
+  On a real expiry transition, sets `resumed_at = expires_at`
+  (anchored to the recorded expiry, not the sweeper's wall clock,
+  so re-runs always agree on the resumption instant) and emits a
+  `security.scope_expired` audit event with `actor: :runtime`.
+  Idempotent in the small: a second call against the same row sees
+  `resumed_at` set and returns `{:ok, :already_resumed}`.
+  """
+  @spec expire(Pause.t(), DateTime.t()) :: expire_result()
+  def expire(%Pause{id: id}, %DateTime{} = now) do
+    txn_result =
+      Repo.transaction(fn ->
+        case Repo.one(from p in Pause, where: p.id == ^id, lock: "FOR UPDATE") do
+          nil ->
+            {:already_resumed, nil, nil}
+
+          %Pause{resumed_at: %DateTime{}} ->
+            {:already_resumed, nil, nil}
+
+          %Pause{expires_at: nil} ->
+            {:not_yet_expired, nil, nil}
+
+          %Pause{expires_at: %DateTime{} = expires_at} = locked ->
+            if DateTime.compare(expires_at, now) == :gt do
+              {:not_yet_expired, nil, nil}
+            else
+              prior = %{
+                paused_at: locked.paused_at,
+                reason: locked.reason,
+                created_by_user_id: locked.created_by_user_id,
+                expires_at: locked.expires_at
+              }
+
+              # Anchor `resumed_at` to the recorded expiry instant so a
+              # re-run of the sweeper at a different `now` cannot shift
+              # it. `resumed_by_user_id` stays nil (no human acted).
+              changeset = Pause.resume_changeset(locked, %{resumed_at: expires_at})
+
+              case Repo.update(changeset) do
+                {:ok, %Pause{} = expired} ->
+                  event_attrs =
+                    Events.security_scope_expired(expired, prior,
+                      actor: :runtime,
+                      actor_id: nil
+                    )
+
+                  case Audit.append_event(event_attrs) do
+                    {:ok, audit_event} -> {:expired, expired, audit_event}
+                    {:error, audit_error} -> Repo.rollback(audit_error)
+                  end
+
+                {:error, cs} ->
+                  Repo.rollback(cs)
+              end
+            end
+        end
+      end)
+
+    case txn_result do
+      {:ok, {:expired, pause, audit_event}} ->
+        broadcast_scope_expired(pause, audit_event)
+        {:ok, :expired, pause}
+
+      {:ok, {:already_resumed, _, _}} ->
+        {:ok, :already_resumed}
+
+      {:ok, {:not_yet_expired, _, _}} ->
+        {:ok, :not_yet_expired}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   # --- internals ---------------------------------------------------------
 
   defp lock_active(workspace_id, scope_type, scope_value) do
@@ -403,6 +527,20 @@ defmodule Bank.Security.Pauses do
     })
 
     RuntimeTelemetry.security(:scope_resumed, pause.scope_type)
+    :ok
+  end
+
+  defp broadcast_scope_expired(%Pause{} = pause, audit_event) do
+    Notifier.audit_stream(audit_event)
+
+    Notifier.security_event(:scope_expired, %{
+      scope: scope_payload(pause),
+      expires_at: pause.expires_at,
+      actor: :runtime,
+      actor_id: nil
+    })
+
+    RuntimeTelemetry.security(:scope_expired, pause.scope_type)
     :ok
   end
 

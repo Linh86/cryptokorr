@@ -61,6 +61,11 @@ defmodule BankWeb.SecurityLive do
     # but would leak workspace-scoped scope events).
     "security.scope_paused",
     "security.scope_resumed",
+    # Auto-resume from the periodic SweepExpiredPauses worker
+    # (#228 Phase 1.5). Same workspace_id-stamped envelope as the
+    # other scope events; gated by the same `visible_to_workspace?/3`
+    # ordering rule (its match clause is added below).
+    "security.scope_expired",
     "delegation.revoke_requested",
     "delegation.revoked",
     "delegation.state_changed",
@@ -706,6 +711,14 @@ defmodule BankWeb.SecurityLive do
 
   defp visible_to_workspace?(
          %{event_type: "security.scope_resumed", workspace_id: row_ws},
+         _ids,
+         ws_id
+       )
+       when is_binary(row_ws) and is_binary(ws_id),
+       do: row_ws == ws_id
+
+  defp visible_to_workspace?(
+         %{event_type: "security.scope_expired", workspace_id: row_ws},
          _ids,
          ws_id
        )

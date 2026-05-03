@@ -319,6 +319,41 @@ defmodule BankWeb.SecurityLiveTest do
       assert has_element?(view, "#safety-events-empty")
       assert has_element?(view, "#safety-events-empty", "No safety events recorded yet")
     end
+
+    test "shows security.scope_expired for the current workspace (#228 phase 1.5)",
+         %{conn: conn, workspace: ws} do
+      audit_event(
+        event_type: "security.scope_expired",
+        subject_type: "chain",
+        subject_id: "base",
+        workspace_id: ws.id,
+        actor: :runtime
+      )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      refute has_element?(view, "#safety-events-empty")
+      assert has_element?(view, "#safety-events-card", "security.scope_expired")
+    end
+
+    test "does NOT leak another workspace's security.scope_expired event (#228 phase 1.5)",
+         %{conn: conn} do
+      {:ok, other_ws} =
+        Bank.Workspaces.create_workspace(%{slug: "other-ws-expired-leak", name: "Other Expired"})
+
+      audit_event(
+        event_type: "security.scope_expired",
+        subject_type: "chain",
+        subject_id: "base",
+        workspace_id: other_ws.id,
+        actor: :runtime
+      )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#safety-events-empty")
+      assert has_element?(view, "#safety-events-empty", "No safety events recorded yet")
+    end
   end
 
   # --- Risk summary card (#231-e) -----------------------------------------

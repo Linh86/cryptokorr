@@ -1297,6 +1297,50 @@ defmodule Bank.Audit.Events do
   defp normalize_actor(actor) when actor in [:user, :agent, :runtime, :adapter], do: actor
   defp normalize_actor(_), do: :user
 
+  @doc """
+  `security.scope_expired` — the periodic
+  `Bank.Runtime.Workers.SweepExpiredPauses` worker auto-resumed a
+  scoped pause whose `expires_at` had passed (#228 Phase 1.5).
+
+  Distinct from `security.scope_resumed` so replay readers can
+  tell the difference between an operator-driven resume and a
+  passive auto-expiry. Actor is always `:runtime` (no human in
+  the loop).
+
+  `before_ref` carries the prior pause snapshot (paused_at,
+  reason, created_by_user_id, expires_at) so replay can
+  reconstruct the pause this expiry cleared. `after_ref` records
+  the resume terminator and echoes `expires_at` so consumers
+  reading only the after-snapshot still see why the row resumed.
+  """
+  @spec security_scope_expired(Bank.Security.Pause.t(), map(), keyword()) :: attrs()
+  def security_scope_expired(%Bank.Security.Pause{} = pause, prior, opts \\ [])
+      when is_map(prior) do
+    actor_id = Keyword.get(opts, :actor_id)
+
+    %{
+      actor: :runtime,
+      actor_id: actor_id,
+      event_type: "security.scope_expired",
+      subject_type: subject_type_for(pause.scope_type),
+      subject_id: pause.scope_value,
+      correlation_id: nil,
+      before_ref: %{
+        paused_at: Map.get(prior, :paused_at),
+        reason: Map.get(prior, :reason),
+        created_by_user_id: Map.get(prior, :created_by_user_id),
+        expires_at: Map.get(prior, :expires_at)
+      },
+      after_ref: %{
+        scope_type: subject_type_for(pause.scope_type),
+        scope_value: pause.scope_value,
+        resumed_at: pause.resumed_at,
+        expires_at: pause.expires_at
+      },
+      workspace_id: pause.workspace_id
+    }
+  end
+
   defp subject_type_for(:chain), do: "chain"
   defp subject_type_for(scope_type) when is_atom(scope_type), do: Atom.to_string(scope_type)
 
