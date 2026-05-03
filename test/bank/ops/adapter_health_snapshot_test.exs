@@ -3,6 +3,8 @@ defmodule Bank.Ops.AdapterHealthSnapshotTest do
   # global; tests share state and reset between runs.
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias Bank.Ops.AdapterHealthSnapshot
 
   setup do
@@ -158,6 +160,123 @@ defmodule Bank.Ops.AdapterHealthSnapshotTest do
       snap = AdapterHealthSnapshot.snapshot()
       assert snap.status == :degraded
       assert snap.detail == "error"
+    end
+  end
+
+  describe "log sanitization on probe failure" do
+    @secret_message "https://secret@example.test/healthz Bearer sk_live_4242 private_key=0xabc Authorization: Bearer xxx"
+
+    test "raised exception with secret-bearing message: log carries fixed text only" do
+      probe_fn = fn -> raise RuntimeError, @secret_message end
+
+      log =
+        capture_log(fn ->
+          assert %{status: :degraded, detail: "error"} =
+                   AdapterHealthSnapshot.refresh(health_fn: probe_fn)
+        end)
+
+      # Cache survived; second call returns the same degraded snapshot.
+      assert is_pid(Process.whereis(AdapterHealthSnapshot))
+      snap = AdapterHealthSnapshot.snapshot()
+      assert snap.status == :degraded
+      assert snap.detail == "error"
+
+      # The fixed log markers are present.
+      assert log =~ "AdapterHealthSnapshot"
+      assert log =~ "probe raised"
+      assert log =~ "kind=rescue"
+      # Module name is safe to log (it is code, not user input).
+      assert log =~ "RuntimeError"
+
+      # No fragment of the secret-bearing message leaks into the log.
+      for needle <- [
+            "https://",
+            "Bearer",
+            "Authorization",
+            "sk_live",
+            "sk_",
+            "private_key",
+            "0xabc",
+            "secret@",
+            "example.test"
+          ] do
+        refute log =~ needle,
+               "log must not leak #{needle}: #{inspect(log)}"
+      end
+    end
+
+    test "exit in probe: log carries fixed text only, no exit reason interpolated" do
+      probe_fn = fn -> exit({:secret_token, "sk_live_4242"}) end
+
+      log =
+        capture_log(fn ->
+          assert %{status: :degraded, detail: "error"} =
+                   AdapterHealthSnapshot.refresh(health_fn: probe_fn)
+        end)
+
+      assert is_pid(Process.whereis(AdapterHealthSnapshot))
+      assert log =~ "AdapterHealthSnapshot"
+      assert log =~ "probe raised"
+      assert log =~ "kind=exit"
+
+      for needle <- ["sk_live", "sk_", "secret_token"] do
+        refute log =~ needle,
+               "log must not leak #{needle}: #{inspect(log)}"
+      end
+    end
+
+    test "throw in probe: log carries fixed text only, no thrown value interpolated" do
+      probe_fn = fn -> throw(%{token: "sk_live_4242", url: "https://secret@example.test"}) end
+
+      log =
+        capture_log(fn ->
+          assert %{status: :degraded, detail: "error"} =
+                   AdapterHealthSnapshot.refresh(health_fn: probe_fn)
+        end)
+
+      assert is_pid(Process.whereis(AdapterHealthSnapshot))
+      assert log =~ "AdapterHealthSnapshot"
+      assert log =~ "probe raised"
+
+      for needle <- ["sk_live", "https://", "secret@", "example.test"] do
+        refute log =~ needle,
+               "log must not leak #{needle}: #{inspect(log)}"
+      end
+    end
+
+    test "successful probe emits no warning log" do
+      probe_fn = fn -> %{status: :ok, detail: "http 200"} end
+
+      log = capture_log(fn -> _ = AdapterHealthSnapshot.refresh(health_fn: probe_fn) end)
+
+      refute log =~ "AdapterHealthSnapshot: probe raised"
+    end
+  end
+
+  describe "RefreshAdapterHealth worker robustness" do
+    # Sanity: the worker calls AdapterHealthSnapshot.refresh/0 with no
+    # injected probe fn, so the production probe runs. In :test that
+    # falls into a degraded branch (no Req stub installed in the
+    # worker process) — but the cache must be updated and the worker
+    # MUST NOT crash.
+    test "perform/1 stores a degraded/error snapshot without raising" do
+      bootstrap = AdapterHealthSnapshot.snapshot()
+      assert bootstrap.status == :unknown
+
+      # Capture log to silence test output; we don't assert on it
+      # because the worker's behavior on the snapshot module is what
+      # we care about here.
+      _ =
+        capture_log(fn ->
+          assert :ok =
+                   Bank.Runtime.Workers.RefreshAdapterHealth
+                   |> Oban.Testing.perform_job(%{}, repo: Bank.Repo)
+        end)
+
+      after_run = AdapterHealthSnapshot.snapshot()
+      assert after_run.status in [:ok, :degraded]
+      assert %DateTime{} = after_run.checked_at
+      assert is_pid(Process.whereis(AdapterHealthSnapshot))
     end
   end
 end

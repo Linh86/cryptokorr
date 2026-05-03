@@ -174,14 +174,39 @@ defmodule Bank.Ops.AdapterHealthSnapshot do
         sanitize(health_fn.(), now)
       rescue
         e ->
-          Logger.warning("AdapterHealthSnapshot: probe raised: #{Exception.message(e)}")
-
+          # The exception's `message/0` is operator-controlled (it
+          # comes from whatever the underlying probe raised — Req's
+          # transport-error message can carry the full request URL,
+          # including any token in the userinfo or query string).
+          # Log only the exception MODULE; never the message,
+          # `inspect(reason)`, the URL, or a stack frame. Operators
+          # who need the raw error can rerun the probe directly via
+          # `Bank.Ops.Health.adapter/0` from IEx, where the result
+          # is not persisted to logs.
+          log_probe_failure(:rescue, e.__struct__)
           degraded_snapshot("error", now)
       catch
-        :exit, _ -> degraded_snapshot("error", now)
-        kind, _ when kind in [:throw, :error] -> degraded_snapshot("error", now)
+        :exit, _ ->
+          log_probe_failure(:exit, :exit)
+          degraded_snapshot("error", now)
+
+        kind, _ when kind in [:throw, :error] ->
+          log_probe_failure(kind, kind)
+          degraded_snapshot("error", now)
       end
     end
+  end
+
+  # Fixed log shape — module + reason kind only, no message/URL/value
+  # ever interpolated. `kind_module` is either an atom (`:exit`,
+  # `:throw`, `:error`) or an exception module (e.g. `RuntimeError`).
+  # Inspecting an atom or module name is safe: there is no caller-
+  # controlled data path.
+  defp log_probe_failure(kind, kind_module) do
+    Logger.warning(
+      "AdapterHealthSnapshot: probe raised; storing degraded snapshot " <>
+        "(kind=#{kind} module=#{inspect(kind_module)})"
+    )
   end
 
   # OK with an HTTP status (Health.adapter/0 returns "http <n>" on
