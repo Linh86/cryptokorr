@@ -194,20 +194,46 @@ defmodule Bank.Activity do
 
   @doc """
   Replace values for well-known secret-bearing keys with
-  `"[REDACTED]"`. Pure function; safe to call independent of insert.
+  `"[REDACTED]"` at any nesting depth. Pure function; safe to call
+  independent of insert.
+
+  Walks both maps and lists. For maps, when a key matches the
+  secret-key allowlist (case-insensitive), the value is replaced
+  with `"[REDACTED]"` regardless of its shape — even if the value
+  is itself a nested map or list, so a structured payload like
+  `%{"raw_request" => %{...}}` keyed under `"Authorization"` does
+  not leak. Non-secret keys recurse into their values so a
+  secret nested under a benign key (e.g.
+  `%{"raw" => %{"Authorization" => "Bearer ..."}}`) is still
+  caught at its own depth.
+
+  Non-map / non-list values (binaries, numbers, atoms, etc.)
+  pass through unchanged. The contract for top-level non-map
+  input is preserved: `redact_metadata/1` returns it as-is.
   """
-  @spec redact_metadata(map()) :: map()
+  @spec redact_metadata(term()) :: term()
   def redact_metadata(metadata) when is_map(metadata) do
     Map.new(metadata, fn {k, v} ->
       if secret_key?(k) do
         {k, "[REDACTED]"}
       else
-        {k, v}
+        {k, redact_value(v)}
       end
     end)
   end
 
   def redact_metadata(other), do: other
+
+  # Recurse into nested values that can themselves carry secret-
+  # keyed entries. Tuples are not part of the JSON-shaped metadata
+  # contract (the column is `:map`), so leaving them untouched is
+  # consistent with the public API.
+  defp redact_value(value) when is_map(value), do: redact_metadata(value)
+
+  defp redact_value(value) when is_list(value),
+    do: Enum.map(value, &redact_value/1)
+
+  defp redact_value(value), do: value
 
   # --- internals ---------------------------------------------------------
 
