@@ -65,6 +65,61 @@ defmodule BankWeb.API.V1.ConnectControllerTest do
       )
     end
 
+    test "broadcasts delegation.connect_requested on audit_stream after the request commits",
+         %{conn: conn} do
+      # Pre-fix `Delegations.write_intent_audit/3` called
+      # `Bank.Audit.append_event/1` (silent insert) without a
+      # follow-up `Notifier.audit_stream/1` broadcast, so
+      # `BankWeb.AuditLive`'s real-time tail silently dropped every
+      # `delegation.connect_requested` event. Post-fix the helper
+      # uses `Bank.Runtime.emit_audit/1`, which writes + broadcasts.
+      :ok = Bank.Runtime.PubSub.subscribe(Bank.Runtime.PubSub.audit_stream())
+
+      payload = %{
+        "smart_account_id" => "sa_broadcast_connect",
+        "account" => "0xabc000000000000000000000000000000000dead",
+        "chain_id" => 84_532
+      }
+
+      conn = post(conn, ~p"/v1/connect/smart_account", payload)
+      assert json_response(conn, 202)
+
+      assert_receive %{
+        topic: :audit_stream,
+        event: :appended,
+        payload: %{
+          event_type: "delegation.connect_requested",
+          subject_id: "sa_broadcast_connect"
+        }
+      }
+    end
+
+    test "no delegation.connect_requested broadcast when validation rejects the payload",
+         %{conn: conn} do
+      # Unsupported chain_id rejects BEFORE `write_intent_audit/3`
+      # runs (chain validation is the first `with` step). No audit
+      # row is persisted, so no broadcast must fire either.
+      :ok = Bank.Runtime.PubSub.subscribe(Bank.Runtime.PubSub.audit_stream())
+
+      conn =
+        post(conn, ~p"/v1/connect/smart_account", %{
+          "smart_account_id" => "sa_no_broadcast",
+          "account" => "0xabc000000000000000000000000000000000dead",
+          "chain_id" => 1
+        })
+
+      assert json_response(conn, 422)
+
+      refute_received %{
+        topic: :audit_stream,
+        event: :appended,
+        payload: %{
+          event_type: "delegation.connect_requested",
+          subject_id: "sa_no_broadcast"
+        }
+      }
+    end
+
     test "rejects missing smart_account_id", %{conn: conn} do
       conn =
         post(conn, ~p"/v1/connect/smart_account", %{

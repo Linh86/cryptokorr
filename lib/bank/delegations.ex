@@ -105,6 +105,7 @@ defmodule Bank.Delegations do
 
   alias Bank.Delegations.Delegation
   alias Bank.Repo
+  alias Bank.Runtime
 
   @grant_failure_reasons ~w(
     operator_key_missing
@@ -664,8 +665,17 @@ defmodule Bank.Delegations do
   defp validate_chain(84_532), do: :ok
   defp validate_chain(_), do: {:error, :unsupported_chain}
 
+  # `request_connect/1` runs outside any `Repo.transaction/1`, so
+  # there is no commit to coordinate with — the audit row is
+  # immediately durable on `{:ok, event}`. Use `Runtime.emit_audit/1`
+  # (which writes via `Audit.append_event/1` and then broadcasts on
+  # `audit_stream`) so `BankWeb.AuditLive`'s real-time tail sees
+  # `delegation.connect_requested` events without needing a manual
+  # refresh. Pre-fix this path persisted the row but never broadcast,
+  # so the live tail silently dropped every connect-request event.
+  # Same fix family as PRs #335 / #338 / #340 / #343.
   defp write_intent_audit(sa_id, chain_id, account) do
-    Bank.Audit.append_event(%{
+    Runtime.emit_audit(%{
       actor: :user,
       event_type: "delegation.connect_requested",
       subject_type: "smart_account",
