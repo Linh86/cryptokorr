@@ -347,6 +347,102 @@ defmodule Bank.ActivityTest do
       refute inspect(row.metadata) =~ "LEAKED_PROBE"
     end
 
+    test "nested maps are walked: secret keys redacted at any depth",
+         %{workspace: ws} do
+      # P2 regression: prior to the recursive walk, only top-level
+      # keys were redacted. A common CSV-importer shape stashes the
+      # raw source row under a benign key like `"raw"` — and that
+      # nested map carries every secret-key permutation the source
+      # had. Pin that those nested keys are redacted too while the
+      # surrounding non-secret keys are preserved.
+      meta = %{
+        "csv_row_index" => 7,
+        "raw" => %{
+          "Authorization" => "Bearer sk_live_LEAKED_PROBE",
+          "memo" => "ok",
+          "deeper" => %{
+            "private_key" => "0xLEAKED_PROBE",
+            "label" => "payroll"
+          }
+        }
+      }
+
+      {:ok, :inserted, row} =
+        Activity.create_imported_activity(
+          base_attrs(ws.id, source_ref: "nested-secret-map")
+          |> Map.put(:metadata, meta)
+        )
+
+      assert row.metadata["csv_row_index"] == 7
+      assert row.metadata["raw"]["Authorization"] == "[REDACTED]"
+      assert row.metadata["raw"]["memo"] == "ok"
+      assert row.metadata["raw"]["deeper"]["private_key"] == "[REDACTED]"
+      assert row.metadata["raw"]["deeper"]["label"] == "payroll"
+
+      refute inspect(row.metadata) =~ "LEAKED_PROBE"
+    end
+
+    test "lists are traversed: secret keys inside list-of-maps are redacted",
+         %{workspace: ws} do
+      # P2 regression: the same nested-redaction blind spot applied
+      # to list values like `%{"rows" => [%{...}, %{...}]}`. Pin
+      # that the per-row secret keys are redacted while the list
+      # shape and non-secret entries survive intact.
+      meta = %{
+        "rows" => [
+          %{"private_key" => "0xLEAKED_PROBE", "memo" => "row-1"},
+          %{"memo" => "row-2"},
+          %{"nested_list" => [%{"Authorization" => "Bearer LEAKED_PROBE"}]}
+        ]
+      }
+
+      {:ok, :inserted, row} =
+        Activity.create_imported_activity(
+          base_attrs(ws.id, source_ref: "nested-secret-list")
+          |> Map.put(:metadata, meta)
+        )
+
+      [r0, r1, r2] = row.metadata["rows"]
+      assert r0["private_key"] == "[REDACTED]"
+      assert r0["memo"] == "row-1"
+      assert r1 == %{"memo" => "row-2"}
+      [inner] = r2["nested_list"]
+      assert inner["Authorization"] == "[REDACTED]"
+
+      meta_dump = inspect(row.metadata)
+      refute meta_dump =~ "LEAKED_PROBE"
+      refute meta_dump =~ "Bearer "
+      refute meta_dump =~ "sk_"
+      refute meta_dump =~ "BEGIN "
+      refute meta_dump =~ "0xLEAKED_PROBE"
+    end
+
+    test "secret value is redacted even when it is itself a nested structure",
+         %{workspace: _ws} do
+      # If the secret-bearing key holds a map / list (e.g. an
+      # importer that stashed an entire request body under
+      # `"Authorization"`), the value MUST collapse to the literal
+      # `"[REDACTED]"` — not a recursively-walked map that might
+      # leak unexpected internals.
+      meta = %{
+        "Authorization" => %{
+          "header" => "Bearer LEAKED_PROBE",
+          "raw_token" => "LEAKED_PROBE"
+        },
+        "tokens" => ["LEAKED_PROBE_1", "LEAKED_PROBE_2"]
+      }
+
+      assert Activity.redact_metadata(meta) == %{
+               "Authorization" => "[REDACTED]",
+               "tokens" => ["LEAKED_PROBE_1", "LEAKED_PROBE_2"]
+             }
+
+      # `tokens` is the surrounding key; it is not in the secret
+      # allowlist so its list values pass through. (The actual
+      # values would be caught by an importer-side validation, not
+      # by `redact_metadata/1`.)
+    end
+
     test "redact_metadata/1 is a pure function and matches insert behaviour",
          %{workspace: _ws} do
       meta = %{"Authorization" => "Bearer x", "memo" => "ok"}
