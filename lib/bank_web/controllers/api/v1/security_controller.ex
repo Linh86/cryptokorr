@@ -28,6 +28,7 @@ defmodule BankWeb.API.V1.SecurityController do
   alias Bank.APIKeys
   alias Bank.Decisions
   alias Bank.Security
+  alias Bank.Security.Pause
   alias Bank.Workspaces.Workspace
   alias OpenApiSpex.Reference
 
@@ -131,6 +132,253 @@ defmodule BankWeb.API.V1.SecurityController do
         conn
         |> put_status(:unprocessable_entity)
         |> json(%{error: %{code: "resume_failed", message: inspect(reason)}})
+    end
+  end
+
+  # --- POST /v1/security/pause_chain (#228 phase 1) ----------------------
+
+  operation(:pause_chain,
+    summary: "Pause execution dispatch for a chain (workspace-scoped)",
+    description: """
+    Pauses execution dispatch for the requested chain inside the
+    calling key's workspace. Workspace-scoped: the pause does NOT
+    affect sibling workspaces. The pause persists across
+    control-plane restarts.
+
+    Idempotent: re-pausing an already-paused chain returns `200`
+    with `status: "already_paused"` and emits no second audit
+    row. The workspace is taken from `current_scope`; any
+    `workspace_id` in the body is ignored.
+
+    Request body must include `chain` (e.g. `"base"`); v0.1 ships
+    `:chain` scope only. Future phases extend the supported scope
+    set without changing this wire shape.
+    """,
+    tags: ["Security"],
+    parameters: [@idempotency_key_ref, @request_id_in_ref],
+    request_body: {"Pause body", "application/json", BankWeb.OpenApi.Schemas.PauseChainRequest},
+    responses: %{
+      200 =>
+        {"Per-chain pause state", "application/json",
+         BankWeb.OpenApi.Schemas.ChainPauseStateResponse},
+      401 => @unauthorized_ref,
+      403 => @forbidden_ref,
+      429 => @too_many_requests_ref,
+      422 => @unprocessable_ref
+    }
+  )
+
+  def pause_chain(conn, params) do
+    scope = conn.assigns.current_scope
+
+    with {:ok, chain} <- parse_chain(params),
+         {:ok, actor} <- resolve_creator(scope),
+         reason = clean_reason(Map.get(params, "reason")),
+         {:ok, status, %Pause{} = pause} <-
+           Security.pause(scope.workspace.id, {:chain, chain},
+             actor: actor,
+             reason: reason
+           ) do
+      conn
+      |> put_status(:ok)
+      |> json(%{status: status_string(status), data: chain_pause_state(pause)})
+    else
+      {:error, :no_creator_user} ->
+        conn
+        |> put_status(:forbidden)
+        |> json(%{error: %{code: "creator_user_unavailable"}})
+
+      {:error, :missing_chain} ->
+        conn
+        |> put_status(:unprocessable_entity)
+        |> json(%{error: %{code: "invalid_body", message: "chain is required"}})
+
+      {:error, :invalid_chain} ->
+        conn
+        |> put_status(:unprocessable_entity)
+        |> json(%{error: %{code: "invalid_body", message: "chain must be 1-64 characters"}})
+
+      {:error, :unsupported_chain} ->
+        conn
+        |> put_status(:unprocessable_entity)
+        |> json(%{
+          error: %{
+            code: "unsupported_chain",
+            message: unsupported_chain_message()
+          }
+        })
+
+      {:error, :invalid_workspace} ->
+        conn
+        |> put_status(:unprocessable_entity)
+        |> json(%{error: %{code: "invalid_workspace"}})
+
+      {:error, :invalid_scope_value} ->
+        conn
+        |> put_status(:unprocessable_entity)
+        |> json(%{error: %{code: "invalid_body", message: "chain must be 1-64 characters"}})
+
+      {:error, %Ecto.Changeset{} = changeset} ->
+        conn
+        |> put_status(:unprocessable_entity)
+        |> json(%{error: pause_changeset_error(changeset)})
+
+      {:error, reason} ->
+        conn
+        |> put_status(:unprocessable_entity)
+        |> json(%{error: %{code: "pause_failed", message: inspect(reason)}})
+    end
+  end
+
+  # --- POST /v1/security/resume_chain (#228 phase 1) ---------------------
+
+  operation(:resume_chain,
+    summary: "Resume execution dispatch for a chain (workspace-scoped)",
+    description: """
+    Resumes execution dispatch for the requested chain inside the
+    calling key's workspace. Idempotent: resuming a chain that is
+    not paused returns `200` with `status: "already_running"` and
+    emits no second audit row. The workspace is taken from
+    `current_scope`.
+    """,
+    tags: ["Security"],
+    parameters: [@idempotency_key_ref, @request_id_in_ref],
+    request_body: {"Resume body", "application/json", BankWeb.OpenApi.Schemas.ResumeChainRequest},
+    responses: %{
+      200 =>
+        {"Per-chain pause state", "application/json",
+         BankWeb.OpenApi.Schemas.ChainPauseStateResponse},
+      401 => @unauthorized_ref,
+      403 => @forbidden_ref,
+      429 => @too_many_requests_ref,
+      422 => @unprocessable_ref
+    }
+  )
+
+  def resume_chain(conn, params) do
+    scope = conn.assigns.current_scope
+
+    with {:ok, chain} <- parse_chain(params),
+         {:ok, actor} <- resolve_creator(scope) do
+      case Security.resume(scope.workspace.id, {:chain, chain}, actor: actor) do
+        {:ok, :resumed, %Pause{} = pause} ->
+          conn
+          |> put_status(:ok)
+          |> json(%{status: "resumed", data: chain_pause_state(pause)})
+
+        {:ok, :already_running} ->
+          conn
+          |> put_status(:ok)
+          |> json(%{status: "already_running", data: nil})
+
+        {:error, :invalid_workspace} ->
+          conn
+          |> put_status(:unprocessable_entity)
+          |> json(%{error: %{code: "invalid_workspace"}})
+
+        {:error, :invalid_scope_value} ->
+          conn
+          |> put_status(:unprocessable_entity)
+          |> json(%{error: %{code: "invalid_body", message: "chain must be 1-64 characters"}})
+
+        {:error, reason} ->
+          conn
+          |> put_status(:unprocessable_entity)
+          |> json(%{error: %{code: "resume_failed", message: inspect(reason)}})
+      end
+    else
+      {:error, :no_creator_user} ->
+        conn
+        |> put_status(:forbidden)
+        |> json(%{error: %{code: "creator_user_unavailable"}})
+
+      {:error, :missing_chain} ->
+        conn
+        |> put_status(:unprocessable_entity)
+        |> json(%{error: %{code: "invalid_body", message: "chain is required"}})
+
+      {:error, :invalid_chain} ->
+        conn
+        |> put_status(:unprocessable_entity)
+        |> json(%{error: %{code: "invalid_body", message: "chain must be 1-64 characters"}})
+
+      {:error, :unsupported_chain} ->
+        conn
+        |> put_status(:unprocessable_entity)
+        |> json(%{
+          error: %{
+            code: "unsupported_chain",
+            message: unsupported_chain_message()
+          }
+        })
+    end
+  end
+
+  defp unsupported_chain_message do
+    supported = pause_chain_supported_chains() |> Enum.join(", ")
+    "chain is not supported; supported chains: #{supported}"
+  end
+
+  # Phase 1 supports `:chain` scope with `"base"` only — that is the
+  # only chain wired into the dispatch gates today (the plan's
+  # `chain` is hardcoded `"base"` at `Bank.Decisions` plan attrs).
+  # Accepting other values would let an operator successfully create
+  # and audit a pause that no dispatch path will ever check.
+  # `pause_chain_supported_chains/0` is the canonical allowlist.
+  @pause_chain_supported_chains ~w(base)
+
+  defp parse_chain(params) do
+    case Map.get(params, "chain") do
+      chain when is_binary(chain) ->
+        trimmed = String.trim(chain)
+
+        cond do
+          trimmed == "" -> {:error, :invalid_chain}
+          String.length(trimmed) > 64 -> {:error, :invalid_chain}
+          trimmed not in @pause_chain_supported_chains -> {:error, :unsupported_chain}
+          true -> {:ok, trimmed}
+        end
+
+      nil ->
+        {:error, :missing_chain}
+
+      _ ->
+        {:error, :invalid_chain}
+    end
+  end
+
+  defp pause_chain_supported_chains, do: @pause_chain_supported_chains
+
+  defp status_string(:paused), do: "paused"
+  defp status_string(:already_paused), do: "already_paused"
+  defp status_string(:resumed), do: "resumed"
+
+  defp chain_pause_state(%Pause{} = pause) do
+    %{
+      scope_type: Atom.to_string(pause.scope_type),
+      scope_value: pause.scope_value,
+      workspace_id: pause.workspace_id,
+      paused_at: pause.paused_at,
+      resumed_at: pause.resumed_at,
+      reason: pause.reason,
+      created_by_user_id: pause.created_by_user_id,
+      resumed_by_user_id: pause.resumed_by_user_id
+    }
+  end
+
+  defp pause_changeset_error(%Ecto.Changeset{errors: errors}) do
+    case errors do
+      [{:reason, {_msg, _}} | _] ->
+        %{code: "invalid_reason", message: "reason must be 256 characters or fewer"}
+
+      [{:scope_value, {_msg, _}} | _] ->
+        %{code: "invalid_body", message: "chain must be 1-64 characters"}
+
+      [{field, {msg, _}} | _] ->
+        %{code: "invalid_body", message: "#{field}: #{msg}"}
+
+      [] ->
+        %{code: "invalid_body"}
     end
   end
 

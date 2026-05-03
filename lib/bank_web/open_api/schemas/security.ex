@@ -379,3 +379,167 @@ defmodule BankWeb.OpenApi.Schemas.AbortExecutionResponse do
     }
   })
 end
+
+defmodule BankWeb.OpenApi.Schemas.PauseChainRequest do
+  @moduledoc "Body for `POST /v1/security/pause_chain` (#228 phase 1)."
+
+  require OpenApiSpex
+  alias OpenApiSpex.Schema
+
+  OpenApiSpex.schema(%{
+    title: "PauseChainRequest",
+    description: """
+    Pause execution dispatch for a chain inside the calling key's
+    workspace. Workspace-scoped: a pause set here only affects this
+    workspace's plans — sibling workspaces continue dispatching on
+    the same chain. Idempotent: re-pausing an already-paused chain
+    returns `200` with `status: "already_paused"` and does not
+    emit a second audit row.
+
+    `workspace_id` from the body (if present) is ignored — the
+    workspace is resolved from `current_scope`.
+
+    Phase 1 supports `"base"` only — the dispatch gate currently
+    pauses only that chain. Other values return
+    `422 unsupported_chain`. Future phases will extend the enum.
+    """,
+    type: :object,
+    required: [:chain],
+    properties: %{
+      chain: %Schema{
+        type: :string,
+        enum: ["base"],
+        description:
+          "Chain identifier to pause. Phase 1 accepts `\"base\"` only; " <>
+            "any other value returns `422 unsupported_chain`.",
+        example: "base",
+        minLength: 1,
+        maxLength: 64
+      },
+      reason: %Schema{
+        type: :string,
+        maxLength: 256,
+        description: """
+        Optional operator-supplied reason persisted to the `pauses`
+        row and the `security.scope_paused` audit event. Empty or
+        whitespace-only is treated as `nil`.
+        """,
+        example: "RPC outage on Base"
+      }
+    }
+  })
+end
+
+defmodule BankWeb.OpenApi.Schemas.ResumeChainRequest do
+  @moduledoc "Body for `POST /v1/security/resume_chain` (#228 phase 1)."
+
+  require OpenApiSpex
+  alias OpenApiSpex.Schema
+
+  OpenApiSpex.schema(%{
+    title: "ResumeChainRequest",
+    description: """
+    Resume execution dispatch for a chain inside the calling key's
+    workspace. Workspace-scoped — only clears the pause this
+    workspace set. Idempotent: resuming a chain that is not paused
+    returns `200` with `status: "already_running"` and does not
+    emit a second audit row.
+
+    `workspace_id` from the body (if present) is ignored.
+
+    Phase 1 supports `"base"` only; other values return
+    `422 unsupported_chain`.
+    """,
+    type: :object,
+    required: [:chain],
+    properties: %{
+      chain: %Schema{
+        type: :string,
+        enum: ["base"],
+        description:
+          "Chain identifier to resume. Phase 1 accepts `\"base\"` only; " <>
+            "any other value returns `422 unsupported_chain`.",
+        example: "base",
+        minLength: 1,
+        maxLength: 64
+      }
+    }
+  })
+end
+
+defmodule BankWeb.OpenApi.Schemas.ChainPauseStateResponse do
+  @moduledoc """
+  Response body for `POST /v1/security/pause_chain` and
+  `POST /v1/security/resume_chain` (#228 phase 1).
+  """
+
+  require OpenApiSpex
+  alias OpenApiSpex.{Reference, Schema}
+
+  OpenApiSpex.schema(%{
+    title: "ChainPauseStateResponse",
+    description: """
+    Per-chain pause state for the calling workspace. Returned by
+    both `pause_chain` and `resume_chain` on `200`. `status`
+    discriminates between a real transition and the idempotent
+    no-op:
+
+      * `"paused"` — the call inserted a fresh active pause row.
+      * `"already_paused"` — an active pause was already in place
+        for this `(workspace, chain)`; no second audit row was
+        emitted.
+      * `"resumed"` — the call cleared the active pause.
+      * `"already_running"` — no active pause existed; no audit row
+        emitted.
+
+    The `data` block carries the safe pause-row fields (no secrets,
+    no API-key data, no chain-side artefacts). On the
+    `already_running` branch `data` is null.
+    """,
+    type: :object,
+    required: [:status],
+    properties: %{
+      status: %Schema{
+        type: :string,
+        enum: ["paused", "already_paused", "resumed", "already_running"],
+        example: "paused"
+      },
+      data: %Schema{
+        type: :object,
+        nullable: true,
+        required: [:scope_type, :scope_value, :workspace_id],
+        properties: %{
+          scope_type: %Schema{type: :string, enum: ["chain"], example: "chain"},
+          scope_value: %Schema{type: :string, example: "base"},
+          workspace_id: %Reference{"$ref": "#/components/schemas/Id"},
+          paused_at: %Reference{"$ref": "#/components/schemas/Timestamp"},
+          resumed_at: %Schema{
+            type: :string,
+            format: :"date-time",
+            nullable: true,
+            description: "Set when the pause has been resumed; null on active pauses."
+          },
+          reason: %Schema{
+            type: :string,
+            nullable: true,
+            description:
+              "Operator-supplied reason recorded at pause time. Null when no reason was supplied.",
+            example: "RPC outage on Base"
+          },
+          created_by_user_id: %Schema{
+            type: :string,
+            format: :uuid,
+            nullable: true,
+            description: "User id of the operator who initiated the pause, if known."
+          },
+          resumed_by_user_id: %Schema{
+            type: :string,
+            format: :uuid,
+            nullable: true,
+            description: "User id of the operator who lifted the pause, if applicable."
+          }
+        }
+      }
+    }
+  })
+end
