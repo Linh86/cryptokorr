@@ -93,6 +93,18 @@ This is a working map of progress as of the most recent `main`.
   HTTP probe. Unblocks the provider/adapter health summary slice on
   the LiveView side. Merge SHA
   `000ff91068dfa7d3ab7e0ee24889d6487a6a5eb6`.
+- [PR #342](https://github.com/Linh86/cryptobank/pull/342) — SecurityLive
+  cached adapter health card. Read-only `#adapter-health-card`
+  rendered in the right column between `#chain-pauses-card` and
+  `#safety-events-card`. Stable element ids: `#adapter-health-status`
+  (with `data-status`), `#adapter-health-detail` (with `data-detail`),
+  `#adapter-health-http`, `#adapter-health-checked-at`. Sourced from
+  `Bank.Ops.AdapterHealthSnapshot.snapshot/0` — a non-blocking ETS
+  lookup, **not** `Bank.Ops.Health.adapter/0`; LiveView never makes a
+  blocking HTTP probe. Detail is a fixed enum string sanitized at the
+  cache boundary; raw exception text, credentialed RPC URLs, and
+  stack traces are excluded by construction. No refresh button. Merge
+  SHA `88f409d176389cce606d8579a81852398a1232bf`.
 
 ## Shipped surfaces
 
@@ -202,18 +214,43 @@ organized by the LiveView they live on.
   `#chain-pause-base-submit` (pause action with reason input),
   `#chain-resume-base-submit` (resume action), and
   `#chain-pause-base-readonly` for the non-admin state line. Phase 1
-  scope is pinned to `"base"` server-side; the form does not expose
-  arbitrary chain input. Both buttons carry `data-confirm`. The
-  `pause_chain` and `resume_chain` LiveView events re-check `:admin`
-  via `BankWeb.LiveAuth.authorize_action/2`, so a hostile event from a
+  controls are Base-only; the server uses the fixed `"base"` chain
+  and the workspace from `current_scope` rather than client-selected
+  chain/workspace params, so the form cannot smuggle in arbitrary
+  chain or cross-workspace input. Both mutating buttons carry
+  `data-confirm`. The `pause_chain` and `resume_chain` LiveView
+  events re-check `:admin` via
+  `BankWeb.LiveAuth.authorize_action/2`, so a hostile event from a
   non-admin connection is refused even if the form is bypassed.
-  Backend goes through `Bank.Security.Pauses` (#326 context) and the
-  HTTP/OpenAPI surface from #332 remains the equivalent path for
-  non-LiveView clients. Tests cover the admin happy path, long-reason
-  validation error, sibling-workspace isolation, operator read-only
-  rendering, and hostile-operator event rejection. Landed in
+  Builds on the #326 backend (`Bank.Security.Pauses` context + DB
+  table), the #332 HTTP/OpenAPI surface (equivalent path for
+  non-LiveView clients), and the #334 read-only active chain pauses
+  card. Tests cover admin pause/resume happy paths, no-reason pause
+  (reason persists as `nil`), 256-char reason length rejection (form
+  changeset error), sibling-workspace isolation, operator-tier
+  read-only rendering (no mutating buttons), and hostile-operator
+  `pause_chain` / `resume_chain` event refusal with admin-required
+  flash. Landed in
   [#337](https://github.com/Linh86/cryptobank/pull/337) ("SecurityLive:
   add base chain pause controls (#228/#229)"), merge SHA `d67dd951`.
+- **Cached adapter health card** — read-only `#adapter-health-card`
+  rendered in the right column between `#chain-pauses-card` and
+  `#safety-events-card`. Per-field stable ids: `#adapter-health-status`
+  (with `data-status`), `#adapter-health-detail` (with `data-detail`),
+  `#adapter-health-http`, `#adapter-health-checked-at`. Sourced from
+  `Bank.Ops.AdapterHealthSnapshot.snapshot/0` — a non-blocking ETS
+  lookup, **not** `Bank.Ops.Health.adapter/0`; the LiveView never
+  makes a blocking HTTP probe. Detail is a fixed enum string
+  sanitized at the cache boundary (e.g. `ok` / `adapter_5xx` /
+  `error`); raw exception text, credentialed RPC URLs, stack traces,
+  and other secrets are excluded by construction. No refresh button.
+  Coexists with `#incident-summary-card`, `#chain-pauses-card`,
+  `#pending-approvals-card`, and `#safety-events-card`. Tests pin
+  the card's negative posture (no `AdapterHealthSnapshot.refresh/1`
+  network calls during render) plus the cache-only data flow. Landed
+  in [#342](https://github.com/Linh86/cryptobank/pull/342)
+  ("SecurityLive: show cached adapter health (#229)"), merge SHA
+  `88f409d`.
 
 ### `BankWeb.DashboardLive` (`/`)
 
@@ -250,20 +287,29 @@ These are probable next pieces under #229 based on the issue body's
 scope list and the surfaces not yet present. They are *suggestions*,
 not commitments — a human owner should triage before assigning.
 
+Surfaces already shipped (do **not** rebuild): emergency-action
+confirmation audit (#327), pending approvals card (#329), incident
+summary snapshot (#330), in-flight execution plans card (#324),
+read-only active chain pauses card (#334), Base chain pause/resume
+controls (#337), cached adapter health card (#342). For all of these,
+treat any new request as a follow-up patch to the existing surface,
+not a green-field reimplementation.
+
 - **Failed/retrying jobs surface** — `#229` lists "failed/retrying
-  jobs". **Blocked on backend Oban/read API** — today the operator
-  drops into Oban LiveDashboard or queries the DB. A workspace-scoped
-  read API for the relevant Oban queues would unlock a small per-queue
-  retry panel on the security console.
-- **Provider/adapter health summary** — `#229` lists this as a
-  section. The cached backend source landed in
-  [PR #339](https://github.com/Linh86/cryptobank/pull/339) (SHA
-  `000ff910`) — `Bank.Ops.AdapterHealthSnapshot` exposes a non-blocking
-  ETS-backed view of the latest `Bank.Ops.Health.adapter/0` probe.
-  Remaining work is a small `/security` LiveView card that reads from
-  the snapshot (single-row "current health snapshot": adapter / DB /
-  stuck-plans) so the operator can confirm posture without leaving the
-  page. No longer blocked on backend.
+  jobs". **Still blocked on a safe backend Oban/read API** — today
+  the operator drops into Oban LiveDashboard or queries the DB. A
+  workspace-scoped read API for the relevant Oban queues would unlock
+  a small per-queue retry panel on the security console.
+- **Non-Base chain pause/resume controls** — Phase 1 pause UI is Base
+  only; pausing additional chains is gated on the underlying
+  `Bank.Security.Pauses` / dispatch gates accepting them as supported
+  scope values. Future scope; do **not** widen the existing
+  `#chain-pause-base-control` form to expose arbitrary chain input
+  ahead of the backend.
+- **Smart-account / api-key scoped pause UI** — Phase 2 (smart_account)
+  and Phase 3 (api_key) backends do not exist yet. UI for those
+  scopes remains future scope per design memo
+  [PR #310](https://github.com/Linh86/cryptobank/pull/310) §9.
 
 ## Optional enhancements
 
