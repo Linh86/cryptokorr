@@ -229,6 +229,84 @@ defmodule Bank.APIKeysTest do
       events = Enum.filter(events, &(&1.subject_id == key.id))
       assert length(events) == 1
     end
+
+    test "broadcasts the api_key.revoked audit event on audit_stream after the txn commits",
+         %{workspace: ws, user: user} do
+      # Pre-fix the revoke path wrote the audit row inside the
+      # transaction via `Audit.append_event/1` (silent insert) but
+      # never broadcast it on `audit_stream`. `BankWeb.AuditLive`
+      # subscribes to `audit_stream` for its real-time tail, so
+      # `api_key.revoked` events were persisted but invisible to
+      # any operator viewing the audit page until they refreshed.
+      # Post-fix the broadcast fires AFTER `Repo.transaction/1`
+      # commits so subscribers only see events that are durably
+      # persisted.
+      {:ok, key, _raw} = APIKeys.create_key(ws, user, :operator, "broadcast-tail-revoke")
+
+      :ok = Bank.Runtime.PubSub.subscribe(Bank.Runtime.PubSub.audit_stream())
+
+      assert {:ok, %APIKey{revoked_at: %DateTime{}}} = APIKeys.revoke_key(key, actor: user)
+
+      key_id = key.id
+
+      assert_receive %{
+        topic: :audit_stream,
+        event: :appended,
+        payload: %{event_type: "api_key.revoked", subject_id: ^key_id}
+      }
+    end
+
+    test "no api_key.revoked audit broadcast for an in-memory short-circuit on already-revoked struct",
+         %{workspace: ws, user: user} do
+      # The first clause of `revoke_key/2` short-circuits when the
+      # caller already passes a struct whose `revoked_at` is set —
+      # no transaction runs, no audit row is appended, and no
+      # broadcast must fire. This is the cheapest idempotent path
+      # and the new post-commit broadcast must not regress it.
+      {:ok, key, _raw} = APIKeys.create_key(ws, user, :viewer, "broadcast-shortcircuit")
+      {:ok, revoked_first} = APIKeys.revoke_key(key, actor: user)
+
+      :ok = Bank.Runtime.PubSub.subscribe(Bank.Runtime.PubSub.audit_stream())
+
+      assert {:ok, %APIKey{} = revoked_again} = APIKeys.revoke_key(revoked_first, actor: user)
+      assert revoked_again.revoked_at == revoked_first.revoked_at
+
+      key_id = key.id
+
+      refute_received %{
+        topic: :audit_stream,
+        event: :appended,
+        payload: %{event_type: "api_key.revoked", subject_id: ^key_id}
+      }
+    end
+
+    test "no api_key.revoked audit broadcast on the lock-loser idempotent path",
+         %{workspace: ws, user: user} do
+      # Stale-struct race: caller B holds a pristine
+      # `%APIKey{revoked_at: nil}` from before caller A's revoke
+      # committed. Inside the txn the lock returns an
+      # already-revoked locked row, so caller B short-circuits
+      # with `{:already_revoked, locked}` and emits no audit row
+      # (PR #333). The post-commit broadcast must also not fire
+      # for this path — only the winner (caller A) broadcasts.
+      {:ok, key, _raw} = APIKeys.create_key(ws, user, :operator, "broadcast-lock-loser")
+      stale_struct = key
+
+      assert {:ok, %APIKey{revoked_at: %DateTime{}}} = APIKeys.revoke_key(key, actor: user)
+
+      :ok = Bank.Runtime.PubSub.subscribe(Bank.Runtime.PubSub.audit_stream())
+
+      assert {:ok, %APIKey{revoked_at: %DateTime{}}} =
+               APIKeys.revoke_key(stale_struct, actor: user)
+
+      key_id = key.id
+
+      refute_received %{
+        topic: :audit_stream,
+        event: :appended,
+        payload: %{event_type: "api_key.revoked", subject_id: ^key_id}
+      }
+    end
   end
 
   # --- rotate_key/3 ---------------------------------------------------------
