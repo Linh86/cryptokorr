@@ -374,11 +374,44 @@ defmodule Bank.Decisions.Report do
   defp snapshot_rule_ids(_), do: []
 
   defp reasons_summary(%{} = reasons) do
-    items = Map.get(reasons, "items") || Map.get(reasons, :items) || []
+    raw = Map.get(reasons, "items") || Map.get(reasons, :items) || []
+    items = Enum.map(raw, &reason_item/1)
     %{item_count: length(items), items: items}
   end
 
   defp reasons_summary(_), do: %{item_count: 0, items: []}
+
+  # `decision_envelope.reasons.items[]` is mixed-shape (#248 P2):
+  #
+  #   * Runtime-generated items are bare strings — programmer-written
+  #     labels like `"policy.amount_limit ok"`. Safe to pass through.
+  #   * Operator approval/rejection items (see
+  #     `Bank.Decisions.apply_approval_decision/2`) are maps with
+  #     `"code"`, `"message"`, `"actor_id"` keys. The `message`
+  #     value is operator-supplied free text and CAN carry pasted
+  #     secrets — a pasted Authorization header, RPC URL with
+  #     embedded credentials, or PEM marker would otherwise flow
+  #     through the report verbatim into any downstream
+  #     #249/#250/#251 export. The audit-safe summary therefore
+  #     drops `message` and `details` entirely and exposes only
+  #     `code` + `actor_id`. A `redacted: true` marker tells
+  #     downstream readers the operator wrote a free-text reason
+  #     even though the body was suppressed.
+  defp reason_item(text) when is_binary(text), do: text
+
+  defp reason_item(%{} = item) do
+    code = Map.get(item, "code") || Map.get(item, :code)
+    actor_id = Map.get(item, "actor_id") || Map.get(item, :actor_id)
+
+    redacted? =
+      Map.has_key?(item, "message") or Map.has_key?(item, :message) or
+        Map.has_key?(item, "details") or Map.has_key?(item, :details)
+
+    base = %{"code" => code, "actor_id" => actor_id}
+    if redacted?, do: Map.put(base, "redacted", true), else: base
+  end
+
+  defp reason_item(other), do: other
 
   # --- approval -------------------------------------------------------------
 

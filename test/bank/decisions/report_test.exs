@@ -402,6 +402,105 @@ defmodule Bank.Decisions.ReportTest do
       assert json =~ "max_per_tx"
       assert json =~ "provider_secret_id"
     end
+
+    test "operator-supplied reason text in `decision.reasons.items[].message` is redacted (#248 P2)" do
+      # `Bank.Decisions.apply_approval_decision/2` writes the
+      # operator's free-text `reason` into a successor decision
+      # envelope as `reasons.items[].message`. Pre-fix the Report
+      # builder serialised those items verbatim, so an operator who
+      # pasted a Bearer token / Authorization header / RPC URL with
+      # embedded credentials / PEM marker / 0x-prefixed key handle
+      # would leak the secret into any downstream
+      # #249/#250/#251 report. Post-fix the message body is
+      # dropped; only `code` + `actor_id` survive, plus a
+      # `redacted: true` marker so downstream readers can tell
+      # "operator wrote a reason but the body was suppressed" apart
+      # from "operator wrote no reason at all".
+      intent = agent_intent()
+
+      # Plant every shape from the review finding into one
+      # operator-style reason so the JSON-string refute covers all
+      # markers the issue called for.
+      planted_message =
+        "Bearer sk_test_LEAKED_PROBE | Authorization: Bearer header | " <>
+          "https://secret@example.test | -----BEGIN PRIVATE KEY----- | " <>
+          "private_key=hex_blob | sk_live_HIDDEN | 0xdeadbeef"
+
+      operator_actor_id = Ecto.UUID.generate()
+
+      decision_envelope(
+        intent: intent,
+        outcome: :auto_exec,
+        risk_tier: :low,
+        decided_by: :user,
+        current: true,
+        reasons: %{
+          "items" => [
+            %{
+              "code" => "operator_approved",
+              "message" => planted_message,
+              "actor_id" => operator_actor_id,
+              # Some future caller may also use a `details` map for
+              # richer context; the redactor must drop that too.
+              "details" => %{"raw_authorization" => "Bearer sk_test_LEAKED_PROBE"}
+            }
+          ]
+        }
+      )
+
+      {:ok, bundle} = Audit.replay(intent.id)
+      report = Report.from_bundle(bundle)
+
+      # The safe summary survives.
+      assert report.decision_envelope.reasons.item_count == 1
+      [item] = report.decision_envelope.reasons.items
+
+      assert item["code"] == "operator_approved"
+      assert item["actor_id"] == operator_actor_id
+      assert item["redacted"] == true
+      refute Map.has_key?(item, "message")
+      refute Map.has_key?(item, "details")
+
+      # And the JSON dump must not contain ANY of the planted
+      # markers from the P2 acceptance list.
+      json = Jason.encode!(report)
+
+      refute json =~ "Bearer sk_test_LEAKED_PROBE"
+      refute json =~ "Authorization: Bearer"
+      refute json =~ "https://secret@example.test"
+      refute json =~ "BEGIN PRIVATE KEY"
+      refute json =~ "private_key"
+      refute json =~ "sk_test_"
+      refute json =~ "sk_live_HIDDEN"
+      refute json =~ "0xdeadbeef"
+      refute json =~ "raw_authorization"
+
+      # `sk_` is a partial substring marker — verify nothing of the
+      # planted secret-prefix family leaks under any casing.
+      refute json =~ ~r/sk_(test|live)_/
+    end
+
+    test "runtime-generated reason items (bare strings) still pass through verbatim" do
+      # Backstop: the redactor must not break the runtime path.
+      # Programmer-written labels like `"policy.amount_limit ok"`
+      # are safe by construction (no operator input) and remain
+      # useful evidence in the report.
+      intent = agent_intent()
+
+      decision_envelope(
+        intent: intent,
+        outcome: :auto_exec,
+        current: true,
+        reasons: %{"items" => ["policy.amount_limit ok", "trust=trusted"]}
+      )
+
+      {:ok, bundle} = Audit.replay(intent.id)
+      report = Report.from_bundle(bundle)
+
+      assert report.decision_envelope.reasons.item_count == 2
+      assert "policy.amount_limit ok" in report.decision_envelope.reasons.items
+      assert "trust=trusted" in report.decision_envelope.reasons.items
+    end
   end
 
   describe "read-only / no side effects" do
