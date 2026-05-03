@@ -2187,10 +2187,13 @@
         "type": "object"
       },
       "PauseChainRequest": {
-        "description": "Pause execution dispatch for a chain inside the calling key's\nworkspace. Workspace-scoped: a pause set here only affects this\nworkspace's plans — sibling workspaces continue dispatching on\nthe same chain. Idempotent: re-pausing an already-paused chain\nreturns `200` with `status: \"already_paused\"` and does not\nemit a second audit row.\n\n`workspace_id` from the body (if present) is ignored — the\nworkspace is resolved from `current_scope`.\n",
+        "description": "Pause execution dispatch for a chain inside the calling key's\nworkspace. Workspace-scoped: a pause set here only affects this\nworkspace's plans — sibling workspaces continue dispatching on\nthe same chain. Idempotent: re-pausing an already-paused chain\nreturns `200` with `status: \"already_paused\"` and does not\nemit a second audit row.\n\n`workspace_id` from the body (if present) is ignored — the\nworkspace is resolved from `current_scope`.\n\nPhase 1 supports `\"base\"` only — the dispatch gate currently\npauses only that chain. Other values return\n`422 unsupported_chain`. Future phases will extend the enum.\n",
         "properties": {
           "chain": {
-            "description": "Chain identifier to pause. v0.1 ships `\"base\"` only; future phases extend the supported set without changing this wire shape.",
+            "description": "Chain identifier to pause. Phase 1 accepts `\"base\"` only; any other value returns `422 unsupported_chain`.",
+            "enum": [
+              "base"
+            ],
             "example": "base",
             "maxLength": 64,
             "minLength": 1,
@@ -2328,10 +2331,13 @@
         "type": "object"
       },
       "ResumeChainRequest": {
-        "description": "Resume execution dispatch for a chain inside the calling key's\nworkspace. Workspace-scoped — only clears the pause this\nworkspace set. Idempotent: resuming a chain that is not paused\nreturns `200` with `status: \"already_running\"` and does not\nemit a second audit row.\n\n`workspace_id` from the body (if present) is ignored.\n",
+        "description": "Resume execution dispatch for a chain inside the calling key's\nworkspace. Workspace-scoped — only clears the pause this\nworkspace set. Idempotent: resuming a chain that is not paused\nreturns `200` with `status: \"already_running\"` and does not\nemit a second audit row.\n\n`workspace_id` from the body (if present) is ignored.\n\nPhase 1 supports `\"base\"` only; other values return\n`422 unsupported_chain`.\n",
         "properties": {
           "chain": {
-            "description": "Chain identifier to resume.",
+            "description": "Chain identifier to resume. Phase 1 accepts `\"base\"` only; any other value returns `422 unsupported_chain`.",
+            "enum": [
+              "base"
+            ],
             "example": "base",
             "maxLength": 64,
             "minLength": 1,

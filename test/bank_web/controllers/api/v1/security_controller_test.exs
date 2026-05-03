@@ -608,6 +608,29 @@ defmodule BankWeb.API.V1.SecurityControllerTest do
       assert body["error"]["code"] == "invalid_body"
     end
 
+    test "unsupported chain returns 422 unsupported_chain (#228 Phase 1: base only)",
+         %{conn: conn, workspace: ws} do
+      conn = post(conn, ~p"/v1/security/pause_chain", %{"chain" => "optimism"})
+      body = json_response(conn, 422)
+
+      assert body["error"]["code"] == "unsupported_chain"
+      assert body["error"]["message"] =~ "supported chains: base"
+
+      # No pause row was created and no audit event was emitted.
+      refute Bank.Security.paused?(ws.id, {:chain, "optimism"})
+      assert audit_count("security.scope_paused", ws.id) == 0
+    end
+
+    test "trims whitespace and accepts ' base ' as 'base'",
+         %{conn: conn, workspace: ws} do
+      conn = post(conn, ~p"/v1/security/pause_chain", %{"chain" => "  base  "})
+      body = json_response(conn, 200)
+
+      assert body["status"] == "paused"
+      assert body["data"]["scope_value"] == "base"
+      assert Bank.Security.paused?(ws.id, {:chain, "base"})
+    end
+
     test "reason longer than 256 returns 422 invalid_reason", %{conn: conn} do
       long = String.duplicate("x", 257)
 
@@ -707,6 +730,28 @@ defmodule BankWeb.API.V1.SecurityControllerTest do
       conn = post(conn, ~p"/v1/security/resume_chain", %{})
       body = json_response(conn, 422)
       assert body["error"]["code"] == "invalid_body"
+    end
+
+    test "unsupported chain returns 422 unsupported_chain (#228 Phase 1: base only)",
+         %{conn: conn} do
+      conn = post(conn, ~p"/v1/security/resume_chain", %{"chain" => "optimism"})
+      body = json_response(conn, 422)
+
+      assert body["error"]["code"] == "unsupported_chain"
+      assert body["error"]["message"] =~ "supported chains: base"
+    end
+
+    test "trims whitespace and accepts ' base ' as 'base'",
+         %{conn: conn, workspace: ws} do
+      {:ok, :paused, _} =
+        Bank.Security.pause(ws.id, {:chain, "base"}, actor: :user, actor_id: nil)
+
+      conn = post(conn, ~p"/v1/security/resume_chain", %{"chain" => "  base  "})
+      body = json_response(conn, 200)
+
+      assert body["status"] == "resumed"
+      assert body["data"]["scope_value"] == "base"
+      refute Bank.Security.paused?(ws.id, {:chain, "base"})
     end
 
     test "operator (non-admin) key is rejected with 403", %{conn: _conn} do

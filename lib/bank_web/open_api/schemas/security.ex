@@ -398,15 +398,20 @@ defmodule BankWeb.OpenApi.Schemas.PauseChainRequest do
 
     `workspace_id` from the body (if present) is ignored — the
     workspace is resolved from `current_scope`.
+
+    Phase 1 supports `"base"` only — the dispatch gate currently
+    pauses only that chain. Other values return
+    `422 unsupported_chain`. Future phases will extend the enum.
     """,
     type: :object,
     required: [:chain],
     properties: %{
       chain: %Schema{
         type: :string,
+        enum: ["base"],
         description:
-          "Chain identifier to pause. v0.1 ships `\"base\"` only; future " <>
-            "phases extend the supported set without changing this wire shape.",
+          "Chain identifier to pause. Phase 1 accepts `\"base\"` only; " <>
+            "any other value returns `422 unsupported_chain`.",
         example: "base",
         minLength: 1,
         maxLength: 64
@@ -441,13 +446,19 @@ defmodule BankWeb.OpenApi.Schemas.ResumeChainRequest do
     emit a second audit row.
 
     `workspace_id` from the body (if present) is ignored.
+
+    Phase 1 supports `"base"` only; other values return
+    `422 unsupported_chain`.
     """,
     type: :object,
     required: [:chain],
     properties: %{
       chain: %Schema{
         type: :string,
-        description: "Chain identifier to resume.",
+        enum: ["base"],
+        description:
+          "Chain identifier to resume. Phase 1 accepts `\"base\"` only; " <>
+            "any other value returns `422 unsupported_chain`.",
         example: "base",
         minLength: 1,
         maxLength: 64

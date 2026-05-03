@@ -198,6 +198,16 @@ defmodule BankWeb.API.V1.SecurityController do
         |> put_status(:unprocessable_entity)
         |> json(%{error: %{code: "invalid_body", message: "chain must be 1-64 characters"}})
 
+      {:error, :unsupported_chain} ->
+        conn
+        |> put_status(:unprocessable_entity)
+        |> json(%{
+          error: %{
+            code: "unsupported_chain",
+            message: unsupported_chain_message()
+          }
+        })
+
       {:error, :invalid_workspace} ->
         conn
         |> put_status(:unprocessable_entity)
@@ -291,8 +301,31 @@ defmodule BankWeb.API.V1.SecurityController do
         conn
         |> put_status(:unprocessable_entity)
         |> json(%{error: %{code: "invalid_body", message: "chain must be 1-64 characters"}})
+
+      {:error, :unsupported_chain} ->
+        conn
+        |> put_status(:unprocessable_entity)
+        |> json(%{
+          error: %{
+            code: "unsupported_chain",
+            message: unsupported_chain_message()
+          }
+        })
     end
   end
+
+  defp unsupported_chain_message do
+    supported = pause_chain_supported_chains() |> Enum.join(", ")
+    "chain is not supported; supported chains: #{supported}"
+  end
+
+  # Phase 1 supports `:chain` scope with `"base"` only — that is the
+  # only chain wired into the dispatch gates today (the plan's
+  # `chain` is hardcoded `"base"` at `Bank.Decisions` plan attrs).
+  # Accepting other values would let an operator successfully create
+  # and audit a pause that no dispatch path will ever check.
+  # `pause_chain_supported_chains/0` is the canonical allowlist.
+  @pause_chain_supported_chains ~w(base)
 
   defp parse_chain(params) do
     case Map.get(params, "chain") do
@@ -302,6 +335,7 @@ defmodule BankWeb.API.V1.SecurityController do
         cond do
           trimmed == "" -> {:error, :invalid_chain}
           String.length(trimmed) > 64 -> {:error, :invalid_chain}
+          trimmed not in @pause_chain_supported_chains -> {:error, :unsupported_chain}
           true -> {:ok, trimmed}
         end
 
@@ -312,6 +346,8 @@ defmodule BankWeb.API.V1.SecurityController do
         {:error, :invalid_chain}
     end
   end
+
+  defp pause_chain_supported_chains, do: @pause_chain_supported_chains
 
   defp status_string(:paused), do: "paused"
   defp status_string(:already_paused), do: "already_paused"
