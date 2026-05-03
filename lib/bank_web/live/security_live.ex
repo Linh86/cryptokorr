@@ -518,6 +518,20 @@ defmodule BankWeb.SecurityLive do
     # a credentialed RPC URL — so it is safe to render directly.
     adapter_health = Bank.Ops.AdapterHealthSnapshot.snapshot()
 
+    # Sanitized failed/retrying Oban jobs (#229). Sourced from
+    # `Bank.Ops.Jobs.list_problem_jobs/1`, which returns a fixed
+    # row shape (worker / queue / state / attempt / timestamps)
+    # and never exposes `args`, `errors`, `meta`, or `tags` —
+    # those columns can carry caller IDs, exception text, RPC
+    # URLs with embedded tokens, or signing-payload fragments
+    # and are unsafe to render. The query is hard-capped at 50
+    # in the context; we ask for 10 so the card stays compact.
+    #
+    # v1 limitation: the Ops.Jobs API is global, not workspace-
+    # scoped. The card is rendered with `data-scope="global"`
+    # and labels itself as ops-wide so operators are not misled.
+    problem_jobs = Bank.Ops.Jobs.list_problem_jobs(limit: 10)
+
     filters = socket.assigns[:safety_filters] || @default_safety_filters
     safety_events = load_safety_events(delegations, workspace_id, filters)
 
@@ -546,6 +560,8 @@ defmodule BankWeb.SecurityLive do
     |> assign(:chain_pauses, chain_pauses)
     |> assign(:base_paused, base_paused?)
     |> assign(:adapter_health, adapter_health)
+    |> assign(:problem_jobs, problem_jobs)
+    |> assign(:problem_job_count, length(problem_jobs))
     |> assign(:safety_events, safety_events)
     |> assign(:safety_filters, filters)
     |> assign(:safety_filter_form, safety_filter_form)
@@ -843,6 +859,7 @@ defmodule BankWeb.SecurityLive do
             delegations={@delegations}
             safety_events={@safety_events}
           />
+          <.problem_jobs_card jobs={@problem_jobs} />
           <.safety_events_card
             events={@safety_events}
             filter_form={@safety_filter_form}
@@ -2109,6 +2126,126 @@ defmodule BankWeb.SecurityLive do
   defp incident_readiness_badge_class("attention"), do: "badge-warning"
   defp incident_readiness_badge_class("steady"), do: "badge-success"
   defp incident_readiness_badge_class(_), do: "badge-ghost"
+
+  # --- Component: problem jobs card (#229) ---------------------------------
+  #
+  # Read-only ops-wide view of failed/retrying Oban jobs sourced
+  # from `Bank.Ops.Jobs.list_problem_jobs/1`. The card's only data
+  # path is that sanctioned context function — direct reads of
+  # `oban_jobs` and Oban internals would expose `args`, `errors`,
+  # `meta`, and `tags` columns that can carry caller IDs, raw
+  # exception messages, RPC URLs with embedded tokens, transaction
+  # hashes, and signing-payload fragments.
+  #
+  # ## v1 limitation: GLOBAL, not workspace-scoped
+  #
+  # Job `args` are per-worker and not uniformly mappable back to
+  # a workspace, so the v1 list is global. The card is rendered
+  # with `data-scope="global"` and labels itself as ops-wide so
+  # operators are not misled into thinking this is tenant-isolated.
+  # Future revisions may add per-worker workspace resolvers.
+  #
+  # ## Field selection
+  #
+  # Each row renders only fields the context already classifies
+  # as safe: short worker module name, queue, state badge,
+  # attempt counter, and the most-recent attempted-at age.
+  # `args`, `errors`, `meta`, and `tags` are not present on the
+  # context's row shape and cannot be reached from this component.
+
+  attr :jobs, :list, required: true
+
+  defp problem_jobs_card(assigns) do
+    ~H"""
+    <section
+      id="problem-jobs-card"
+      data-scope="global"
+      data-count={length(@jobs)}
+      class="rounded-xl border border-base-300 bg-base-100 shadow-sm overflow-hidden"
+    >
+      <header class="px-6 py-4 border-b border-base-300 flex items-center justify-between">
+        <div class="min-w-0">
+          <h2 class="text-sm font-semibold flex items-center gap-1.5">
+            <.icon name="hero-exclamation-triangle" class="size-4" /> Problem jobs
+          </h2>
+          <p class="mt-0.5 text-xs text-base-content/40">
+            Ops-wide Oban jobs, sanitized.
+          </p>
+        </div>
+        <span class="badge badge-sm badge-ghost">{length(@jobs)}</span>
+      </header>
+
+      <div
+        :if={@jobs == []}
+        id="problem-jobs-empty"
+        class="px-6 py-8 text-center text-sm text-base-content/50"
+      >
+        No retryable, discarded, or cancelled Oban jobs.
+      </div>
+
+      <ul :if={@jobs != []} class="divide-y divide-base-300">
+        <li :for={job <- @jobs} id={"problem-job-#{job.id}"} class="px-6 py-4">
+          <.problem_job_row job={job} />
+        </li>
+      </ul>
+    </section>
+    """
+  end
+
+  attr :job, :map, required: true
+
+  defp problem_job_row(assigns) do
+    ~H"""
+    <div class="flex items-start justify-between gap-3">
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2 flex-wrap">
+          <span
+            id={"problem-job-state-#{@job.id}"}
+            class={[
+              "badge badge-sm font-mono",
+              problem_job_badge_class(@job.state)
+            ]}
+            data-state={@job.state}
+          >
+            {@job.state}
+          </span>
+          <span id={"problem-job-worker-#{@job.id}"} class="text-sm font-mono break-all">
+            {short_worker(@job.worker)}
+          </span>
+        </div>
+        <div class="mt-1 text-xs text-base-content/50 flex items-center gap-3 flex-wrap">
+          <span id={"problem-job-queue-#{@job.id}"}>
+            queue <span class="font-mono">{@job.queue}</span>
+          </span>
+          <span id={"problem-job-attempt-#{@job.id}"}>
+            attempt <span class="font-mono">{@job.attempt}/{@job.max_attempts}</span>
+          </span>
+          <span id={"problem-job-age-#{@job.id}"}>
+            attempted <span class="font-mono">{format_age(@job.attempted_at)}</span> ago
+          </span>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
+  defp problem_job_badge_class("retryable"), do: "badge-warning"
+  defp problem_job_badge_class("discarded"), do: "badge-error"
+  defp problem_job_badge_class("cancelled"), do: "badge-ghost"
+  defp problem_job_badge_class(_), do: "badge-ghost"
+
+  # Strip the leading `Bank.Runtime.Workers.` namespace so the
+  # row stays readable; full module name is operator-controlled
+  # code and not sensitive, but the prefix is repetitive.
+  defp short_worker(nil), do: "—"
+
+  defp short_worker(worker) when is_binary(worker) do
+    worker
+    |> String.replace_prefix("Elixir.", "")
+    |> String.replace_prefix("Bank.Runtime.Workers.", "")
+  end
+
+  defp short_worker(_), do: "—"
 
   # --- Component: delegations card -----------------------------------------
 

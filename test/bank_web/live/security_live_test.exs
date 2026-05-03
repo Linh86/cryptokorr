@@ -2046,6 +2046,195 @@ defmodule BankWeb.SecurityLiveTest do
     end
   end
 
+  # --- Problem jobs card (#229) --------------------------------------------
+
+  describe "problem jobs card" do
+    test "renders empty state with global scope marker", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, ~s|#problem-jobs-card[data-scope="global"]|)
+      assert has_element?(view, ~s|#problem-jobs-card[data-count="0"]|)
+      assert has_element?(view, "#problem-jobs-empty")
+      # Card explicitly says ops-wide so operators are not misled
+      # into thinking workspace isolation is in effect.
+      assert has_element?(view, "#problem-jobs-card", "Ops-wide")
+    end
+
+    test "renders a retryable job with sanitized fields and stable ids",
+         %{conn: conn} do
+      id =
+        insert_problem_job!(%{
+          state: "retryable",
+          worker: "Bank.Runtime.Workers.RunExecution",
+          queue: "executions_run",
+          attempt: 2,
+          max_attempts: 5,
+          attempted_at: DateTime.utc_now()
+        })
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#problem-job-#{id}")
+      assert has_element?(view, ~s|#problem-job-state-#{id}[data-state="retryable"]|)
+      assert has_element?(view, "#problem-job-worker-#{id}", "RunExecution")
+      assert has_element?(view, "#problem-job-queue-#{id}", "executions_run")
+      assert has_element?(view, "#problem-job-attempt-#{id}", "2/5")
+      refute has_element?(view, "#problem-jobs-empty")
+    end
+
+    test "renders a discarded job", %{conn: conn} do
+      id =
+        insert_problem_job!(%{
+          state: "discarded",
+          worker: "Bank.Runtime.Workers.ConfirmExecution",
+          queue: "executions_confirm",
+          attempt: 5,
+          max_attempts: 5
+        })
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, ~s|#problem-job-state-#{id}[data-state="discarded"]|)
+      assert has_element?(view, "#problem-job-worker-#{id}", "ConfirmExecution")
+    end
+
+    test "renders a cancelled job", %{conn: conn} do
+      id =
+        insert_problem_job!(%{
+          state: "cancelled",
+          worker: "ManualCancelWorker",
+          queue: "default"
+        })
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, ~s|#problem-job-state-#{id}[data-state="cancelled"]|)
+    end
+
+    test "completed / scheduled / available / executing / suspended jobs do NOT appear",
+         %{conn: conn} do
+      ids =
+        for state <- ~w(completed scheduled available executing suspended) do
+          insert_problem_job!(%{state: state, worker: "Quiet#{state}Worker", queue: "default"})
+        end
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#problem-jobs-empty")
+
+      for id <- ids do
+        refute has_element?(view, "#problem-job-#{id}")
+      end
+    end
+
+    test "card content does not leak args/errors/meta/tags or common secret prefixes",
+         %{conn: conn} do
+      _id =
+        insert_problem_job!(%{
+          state: "discarded",
+          worker: "Bank.Runtime.Workers.RunExecution",
+          queue: "executions_run",
+          attempt: 5,
+          max_attempts: 5,
+          args: %{
+            "decision_id" => "secret-id-12345",
+            "Authorization" => "Bearer sk_live_4242",
+            "url" => "https://secret@adapter.test/dispatch"
+          },
+          errors: [
+            %{
+              "attempt" => 5,
+              "error" => "** (RuntimeError) https://secret@adapter.test sk_live_4242 0xdeadbeef"
+            }
+          ],
+          meta: %{"private_key" => "0xabc"},
+          tags: ["should_not_appear"]
+        })
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      card_html =
+        view
+        |> element("#problem-jobs-card")
+        |> render()
+
+      refute card_html =~ "Bearer"
+      refute card_html =~ "Authorization"
+      refute card_html =~ "sk_live"
+      refute card_html =~ "sk_"
+      refute card_html =~ "https://"
+      refute card_html =~ "secret@"
+      refute card_html =~ "private_key"
+      refute card_html =~ "0x"
+      refute card_html =~ "RuntimeError"
+      refute card_html =~ "should_not_appear"
+      refute card_html =~ ~s|"args"|
+      refute card_html =~ ~s|"errors"|
+      refute card_html =~ ~s|"meta"|
+      refute card_html =~ ~s|"tags"|
+    end
+
+    test "coexists with incident-readiness / adapter-health / chain-pauses / safety-events cards",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#problem-jobs-card")
+      assert has_element?(view, "#incident-readiness-card")
+      assert has_element?(view, "#adapter-health-card")
+      assert has_element?(view, "#chain-pauses-card")
+      assert has_element?(view, "#safety-events-card")
+    end
+
+    test "renders no more than 10 rows even when many problem jobs exist",
+         %{conn: conn} do
+      ids =
+        for i <- 1..15 do
+          insert_problem_job!(%{
+            state: "retryable",
+            worker: "Worker#{i}",
+            queue: "default",
+            attempted_at: DateTime.add(DateTime.utc_now(), -i, :second)
+          })
+        end
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      rendered_count = Enum.count(ids, &has_element?(view, "#problem-job-#{&1}"))
+      assert rendered_count == 10
+      assert has_element?(view, ~s|#problem-jobs-card[data-count="10"]|)
+    end
+  end
+
+  # Insert an Oban job row directly so `state`, `errors`, `meta`,
+  # and `tags` can be set independently of the worker API
+  # (`Oban.insert/1` won't let us land a `discarded` row at
+  # insert time). Mirrors the pattern from
+  # `test/bank/ops/jobs_test.exs`.
+  defp insert_problem_job!(attrs) do
+    now = DateTime.utc_now()
+
+    row = %{
+      worker: Map.get(attrs, :worker, "TestWorker"),
+      queue: Map.get(attrs, :queue, "default"),
+      state: Map.fetch!(attrs, :state),
+      args: Map.get(attrs, :args, %{}),
+      errors: Map.get(attrs, :errors, []),
+      meta: Map.get(attrs, :meta, %{}),
+      tags: Map.get(attrs, :tags, []),
+      attempt: Map.get(attrs, :attempt, 0),
+      max_attempts: Map.get(attrs, :max_attempts, 20),
+      priority: Map.get(attrs, :priority, 0),
+      inserted_at: Map.get(attrs, :inserted_at, now),
+      scheduled_at: Map.get(attrs, :scheduled_at, now),
+      attempted_at: Map.get(attrs, :attempted_at, nil)
+    }
+
+    {1, [%{id: id}]} =
+      Bank.Repo.insert_all("oban_jobs", [row], returning: [:id])
+
+    id
+  end
+
   # Insert an `ExecutionPlan` whose `updated_at` is overwritten via a
   # raw SQL update so it appears stuck without depending on Ecto's
   # automatic timestamp behavior.
