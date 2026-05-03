@@ -1700,6 +1700,123 @@ defmodule BankWeb.SecurityLiveTest do
     end
   end
 
+  # --- Adapter health card (#229) ------------------------------------------
+
+  describe "adapter health card" do
+    setup do
+      # The supervised cache GenServer is started by the application;
+      # reset to the bootstrap snapshot so an earlier test's refresh
+      # does not bleed into our assertions.
+      :ok = Bank.Ops.AdapterHealthSnapshot.reset()
+      :ok
+    end
+
+    test "renders the bootstrap unknown state with stable ids",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#adapter-health-card")
+      assert has_element?(view, ~s|#adapter-health-status[data-status="unknown"]|)
+      assert has_element?(view, "#adapter-health-detail", "—")
+      assert has_element?(view, "#adapter-health-checked-at", "not checked yet")
+    end
+
+    test "renders ok snapshot with status, detail and http",
+         %{conn: conn} do
+      _ =
+        Bank.Ops.AdapterHealthSnapshot.refresh(
+          health_fn: fn -> %{status: :ok, detail: "http 200"} end
+        )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, ~s|#adapter-health-status[data-status="ok"]|)
+      assert has_element?(view, ~s|#adapter-health-detail[data-detail="ok"]|)
+      assert has_element?(view, "#adapter-health-detail", "ok")
+      assert has_element?(view, "#adapter-health-http", "200")
+      refute has_element?(view, "#adapter-health-checked-at", "not checked yet")
+    end
+
+    test "renders degraded snapshot for an adapter 5xx response",
+         %{conn: conn} do
+      _ =
+        Bank.Ops.AdapterHealthSnapshot.refresh(
+          health_fn: fn -> %{status: :error, detail: "adapter 5xx: 503"} end
+        )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, ~s|#adapter-health-status[data-status="degraded"]|)
+      assert has_element?(view, ~s|#adapter-health-detail[data-detail="adapter_5xx"]|)
+      assert has_element?(view, "#adapter-health-http", "503")
+    end
+
+    test "renders degraded snapshot with sanitized transport_error detail",
+         %{conn: conn} do
+      _ =
+        Bank.Ops.AdapterHealthSnapshot.refresh(
+          health_fn: fn ->
+            # The probe-side detail is a free-form string; the cache
+            # collapses anything that is neither "http <n>" nor
+            # "adapter 5xx ..." nor "adapter base_url not configured"
+            # to the fixed enum "transport_error". A test that hands
+            # over a credentialed-looking inspect string lets us
+            # assert the sanitization (and that the URL never reaches
+            # the rendered card).
+            %{
+              status: :error,
+              detail:
+                ~s|%Req.TransportError{reason: :econnrefused, url: "https://user:secret@adapter.internal/healthz"}|
+            }
+          end
+        )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, ~s|#adapter-health-status[data-status="degraded"]|)
+      assert has_element?(view, ~s|#adapter-health-detail[data-detail="transport_error"]|)
+      assert has_element?(view, "#adapter-health-detail", "transport_error")
+    end
+
+    test "secret-bearing raw probe detail does not render in the card",
+         %{conn: conn} do
+      _ =
+        Bank.Ops.AdapterHealthSnapshot.refresh(
+          health_fn: fn ->
+            %{
+              status: :error,
+              detail:
+                ~s|%Req.TransportError{reason: :nxdomain, url: "https://user:SECRET_LEAK_TOKEN@adapter.internal/healthz"}|
+            }
+          end
+        )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      card_html =
+        view
+        |> element("#adapter-health-card")
+        |> render()
+
+      refute card_html =~ "SECRET_LEAK_TOKEN"
+      refute card_html =~ "Bearer "
+      refute card_html =~ "https://"
+      refute card_html =~ "adapter.internal"
+      refute card_html =~ "Req.TransportError"
+    end
+
+    test "coexists with incident-summary / chain-pauses / pending-approvals / safety-events cards",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#adapter-health-card")
+      assert has_element?(view, "#incident-summary-card")
+      assert has_element?(view, "#chain-pauses-card")
+      assert has_element?(view, "#pending-approvals-card")
+      assert has_element?(view, "#safety-events-card")
+    end
+  end
+
   # Insert an `ExecutionPlan` whose `updated_at` is overwritten via a
   # raw SQL update so it appears stuck without depending on Ecto's
   # automatic timestamp behavior.
