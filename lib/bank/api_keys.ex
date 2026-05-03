@@ -48,6 +48,7 @@ defmodule Bank.APIKeys do
   alias Bank.APIKeys.APIKey
   alias Bank.Audit
   alias Bank.Repo
+  alias Bank.Runtime.Notifier
   alias Bank.Workspaces.Workspace
 
   @secret_bytes 32
@@ -381,18 +382,30 @@ defmodule Bank.APIKeys do
       with {:ok, revoked_old} <- claim_revoke(old_key, now),
            {:ok, new_key} <-
              %APIKey{} |> APIKey.create_changeset(new_attrs) |> Repo.insert(),
-           {:ok, _event} <-
+           {:ok, audit_event} <-
              Audit.append_event(
                Bank.Audit.Events.api_key_rotated(revoked_old, new_key, actor: actor)
              ) do
-        {new_key, raw_secret}
+        {new_key, raw_secret, audit_event}
       else
         {:error, reason} -> Repo.rollback(reason)
       end
     end)
     |> case do
-      {:ok, {new_key, raw_secret}} -> {:ok, new_key, raw_secret}
-      {:error, reason} -> {:error, reason}
+      {:ok, {new_key, raw_secret, audit_event}} ->
+        # `Audit.append_event/1` is the silent insert path used
+        # inside the txn; it does NOT broadcast. The `audit_stream`
+        # PubSub broadcast must run AFTER the transaction commits
+        # so subscribers (e.g. `BankWeb.AuditLive`'s real-time
+        # tail) see the row only once it is durably persisted, and
+        # not at all on the loser-rollback paths
+        # (`{:error, :already_revoked}` from `claim_revoke/2`,
+        # changeset failure on the new-key insert).
+        Notifier.audit_stream(audit_event)
+        {:ok, new_key, raw_secret}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
