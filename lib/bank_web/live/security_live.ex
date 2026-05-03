@@ -407,6 +407,15 @@ defmodule BankWeb.SecurityLive do
     pending_approvals =
       Bank.Decisions.list_pending_approvals(workspace_id: workspace_id)
 
+    # Active DB-backed pauses for the current workspace
+    # (#228 Phase 1 — chain scope only). Read-only mirror of
+    # `Bank.Security.Pauses.list_active/1`, which already refuses
+    # to surface sibling-workspace rows even when given `nil`.
+    # Mutating pause/resume controls wait for #332 — this slice is
+    # surface-only so an operator can see "what is currently
+    # paused" alongside the rest of the safety posture.
+    chain_pauses = Bank.Security.Pauses.list_active(workspace_id)
+
     filters = socket.assigns[:safety_filters] || @default_safety_filters
     safety_events = load_safety_events(delegations, workspace_id, filters)
 
@@ -432,6 +441,7 @@ defmodule BankWeb.SecurityLive do
     |> assign(:in_flight_plan_count, length(in_flight_plans))
     |> assign(:pending_approvals, pending_approvals)
     |> assign(:pending_approval_count, length(pending_approvals))
+    |> assign(:chain_pauses, chain_pauses)
     |> assign(:safety_events, safety_events)
     |> assign(:safety_filters, filters)
     |> assign(:safety_filter_form, safety_filter_form)
@@ -704,6 +714,7 @@ defmodule BankWeb.SecurityLive do
             pending_approvals={@pending_approvals}
             safety_events={@safety_events}
           />
+          <.chain_pauses_card pauses={@chain_pauses} />
           <.safety_events_card
             events={@safety_events}
             filter_form={@safety_filter_form}
@@ -1561,6 +1572,95 @@ defmodule BankWeb.SecurityLive do
     Approvals: #{counts.pending_approvals} pending
     Safety events shown: #{counts.safety_events}
     Generated: #{generated}
+    """
+  end
+
+  # --- Component: chain pauses card (#228 Phase 1) -------------------------
+  #
+  # Read-only "what is currently paused at scope?" surface for the
+  # current workspace. Sourced from
+  # `Bank.Security.Pauses.list_active/1`, which is workspace-scoped
+  # at the context layer (refuses to surface sibling-workspace rows
+  # even when given `nil`).
+  #
+  # Phase 1 only ships `:chain` rows; future phases extend the
+  # `scope_type` enum. The card renders whatever scope rows the
+  # context returns so adding a new scope_type later does not
+  # require this component to change.
+  #
+  # No mutating controls in this slice — pause/resume buttons wait
+  # for #332's HTTP/UI surface. Field selection is intentionally
+  # minimal: scope type/value, optional reason (≤256 chars,
+  # operator-supplied), and the paused-at age. `created_by_user_id`
+  # is omitted to keep the safety console scoped to the existing
+  # patterns; the audit row carries the actor identity durably.
+
+  attr :pauses, :list, required: true
+
+  defp chain_pauses_card(assigns) do
+    ~H"""
+    <section
+      id="chain-pauses-card"
+      data-count={length(@pauses)}
+      class="rounded-xl border border-base-300 bg-base-100 shadow-sm overflow-hidden"
+    >
+      <header class="px-6 py-4 border-b border-base-300 flex items-center justify-between">
+        <h2 class="text-sm font-semibold flex items-center gap-1.5">
+          <.icon name="hero-no-symbol" class="size-4" /> Active scope pauses
+        </h2>
+        <span class="badge badge-sm badge-ghost">{length(@pauses)}</span>
+      </header>
+
+      <div
+        :if={@pauses == []}
+        id="chain-pauses-empty"
+        class="px-6 py-8 text-center text-sm text-base-content/50"
+      >
+        No active scope pauses for this workspace.
+      </div>
+
+      <ul :if={@pauses != []} class="divide-y divide-base-300">
+        <li :for={pause <- @pauses} id={"chain-pause-#{pause.id}"} class="px-6 py-4">
+          <.chain_pause_row pause={pause} />
+        </li>
+      </ul>
+    </section>
+    """
+  end
+
+  attr :pause, :map, required: true
+
+  defp chain_pause_row(assigns) do
+    ~H"""
+    <div class="flex items-start justify-between gap-3">
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2 flex-wrap">
+          <span
+            id={"chain-pause-scope-#{@pause.id}"}
+            class="badge badge-sm badge-warning font-mono"
+            data-scope-type={@pause.scope_type}
+            data-scope-value={@pause.scope_value}
+          >
+            {@pause.scope_type} · {@pause.scope_value}
+          </span>
+        </div>
+        <div class="mt-1 text-xs text-base-content/50 flex items-center gap-3 flex-wrap">
+          <span :if={@pause.reason}>
+            reason
+            <span id={"chain-pause-reason-#{@pause.id}"} class="font-mono break-words">
+              {@pause.reason}
+            </span>
+          </span>
+          <span :if={@pause.paused_at}>
+            paused
+            <span id={"chain-pause-age-#{@pause.id}"} class="font-mono">
+              {format_age(@pause.paused_at)}
+            </span>
+            ago
+          </span>
+        </div>
+      </div>
+    </div>
     """
   end
 

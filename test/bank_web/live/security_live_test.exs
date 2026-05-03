@@ -1368,6 +1368,119 @@ defmodule BankWeb.SecurityLiveTest do
     end
   end
 
+  # --- Chain pauses card (#228 Phase 1, read-only surface) ----------------
+
+  describe "chain pauses card" do
+    test "renders empty state when no active pauses exist", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#chain-pauses-card")
+      assert has_element?(view, "#chain-pauses-empty")
+      assert has_element?(view, ~s|#chain-pauses-card[data-count="0"]|)
+    end
+
+    test "active chain pause renders for current workspace",
+         %{conn: conn, workspace: ws, current_user: user} do
+      {:ok, :paused, pause} =
+        Bank.Security.Pauses.create_pause(ws.id, :chain, "base",
+          actor: user,
+          reason: "rpc outage"
+        )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#chain-pauses-card")
+      refute has_element?(view, "#chain-pauses-empty")
+
+      assert has_element?(view, ~s|#chain-pauses-card[data-count="1"]|)
+      assert has_element?(view, "#chain-pause-#{pause.id}")
+
+      assert has_element?(
+               view,
+               ~s|#chain-pause-scope-#{pause.id}[data-scope-type="chain"][data-scope-value="base"]|
+             )
+
+      assert has_element?(view, "#chain-pause-reason-#{pause.id}", "rpc outage")
+    end
+
+    test "sibling-workspace chain pause does NOT appear", %{conn: conn} do
+      {:ok, sibling_ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "sibling-pause-#{System.unique_integer([:positive])}",
+          name: "Sibling"
+        })
+
+      {:ok, sibling_user} =
+        Bank.Accounts.find_or_create_from_oauth(%{
+          provider: :google,
+          subject: "sibling-pause-#{System.unique_integer([:positive])}",
+          email: "sibling-pause-#{System.unique_integer([:positive])}@example.com",
+          name: "Sibling User"
+        })
+
+      {:ok, :paused, _sibling_pause} =
+        Bank.Security.Pauses.create_pause(sibling_ws.id, :chain, "base",
+          actor: sibling_user,
+          reason: "sibling-only"
+        )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#chain-pauses-empty")
+      assert has_element?(view, ~s|#chain-pauses-card[data-count="0"]|)
+    end
+
+    test "resumed pause does NOT appear",
+         %{conn: conn, workspace: ws, current_user: user} do
+      {:ok, :paused, _pause} =
+        Bank.Security.Pauses.create_pause(ws.id, :chain, "base",
+          actor: user,
+          reason: "transient"
+        )
+
+      {:ok, :resumed, _resumed} =
+        Bank.Security.Pauses.resume(ws.id, :chain, "base", actor: user)
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#chain-pauses-empty")
+    end
+
+    test "card content does not include obvious secret-bearing substrings",
+         %{conn: conn, workspace: ws, current_user: user} do
+      {:ok, :paused, _pause} =
+        Bank.Security.Pauses.create_pause(ws.id, :chain, "base",
+          actor: user,
+          reason: "operator-typed reason"
+        )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      card_html =
+        view
+        |> element("#chain-pauses-card")
+        |> render()
+
+      refute card_html =~ "Bearer "
+      refute card_html =~ "cb_"
+      refute card_html =~ "0x"
+      refute card_html =~ "BEGIN "
+      refute card_html =~ "private_key"
+      refute card_html =~ "signing"
+    end
+
+    test "coexists with incident-summary / pending-approvals / in-flight / safety-events cards",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#chain-pauses-card")
+      assert has_element?(view, "#incident-summary-card")
+      assert has_element?(view, "#pending-approvals-card")
+      assert has_element?(view, "#in-flight-plans-card")
+      assert has_element?(view, "#safety-events-card")
+    end
+  end
+
   # Insert an `ExecutionPlan` whose `updated_at` is overwritten via a
   # raw SQL update so it appears stuck without depending on Ecto's
   # automatic timestamp behavior.
