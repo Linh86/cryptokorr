@@ -832,6 +832,17 @@ defmodule BankWeb.SecurityLive do
             current_role={@current_scope.role}
           />
           <.adapter_health_card health={@adapter_health} />
+          <.incident_readiness_card
+            paused={@paused}
+            agent_keys_paused={@agent_keys_paused}
+            chain_pauses={@chain_pauses}
+            adapter_health={@adapter_health}
+            stuck_plans={@stuck_plans}
+            in_flight_plans={@in_flight_plans}
+            pending_approvals={@pending_approvals}
+            delegations={@delegations}
+            safety_events={@safety_events}
+          />
           <.safety_events_card
             events={@safety_events}
             filter_form={@safety_filter_form}
@@ -1934,6 +1945,170 @@ defmodule BankWeb.SecurityLive do
   defp adapter_health_badge_class(:degraded), do: "badge-error"
   defp adapter_health_badge_class(:unknown), do: "badge-ghost"
   defp adapter_health_badge_class(_), do: "badge-ghost"
+
+  # --- Component: incident readiness card (#229) ---------------------------
+  #
+  # Compact "operations pressure" snapshot. Pure projection of
+  # already-loaded SecurityLive assigns — no new backend call, no
+  # new ETS read, no PubSub work, no events. The card collapses
+  # the rest of the right column into a single readiness level so
+  # an operator can scan one row before drilling into the
+  # specific cards above (incident summary, chain pauses, adapter
+  # health) for detail.
+  #
+  # Readiness rules:
+  #
+  #   * `critical` — runtime paused, OR workspace agent keys paused,
+  #     OR an active chain pause exists, OR adapter health is
+  #     `:degraded`. These are conditions that are actively
+  #     refusing or unable to process work.
+  #   * `attention` — no critical signal, but stuck plans, in-flight
+  #     plans, or pending approvals exist. Operator pressure but
+  #     nothing is actively broken.
+  #   * `steady` — none of the above.
+  #
+  # Field selection deliberately excludes reasons, payloads, and
+  # adapter detail strings beyond the sanitized `:status` /
+  # `:detail` enum already exposed by `#adapter-health-card`.
+  # Counts only.
+
+  attr :paused, :boolean, required: true
+  attr :agent_keys_paused, :boolean, required: true
+  attr :chain_pauses, :list, required: true
+  attr :adapter_health, :map, required: true
+  attr :stuck_plans, :list, required: true
+  attr :in_flight_plans, :list, required: true
+  attr :pending_approvals, :list, required: true
+  attr :delegations, :list, required: true
+  attr :safety_events, :list, required: true
+
+  defp incident_readiness_card(assigns) do
+    counts = %{
+      chain_pauses: length(assigns.chain_pauses),
+      stuck: length(assigns.stuck_plans),
+      in_flight: length(assigns.in_flight_plans),
+      pending_approvals: length(assigns.pending_approvals),
+      delegations: length(assigns.delegations),
+      safety_events: length(assigns.safety_events)
+    }
+
+    level =
+      incident_readiness_level(
+        assigns.paused,
+        assigns.agent_keys_paused,
+        counts.chain_pauses,
+        assigns.adapter_health.status,
+        counts.stuck,
+        counts.in_flight,
+        counts.pending_approvals
+      )
+
+    assigns = assign(assigns, counts: counts, level: level)
+
+    ~H"""
+    <section
+      id="incident-readiness-card"
+      data-level={@level}
+      class="rounded-xl border border-base-300 bg-base-100 shadow-sm overflow-hidden"
+    >
+      <header class="px-6 py-4 border-b border-base-300 flex items-center justify-between">
+        <h2 class="text-sm font-semibold flex items-center gap-1.5">
+          <.icon name="hero-bolt" class="size-4" /> Incident readiness
+        </h2>
+        <span class={[
+          "badge badge-sm font-mono",
+          incident_readiness_badge_class(@level)
+        ]}>
+          {@level}
+        </span>
+      </header>
+
+      <dl class="px-6 py-4 grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
+        <div id="incident-readiness-runtime" class="flex items-center justify-between gap-2">
+          <dt class="text-base-content/50">Runtime</dt>
+          <dd class={[
+            "font-mono",
+            if(@paused, do: "text-warning", else: "text-success")
+          ]}>
+            {if @paused, do: "paused", else: "running"}
+          </dd>
+        </div>
+        <div id="incident-readiness-agent-keys" class="flex items-center justify-between gap-2">
+          <dt class="text-base-content/50">Agent keys</dt>
+          <dd class={[
+            "font-mono",
+            if(@agent_keys_paused, do: "text-warning", else: "text-success")
+          ]}>
+            {if @agent_keys_paused, do: "paused", else: "active"}
+          </dd>
+        </div>
+        <div id="incident-readiness-chain-pauses" class="flex items-center justify-between gap-2">
+          <dt class="text-base-content/50">Chain pauses</dt>
+          <dd class={[
+            "font-mono",
+            if(@counts.chain_pauses > 0, do: "text-warning", else: "")
+          ]}>
+            {@counts.chain_pauses}
+          </dd>
+        </div>
+        <div
+          id="incident-readiness-adapter"
+          data-status={@adapter_health.status}
+          class="flex items-center justify-between gap-2"
+        >
+          <dt class="text-base-content/50">Adapter</dt>
+          <dd class="font-mono">{@adapter_health.status}</dd>
+        </div>
+        <div id="incident-readiness-plans" class="flex items-center justify-between gap-2">
+          <dt class="text-base-content/50">Plans</dt>
+          <dd class="font-mono">
+            {@counts.stuck} stuck, {@counts.in_flight} in-flight
+          </dd>
+        </div>
+        <div id="incident-readiness-approvals" class="flex items-center justify-between gap-2">
+          <dt class="text-base-content/50">Approvals</dt>
+          <dd class="font-mono">{@counts.pending_approvals} pending</dd>
+        </div>
+        <div id="incident-readiness-delegations" class="flex items-center justify-between gap-2">
+          <dt class="text-base-content/50">Delegations</dt>
+          <dd class="font-mono">{@counts.delegations}</dd>
+        </div>
+        <div id="incident-readiness-events" class="flex items-center justify-between gap-2">
+          <dt class="text-base-content/50">Safety events</dt>
+          <dd class="font-mono">{@counts.safety_events} shown</dd>
+        </div>
+      </dl>
+    </section>
+    """
+  end
+
+  # Readiness rule. Order matters: any critical signal short-circuits
+  # the attention check.
+  defp incident_readiness_level(
+         paused?,
+         agent_keys_paused?,
+         chain_pause_count,
+         adapter_status,
+         stuck_count,
+         in_flight_count,
+         pending_count
+       ) do
+    cond do
+      paused? or agent_keys_paused? or chain_pause_count > 0 or adapter_status == :degraded ->
+        "critical"
+
+      stuck_count > 0 or in_flight_count > 0 or pending_count > 0 ->
+        "attention"
+
+      true ->
+        "steady"
+    end
+  end
+
+  defp incident_readiness_badge_class("critical"), do: "badge-error"
+  defp incident_readiness_badge_class("attention"), do: "badge-warning"
+  defp incident_readiness_badge_class("steady"), do: "badge-success"
+  defp incident_readiness_badge_class(_), do: "badge-ghost"
 
   # --- Component: delegations card -----------------------------------------
 

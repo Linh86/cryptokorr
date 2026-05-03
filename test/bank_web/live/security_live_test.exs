@@ -1817,6 +1817,235 @@ defmodule BankWeb.SecurityLiveTest do
     end
   end
 
+  # --- Incident readiness card (#229) --------------------------------------
+
+  describe "incident readiness card" do
+    setup do
+      :ok = Bank.Ops.AdapterHealthSnapshot.reset()
+      :ok
+    end
+
+    test "steady state when no pressure signals exist", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, ~s|#incident-readiness-card[data-level="steady"]|)
+      assert has_element?(view, "#incident-readiness-runtime", "running")
+      assert has_element?(view, "#incident-readiness-agent-keys", "active")
+      assert has_element?(view, "#incident-readiness-chain-pauses", "0")
+      assert has_element?(view, ~s|#incident-readiness-adapter[data-status="unknown"]|)
+      assert has_element?(view, "#incident-readiness-plans", "0 stuck, 0 in-flight")
+      assert has_element?(view, "#incident-readiness-approvals", "0 pending")
+      assert has_element?(view, "#incident-readiness-delegations", "0")
+      assert has_element?(view, "#incident-readiness-events", "0 shown")
+    end
+
+    test "runtime paused moves level to critical", %{conn: conn} do
+      {:ok, _} = Security.pause(:global, reason: :test, actor: :user)
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, ~s|#incident-readiness-card[data-level="critical"]|)
+      assert has_element?(view, "#incident-readiness-runtime", "paused")
+    end
+
+    test "workspace agent keys paused moves level to critical",
+         %{conn: conn, workspace: ws, current_user: user} do
+      {:ok, :paused, _} = Bank.APIKeys.pause_workspace(ws, user, reason: "test-readiness")
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, ~s|#incident-readiness-card[data-level="critical"]|)
+      assert has_element?(view, "#incident-readiness-agent-keys", "paused")
+    end
+
+    test "active chain pause moves level to critical",
+         %{conn: conn, workspace: ws, current_user: user} do
+      {:ok, :paused, _} =
+        Bank.Security.Pauses.create_pause(ws.id, :chain, "base",
+          actor: user,
+          reason: "test-readiness"
+        )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, ~s|#incident-readiness-card[data-level="critical"]|)
+      assert has_element?(view, "#incident-readiness-chain-pauses", "1")
+    end
+
+    test "degraded adapter health moves level to critical", %{conn: conn} do
+      _ =
+        Bank.Ops.AdapterHealthSnapshot.refresh(
+          health_fn: fn -> %{status: :error, detail: "adapter 5xx: 503"} end
+        )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, ~s|#incident-readiness-card[data-level="critical"]|)
+      assert has_element?(view, ~s|#incident-readiness-adapter[data-status="degraded"]|)
+    end
+
+    test "stuck plan moves level to attention when no critical signal",
+         %{conn: conn, workspace: ws} do
+      _stuck = stuck_prepared_plan(ws.id)
+
+      _ =
+        Bank.Ops.AdapterHealthSnapshot.refresh(
+          health_fn: fn -> %{status: :ok, detail: "http 200"} end
+        )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, ~s|#incident-readiness-card[data-level="attention"]|)
+      assert has_element?(view, "#incident-readiness-plans", "1 stuck")
+    end
+
+    test "in-flight plan moves level to attention when no critical signal",
+         %{conn: conn, workspace: ws} do
+      _in_flight = fresh_plan(:signing, ws.id)
+
+      _ =
+        Bank.Ops.AdapterHealthSnapshot.refresh(
+          health_fn: fn -> %{status: :ok, detail: "http 200"} end
+        )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, ~s|#incident-readiness-card[data-level="attention"]|)
+      assert has_element?(view, "#incident-readiness-plans", "0 stuck, 1 in-flight")
+    end
+
+    test "pending approval moves level to attention when no critical signal",
+         %{conn: conn} do
+      intent = agent_intent()
+
+      _envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          risk_tier: :moderate,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      _ =
+        Bank.Ops.AdapterHealthSnapshot.refresh(
+          health_fn: fn -> %{status: :ok, detail: "http 200"} end
+        )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, ~s|#incident-readiness-card[data-level="attention"]|)
+      assert has_element?(view, "#incident-readiness-approvals", "1 pending")
+    end
+
+    test "sibling-workspace data does not inflate readiness counts", %{conn: conn} do
+      {:ok, sibling_ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "sibling-readiness-#{System.unique_integer([:positive])}",
+          name: "Sibling"
+        })
+
+      {:ok, sibling_user} =
+        Bank.Accounts.find_or_create_from_oauth(%{
+          provider: :google,
+          subject: "sibling-readiness-#{System.unique_integer([:positive])}",
+          email: "sibling-readiness-#{System.unique_integer([:positive])}@example.com",
+          name: "Sibling User"
+        })
+
+      # Sibling stuck plan, in-flight plan, pending approval, chain
+      # pause — none of these should bleed into the current
+      # workspace's readiness counts.
+      _ = stuck_prepared_plan(sibling_ws.id)
+      _ = fresh_plan(:signing, sibling_ws.id)
+
+      sibling_intent = agent_intent(workspace_id: sibling_ws.id)
+
+      _ =
+        decision_envelope(
+          intent: sibling_intent,
+          outcome: :approval_required,
+          risk_tier: :elevated,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      {:ok, :paused, _} =
+        Bank.Security.Pauses.create_pause(sibling_ws.id, :chain, "base",
+          actor: sibling_user,
+          reason: "sibling-only"
+        )
+
+      _ =
+        Bank.Ops.AdapterHealthSnapshot.refresh(
+          health_fn: fn -> %{status: :ok, detail: "http 200"} end
+        )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, ~s|#incident-readiness-card[data-level="steady"]|)
+      assert has_element?(view, "#incident-readiness-chain-pauses", "0")
+      assert has_element?(view, "#incident-readiness-plans", "0 stuck, 0 in-flight")
+      assert has_element?(view, "#incident-readiness-approvals", "0 pending")
+    end
+
+    test "coexists with incident-summary / chain-pauses / adapter-health / safety-events cards",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#incident-readiness-card")
+      assert has_element?(view, "#incident-summary-card")
+      assert has_element?(view, "#chain-pauses-card")
+      assert has_element?(view, "#adapter-health-card")
+      assert has_element?(view, "#safety-events-card")
+    end
+
+    test "card does not include obvious secret-bearing substrings",
+         %{conn: conn, workspace: ws, current_user: user} do
+      # Stage every input that could carry sensitive text:
+      # - workspace pause with a probe-leak reason
+      # - chain pause with a probe-leak reason
+      # - degraded adapter health whose probe carries a credentialed URL
+      {:ok, :paused, _} =
+        Bank.APIKeys.pause_workspace(ws, user, reason: "READINESS_LEAK_PROBE_REASON_DO_NOT_LEAK")
+
+      {:ok, :paused, _} =
+        Bank.Security.Pauses.create_pause(ws.id, :chain, "base",
+          actor: user,
+          reason: "READINESS_LEAK_PROBE_CHAIN_REASON"
+        )
+
+      _ =
+        Bank.Ops.AdapterHealthSnapshot.refresh(
+          health_fn: fn ->
+            %{
+              status: :error,
+              detail:
+                ~s|%Req.TransportError{reason: :nxdomain, url: "https://user:READINESS_LEAK_TOKEN@adapter.internal/healthz"}|
+            }
+          end
+        )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      card_html =
+        view
+        |> element("#incident-readiness-card")
+        |> render()
+
+      refute card_html =~ "READINESS_LEAK_PROBE_REASON_DO_NOT_LEAK"
+      refute card_html =~ "READINESS_LEAK_PROBE_CHAIN_REASON"
+      refute card_html =~ "READINESS_LEAK_TOKEN"
+      refute card_html =~ "Bearer "
+      refute card_html =~ "cb_"
+      refute card_html =~ "0x"
+      refute card_html =~ "BEGIN "
+      refute card_html =~ "private_key"
+      refute card_html =~ "signing"
+      refute card_html =~ "https://"
+    end
+  end
+
   # Insert an `ExecutionPlan` whose `updated_at` is overwritten via a
   # raw SQL update so it appears stuck without depending on Ecto's
   # automatic timestamp behavior.
