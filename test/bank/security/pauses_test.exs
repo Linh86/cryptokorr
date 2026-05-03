@@ -108,6 +108,182 @@ defmodule Bank.Security.PausesTest do
     end
   end
 
+  describe "create_pause with expires_at (#228 phase 1.5)" do
+    test "stores future expires_at on a fresh pause" do
+      %{id: ws_id} = create_workspace!("expiry-future")
+      user = create_user!()
+      future = DateTime.utc_now() |> DateTime.add(3600, :second)
+
+      assert {:ok, :paused, %Pause{} = pause} =
+               Pauses.create_pause(ws_id, :chain, "base", actor: user, expires_at: future)
+
+      assert DateTime.compare(pause.expires_at, future) == :eq
+    end
+
+    test "rejects expires_at that is not strictly after paused_at" do
+      %{id: ws_id} = create_workspace!("expiry-past")
+      user = create_user!()
+      past = DateTime.utc_now() |> DateTime.add(-60, :second)
+
+      assert {:error, %Ecto.Changeset{} = cs} =
+               Pauses.create_pause(ws_id, :chain, "base", actor: user, expires_at: past)
+
+      assert {:expires_at, _} = List.keyfind(cs.errors, :expires_at, 0)
+    end
+
+    test "idempotent re-pause does NOT mutate the existing expires_at" do
+      %{id: ws_id} = create_workspace!("expiry-idem")
+      user = create_user!()
+      first = DateTime.utc_now() |> DateTime.add(600, :second)
+      second = DateTime.utc_now() |> DateTime.add(7200, :second)
+
+      {:ok, :paused, original} =
+        Pauses.create_pause(ws_id, :chain, "base", actor: user, expires_at: first)
+
+      {:ok, :already_paused, returned} =
+        Pauses.create_pause(ws_id, :chain, "base", actor: user, expires_at: second)
+
+      assert returned.id == original.id
+      # First writer's expires_at wins; the second call's later expiry
+      # is silently ignored.
+      assert DateTime.compare(returned.expires_at, original.expires_at) == :eq
+      refute DateTime.compare(returned.expires_at, second) == :eq
+
+      # No second audit row from the idempotent re-pause.
+      assert count_events("security.scope_paused", ws_id) == 1
+    end
+
+    test "expires_at is optional — no expiry means manual-resume only" do
+      %{id: ws_id} = create_workspace!("expiry-none")
+      user = create_user!()
+
+      {:ok, :paused, pause} = Pauses.create_pause(ws_id, :chain, "base", actor: user)
+
+      assert is_nil(pause.expires_at)
+    end
+  end
+
+  describe "list_active_expired/2 + expire/2 (#228 phase 1.5)" do
+    test "list_active_expired returns rows with expires_at <= now from any workspace" do
+      %{id: a_id} = create_workspace!("expiry-list-a")
+      %{id: b_id} = create_workspace!("expiry-list-b")
+      user = create_user!()
+      far_future = DateTime.utc_now() |> DateTime.add(7200, :second)
+      soon = DateTime.utc_now() |> DateTime.add(60, :second)
+
+      {:ok, :paused, soon_a} =
+        Pauses.create_pause(a_id, :chain, "base", actor: user, expires_at: soon)
+
+      {:ok, :paused, far_b} =
+        Pauses.create_pause(b_id, :chain, "base", actor: user, expires_at: far_future)
+
+      {:ok, :paused, _no_expiry} = Pauses.create_pause(a_id, :chain, "optimism", actor: user)
+
+      # `now` two minutes from now: only the soon row in workspace A
+      # is expired; far_b and the no-expiry row are left alone.
+      now = DateTime.utc_now() |> DateTime.add(120, :second)
+
+      ids = Pauses.list_active_expired(now) |> Enum.map(& &1.id)
+      assert soon_a.id in ids
+      refute far_b.id in ids
+    end
+
+    test "expire/2 transitions an expired active row to resumed with anchored resumed_at" do
+      %{id: ws_id} = create_workspace!("expire-flip")
+      user = create_user!()
+      expires_at = DateTime.utc_now() |> DateTime.add(60, :second)
+
+      {:ok, :paused, pause} =
+        Pauses.create_pause(ws_id, :chain, "base", actor: user, expires_at: expires_at)
+
+      now = DateTime.utc_now() |> DateTime.add(120, :second)
+
+      assert {:ok, :expired, %Pause{} = expired} = Pauses.expire(pause, now)
+
+      # `resumed_at` is anchored to the recorded `expires_at`, NOT the
+      # sweeper's `now`, so re-runs always agree.
+      assert DateTime.compare(expired.resumed_at, expires_at) == :eq
+      assert is_nil(expired.resumed_by_user_id)
+      refute Pauses.paused?(ws_id, :chain, "base")
+      assert count_events("security.scope_expired", ws_id) == 1
+    end
+
+    test "expire/2 second call on an already-resumed row returns :already_resumed with no audit" do
+      %{id: ws_id} = create_workspace!("expire-idem")
+      user = create_user!()
+      expires_at = DateTime.utc_now() |> DateTime.add(60, :second)
+
+      {:ok, :paused, pause} =
+        Pauses.create_pause(ws_id, :chain, "base", actor: user, expires_at: expires_at)
+
+      now = DateTime.utc_now() |> DateTime.add(120, :second)
+      {:ok, :expired, _} = Pauses.expire(pause, now)
+
+      assert {:ok, :already_resumed} = Pauses.expire(pause, now)
+      assert count_events("security.scope_expired", ws_id) == 1
+    end
+
+    test "expire/2 with stale snapshot: row already operator-resumed returns :already_resumed" do
+      %{id: ws_id} = create_workspace!("expire-stale-resume")
+      user = create_user!()
+      expires_at = DateTime.utc_now() |> DateTime.add(60, :second)
+
+      {:ok, :paused, pause} =
+        Pauses.create_pause(ws_id, :chain, "base", actor: user, expires_at: expires_at)
+
+      {:ok, :resumed, _} = Pauses.resume(ws_id, :chain, "base", actor: user)
+
+      now = DateTime.utc_now() |> DateTime.add(120, :second)
+
+      assert {:ok, :already_resumed} = Pauses.expire(pause, now)
+      assert count_events("security.scope_expired", ws_id) == 0
+    end
+
+    test "expire/2 with stale `now`: not-yet-expired row returns :not_yet_expired" do
+      %{id: ws_id} = create_workspace!("expire-stale-now")
+      user = create_user!()
+      expires_at = DateTime.utc_now() |> DateTime.add(7200, :second)
+
+      {:ok, :paused, pause} =
+        Pauses.create_pause(ws_id, :chain, "base", actor: user, expires_at: expires_at)
+
+      now = DateTime.utc_now() |> DateTime.add(60, :second)
+
+      assert {:ok, :not_yet_expired} = Pauses.expire(pause, now)
+      assert count_events("security.scope_expired", ws_id) == 0
+    end
+
+    test "expire/2 broadcasts :scope_expired post-commit" do
+      %{id: ws_id} = create_workspace!("expire-bcast")
+      user = create_user!()
+      expires_at = DateTime.utc_now() |> DateTime.add(60, :second)
+
+      {:ok, :paused, pause} =
+        Pauses.create_pause(ws_id, :chain, "base", actor: user, expires_at: expires_at)
+
+      :ok = Phoenix.PubSub.subscribe(Bank.PubSub, PubSub.security_events())
+      :ok = Phoenix.PubSub.subscribe(Bank.PubSub, PubSub.audit_stream())
+
+      now = DateTime.utc_now() |> DateTime.add(120, :second)
+      {:ok, :expired, _} = Pauses.expire(pause, now)
+
+      assert_receive %{
+        topic: :security_events,
+        event: :scope_expired,
+        payload: %{
+          scope: %{kind: :chain, value: "base", workspace_id: ^ws_id},
+          actor: :runtime
+        }
+      }
+
+      assert_receive %{
+        topic: :audit_stream,
+        event: :appended,
+        payload: %{event_type: "security.scope_expired", subject_id: "base"}
+      }
+    end
+  end
+
   describe "realtime broadcast" do
     test "create_pause emits :scope_paused on security:events and :appended on audit:stream" do
       %{id: ws_id} = create_workspace!("bcast-pause")

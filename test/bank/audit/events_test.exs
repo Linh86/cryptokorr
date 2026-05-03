@@ -202,6 +202,44 @@ defmodule Bank.Audit.EventsTest do
     end
   end
 
+  describe "security_scope_expired/3" do
+    test "actor is :runtime; before_ref carries pause snapshot incl. expires_at" do
+      expires_at = DateTime.utc_now() |> DateTime.add(60, :second)
+
+      pause =
+        build_chain_pause(%{
+          workspace_id: "ws-expired-1",
+          scope_value: "base",
+          resumed_at: expires_at,
+          expires_at: expires_at
+        })
+
+      prior = %{
+        paused_at: pause.paused_at,
+        reason: "rpc outage",
+        created_by_user_id: "user-paused",
+        expires_at: expires_at
+      }
+
+      attrs = Events.security_scope_expired(pause, prior)
+
+      assert attrs.event_type == "security.scope_expired"
+      assert attrs.actor == :runtime
+      assert is_nil(attrs.actor_id)
+      assert attrs.subject_type == "chain"
+      assert attrs.subject_id == "base"
+      assert attrs.workspace_id == "ws-expired-1"
+      assert attrs.before_ref.paused_at == pause.paused_at
+      assert attrs.before_ref.reason == "rpc outage"
+      assert attrs.before_ref.created_by_user_id == "user-paused"
+      assert attrs.before_ref.expires_at == expires_at
+      assert attrs.after_ref.scope_type == "chain"
+      assert attrs.after_ref.scope_value == "base"
+      assert attrs.after_ref.resumed_at == expires_at
+      assert attrs.after_ref.expires_at == expires_at
+    end
+  end
+
   defp build_chain_pause(attrs) do
     base = %Bank.Security.Pause{
       id: Ecto.UUID.generate(),
