@@ -290,6 +290,11 @@ defmodule Bank.APIKeys do
     # for the same key. Lock the row `FOR UPDATE` and re-check
     # `revoked_at` inside the txn so only the winner writes the
     # audit event. Mirrors PR #314 / PR #318 / PR #325 / PR #328.
+    #
+    # The `Notifier.audit_stream/1` broadcast fires AFTER the txn
+    # commits, on the winning real-revoke path only. Idempotent
+    # already-revoked and rollback paths emit no broadcast.
+    # Mirrors PR #335's rotate_key/3 post-commit shape.
     Repo.transaction(fn ->
       case lock_key(api_key.id) do
         nil ->
@@ -299,18 +304,34 @@ defmodule Bank.APIKeys do
           # Concurrent revoke landed first. Return the locked
           # (already-revoked) struct so callers see the
           # authoritative `revoked_at`. No audit, no broadcast.
-          locked
+          {:already_revoked, locked}
 
         %APIKey{} = locked ->
           with {:ok, revoked} <- locked |> APIKey.revoke_changeset() |> Repo.update(),
-               {:ok, _event} <-
+               {:ok, audit_event} <-
                  Audit.append_event(Bank.Audit.Events.api_key_revoked(revoked, actor: actor)) do
-            revoked
+            {:revoked, revoked, audit_event}
           else
             {:error, reason} -> Repo.rollback(reason)
           end
       end
     end)
+    |> case do
+      {:ok, {:revoked, revoked, audit_event}} ->
+        # `Audit.append_event/1` is the silent insert path used
+        # inside the txn; the `audit_stream` PubSub broadcast
+        # must run AFTER the transaction commits so subscribers
+        # (e.g. `BankWeb.AuditLive`'s real-time tail) only see
+        # events that are durably persisted.
+        Notifier.audit_stream(audit_event)
+        {:ok, revoked}
+
+      {:ok, {:already_revoked, locked}} ->
+        {:ok, locked}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   defp lock_key(id) when is_binary(id) do
