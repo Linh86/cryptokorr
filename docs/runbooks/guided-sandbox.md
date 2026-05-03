@@ -1,8 +1,28 @@
 # Guided sandbox runbook
 
+> **Status: interim.** This runbook is the working version that goes
+> with [#242](https://github.com/Linh86/cryptobank/issues/242) — it is
+> NOT the final closeout. Two upstream slices in epic
+> [#214](https://github.com/Linh86/cryptobank/issues/214) are still
+> open and feed back into this page once they land:
+>
+> - **[#240](https://github.com/Linh86/cryptobank/issues/240)** —
+>   automated Level 1 sandbox smoke command. Until #240 ships, the
+>   "Run smoke" step is a *manual `/sandbox` checklist walk* (eight
+>   stable-id steps). When #240 lands, the per-environment table and
+>   the run-smoke section need to cite the actual command.
+> - **[#241](https://github.com/Linh86/cryptobank/issues/241)** —
+>   safe sandbox reset and fixture hygiene. The "Reset between takes"
+>   section below describes `mix bank.demo.reset` as it ships **today**;
+>   when #241 hardens reset / fixture handling, that section needs to
+>   cite the final reset surface, not the current shape.
+>
+> #242 will be re-closed once #240 and #241 merge AND this runbook is
+> updated to cite their shipped surfaces.
+
 A fresh reviewer should be able to follow this page top-to-bottom, starting from an empty database, and finish with the `/sandbox` checklist green — without configuring any secrets, without `.env` files, and without ever broadcasting to a real chain.
 
-This is the closeout doc for [#242](https://github.com/Linh86/cryptobank/issues/242). It sits next to the dataset reference in [`docs/demo.md`](../demo.md), the demo dataset scenarios in [`docs/demo-scenarios.md`](../demo-scenarios.md), and the alpha-staging smoke in [`docs/mvp-smoke-runbook.md`](../mvp-smoke-runbook.md). What is new here is the *single guided path*: setup → seed → walk → reset, with explicit boundaries against staging / testnet / mainnet.
+This is the *interim* closeout doc for [#242](https://github.com/Linh86/cryptobank/issues/242). It sits next to the dataset reference in [`docs/demo.md`](../demo.md), the demo dataset scenarios in [`docs/demo-scenarios.md`](../demo-scenarios.md), and the alpha-staging smoke in [`docs/mvp-smoke-runbook.md`](../mvp-smoke-runbook.md). What is new here is the *single guided path*: setup → seed → walk → reset, with explicit boundaries against staging / testnet / mainnet.
 
 ## What this runbook is — and is not
 
@@ -58,6 +78,8 @@ Open <http://localhost:4000>. You will land on the dashboard for the seeded `san
 
 ## Walk the guided checklist at `/sandbox`
 
+> **Interim smoke.** Until [#240](https://github.com/Linh86/cryptobank/issues/240) ships an automated Level 1 sandbox smoke command, walking the eight `/sandbox` steps below by hand IS the smoke. When #240 merges, this section needs an additional "run the automated smoke" subsection citing the actual command, and the per-environment table above needs the same update.
+
 Open <http://localhost:4000/sandbox>. You will see a one-page guided checklist (`#sandbox-guide`) with a progress badge (`#sandbox-progress`) and eight steps. Each step is keyed by a stable element id (`#sandbox-step-<id>`) with a navigation link (`#sandbox-step-link-<id>`) to the operator page where the corresponding action lives. The checklist itself is **read-only** — no buttons, no form submissions, no chain calls; each step's `complete?` flag is a bounded `LIMIT 1` workspace-scoped DB read.
 
 Walk the eight steps in order:
@@ -79,6 +101,13 @@ A reviewer who is *new* to the runtime should also exercise the no-action path: 
 
 ## Reset between takes
 
+> **Interim — final reset behavior is tracked by [#241](https://github.com/Linh86/cryptobank/issues/241).**
+> The instructions below describe `mix bank.demo.reset` as it ships
+> on `main` *today*. #241 is hardening reset / fixture hygiene; when
+> it lands, this section must be updated to cite the final reset
+> surface (command shape, allowlist, and any new safety guards) and
+> any superseded behavior must be removed before #242 re-closes.
+
 ```sh
 mix bank.demo.reset
 ```
@@ -97,7 +126,7 @@ The reset is guarded behind an env allowlist — `:dev`, `:test`, `:staging` onl
 
 | Environment | Chain calls | Secrets / `.env` | Broadcast posture | Smoke command |
 |---|---|---|---|---|
-| **Local sandbox** (this runbook) | None. The seed inserts canned `:executed` rows with synthetic `tx_refs`. | None required. | No HTTP to the adapter; deep-health reports `adapter: not_configured`. | None. The `/sandbox` checklist is the smoke. |
+| **Local sandbox** (this runbook) | None. The seed inserts canned `:executed` rows with synthetic `tx_refs`. | None required. | No HTTP to the adapter; deep-health reports `adapter: not_configured`. | Manual `/sandbox` checklist today; automated Level 1 smoke pending [#240](https://github.com/Linh86/cryptobank/issues/240). |
 | **Staging** | Real adapter, but Base Sepolia by default. | Requires `ADAPTER_BASE_URL`, `ADAPTER_DISPATCH_SECRET`, `ADAPTER_CALLBACK_SECRET`. | Broadcasts to Base Sepolia bundler. | `mix bank.smoke.transfer`, `mix bank.smoke.revoke`. |
 | **Testnet (Base Sepolia)** | Real chain. | Same staging secrets plus a funded smart account and an active delegation. | Broadcasts; on-chain calls land. | See [`docs/base-sepolia-execution-day.md`](../base-sepolia-execution-day.md). |
 | **Mainnet** | Real chain. | Production-tier secrets, controlled by deploy. | Broadcasts; real value moves. | See [`docs/deploy.md`](../deploy.md). |
