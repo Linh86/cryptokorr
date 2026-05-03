@@ -122,16 +122,26 @@ defmodule Bank.APIKeys do
     Repo.transaction(fn ->
       with {:ok, api_key} <-
              %APIKey{} |> APIKey.create_changeset(attrs) |> Repo.insert(),
-           {:ok, _event} <-
+           {:ok, audit_event} <-
              Audit.append_event(Bank.Audit.Events.api_key_created(api_key, creator)) do
-        {api_key, raw_secret}
+        {api_key, audit_event}
       else
         {:error, reason} -> Repo.rollback(reason)
       end
     end)
     |> case do
-      {:ok, {api_key, raw_secret}} -> {:ok, api_key, raw_secret}
-      {:error, reason} -> {:error, reason}
+      {:ok, {api_key, audit_event}} ->
+        # `Audit.append_event/1` is the silent insert path used
+        # inside the txn; the `audit_stream` PubSub broadcast must
+        # run AFTER the transaction commits so subscribers (e.g.
+        # `BankWeb.AuditLive`'s real-time tail) only see events
+        # that are durably persisted, and not at all on rollback.
+        # Mirrors PR #335 (rotate_key) and PR #338 (revoke_key).
+        Notifier.audit_stream(audit_event)
+        {:ok, api_key, raw_secret}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
