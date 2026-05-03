@@ -145,6 +145,67 @@ defmodule Bank.APIKeysTest do
 
       assert event.after_ref["role"] == "operator" or event.after_ref[:role] == "operator"
     end
+
+    test "broadcasts the api_key.created audit event on audit_stream after the txn commits",
+         %{workspace: ws, user: user} do
+      # Pre-fix the create path wrote the audit row inside the
+      # transaction via `Audit.append_event/1` (silent insert) but
+      # never broadcast it on `audit_stream`. `BankWeb.AuditLive`
+      # subscribes to `audit_stream` for its real-time tail, so
+      # `api_key.created` events were persisted but invisible to
+      # any operator viewing the audit page until they refreshed.
+      # Post-fix the broadcast fires AFTER `Repo.transaction/1`
+      # commits so subscribers only see events that are durably
+      # persisted.
+      :ok = Bank.Runtime.PubSub.subscribe(Bank.Runtime.PubSub.audit_stream())
+
+      assert {:ok, %APIKey{} = key, raw_secret} =
+               APIKeys.create_key(ws, user, :operator, "broadcast-tail-create")
+
+      key_id = key.id
+
+      assert_receive %{
+        topic: :audit_stream,
+        event: :appended,
+        payload: %{event_type: "api_key.created", subject_id: ^key_id} = payload
+      }
+
+      # Broadcast payload must not carry the raw secret either —
+      # `Notifier.audit_stream/1` builds the payload from the
+      # persisted `%AuditEvent{}`'s public summary fields (id,
+      # event_type, subject_type, subject_id, correlation_id, ts),
+      # none of which can hold the raw secret. Pin that contract.
+      payload_json = Jason.encode!(payload)
+      refute payload_json =~ raw_secret, "audit_stream payload must not include the raw secret"
+    end
+
+    test "no api_key.created audit row or broadcast on changeset/constraint failure",
+         %{workspace: ws, user: user} do
+      # Empty `name` violates `validate_length(:name, min: 1)` in
+      # `APIKey.create_changeset/2`. The transaction rolls back,
+      # `create_key/4` returns `{:error, changeset}`, and NEITHER
+      # an audit row is persisted NOR an `audit_stream` broadcast
+      # fires. The audit-row absence is the authoritative check
+      # (broadcasts only fire post-commit, so a missing row
+      # implies a missing broadcast).
+      :ok = Bank.Runtime.PubSub.subscribe(Bank.Runtime.PubSub.audit_stream())
+
+      assert {:error, %Ecto.Changeset{valid?: false}} =
+               APIKeys.create_key(ws, user, :viewer, "")
+
+      # No persisted row for this workspace → rollback worked.
+      ws_id = ws.id
+
+      created_for_ws =
+        Repo.aggregate(
+          from(e in Bank.Audit.AuditEvent,
+            where: e.event_type == "api_key.created" and e.workspace_id == ^ws_id
+          ),
+          :count
+        )
+
+      assert created_for_ws == 0
+    end
   end
 
   # --- revoke_key/2 ---------------------------------------------------------
