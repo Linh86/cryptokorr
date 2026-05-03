@@ -506,6 +506,18 @@ defmodule BankWeb.SecurityLive do
         p.scope_type == :chain and p.scope_value == "base"
       end)
 
+    # Cached adapter health snapshot (#229). Read from
+    # `Bank.Ops.AdapterHealthSnapshot.snapshot/0`, which is a single
+    # `:ets.lookup` and never blocks the LiveView socket. The
+    # underlying probe (`Bank.Ops.Health.adapter/0`) is a 2-second
+    # synchronous HTTP call and is NOT safe to call from this
+    # process — refreshes happen out-of-band on the `:ops_scan`
+    # queue. The snapshot's detail field is a fixed enum string
+    # (`"ok"`, `"adapter_5xx"`, `"transport_error"`,
+    # `"not_configured"`, `"error"`) — never raw exception text or
+    # a credentialed RPC URL — so it is safe to render directly.
+    adapter_health = Bank.Ops.AdapterHealthSnapshot.snapshot()
+
     filters = socket.assigns[:safety_filters] || @default_safety_filters
     safety_events = load_safety_events(delegations, workspace_id, filters)
 
@@ -533,6 +545,7 @@ defmodule BankWeb.SecurityLive do
     |> assign(:pending_approval_count, length(pending_approvals))
     |> assign(:chain_pauses, chain_pauses)
     |> assign(:base_paused, base_paused?)
+    |> assign(:adapter_health, adapter_health)
     |> assign(:safety_events, safety_events)
     |> assign(:safety_filters, filters)
     |> assign(:safety_filter_form, safety_filter_form)
@@ -818,6 +831,7 @@ defmodule BankWeb.SecurityLive do
             base_paused={@base_paused}
             current_role={@current_scope.role}
           />
+          <.adapter_health_card health={@adapter_health} />
           <.safety_events_card
             events={@safety_events}
             filter_form={@safety_filter_form}
@@ -1846,6 +1860,80 @@ defmodule BankWeb.SecurityLive do
     </div>
     """
   end
+
+  # --- Component: adapter health card (#229) -------------------------------
+  #
+  # Read-only operator surface for the cached adapter health probe.
+  # Sourced from `Bank.Ops.AdapterHealthSnapshot.snapshot/0`, which
+  # is a single ETS lookup and never blocks the LiveView socket.
+  #
+  # The snapshot's `:detail` field is a fixed enum string (`"ok"`,
+  # `"adapter_5xx"`, `"transport_error"`, `"not_configured"`,
+  # `"error"`) sanitized at the cache boundary. Raw exception text,
+  # credentialed RPC URLs, and stack traces never reach the cache,
+  # so this card can render the detail directly without filtering.
+  #
+  # No refresh button in this slice — refresh is owned by the
+  # `Bank.Runtime.Workers.RefreshAdapterHealth` job on the
+  # `:ops_scan` queue. Re-mounts pick up the latest cached value.
+
+  attr :health, :map, required: true
+
+  defp adapter_health_card(assigns) do
+    ~H"""
+    <section
+      id="adapter-health-card"
+      class="rounded-xl border border-base-300 bg-base-100 shadow-sm overflow-hidden"
+    >
+      <header class="px-6 py-4 border-b border-base-300 flex items-center justify-between">
+        <h2 class="text-sm font-semibold flex items-center gap-1.5">
+          <.icon name="hero-signal" class="size-4" /> Adapter health
+        </h2>
+        <span
+          id="adapter-health-status"
+          class={[
+            "badge badge-sm font-mono",
+            adapter_health_badge_class(@health.status)
+          ]}
+          data-status={@health.status}
+        >
+          {@health.status}
+        </span>
+      </header>
+
+      <dl class="px-6 py-4 grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
+        <div class="flex items-center justify-between gap-2">
+          <dt class="text-base-content/50">Detail</dt>
+          <dd
+            id="adapter-health-detail"
+            class="font-mono"
+            data-detail={@health.detail || ""}
+          >
+            {@health.detail || "—"}
+          </dd>
+        </div>
+        <div class="flex items-center justify-between gap-2">
+          <dt class="text-base-content/50">HTTP</dt>
+          <dd id="adapter-health-http" class="font-mono">
+            {@health.http_status || "—"}
+          </dd>
+        </div>
+        <div class="flex items-center justify-between gap-2 col-span-2">
+          <dt class="text-base-content/50">Checked</dt>
+          <dd id="adapter-health-checked-at" class="font-mono">
+            <span :if={@health.checked_at}>{format_age(@health.checked_at)} ago</span>
+            <span :if={is_nil(@health.checked_at)}>not checked yet</span>
+          </dd>
+        </div>
+      </dl>
+    </section>
+    """
+  end
+
+  defp adapter_health_badge_class(:ok), do: "badge-success"
+  defp adapter_health_badge_class(:degraded), do: "badge-error"
+  defp adapter_health_badge_class(:unknown), do: "badge-ghost"
+  defp adapter_health_badge_class(_), do: "badge-ghost"
 
   # --- Component: delegations card -----------------------------------------
 
