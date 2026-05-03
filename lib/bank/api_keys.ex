@@ -207,17 +207,31 @@ defmodule Bank.APIKeys do
         }
 
         with {:ok, paused} <- locked |> Workspace.pause_changeset(attrs) |> Repo.update(),
-             {:ok, _event} <-
+             {:ok, audit_event} <-
                Audit.append_event(Bank.Audit.Events.agent_keys_paused(paused, actor: actor)) do
-          {:paused, paused}
+          {:paused, paused, audit_event}
         else
           {:error, reason} -> Repo.rollback(reason)
         end
       end
     end)
     |> case do
-      {:ok, {result, ws}} -> {:ok, result, ws}
-      {:error, reason} -> {:error, reason}
+      {:ok, {:paused, ws, audit_event}} ->
+        # `Audit.append_event/1` is the silent insert path used
+        # inside the txn; the `audit_stream` PubSub broadcast
+        # must run AFTER the transaction commits so subscribers
+        # (e.g. `BankWeb.AuditLive`'s real-time tail) only see
+        # events that are durably persisted, and not at all on
+        # the idempotent `:already_paused` short-circuit.
+        # Mirrors PR #335 / #338 / #340.
+        Notifier.audit_stream(audit_event)
+        {:ok, :paused, ws}
+
+      {:ok, {:already_paused, ws}} ->
+        {:ok, :already_paused, ws}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -256,11 +270,11 @@ defmodule Bank.APIKeys do
         }
 
         with {:ok, resumed} <- locked |> Workspace.pause_changeset(attrs) |> Repo.update(),
-             {:ok, _event} <-
+             {:ok, audit_event} <-
                Audit.append_event(
                  Bank.Audit.Events.agent_keys_resumed(resumed, prior, actor: actor)
                ) do
-          {:resumed, resumed}
+          {:resumed, resumed, audit_event}
         else
           {:error, reason} -> Repo.rollback(reason)
         end
@@ -269,8 +283,18 @@ defmodule Bank.APIKeys do
       end
     end)
     |> case do
-      {:ok, {result, ws}} -> {:ok, result, ws}
-      {:error, reason} -> {:error, reason}
+      {:ok, {:resumed, ws, audit_event}} ->
+        # Same post-commit broadcast contract as
+        # `pause_workspace/3`: real transition broadcasts;
+        # idempotent `:already_unpaused` short-circuit does not.
+        Notifier.audit_stream(audit_event)
+        {:ok, :resumed, ws}
+
+      {:ok, {:already_unpaused, ws}} ->
+        {:ok, :already_unpaused, ws}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

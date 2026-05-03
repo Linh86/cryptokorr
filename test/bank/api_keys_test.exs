@@ -1045,6 +1045,82 @@ defmodule Bank.APIKeysTest do
       ws_events = Enum.filter(events, &(&1.workspace_id == ws.id))
       assert length(ws_events) == 1
     end
+
+    test "pause_workspace/3 broadcasts agent_keys.paused on audit_stream after the txn commits",
+         %{workspace: ws, user: user} do
+      # Pre-fix the pause path wrote the audit row inside the
+      # transaction via `Audit.append_event/1` (silent insert) but
+      # never broadcast it on `audit_stream`. `BankWeb.AuditLive`
+      # subscribes to `audit_stream` for its real-time tail, so
+      # `agent_keys.paused` events were persisted but invisible to
+      # any operator viewing the audit page until they refreshed.
+      :ok = Bank.Runtime.PubSub.subscribe(Bank.Runtime.PubSub.audit_stream())
+
+      assert {:ok, :paused, _} = APIKeys.pause_workspace(ws, user, reason: "broadcast-test")
+
+      ws_id = ws.id
+
+      assert_receive %{
+        topic: :audit_stream,
+        event: :appended,
+        payload: %{event_type: "agent_keys.paused", subject_id: ^ws_id}
+      }
+    end
+
+    test "idempotent already-paused path does NOT broadcast a second agent_keys.paused",
+         %{workspace: ws, user: user} do
+      # First pause commits + broadcasts. Second call lands on the
+      # `:already_paused` short-circuit inside the txn, persists no
+      # audit row, and must not fire a second broadcast.
+      {:ok, :paused, paused} = APIKeys.pause_workspace(ws, user)
+
+      :ok = Bank.Runtime.PubSub.subscribe(Bank.Runtime.PubSub.audit_stream())
+
+      assert {:ok, :already_paused, _} = APIKeys.pause_workspace(paused, user)
+
+      ws_id = ws.id
+
+      refute_received %{
+        topic: :audit_stream,
+        event: :appended,
+        payload: %{event_type: "agent_keys.paused", subject_id: ^ws_id}
+      }
+    end
+
+    test "resume_workspace/3 broadcasts agent_keys.resumed on audit_stream after the txn commits",
+         %{workspace: ws, user: user} do
+      {:ok, :paused, paused} = APIKeys.pause_workspace(ws, user)
+
+      :ok = Bank.Runtime.PubSub.subscribe(Bank.Runtime.PubSub.audit_stream())
+
+      assert {:ok, :resumed, _} = APIKeys.resume_workspace(paused, user)
+
+      ws_id = ws.id
+
+      assert_receive %{
+        topic: :audit_stream,
+        event: :appended,
+        payload: %{event_type: "agent_keys.resumed", subject_id: ^ws_id}
+      }
+    end
+
+    test "idempotent already-unpaused path does NOT broadcast agent_keys.resumed",
+         %{workspace: ws, user: user} do
+      # The workspace starts unpaused. Calling resume on an already-
+      # unpaused workspace must commit no audit row and fire no
+      # broadcast.
+      :ok = Bank.Runtime.PubSub.subscribe(Bank.Runtime.PubSub.audit_stream())
+
+      assert {:ok, :already_unpaused, _} = APIKeys.resume_workspace(ws, user)
+
+      ws_id = ws.id
+
+      refute_received %{
+        topic: :audit_stream,
+        event: :appended,
+        payload: %{event_type: "agent_keys.resumed", subject_id: ^ws_id}
+      }
+    end
   end
 
   # --- verify_key with workspace pause (#231-a) ---------------------------
