@@ -50,8 +50,27 @@ This is a working map of progress as of the most recent `main`.
   `RunExecution.verify_not_paused/1`, audit builders
   `security.scope_paused`/`_resumed`, and the `visible_to_workspace?/3`
   clauses + `@safety_event_types` entries that wire the new events into
-  the `/security` safety timeline. **Not** a chain-pause UI card; the
-  operator-facing per-chain pause card remains a follow-up slice.
+  the `/security` safety timeline. **Not** a chain-pause UI card; that
+  shipped separately in #334 (below).
+- [PR #332](https://github.com/Linh86/cryptobank/pull/332) — per-chain
+  pause HTTP / OpenAPI endpoints (#228 Phase 1). Adds `POST
+  /v1/security/pause_chain` and `POST /v1/security/resume_chain` to the
+  `/v1` surface. Phase 1 accepts only `chain: "base"`; any other value
+  returns `422 unsupported_chain` with a stable error code naming the
+  supported set. Merge SHA
+  `35a1574c06d8944fa1f18ea90d757c99f5a18653`.
+- [PR #334](https://github.com/Linh86/cryptobank/pull/334) — SecurityLive
+  read-only chain-pauses card (`#chain-pauses-card`). Originally listed
+  under *Remaining likely slices* as "chain-pause UI card"; the
+  read-only half is now shipped, mutating controls remain a follow-up.
+  Merge SHA `69d8770c0630fbc51ae43d008956c48c68f6942d`.
+- [PR #336](https://github.com/Linh86/cryptobank/pull/336) — `expires_at`
+  + auto-resume sweeper (#228 Phase 1.5, backend-only). Adds nullable
+  `expires_at` to the `pauses` table with a partial index for the
+  sweeper, and a periodic `Bank.Runtime.Workers.SweepExpiredPauses` job
+  that flips active rows whose `expires_at <= now()` to resumed. No UI
+  surface; no new HTTP/OpenAPI endpoints. Merge SHA
+  `6744871da00f415173053e9a2c94d1769be710ef`.
 
 ## Shipped surfaces
 
@@ -138,9 +157,22 @@ organized by the LiveView they live on.
   BEFORE the existing `"security." <> _` catch-all so workspace-scoped
   scope events do not leak across workspaces. Backend gate landed in
   [#326](https://github.com/Linh86/cryptobank/pull/326) ("Add DB-backed
-  per-chain pause gate (#228 phase 1)"), merge SHA `9083bc3`. The
-  per-chain pause card with operator controls is still a follow-up
-  slice (see *Remaining likely slices* below).
+  per-chain pause gate (#228 phase 1)"), merge SHA `9083bc3`.
+- **Active chain pauses card** — read-only operator-visible card
+  listing the current workspace's currently-active scope pauses
+  (Phase 1: `:chain`). Stable element id `#chain-pauses-card`, with
+  per-row stable ids `#chain-pauses-empty`, `#chain-pause-<id>`,
+  `#chain-pause-scope-<id>` (with `data-scope-type` /
+  `data-scope-value`), `#chain-pause-reason-<id>`, and
+  `#chain-pause-age-<id>`. No mutating controls in this slice. Sourced
+  from `Bank.Security.Pauses.list_active/1`, which is workspace-scoped
+  at the context layer and refuses to surface sibling-workspace rows.
+  Tests cover empty state (`data-count="0"`), present rows,
+  sibling-workspace isolation, and an audit-hygiene assertion that
+  reasons / payloads are not exposed beyond the rendered fields.
+  Landed in [#334](https://github.com/Linh86/cryptobank/pull/334)
+  ("SecurityLive: show active chain pauses (#229)"), merge SHA
+  `69d8770`.
 
 ### `BankWeb.DashboardLive` (`/`)
 
@@ -187,16 +219,19 @@ not commitments — a human owner should triage before assigning.
   `bank.ops.health.adapter_up` / `database_up` / `stuck_plans` exist
   via `/v1/health/deep`, but the LiveView surface needs a cached /
   push-driven source rather than re-running the deep probe per render.
-- **Chain-pause UI card** — operator card for per-chain pause
-  controls (pause / resume buttons, current paused-chains list,
-  workspace-scoped). The DB-backed Phase 1 backend has now LANDED in
-  [PR #326](https://github.com/Linh86/cryptobank/pull/326) (merge SHA
-  `9083bc3`), so the gate is no longer "blocked on backend" — what
-  remains for the UI slice is a controller / OpenAPI surface for
-  pause/resume (or an admin-only LiveView form path), then the card
-  itself. UI work bounded by the
-  [PR #310](https://github.com/Linh86/cryptobank/pull/310) design memo
-  §9.
+- **Mutating chain-pause controls on `/security`** — the read-only
+  chain-pauses card shipped in [PR #334](https://github.com/Linh86/cryptobank/pull/334)
+  and the HTTP/OpenAPI endpoints shipped in
+  [PR #332](https://github.com/Linh86/cryptobank/pull/332). What remains
+  is a per-`/security` admin form / button path that posts to
+  `POST /v1/security/pause_chain` and `POST /v1/security/resume_chain`
+  (or invokes the context directly under `:admin` LiveAuth). Phase 1
+  scope is **`"base"` only** — the form must surface the supported set
+  via `Bank.SecurityWeb.pause_chain_supported_chains/0` (or equivalent)
+  and must NOT expose arbitrary chain input; mismatched values would
+  hit `422 unsupported_chain` server-side. UI is otherwise bounded by
+  the [PR #310](https://github.com/Linh86/cryptobank/pull/310) design
+  memo §9.
 
 ## Optional enhancements
 
@@ -217,20 +252,35 @@ issue if pursued; do not bundle into a #229 closeout.
 
 ## Blocked by #228
 
-The per-scope pause backend is being delivered under #228 across the
-slices below. As of the last refresh, the design memo
-([PR #310](https://github.com/Linh86/cryptobank/pull/310)) is open and
-Phase 1 backend ([PR #326](https://github.com/Linh86/cryptobank/pull/326))
-is merged.
+The per-scope pause backend is being delivered under #228. The design
+memo ([PR #310](https://github.com/Linh86/cryptobank/pull/310)) is
+still open. As of this refresh, Phase 1 chain-pause is materially
+complete on the backend / API / read-only UI / expiry axes; only
+mutating chain-pause controls on `/security` and the later phases
+remain.
 
-- **Per-chain pause card** — Phase 1 of #228. Backend gate is **MERGED**
-  ([PR #326](https://github.com/Linh86/cryptobank/pull/326), SHA
-  `9083bc3`). Remaining for UI: a controller / OpenAPI surface (or
-  admin LiveView form) and the card itself. `expires_at`, the
-  auto-resume sweeper, and any ETS projection are explicitly deferred
-  to Phase 1.5+ per the design memo §6 / §13.
-- **Per-smart-account pause toggle on the delegations card** — Phase 2;
-  no backend yet.
+- **Per-chain pause** — Phase 1 of #228.
+  - Backend gate: **MERGED** in
+    [PR #326](https://github.com/Linh86/cryptobank/pull/326)
+    (SHA `9083bc3`).
+  - HTTP / OpenAPI endpoints (`POST /v1/security/pause_chain`,
+    `POST /v1/security/resume_chain`): **MERGED** in
+    [PR #332](https://github.com/Linh86/cryptobank/pull/332)
+    (SHA `35a1574`). Phase 1 accepts `"base"` only; other values get
+    `422 unsupported_chain`.
+  - Read-only `#chain-pauses-card`: **MERGED** in
+    [PR #334](https://github.com/Linh86/cryptobank/pull/334)
+    (SHA `69d8770`).
+  - `expires_at` + auto-resume sweeper: **MERGED** in
+    [PR #336](https://github.com/Linh86/cryptobank/pull/336)
+    (SHA `6744871`).
+  - **Remaining:** mutating pause/resume controls on `/security` (the
+    UI form / button path that talks to
+    `/v1/security/pause_chain` / `/resume_chain`). See *Remaining
+    likely slices* above. ETS projection remains deferred per design
+    memo §6 (Phase 1.5+ optional, active-rows-only invariant).
+- **Per-smart-account pause toggle on the delegations card** —
+  Phase 2; no backend yet.
 - **Per-api-key pause toggle on the API-keys management surface** —
   Phase 3; no backend yet.
 - **Aggregate scoped-pause badge** on the security console header —
