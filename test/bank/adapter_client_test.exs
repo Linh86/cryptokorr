@@ -651,9 +651,9 @@ defmodule Bank.AdapterClientTest do
         end)
 
       assert log =~ "Bank.AdapterClient: unexpected 2xx body"
-      # Shape descriptor is allowed: it carries only the (operator-known)
-      # adapter contract key names, no values, no host names, no tokens.
-      assert log =~ "shape=map(keys=["
+      # Shape descriptor: kind + count only. Adapter-controlled key
+      # names and values are never echoed.
+      assert log =~ "shape=map(key_count=4)"
 
       for needle <- [
             "Bearer",
@@ -661,9 +661,11 @@ defmodule Bank.AdapterClientTest do
             "sk_",
             "secret@",
             "https://",
-            "private_key=0x",
+            "private_key",
             "0xabc",
-            "leak"
+            "leak",
+            "Authorization",
+            "secret"
           ] do
         refute log =~ needle,
                "invalid-response log must not leak #{needle}: #{inspect(log)}"
@@ -671,6 +673,55 @@ defmodule Bank.AdapterClientTest do
 
       # Telemetry should also fire :invalid_response for this branch
       # so a dashboard alert can pick it up without parsing logs.
+      assert_receive {:telemetry, [:bank, :adapter, :dispatch], %{count: 1},
+                      %{path: "/dispatch/transfer", outcome: :invalid_response, status: 200}}
+    end
+
+    test "invalid 2xx body with secret-bearing KEYS does not leak key names (#255 P2)" do
+      plan = resolvable_plan()
+
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        # Adapter-controlled JSON. The KEYS themselves are the leak
+        # surface here — values are already not logged. A naive shape
+        # descriptor that interpolated the keys would surface every
+        # one of these to the operator log.
+        json_resp(conn, 200, %{
+          "Bearer sk_live_LEAKED_PROBE" => "x",
+          "Authorization: Bearer LEAKED_PROBE" => "x",
+          "https://secret@example.test" => "x",
+          "private_key" => "0xabc"
+        })
+      end)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, :invalid_response} = AdapterClient.dispatch_transfer(plan)
+        end)
+
+      # Operators can still tell what kind of body they got and how
+      # large it was without seeing any caller-controlled string.
+      assert log =~ "Bank.AdapterClient: unexpected 2xx body"
+      assert log =~ "shape=map(key_count=4)"
+
+      # Every secret-bearing fragment — value AND key — must be
+      # absent. The new `body_shape/1` never echoes
+      # `Map.keys(body)`.
+      for needle <- [
+            "Bearer",
+            "Authorization",
+            "LEAKED_PROBE",
+            "https://",
+            "secret@",
+            "example.test",
+            "private_key",
+            "0xabc",
+            "sk_"
+          ] do
+        refute log =~ needle,
+               "invalid-response log must not leak #{needle}: #{inspect(log)}"
+      end
+
+      # Telemetry path for the same branch is also unchanged.
       assert_receive {:telemetry, [:bank, :adapter, :dispatch], %{count: 1},
                       %{path: "/dispatch/transfer", outcome: :invalid_response, status: 200}}
     end

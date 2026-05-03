@@ -471,11 +471,15 @@ defmodule Bank.AdapterClient do
     {:error, :invalid_response}
   end
 
-  defp body_shape(body) when is_map(body) do
-    keys = body |> Map.keys() |> Enum.map(&inspect/1) |> Enum.sort() |> Enum.join(",")
-    "map(keys=[#{keys}])"
-  end
-
+  # The body is adapter-controlled JSON. Even the KEYS can be
+  # secret-bearing (`%{"Authorization: Bearer xxx" => "x"}` would
+  # surface a header through what looks like a "shape" log). Log
+  # only the top-level kind and a count — never any caller-controlled
+  # string. Operators can still tell "got map instead of expected
+  # `accepted: true` envelope" from the kind + count, and the
+  # `[:bank, :adapter, :dispatch]` `:invalid_response` telemetry
+  # event is the durable signal anyway.
+  defp body_shape(body) when is_map(body), do: "map(key_count=#{map_size(body)})"
   defp body_shape(body) when is_list(body), do: "list(len=#{length(body)})"
   defp body_shape(body) when is_binary(body), do: "string(len=#{byte_size(body)})"
   defp body_shape(body) when is_number(body), do: "number"
