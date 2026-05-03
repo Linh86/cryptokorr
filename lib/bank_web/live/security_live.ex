@@ -289,6 +289,79 @@ defmodule BankWeb.SecurityLive do
     end
   end
 
+  # --- Chain pause / resume (#228 Phase 1) ---------------------------------
+  #
+  # Always uses the Phase-1 chain value `"base"` server-side; client
+  # params are NOT trusted to choose a chain. Workspace is sourced
+  # from `current_scope.workspace.id`, never from form input.
+  # Authorization re-checks `:admin` so a hostile event from a
+  # non-admin connection is refused with a flash even if the form
+  # was hidden in their UI.
+
+  @phase1_chain "base"
+
+  def handle_event("pause_chain", params, socket) do
+    with :ok <- BankWeb.LiveAuth.authorize_action(socket, :admin) do
+      reason = clean_reason(Map.get(params, "reason"))
+      actor = socket.assigns.current_scope.user
+      workspace_id = socket.assigns.current_scope.workspace.id
+
+      case Security.pause(workspace_id, {:chain, @phase1_chain},
+             actor: actor,
+             reason: reason
+           ) do
+        {:ok, :paused, _pause} ->
+          {:noreply,
+           socket
+           |> load_state()
+           |> put_flash(:info, "Base chain paused for this workspace.")}
+
+        {:ok, :already_paused, _pause} ->
+          {:noreply,
+           socket
+           |> load_state()
+           |> put_flash(:info, "Base chain is already paused.")}
+
+        {:error, %Ecto.Changeset{} = changeset} ->
+          message = changeset_message(changeset, "Pause failed")
+          {:noreply, put_flash(socket, :error, message)}
+
+        {:error, reason} ->
+          {:noreply, put_flash(socket, :error, "Pause failed: #{inspect(reason)}")}
+      end
+    else
+      {:error, {:insufficient_role, _}} ->
+        {:noreply, put_flash(socket, :error, "Admin role required to pause a chain.")}
+    end
+  end
+
+  def handle_event("resume_chain", _params, socket) do
+    with :ok <- BankWeb.LiveAuth.authorize_action(socket, :admin) do
+      actor = socket.assigns.current_scope.user
+      workspace_id = socket.assigns.current_scope.workspace.id
+
+      case Security.resume(workspace_id, {:chain, @phase1_chain}, actor: actor) do
+        {:ok, :resumed, _pause} ->
+          {:noreply,
+           socket
+           |> load_state()
+           |> put_flash(:info, "Base chain resumed for this workspace.")}
+
+        {:ok, :already_running} ->
+          {:noreply,
+           socket
+           |> load_state()
+           |> put_flash(:info, "Base chain was not paused.")}
+
+        {:error, reason} ->
+          {:noreply, put_flash(socket, :error, "Resume failed: #{inspect(reason)}")}
+      end
+    else
+      {:error, {:insufficient_role, _}} ->
+        {:noreply, put_flash(socket, :error, "Admin role required to resume a chain.")}
+    end
+  end
+
   # --- Safety timeline filters (#212) --------------------------------------
 
   def handle_event("filter_safety_events", %{"filter" => params}, socket) do
@@ -416,6 +489,18 @@ defmodule BankWeb.SecurityLive do
     # paused" alongside the rest of the safety posture.
     chain_pauses = Bank.Security.Pauses.list_active(workspace_id)
 
+    # Phase 1 base-chain pause indicator. Derived from the
+    # already-loaded `chain_pauses` list rather than calling
+    # `Security.paused?(ws_id, {:chain, "base"})` so we don't add
+    # a second DB hit and so the indicator never disagrees with
+    # the row that's about to render in the card. Only counts a
+    # row whose scope_value is exactly "base"; rows for future
+    # chains are ignored by the Phase-1 pause/resume controls.
+    base_paused? =
+      Enum.any?(chain_pauses, fn p ->
+        p.scope_type == :chain and p.scope_value == "base"
+      end)
+
     filters = socket.assigns[:safety_filters] || @default_safety_filters
     safety_events = load_safety_events(delegations, workspace_id, filters)
 
@@ -442,6 +527,7 @@ defmodule BankWeb.SecurityLive do
     |> assign(:pending_approvals, pending_approvals)
     |> assign(:pending_approval_count, length(pending_approvals))
     |> assign(:chain_pauses, chain_pauses)
+    |> assign(:base_paused, base_paused?)
     |> assign(:safety_events, safety_events)
     |> assign(:safety_filters, filters)
     |> assign(:safety_filter_form, safety_filter_form)
@@ -714,7 +800,11 @@ defmodule BankWeb.SecurityLive do
             pending_approvals={@pending_approvals}
             safety_events={@safety_events}
           />
-          <.chain_pauses_card pauses={@chain_pauses} />
+          <.chain_pauses_card
+            pauses={@chain_pauses}
+            base_paused={@base_paused}
+            current_role={@current_scope.role}
+          />
           <.safety_events_card
             events={@safety_events}
             filter_form={@safety_filter_form}
@@ -1596,6 +1686,8 @@ defmodule BankWeb.SecurityLive do
   # patterns; the audit row carries the actor identity durably.
 
   attr :pauses, :list, required: true
+  attr :base_paused, :boolean, required: true
+  attr :current_role, :atom, required: true
 
   defp chain_pauses_card(assigns) do
     ~H"""
@@ -1610,6 +1702,84 @@ defmodule BankWeb.SecurityLive do
         </h2>
         <span class="badge badge-sm badge-ghost">{length(@pauses)}</span>
       </header>
+
+      <%!-- Phase 1 base-chain pause/resume control. The card stays a
+            single section so operators see "what is paused" and "pause
+            this" together. Non-admins see the read-only state with no
+            mutating buttons; the event handlers re-check `:admin` so a
+            hostile event from a non-admin connection is refused with a
+            flash even if the form was hidden in their UI. --%>
+      <div
+        id="chain-pause-base-control"
+        data-base-paused={to_string(@base_paused)}
+        class="px-6 py-4 border-b border-base-300 bg-base-200/20"
+      >
+        <div class="flex items-center justify-between gap-3 mb-2">
+          <span class="text-xs uppercase tracking-wider text-base-content/60">
+            Base chain
+          </span>
+          <span
+            id="chain-pause-base-status"
+            class={[
+              "badge badge-sm font-mono",
+              if(@base_paused, do: "badge-warning", else: "badge-success")
+            ]}
+            data-state={if @base_paused, do: "paused", else: "running"}
+          >
+            {if @base_paused, do: "paused", else: "running"}
+          </span>
+        </div>
+
+        <%!-- Admin pause form (when running) --%>
+        <form
+          :if={!@base_paused and @current_role in [:admin, :owner]}
+          id="chain-pause-base-form"
+          phx-submit="pause_chain"
+          class="flex flex-col gap-2 sm:flex-row sm:items-end"
+        >
+          <label class="form-control flex-1">
+            <span class="label-text text-xs text-base-content/60">
+              Reason (optional)
+            </span>
+            <input
+              id="chain-pause-base-reason"
+              type="text"
+              name="reason"
+              maxlength="256"
+              placeholder="e.g. base RPC outage"
+              class="input input-bordered input-sm w-full"
+            />
+          </label>
+          <.button
+            id="chain-pause-base-submit"
+            type="submit"
+            data-confirm="Pause Base chain for this workspace? Pending and new chain operations on Base will be refused until resumed."
+            class="btn btn-warning btn-soft btn-sm gap-1.5"
+          >
+            <.icon name="hero-pause" class="size-3.5" /> Pause Base
+          </.button>
+        </form>
+
+        <%!-- Admin resume button (when paused) --%>
+        <.button
+          :if={@base_paused and @current_role in [:admin, :owner]}
+          id="chain-resume-base-submit"
+          phx-click="resume_chain"
+          data-confirm="Resume Base chain for this workspace? Chain operations on Base may proceed again."
+          class="btn btn-success btn-soft btn-sm gap-1.5"
+        >
+          <.icon name="hero-play" class="size-3.5" /> Resume Base
+        </.button>
+
+        <%!-- Read-only hint for non-admins --%>
+        <p
+          :if={@current_role not in [:admin, :owner]}
+          id="chain-pause-base-readonly"
+          class="text-xs text-base-content/50"
+        >
+          Admin role required to pause or resume a chain.
+        </p>
+      </div>
 
       <div
         :if={@pauses == []}

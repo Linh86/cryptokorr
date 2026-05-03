@@ -1481,6 +1481,190 @@ defmodule BankWeb.SecurityLiveTest do
     end
   end
 
+  # --- Base chain pause/resume controls (#228 Phase 1, #229) ---------------
+
+  describe "base chain pause control" do
+    test "renders running form for admin in default state",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#chain-pause-base-control")
+      assert has_element?(view, ~s|#chain-pause-base-control[data-base-paused="false"]|)
+      assert has_element?(view, ~s|#chain-pause-base-status[data-state="running"]|)
+
+      # Admin form + submit are visible; resume is not.
+      assert has_element?(view, "#chain-pause-base-form")
+      assert has_element?(view, "#chain-pause-base-reason")
+      assert has_element?(view, "#chain-pause-base-submit[data-confirm]")
+      refute has_element?(view, "#chain-resume-base-submit")
+
+      # Form name attribute is "reason" — chain is NOT a form input;
+      # the server pins it to "base" regardless of client params.
+      refute has_element?(view, ~s|#chain-pause-base-form input[name="chain"]|)
+      refute has_element?(view, ~s|#chain-pause-base-form input[name="scope_value"]|)
+    end
+
+    test "submitting the form pauses base for the current workspace",
+         %{conn: conn, workspace: ws} do
+      {:ok, view, _html} = live(conn, "/security")
+
+      view
+      |> form("#chain-pause-base-form", %{"reason" => "rpc outage smoke"})
+      |> render_submit()
+
+      # State assigns refresh: status becomes paused, resume button
+      # replaces pause form, and a row appears in the card list.
+      assert has_element?(view, ~s|#chain-pause-base-control[data-base-paused="true"]|)
+      assert has_element?(view, ~s|#chain-pause-base-status[data-state="paused"]|)
+      assert has_element?(view, "#chain-resume-base-submit[data-confirm]")
+      refute has_element?(view, "#chain-pause-base-form")
+      refute has_element?(view, "#chain-pause-base-submit")
+      refute has_element?(view, "#chain-pauses-empty")
+
+      # Backend row exists and matches the workspace.
+      assert [pause] = Bank.Security.Pauses.list_active(ws.id)
+      assert pause.scope_type == :chain
+      assert pause.scope_value == "base"
+      assert pause.reason == "rpc outage smoke"
+
+      # The card row references the pause id.
+      assert has_element?(view, "#chain-pause-#{pause.id}")
+    end
+
+    test "submitting the form without a reason still pauses base",
+         %{conn: conn, workspace: ws} do
+      {:ok, view, _html} = live(conn, "/security")
+
+      view
+      |> form("#chain-pause-base-form", %{"reason" => ""})
+      |> render_submit()
+
+      assert has_element?(view, ~s|#chain-pause-base-control[data-base-paused="true"]|)
+      assert [pause] = Bank.Security.Pauses.list_active(ws.id)
+      assert pause.scope_type == :chain
+      assert pause.scope_value == "base"
+      assert is_nil(pause.reason)
+    end
+
+    test "reason longer than 256 chars produces an error and creates no pause",
+         %{conn: conn, workspace: ws} do
+      too_long = String.duplicate("x", 257)
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      html =
+        view
+        |> form("#chain-pause-base-form", %{"reason" => too_long})
+        |> render_submit()
+
+      assert html =~ "Pause failed"
+      assert Bank.Security.Pauses.list_active(ws.id) == []
+      assert has_element?(view, ~s|#chain-pause-base-control[data-base-paused="false"]|)
+      refute has_element?(view, "#chain-resume-base-submit")
+    end
+
+    test "resume clears an existing base pause for the current workspace",
+         %{conn: conn, workspace: ws, current_user: user} do
+      {:ok, :paused, _pause} =
+        Bank.Security.Pauses.create_pause(ws.id, :chain, "base",
+          actor: user,
+          reason: "pre-existing"
+        )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, "#chain-resume-base-submit[data-confirm]")
+      assert has_element?(view, ~s|#chain-pause-base-control[data-base-paused="true"]|)
+
+      view |> element("#chain-resume-base-submit") |> render_click()
+
+      assert Bank.Security.Pauses.list_active(ws.id) == []
+      assert has_element?(view, ~s|#chain-pause-base-control[data-base-paused="false"]|)
+      assert has_element?(view, "#chain-pause-base-form")
+      refute has_element?(view, "#chain-resume-base-submit")
+    end
+
+    test "sibling-workspace base pause does NOT make current workspace look paused",
+         %{conn: conn} do
+      {:ok, sibling_ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "sibling-base-pause-#{System.unique_integer([:positive])}",
+          name: "Sibling"
+        })
+
+      {:ok, sibling_user} =
+        Bank.Accounts.find_or_create_from_oauth(%{
+          provider: :google,
+          subject: "sibling-base-#{System.unique_integer([:positive])}",
+          email: "sibling-base-#{System.unique_integer([:positive])}@example.com",
+          name: "Sibling User"
+        })
+
+      {:ok, :paused, _pause} =
+        Bank.Security.Pauses.create_pause(sibling_ws.id, :chain, "base",
+          actor: sibling_user,
+          reason: "sibling-only"
+        )
+
+      {:ok, view, _html} = live(conn, "/security")
+
+      assert has_element?(view, ~s|#chain-pause-base-control[data-base-paused="false"]|)
+      assert has_element?(view, "#chain-pause-base-form")
+      refute has_element?(view, "#chain-resume-base-submit")
+    end
+
+    test "operator-tier user sees read-only state (no form, no buttons)" do
+      {:ok, op_ctx} = register_and_log_in_user_with_role(%{conn: build_conn()}, :operator)
+
+      {:ok, view, _html} = live(op_ctx[:conn], "/security")
+
+      assert has_element?(view, "#chain-pause-base-control")
+      assert has_element?(view, "#chain-pause-base-readonly")
+      refute has_element?(view, "#chain-pause-base-form")
+      refute has_element?(view, "#chain-pause-base-submit")
+      refute has_element?(view, "#chain-resume-base-submit")
+    end
+
+    test "hostile pause_chain event from operator-tier socket is refused, DB unchanged" do
+      {:ok, op_ctx} = register_and_log_in_user_with_role(%{conn: build_conn()}, :operator)
+      ws_id = op_ctx[:workspace].id
+
+      {:ok, view, _html} = live(op_ctx[:conn], "/security")
+
+      html = render_click(view, "pause_chain", %{"reason" => "hostile"})
+
+      assert html =~ "Admin role required"
+      assert Bank.Security.Pauses.list_active(ws_id) == []
+    end
+
+    test "hostile resume_chain event from operator-tier socket is refused, DB unchanged" do
+      {:ok, op_ctx} = register_and_log_in_user_with_role(%{conn: build_conn()}, :operator)
+      ws_id = op_ctx[:workspace].id
+
+      # Pre-existing pause from an admin-context elsewhere.
+      {:ok, admin_user} =
+        Bank.Accounts.find_or_create_from_oauth(%{
+          provider: :google,
+          subject: "admin-base-#{System.unique_integer([:positive])}",
+          email: "admin-base-#{System.unique_integer([:positive])}@example.com",
+          name: "Admin User"
+        })
+
+      {:ok, :paused, _pause} =
+        Bank.Security.Pauses.create_pause(ws_id, :chain, "base",
+          actor: admin_user,
+          reason: "pre-existing"
+        )
+
+      {:ok, view, _html} = live(op_ctx[:conn], "/security")
+
+      html = render_click(view, "resume_chain", %{})
+
+      assert html =~ "Admin role required"
+      assert [_still_paused] = Bank.Security.Pauses.list_active(ws_id)
+    end
+  end
+
   # Insert an `ExecutionPlan` whose `updated_at` is overwritten via a
   # raw SQL update so it appears stuck without depending on Ecto's
   # automatic timestamp behavior.
