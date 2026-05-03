@@ -280,15 +280,40 @@ defmodule Bank.APIKeys do
   def revoke_key(%APIKey{} = api_key, opts) do
     actor = Keyword.get(opts, :actor)
 
+    # Two callers holding stale `%APIKey{revoked_at: nil}` structs
+    # (loaded before either revoke landed) would both pass the
+    # in-memory short-circuit clause above, both enter this
+    # transaction, and — without a row lock — both `Repo.update`
+    # would succeed, leaving the row in `:revoked` (no state
+    # regression) but emitting TWO `api_key.revoked` audit rows
+    # for the same key. Lock the row `FOR UPDATE` and re-check
+    # `revoked_at` inside the txn so only the winner writes the
+    # audit event. Mirrors PR #314 / PR #318 / PR #325 / PR #328.
     Repo.transaction(fn ->
-      with {:ok, revoked} <- api_key |> APIKey.revoke_changeset() |> Repo.update(),
-           {:ok, _event} <-
-             Audit.append_event(Bank.Audit.Events.api_key_revoked(revoked, actor: actor)) do
-        revoked
-      else
-        {:error, reason} -> Repo.rollback(reason)
+      case lock_key(api_key.id) do
+        nil ->
+          Repo.rollback(:not_found)
+
+        %APIKey{revoked_at: %DateTime{}} = locked ->
+          # Concurrent revoke landed first. Return the locked
+          # (already-revoked) struct so callers see the
+          # authoritative `revoked_at`. No audit, no broadcast.
+          locked
+
+        %APIKey{} = locked ->
+          with {:ok, revoked} <- locked |> APIKey.revoke_changeset() |> Repo.update(),
+               {:ok, _event} <-
+                 Audit.append_event(Bank.Audit.Events.api_key_revoked(revoked, actor: actor)) do
+            revoked
+          else
+            {:error, reason} -> Repo.rollback(reason)
+          end
       end
     end)
+  end
+
+  defp lock_key(id) when is_binary(id) do
+    Repo.one(from k in APIKey, where: k.id == ^id, lock: "FOR UPDATE")
   end
 
   @doc """
