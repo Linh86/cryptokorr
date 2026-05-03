@@ -77,6 +77,33 @@ defmodule BankWeb.OpenApi.Schemas.HealthDeepResponse do
     non-`"ok"` overall `status` if any check is degraded. `checks` maps
     check name to a check-object whose required field is `status`;
     individual checks may add fields additively.
+
+    ## Per-check status enum (#253)
+
+    - `ok` — explicitly verified healthy this tick.
+    - `degraded` — known partially functional (e.g. adapter 5xx,
+      stuck plans present).
+    - `down` — known not working (transport error, DB unreachable).
+    - `not_configured` — the dependency is intentionally absent
+      (e.g. local/dev without an adapter `base_url`). Treated as
+      benign: a fresh checkout that has never set up the chain
+      feature is not falsely degraded by that absence.
+    - `unknown` — could not determine. Returned when a check times
+      out or raises unexpectedly. NEVER reported as healthy at the
+      overall level.
+
+    Top-level `status` is `ok` when every check is `ok` or
+    `not_configured`; otherwise `degraded` (and the response is
+    `503`).
+
+    ## Detail-field redaction (#253)
+
+    Individual check `detail` fields are either `null` or a short
+    fixed-shape enum string (e.g. `http_2xx`, `transport_error`,
+    `database_unreachable`, `adapter_base_url_not_configured`). Raw
+    `inspect/1` of internal structs, exception text, RPC URLs
+    (which can carry credentials), and Authorization headers are
+    deliberately not surfaced.
     """,
     type: :object,
     required: [:status, :service, :version, :checks],
@@ -84,6 +111,7 @@ defmodule BankWeb.OpenApi.Schemas.HealthDeepResponse do
       status: %Schema{
         type: :string,
         description: "Overall health — stringified snapshot status.",
+        enum: ["ok", "degraded"],
         example: "ok"
       },
       service: %Schema{type: :string, example: "bank"},
@@ -95,13 +123,23 @@ defmodule BankWeb.OpenApi.Schemas.HealthDeepResponse do
           type: :object,
           required: [:status],
           properties: %{
-            status: %Schema{type: :string, example: "ok"}
+            status: %Schema{
+              type: :string,
+              enum: ["ok", "degraded", "down", "not_configured", "unknown"],
+              example: "ok"
+            },
+            detail: %Schema{
+              type: :string,
+              nullable: true,
+              description:
+                "Sanitized detail for this check. Either `null` or one of a small fixed allowlist of enum strings; never raw exception text or credentialed URLs."
+            }
           },
           additionalProperties: true
         },
         example: %{
-          "database" => %{"status" => "ok"},
-          "adapter" => %{"status" => "ok"}
+          "database" => %{"status" => "ok", "detail" => nil},
+          "adapter" => %{"status" => "ok", "detail" => "http_2xx"}
         }
       }
     }

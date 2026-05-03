@@ -35,16 +35,19 @@ defmodule BankWeb.APIV1AuthRBACTest do
 
     test "GET /v1/health/deep is in the no-auth scope (not gated by VerifyAPIKey)",
          %{conn: _conn} do
-      # Deep health calls into AdapterClient which isn't mocked in
-      # this test, so the controller raises mid-request. What
-      # matters here is that the auth plug did NOT intercept — the
-      # raised error originates inside the controller, not the
-      # plug pipeline. We assert by checking the raise comes from
-      # `Req.Test.__fetch_plug__/1` (the AdapterClient HTTP path),
-      # NOT from a `send_resp(conn, 401, ...)` returning normally.
-      assert_raise RuntimeError, ~r/Bank.AdapterClient/, fn ->
-        get(Phoenix.ConnTest.build_conn(), "/v1/health/deep")
-      end
+      # The request reaches the controller (not 401-blocked by the
+      # `VerifyAPIKey` plug). Without a `Req.Test` stub installed in
+      # this test process, the AdapterClient probe inside
+      # `Bank.Ops.Health.adapter/0` cannot complete; the post-#253
+      # controller catches the raised error and renders adapter
+      # status `:unknown` rather than letting the exception escape.
+      # The fact that we get a structured 5xx body — not a 401 from
+      # the auth plug — is what proves the no-auth scope.
+      conn = get(Phoenix.ConnTest.build_conn(), "/v1/health/deep")
+      body = json_response(conn, 503)
+      assert body["status"] == "degraded"
+      assert body["checks"]["adapter"]["status"] in ["unknown", "down"]
+      refute body["error"]["code"] == "missing_authorization"
     end
   end
 
