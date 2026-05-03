@@ -59,6 +59,55 @@ defmodule Bank.Runtime.Telemetry do
 
   def stablecoin_route(_), do: :ok
 
+  @typedoc """
+  Adapter dispatch outcome enum (#255). Fixed allowlist so
+  observability backends can group on a stable label instead of
+  raw provider error strings.
+
+    * `:accepted` — adapter returned 2xx with the expected shape.
+    * `:invalid_response` — adapter returned 2xx with an
+      unexpected body. Treat as a contract bug.
+    * `:rejected` — 4xx, deterministic.
+    * `:error` — 5xx. Retryable.
+    * `:unavailable` — transport / DNS / timeout. Retryable.
+  """
+  @type adapter_outcome :: :accepted | :invalid_response | :rejected | :error | :unavailable
+
+  @doc """
+  Record an adapter-dispatch lifecycle event (#255).
+
+  `path` is the adapter sub-path under `{base_url}` (e.g.
+  `"/dispatch/transfer"`). `outcome` is one of the fixed
+  `t:adapter_outcome/0` values. Optional `meta` carries safe
+  correlation metadata only — the caller is responsible for not
+  passing operator-controlled or secret-bearing values. The
+  helper hard-allowlists the metadata keys it propagates so a
+  future caller cannot accidentally widen the surface.
+
+  ## Allowlisted meta keys
+
+    * `:status`             — HTTP status integer when known.
+    * `:execution_plan_id`  — UUID, lets operators follow one plan.
+    * `:smart_account_id`   — string identifier from grant/revoke
+      paths.
+    * `:duration_ms`        — request latency for SLI panels.
+
+  All other keys are silently dropped to keep the metadata shape
+  stable across call sites.
+  """
+  @spec adapter_dispatch(String.t(), adapter_outcome(), map()) :: :ok
+  def adapter_dispatch(path, outcome, meta \\ %{})
+      when is_binary(path) and is_atom(outcome) and is_map(meta) do
+    safe_emit(
+      [:bank, :adapter, :dispatch],
+      %{count: 1},
+      Map.merge(
+        %{path: path, outcome: outcome},
+        Map.take(meta, [:status, :execution_plan_id, :smart_account_id, :duration_ms])
+      )
+    )
+  end
+
   defp safe_emit(event, measurements, metadata) do
     try do
       :telemetry.execute(event, measurements, metadata)

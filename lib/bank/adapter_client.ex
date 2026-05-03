@@ -343,20 +343,73 @@ defmodule Bank.AdapterClient do
 
     case Req.request(req_opts) do
       {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
-        parse_accepted(kind, body)
+        case parse_accepted(kind, body) do
+          {:ok, _payload} = ok ->
+            telemetry(path, :accepted, status, ok)
+            ok
+
+          {:error, :invalid_response} = err ->
+            telemetry(path, :invalid_response, status, err)
+            err
+        end
 
       {:ok, %Req.Response{status: status, body: body}} when status in 400..499 ->
+        telemetry(path, :rejected, status, nil)
         {:error, {:adapter_rejected, status, body}}
 
       {:ok, %Req.Response{status: status, body: body}} ->
+        telemetry(path, :error, status, nil)
         {:error, {:adapter_error, status, body}}
 
       {:error, reason} ->
-        Logger.warning("Bank.AdapterClient #{path} unavailable: #{inspect(reason)}")
+        # Sanitized log: only the reason kind is logged. `inspect(reason)`
+        # would carry the full Req error struct, including the request
+        # URL (which can carry tokenized RPC userinfo) and any
+        # `:transport_options` containing client-side TLS material.
+        # `category/1` collapses into a fixed label set; the structured
+        # telemetry event is the durable record for ops dashboards.
+        Logger.warning(
+          "Bank.AdapterClient #{path} unavailable (category=#{reason_category(reason)})"
+        )
 
+        telemetry(path, :unavailable, nil, nil)
         {:error, :adapter_unavailable}
     end
   end
+
+  # `outcome_meta` is the caller's `{:ok, payload}` / `{:error, reason}`
+  # tuple — we extract a small safe-by-construction correlation slice
+  # (`execution_plan_id`, `smart_account_id`) without ever leaking the
+  # raw payload.
+  defp telemetry(path, outcome, status, outcome_meta) do
+    meta = %{}
+    meta = if is_integer(status), do: Map.put(meta, :status, status), else: meta
+    meta = Map.merge(meta, outcome_meta_correlation(outcome_meta))
+
+    Bank.Runtime.Telemetry.adapter_dispatch(path, outcome, meta)
+  end
+
+  defp outcome_meta_correlation({:ok, %{execution_plan_id: id}}) when is_binary(id),
+    do: %{execution_plan_id: id}
+
+  defp outcome_meta_correlation({:ok, %{smart_account_id: id}}) when is_binary(id),
+    do: %{smart_account_id: id}
+
+  defp outcome_meta_correlation(_), do: %{}
+
+  # Maps a Req transport reason to a fixed label so logs/telemetry
+  # never carry the raw struct. Anything beyond the named cases
+  # collapses to `:transport_error` — `inspect/1` on the reason would
+  # leak the request URL (with embedded credentials) or transport
+  # options (with TLS material), neither of which is safe to log.
+  defp reason_category(%Req.TransportError{reason: :timeout}), do: :timeout
+  defp reason_category(%Req.TransportError{reason: :econnrefused}), do: :econnrefused
+  defp reason_category(%Req.TransportError{reason: :nxdomain}), do: :nxdomain
+  defp reason_category(%Req.TransportError{}), do: :transport_error
+  defp reason_category(:timeout), do: :timeout
+  defp reason_category(:econnrefused), do: :econnrefused
+  defp reason_category(:nxdomain), do: :nxdomain
+  defp reason_category(_), do: :transport_error
 
   defp parse_accepted(:transfer, %{"accepted" => true, "execution_plan_id" => id})
        when is_binary(id) do
@@ -374,9 +427,25 @@ defmodule Bank.AdapterClient do
   end
 
   defp parse_accepted(_, body) do
-    Logger.warning("Bank.AdapterClient: unexpected 2xx body: #{inspect(body)}")
+    # Don't `inspect(body)` — adapter-supplied JSON could echo back
+    # tokens, IDs, or worse. Log only the body's top-level shape so
+    # operators can spot "got string instead of map" without seeing
+    # the actual values. The :invalid_response telemetry event in
+    # `dispatch/3` is the durable signal.
+    Logger.warning("Bank.AdapterClient: unexpected 2xx body (shape=#{body_shape(body)})")
     {:error, :invalid_response}
   end
+
+  defp body_shape(body) when is_map(body) do
+    keys = body |> Map.keys() |> Enum.map(&inspect/1) |> Enum.sort() |> Enum.join(",")
+    "map(keys=[#{keys}])"
+  end
+
+  defp body_shape(body) when is_list(body), do: "list(len=#{length(body)})"
+  defp body_shape(body) when is_binary(body), do: "string(len=#{byte_size(body)})"
+  defp body_shape(body) when is_number(body), do: "number"
+  defp body_shape(nil), do: "nil"
+  defp body_shape(_), do: "other"
 
   defp decimal_to_string(nil), do: nil
 
