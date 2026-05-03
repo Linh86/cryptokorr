@@ -23,6 +23,10 @@ defmodule Bank.Application do
       # Generic audit-emission dedupe (#222) — used by VerifyAPIKey
       # to collapse api_key.denied spam.
       Bank.Audit.DedupeWindow,
+      # Cached, sanitized adapter health snapshot for non-blocking UI
+      # reads (#229). Refreshed out-of-band by
+      # `Bank.Runtime.Workers.RefreshAdapterHealth`.
+      Bank.Ops.AdapterHealthSnapshot,
       # Delegation state is now durable in Postgres (see Bank.Delegations).
       # Background workers for runtime orchestration (see Bank.Runtime).
       {Oban, Application.fetch_env!(:bank, Oban)},

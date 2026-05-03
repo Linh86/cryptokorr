@@ -105,11 +105,15 @@ config :bank, Oban,
     # set (#228 Phase 1.5). Runs every minute; per-row idempotency
     # is owned by `Bank.Security.Pauses.expire/2` so an extra tick
     # is harmless.
+    # Refresh of the cached adapter health snapshot (#229) so
+    # LiveView consumers can read it without blocking on the
+    # adapter's `/healthz` endpoint themselves.
     {Oban.Plugins.Cron,
      crontab: [
        {"30 0 * * *", Bank.Runtime.Workers.AggregateAPIKeyUsage},
        {"*/2 * * * *", Bank.Runtime.Workers.ScanStuckPlans},
-       {"* * * * *", Bank.Runtime.Workers.SweepExpiredPauses}
+       {"* * * * *", Bank.Runtime.Workers.SweepExpiredPauses},
+       {"* * * * *", Bank.Runtime.Workers.RefreshAdapterHealth}
      ]}
   ]
 
