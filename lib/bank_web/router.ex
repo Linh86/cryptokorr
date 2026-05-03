@@ -341,6 +341,7 @@ defmodule BankWeb.Router do
       live "/counterparties/:id", CounterpartyDetailLive
       live "/policies", PoliciesLive
       live "/security", SecurityLive
+      live "/activity/import", ActivityImportLive
     end
   end
 
