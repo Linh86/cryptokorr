@@ -139,6 +139,116 @@ defmodule Bank.Ops.Jobs do
   @spec problem_states() :: [String.t()]
   def problem_states, do: @problem_states
 
+  @typedoc """
+  Aggregate shape returned by `problem_job_summary/1`. Derived
+  from the same sanitized row set as `list_problem_jobs/1` so no
+  unsafe column ever reaches the caller.
+
+  ## Fields
+
+    * `:total` — number of rows in the bounded window. Equal to
+      `Enum.sum(Map.values(:counts))`.
+    * `:counts` — per-state counts. Always carries one key per
+      `problem_states/0` value so callers can `Map.fetch!/2`
+      without nil-checks. Counts come from the bounded window
+      (i.e. `list_problem_jobs/1` with `:limit`), not the full
+      table.
+    * `:oldest_attempted_at` — earliest `attempted_at` in the
+      window, or `nil` if every row has `attempted_at == nil` /
+      the window is empty.
+    * `:newest_attempted_at` — latest `attempted_at` in the
+      window (same nil rule).
+    * `:limit` — the resolved limit used for the underlying scan.
+    * `:global?` — always `true` in v1. Explicit marker so a
+      future workspace-scoped variant cannot silently flip the
+      semantics; UI labels the card "ops-wide" when `true`.
+  """
+  @type problem_job_summary :: %{
+          total: non_neg_integer(),
+          counts: %{String.t() => non_neg_integer()},
+          oldest_attempted_at: DateTime.t() | nil,
+          newest_attempted_at: DateTime.t() | nil,
+          limit: pos_integer(),
+          global?: true
+        }
+
+  @doc """
+  Sanitized aggregate over the same problem-job window as
+  `list_problem_jobs/1`. Suitable for a single-row "ops health"
+  card on SecurityLive.
+
+  Counts come from the *bounded* window (the first `:limit` rows
+  ordered by `attempted_at desc nulls last, inserted_at desc, id
+  desc`), so a runaway problem-job pile-up cannot widen the
+  query past the hard cap. UI consumers wanting a true
+  unbounded total should ask for a future endpoint, not extend
+  the limit here.
+
+  ## Options
+
+    * `:limit` — default `#{@default_limit}`, hard-capped at
+      `#{@max_limit}`. Same clamp rule as `list_problem_jobs/1`.
+
+  ## Workspace scoping (v1 limitation)
+
+  Same as `list_problem_jobs/1` — v1 is global. The returned
+  `:global?` is always `true` and acts as the explicit marker
+  C-UI must check before deciding how to label the card. A
+  future revision can introduce per-workspace summaries; the
+  shape will gain a workspace_id field at that point but
+  `global?` stays as the discriminator.
+  """
+  @spec problem_job_summary(keyword()) :: problem_job_summary()
+  def problem_job_summary(opts \\ []) do
+    limit = opts |> Keyword.get(:limit, @default_limit) |> clamp_limit()
+
+    rows = list_problem_jobs(limit: limit)
+    total = length(rows)
+    counts = build_counts(rows)
+    {oldest, newest} = attempted_at_extents(rows)
+
+    %{
+      total: total,
+      counts: counts,
+      oldest_attempted_at: oldest,
+      newest_attempted_at: newest,
+      limit: limit,
+      global?: true
+    }
+  end
+
+  defp build_counts(rows) do
+    base = Map.new(@problem_states, fn state -> {state, 0} end)
+
+    Enum.reduce(rows, base, fn row, acc ->
+      Map.update(acc, row.state, 1, &(&1 + 1))
+    end)
+  end
+
+  # Walks the row list once; returns {oldest, newest} of the
+  # non-nil `attempted_at` values. Both `nil` when the window has
+  # no rows that have been attempted yet (e.g. cancelled jobs
+  # never run, or the window is empty).
+  defp attempted_at_extents([]), do: {nil, nil}
+
+  defp attempted_at_extents(rows) do
+    rows
+    |> Enum.map(& &1.attempted_at)
+    |> Enum.reject(&is_nil/1)
+    |> case do
+      [] ->
+        {nil, nil}
+
+      [first | _] = stamps ->
+        Enum.reduce(stamps, {first, first}, fn t, {oldest, newest} ->
+          {min_dt(t, oldest), max_dt(t, newest)}
+        end)
+    end
+  end
+
+  defp min_dt(a, b), do: if(DateTime.compare(a, b) == :lt, do: a, else: b)
+  defp max_dt(a, b), do: if(DateTime.compare(a, b) == :gt, do: a, else: b)
+
   defp clamp_limit(n) when is_integer(n) and n > 0 and n <= @max_limit, do: n
   defp clamp_limit(n) when is_integer(n) and n > @max_limit, do: @max_limit
   defp clamp_limit(_), do: @default_limit

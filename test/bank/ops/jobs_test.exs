@@ -157,6 +157,177 @@ defmodule Bank.Ops.JobsTest do
     end
   end
 
+  describe "problem_job_summary/1" do
+    test "returns total 0 and zero counts when no problem jobs exist" do
+      summary = Jobs.problem_job_summary()
+
+      assert summary.total == 0
+      assert summary.counts == %{"retryable" => 0, "discarded" => 0, "cancelled" => 0}
+      assert is_nil(summary.oldest_attempted_at)
+      assert is_nil(summary.newest_attempted_at)
+      assert summary.limit == 10
+      assert summary.global? == true
+    end
+
+    test "counts mixed states correctly and totals match counts" do
+      now = DateTime.utc_now()
+
+      # 2 retryable, 3 discarded, 1 cancelled
+      for _ <- 1..2,
+          do: insert_job!(%{state: "retryable", attempted_at: now})
+
+      for _ <- 1..3,
+          do: insert_job!(%{state: "discarded", attempted_at: now})
+
+      insert_job!(%{state: "cancelled", attempted_at: now})
+
+      summary = Jobs.problem_job_summary()
+
+      assert summary.total == 6
+      assert summary.counts == %{"retryable" => 2, "discarded" => 3, "cancelled" => 1}
+      assert summary.total == summary.counts |> Map.values() |> Enum.sum()
+    end
+
+    test "non-problem states do NOT affect counts or total" do
+      now = DateTime.utc_now()
+
+      # Real problem jobs.
+      insert_job!(%{state: "retryable", attempted_at: now})
+      insert_job!(%{state: "discarded", attempted_at: now})
+
+      # Noise that must be ignored.
+      for state <- ~w(completed scheduled available executing suspended) do
+        insert_job!(%{state: state, attempted_at: now})
+      end
+
+      summary = Jobs.problem_job_summary()
+
+      assert summary.total == 2
+      assert summary.counts == %{"retryable" => 1, "discarded" => 1, "cancelled" => 0}
+    end
+
+    test "limit defaults to 10 and is hard-capped at 50" do
+      for _ <- 1..60, do: insert_job!(%{state: "discarded"})
+
+      assert Jobs.problem_job_summary().limit == 10
+      assert Jobs.problem_job_summary().total == 10
+
+      assert Jobs.problem_job_summary(limit: 25).limit == 25
+      assert Jobs.problem_job_summary(limit: 25).total == 25
+
+      assert Jobs.problem_job_summary(limit: 50).limit == 50
+      assert Jobs.problem_job_summary(limit: 50).total == 50
+
+      # Exceeding cap clamps down to 50.
+      capped = Jobs.problem_job_summary(limit: 999)
+      assert capped.limit == 50
+      assert capped.total == 50
+
+      # Invalid input falls back to default.
+      assert Jobs.problem_job_summary(limit: 0).limit == 10
+      assert Jobs.problem_job_summary(limit: -3).limit == 10
+      assert Jobs.problem_job_summary(limit: "lots").limit == 10
+    end
+
+    test "oldest/newest attempted_at extents come from non-nil window rows" do
+      old = DateTime.utc_now() |> DateTime.add(-7200, :second)
+      mid = DateTime.utc_now() |> DateTime.add(-3600, :second)
+      new = DateTime.utc_now()
+
+      insert_job!(%{state: "discarded", attempted_at: old})
+      insert_job!(%{state: "retryable", attempted_at: mid})
+      insert_job!(%{state: "cancelled", attempted_at: new})
+      # An attempted_at: nil row must NOT affect the extents.
+      insert_job!(%{state: "discarded", attempted_at: nil})
+
+      summary = Jobs.problem_job_summary()
+
+      assert DateTime.compare(summary.oldest_attempted_at, old) == :eq
+      assert DateTime.compare(summary.newest_attempted_at, new) == :eq
+    end
+
+    test "extents are nil when every problem row has attempted_at: nil" do
+      insert_job!(%{state: "cancelled", attempted_at: nil})
+
+      summary = Jobs.problem_job_summary()
+
+      assert summary.total == 1
+      assert is_nil(summary.oldest_attempted_at)
+      assert is_nil(summary.newest_attempted_at)
+    end
+
+    test "summary shape: only allowlisted top-level keys" do
+      insert_job!(%{state: "discarded"})
+
+      summary = Jobs.problem_job_summary()
+
+      assert Map.keys(summary) |> Enum.sort() ==
+               ~w(counts global? limit newest_attempted_at oldest_attempted_at total)a
+
+      refute Map.has_key?(summary, :rows)
+      refute Map.has_key?(summary, :args)
+      refute Map.has_key?(summary, :errors)
+      refute Map.has_key?(summary, :meta)
+      refute Map.has_key?(summary, :tags)
+    end
+
+    test "global? is always true so UI cannot accidentally label workspace-isolated" do
+      insert_job!(%{state: "retryable"})
+      assert Jobs.problem_job_summary().global? == true
+      assert Jobs.problem_job_summary(limit: 50).global? == true
+    end
+
+    test "JSON-scan: summary derived from secret-bearing rows leaks nothing" do
+      insert_job!(%{
+        state: "discarded",
+        worker: "Bank.Runtime.Workers.RunExecution",
+        queue: "executions_run",
+        args: %{
+          "decision_id" => "secret-id-12345",
+          "url" => "https://secret@adapter.test/dispatch",
+          "Authorization" => "Bearer sk_live_4242"
+        },
+        errors: [
+          %{
+            "attempt" => 5,
+            "error" => "** (RuntimeError) https://secret@adapter.test sk_live_4242 0xdeadbeef"
+          }
+        ],
+        meta: %{"private_key" => "0xabc"},
+        tags: ["sensitive-tag-secret"]
+      })
+
+      summary = Jobs.problem_job_summary()
+      json = Jason.encode!(summary)
+
+      for needle <- [
+            "Bearer",
+            "Authorization",
+            "sk_live",
+            "sk_",
+            "secret@",
+            "https://",
+            "private_key",
+            "0xdeadbeef",
+            "0xabc",
+            "sensitive-tag",
+            "RuntimeError",
+            "args",
+            "errors",
+            "meta",
+            "tags"
+          ] do
+        refute String.contains?(json, needle),
+               "summary must not leak #{needle}: #{inspect(json)}"
+      end
+
+      # Sanity: the row WAS counted, so the sanitization didn't
+      # silently drop it.
+      assert summary.counts["discarded"] == 1
+      assert summary.total == 1
+    end
+  end
+
   # ---- helpers ----
 
   # Insert directly into `oban_jobs` so we can drive `state`,
