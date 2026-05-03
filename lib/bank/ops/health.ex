@@ -21,6 +21,34 @@ defmodule Bank.Ops.Health do
   The intent is that a human on call can `curl /v1/health/deep` and
   see a single JSON that answers every "is something obviously wrong"
   question at once.
+
+  ## Status enum (#253)
+
+  Per-check `:status` is one of:
+
+    * `:ok` — explicitly verified healthy this tick.
+    * `:degraded` — known partially functional (e.g. adapter 5xx).
+      Still serving but at a reduced level.
+    * `:down` — known not working (transport error, DB unreachable).
+    * `:not_configured` — the dependency is intentionally absent
+      (e.g. local/dev without an adapter `base_url`). Treated as
+      benign in `snapshot/0` so a fresh checkout that has never set
+      up the chain feature is not falsely degraded.
+    * `:unknown` — could not determine. Returned when a check times
+      out or raises an unexpected error and the state is genuinely
+      unknown. NEVER treated as `:ok` by the snapshot top-level
+      rollup — unknown is not healthy.
+
+  ## Redaction
+
+  Per-check `:detail` is always either `nil` or a short, fixed-shape
+  string drawn from a small allowlist. We deliberately do **not**
+  surface `inspect/1` of internal structs, raw exception text, RPC
+  URLs (which can carry credentials), or Authorization headers. The
+  `inspect` strings the previous version emitted (`%Req.TransportError{...}`)
+  could leak host names and exception message bodies; the
+  enum-string form below preserves the operational signal without
+  the leak.
   """
 
   require Logger
@@ -34,6 +62,15 @@ defmodule Bank.Ops.Health do
   @stuck_plan_threshold_minutes 15
   @adapter_health_path "/healthz"
   @adapter_health_timeout_ms 2_000
+
+  # `database/0` runs a `SELECT 1`; the underlying Ecto pool default
+  # is multi-second, which is too slow for a readiness probe path.
+  # Cap it to 1 second so a deadlocked / overloaded pool surfaces as
+  # `:down` quickly rather than hanging the probe.
+  @database_timeout_ms 1_000
+
+  @type check_status :: :ok | :degraded | :down | :not_configured | :unknown
+  @type check_result :: %{status: check_status(), detail: String.t() | nil}
 
   @non_terminal [:prepared, :signing, :broadcasting, :pending_confirmation]
 
@@ -62,8 +99,16 @@ defmodule Bank.Ops.Health do
   @doc """
   Runs every check and returns a map suitable for JSON rendering.
 
-  The top-level `:status` is `:ok` if every check is `:ok`, otherwise
-  `:degraded`.
+  Top-level `:status` collapses the per-check statuses with these
+  rules (#253):
+
+    * `:ok` — every check is `:ok` or `:not_configured`. A
+      `:not_configured` dependency is treated as benign: a local/dev
+      env that has not configured the adapter is not "degraded" by
+      that absence, only by an attempted-and-failed dependency.
+    * `:degraded` — at least one check is `:degraded`, `:down`, or
+      `:unknown`. Critically, `:unknown` is NOT treated as `:ok` —
+      an unknown dependency status can never be reported healthy.
   """
   @spec snapshot(keyword()) :: %{status: :ok | :degraded, checks: map()}
   def snapshot(opts \\ []) do
@@ -74,58 +119,111 @@ defmodule Bank.Ops.Health do
     }
 
     status =
-      if Enum.all?(checks, fn {_, v} -> v.status == :ok end), do: :ok, else: :degraded
+      if Enum.all?(checks, fn {_, v} -> healthy_for_overall?(v.status) end),
+        do: :ok,
+        else: :degraded
 
     %{status: status, checks: checks}
   end
 
-  @doc "Ping Postgres with a `SELECT 1`."
-  @spec database() :: %{status: :ok | :error, detail: String.t() | nil}
+  # `:not_configured` is benign at the overall level; everything else
+  # that isn't `:ok` (including `:unknown`) is degrading.
+  defp healthy_for_overall?(:ok), do: true
+  defp healthy_for_overall?(:not_configured), do: true
+  defp healthy_for_overall?(_), do: false
+
+  @doc """
+  Ping Postgres with a `SELECT 1`.
+
+  Bounded by `#{@database_timeout_ms}` ms so a deadlocked or
+  overloaded pool surfaces as `:down` rather than hanging the probe.
+  Detail is a fixed enum string; raw `inspect/1` of `DBConnection`
+  errors is never returned, so internal connection state and
+  exception messages do not leak through the readiness payload.
+  """
+  @spec database() :: check_result()
   def database do
-    case Ecto.Adapters.SQL.query(Repo, "SELECT 1", []) do
+    case Ecto.Adapters.SQL.query(Repo, "SELECT 1", [], timeout: @database_timeout_ms) do
       {:ok, _} -> %{status: :ok, detail: nil}
-      {:error, reason} -> %{status: :error, detail: inspect(reason)}
+      {:error, _reason} -> %{status: :down, detail: "database_unreachable"}
     end
   rescue
-    e -> %{status: :error, detail: Exception.message(e)}
+    DBConnection.ConnectionError -> %{status: :down, detail: "database_unreachable"}
+    _ -> %{status: :unknown, detail: "database_check_raised"}
+  catch
+    :exit, _ -> %{status: :unknown, detail: "database_check_exit"}
   end
 
   @doc """
   Ping the adapter's health endpoint.
 
   The adapter isn't required to implement `/healthz` — if it returns
-  404 we still count it as reachable (we got an HTTP response). Only
-  transport errors or 5xx degrade the status.
+  any non-5xx HTTP response we still count it as reachable (we got
+  an HTTP response). Only transport errors or 5xx degrade the
+  status.
+
+  Returns `:not_configured` (not `:down`) when the adapter
+  `base_url` is unset — local/dev that has never wired up the chain
+  feature is not falsely "down".
+
+  Detail is always one of a small fixed allowlist:
+  `"adapter_base_url_not_configured"`, `"http_2xx"`, `"http_3xx"`,
+  `"http_4xx"`, `"http_5xx"`, `"transport_error"`,
+  `"adapter_check_raised"`, `"adapter_check_timeout"`. We never
+  surface raw `inspect/1` of `Req.TransportError` or other internal
+  structs because those can carry host/port and exception-text
+  fragments operators do not need to see.
   """
-  @spec adapter() :: %{status: :ok | :error, detail: String.t() | nil}
+  @spec adapter() :: check_result()
   def adapter do
     config = Application.get_env(:bank, Bank.AdapterClient, [])
     base_url = Keyword.get(config, :base_url)
     extra = Keyword.get(config, :req_options, [])
 
-    if is_nil(base_url) do
-      %{status: :error, detail: "adapter base_url not configured"}
-    else
-      req_opts =
-        [
-          base_url: base_url,
-          url: @adapter_health_path,
-          method: :get,
-          receive_timeout: @adapter_health_timeout_ms,
-          retry: false
-        ]
-        |> Keyword.merge(extra)
+    cond do
+      is_nil(base_url) ->
+        %{status: :not_configured, detail: "adapter_base_url_not_configured"}
 
-      case Req.request(req_opts) do
-        {:ok, %Req.Response{status: status}} when status < 500 ->
-          %{status: :ok, detail: "http #{status}"}
+      true ->
+        req_opts =
+          [
+            base_url: base_url,
+            url: @adapter_health_path,
+            method: :get,
+            receive_timeout: @adapter_health_timeout_ms,
+            retry: false
+          ]
+          |> Keyword.merge(extra)
 
-        {:ok, %Req.Response{status: status}} ->
-          %{status: :error, detail: "adapter 5xx: #{status}"}
+        try do
+          case Req.request(req_opts) do
+            {:ok, %Req.Response{status: status}} when status >= 200 and status < 300 ->
+              %{status: :ok, detail: "http_2xx"}
 
-        {:error, reason} ->
-          %{status: :error, detail: inspect(reason)}
-      end
+            {:ok, %Req.Response{status: status}} when status >= 300 and status < 400 ->
+              %{status: :ok, detail: "http_3xx"}
+
+            {:ok, %Req.Response{status: status}} when status >= 400 and status < 500 ->
+              # 4xx is "the adapter answered" — we still got proof of
+              # reachability. Many adapters intentionally 404 the
+              # health path because they have no `/healthz`. That is
+              # not a runtime degradation by itself.
+              %{status: :ok, detail: "http_4xx"}
+
+            {:ok, %Req.Response{status: _}} ->
+              %{status: :degraded, detail: "http_5xx"}
+
+            {:error, %{__struct__: Req.TransportError}} ->
+              %{status: :down, detail: "transport_error"}
+
+            {:error, _reason} ->
+              %{status: :down, detail: "transport_error"}
+          end
+        rescue
+          _ -> %{status: :unknown, detail: "adapter_check_raised"}
+        catch
+          :exit, _ -> %{status: :unknown, detail: "adapter_check_exit"}
+        end
     end
   end
 
@@ -135,7 +233,7 @@ defmodule Bank.Ops.Health do
   `#{inspect(@non_terminal)}` and it hasn't moved in `threshold_minutes`.
   """
   @spec stuck_plans(keyword()) :: %{
-          status: :ok | :error,
+          status: :ok | :degraded,
           count: non_neg_integer(),
           threshold_minutes: pos_integer()
         }
@@ -152,7 +250,11 @@ defmodule Bank.Ops.Health do
         :id
       )
 
-    status = if count == 0, do: :ok, else: :error
+    # Stuck plans are a partial-functioning signal, not a full
+    # outage: dispatch is still happening, just not for some plans.
+    # Map to `:degraded` (#253) rather than the previous `:error`
+    # which conflated this with adapter/db hard failures.
+    status = if count == 0, do: :ok, else: :degraded
     %{status: status, count: count, threshold_minutes: threshold}
   end
 

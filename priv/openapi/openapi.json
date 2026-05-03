@@ -1600,13 +1600,25 @@
         "type": "object"
       },
       "HealthDeepResponse": {
-        "description": "Deep health probe payload returned by `GET /v1/health/deep`. Runs\nevery operational check in `Bank.Ops.Health.snapshot/0` (Postgres,\nadapter reachability, stuck-plan count, …) and returns `503` with a\nnon-`\"ok\"` overall `status` if any check is degraded. `checks` maps\ncheck name to a check-object whose required field is `status`;\nindividual checks may add fields additively.\n",
+        "description": "Deep health probe payload returned by `GET /v1/health/deep`. Runs\nevery operational check in `Bank.Ops.Health.snapshot/0` (Postgres,\nadapter reachability, stuck-plan count, …) and returns `503` with a\nnon-`\"ok\"` overall `status` if any check is degraded. `checks` maps\ncheck name to a check-object whose required field is `status`;\nindividual checks may add fields additively.\n\n## Per-check status enum (#253)\n\n- `ok` — explicitly verified healthy this tick.\n- `degraded` — known partially functional (e.g. adapter 5xx,\n  stuck plans present).\n- `down` — known not working (transport error, DB unreachable).\n- `not_configured` — the dependency is intentionally absent\n  (e.g. local/dev without an adapter `base_url`). Treated as\n  benign: a fresh checkout that has never set up the chain\n  feature is not falsely degraded by that absence.\n- `unknown` — could not determine. Returned when a check times\n  out or raises unexpectedly. NEVER reported as healthy at the\n  overall level.\n\nTop-level `status` is `ok` when every check is `ok` or\n`not_configured`; otherwise `degraded` (and the response is\n`503`).\n\n## Detail-field redaction (#253)\n\nIndividual check `detail` fields are either `null` or a short\nfixed-shape enum string (e.g. `http_2xx`, `transport_error`,\n`database_unreachable`, `adapter_base_url_not_configured`). Raw\n`inspect/1` of internal structs, exception text, RPC URLs\n(which can carry credentials), and Authorization headers are\ndeliberately not surfaced.\n",
         "properties": {
           "checks": {
             "additionalProperties": {
               "additionalProperties": true,
               "properties": {
+                "detail": {
+                  "description": "Sanitized detail for this check. Either `null` or one of a small fixed allowlist of enum strings; never raw exception text or credentialed URLs.",
+                  "nullable": true,
+                  "type": "string"
+                },
                 "status": {
+                  "enum": [
+                    "ok",
+                    "degraded",
+                    "down",
+                    "not_configured",
+                    "unknown"
+                  ],
                   "example": "ok",
                   "type": "string"
                 }
@@ -1619,9 +1631,11 @@
             "description": "Map of check name to check-object.",
             "example": {
               "adapter": {
+                "detail": "http_2xx",
                 "status": "ok"
               },
               "database": {
+                "detail": null,
                 "status": "ok"
               }
             },
@@ -1633,6 +1647,10 @@
           },
           "status": {
             "description": "Overall health — stringified snapshot status.",
+            "enum": [
+              "ok",
+              "degraded"
+            ],
             "example": "ok",
             "type": "string"
           },

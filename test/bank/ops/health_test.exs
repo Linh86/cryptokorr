@@ -94,6 +94,173 @@ defmodule Bank.Ops.HealthTest do
     :telemetry.detach({__MODULE__, ref})
   end
 
+  # --- #253: dependency status enum + redaction ----------------------------
+
+  describe "database/0 (#253)" do
+    test "returns :ok with nil detail when Postgres is reachable" do
+      assert %{status: :ok, detail: nil} = Health.database()
+    end
+  end
+
+  describe "adapter/0 (#253)" do
+    test "returns :ok with http_2xx detail when the adapter answers" do
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        Req.Test.json(conn, %{status: "ok"})
+      end)
+
+      assert %{status: :ok, detail: "http_2xx"} = Health.adapter()
+    end
+
+    test "returns :ok with http_4xx detail when adapter has no /healthz" do
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        conn
+        |> Plug.Conn.put_status(404)
+        |> Req.Test.json(%{error: "not_found"})
+      end)
+
+      assert %{status: :ok, detail: "http_4xx"} = Health.adapter()
+    end
+
+    test "returns :degraded with http_5xx detail when adapter returns 5xx" do
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        conn
+        |> Plug.Conn.put_status(503)
+        |> Req.Test.json(%{error: "down"})
+      end)
+
+      assert %{status: :degraded, detail: "http_5xx"} = Health.adapter()
+    end
+
+    test "returns :down with transport_error detail on connection failure" do
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        Req.Test.transport_error(conn, :econnrefused)
+      end)
+
+      assert %{status: :down, detail: "transport_error"} = Health.adapter()
+    end
+
+    test "returns :not_configured when base_url is unset (local/dev)" do
+      original = Application.get_env(:bank, Bank.AdapterClient)
+
+      try do
+        Application.put_env(
+          :bank,
+          Bank.AdapterClient,
+          Keyword.delete(original || [], :base_url)
+        )
+
+        assert %{status: :not_configured, detail: "adapter_base_url_not_configured"} =
+                 Health.adapter()
+      after
+        if original do
+          Application.put_env(:bank, Bank.AdapterClient, original)
+        else
+          Application.delete_env(:bank, Bank.AdapterClient)
+        end
+      end
+    end
+
+    test "redacts: detail never carries raw transport-error text or RPC URL" do
+      # base_url contains a fake credential to prove redaction; the
+      # detail field must be the fixed enum string only.
+      original = Application.get_env(:bank, Bank.AdapterClient, [])
+
+      try do
+        secret_url = "https://user:supersecret@adapter.example.invalid"
+
+        Application.put_env(
+          :bank,
+          Bank.AdapterClient,
+          original
+          |> Keyword.put(:base_url, secret_url)
+          |> Keyword.put(:req_options, [])
+        )
+
+        # Adapter is unreachable in this test config (no Req.Test stub
+        # for the per-process owner pid in the real network path);
+        # the underlying call may raise/return :down. Either way the
+        # detail must be one of the fixed enum strings — not the URL.
+        result = Health.adapter()
+
+        assert result.status in [:down, :unknown, :degraded]
+        assert is_binary(result.detail)
+
+        refute String.contains?(result.detail, "supersecret"),
+               "detail leaked secret credential from RPC URL"
+
+        refute String.contains?(result.detail, "adapter.example.invalid"),
+               "detail leaked RPC host"
+
+        refute String.contains?(result.detail, "Req.TransportError"),
+               "detail leaked internal struct module name"
+
+        assert result.detail in [
+                 "transport_error",
+                 "adapter_check_raised",
+                 "adapter_check_exit",
+                 "http_5xx"
+               ]
+      after
+        Application.put_env(:bank, Bank.AdapterClient, original)
+      end
+    end
+  end
+
+  describe "snapshot/0 overall status (#253)" do
+    test "rolls up to :ok when adapter is healthy and DB is healthy" do
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        Req.Test.json(conn, %{status: "ok"})
+      end)
+
+      assert %{status: :ok, checks: checks} = Health.snapshot()
+      assert checks.database.status == :ok
+      assert checks.adapter.status == :ok
+      assert checks.stuck_plans.status == :ok
+    end
+
+    test "rolls up to :ok when adapter is :not_configured (local/dev unconfigured)" do
+      original = Application.get_env(:bank, Bank.AdapterClient)
+
+      try do
+        Application.put_env(
+          :bank,
+          Bank.AdapterClient,
+          Keyword.delete(original || [], :base_url)
+        )
+
+        # Local/dev without chain env: must not falsely fail.
+        assert %{status: :ok, checks: checks} = Health.snapshot()
+        assert checks.adapter.status == :not_configured
+      after
+        if original do
+          Application.put_env(:bank, Bank.AdapterClient, original)
+        else
+          Application.delete_env(:bank, Bank.AdapterClient)
+        end
+      end
+    end
+
+    test "rolls up to :degraded when adapter is :down" do
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        Req.Test.transport_error(conn, :econnrefused)
+      end)
+
+      assert %{status: :degraded, checks: checks} = Health.snapshot()
+      assert checks.adapter.status == :down
+    end
+
+    test "rolls up to :degraded when adapter is :degraded (5xx)" do
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        conn
+        |> Plug.Conn.put_status(502)
+        |> Req.Test.json(%{error: "bad_gateway"})
+      end)
+
+      assert %{status: :degraded, checks: checks} = Health.snapshot()
+      assert checks.adapter.status == :degraded
+    end
+  end
+
   # --- Stuck-plan detection (#230-b) --------------------------------------
 
   describe "stuck_plan_details/1" do
