@@ -88,6 +88,8 @@ defmodule Bank.Runtime.Telemetry do
 
     * `:status`             — HTTP status integer when known.
     * `:execution_plan_id`  — UUID, lets operators follow one plan.
+    * `:intent_id`          — UUID, lets operators follow one intent
+      across decision/dispatch/callback events.
     * `:smart_account_id`   — string identifier from grant/revoke
       paths.
     * `:duration_ms`        — request latency for SLI panels.
@@ -103,7 +105,13 @@ defmodule Bank.Runtime.Telemetry do
       %{count: 1},
       Map.merge(
         %{path: path, outcome: outcome},
-        Map.take(meta, [:status, :execution_plan_id, :smart_account_id, :duration_ms])
+        Map.take(meta, [
+          :status,
+          :execution_plan_id,
+          :intent_id,
+          :smart_account_id,
+          :duration_ms
+        ])
       )
     )
   end

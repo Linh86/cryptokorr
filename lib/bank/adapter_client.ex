@@ -325,6 +325,16 @@ defmodule Bank.AdapterClient do
     secret = Keyword.fetch!(config, :dispatch_secret)
     extra_req_options = Keyword.get(config, :req_options, [])
 
+    # Derive correlation metadata from the **request payload** before
+    # the HTTP call so every outcome branch can tie its telemetry back
+    # to the same intent/plan/smart-account, including the failure
+    # paths where we never see a parsed response (4xx/5xx/transport
+    # error/invalid-response). Hard-allowlist of safe identifiers; we
+    # never thread the raw payload, target address, signing
+    # requirements, delegation payload, or permission blob through
+    # telemetry.
+    request_corr = request_correlation(kind, payload)
+
     req_opts =
       [
         base_url: base_url,
@@ -345,20 +355,20 @@ defmodule Bank.AdapterClient do
       {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
         case parse_accepted(kind, body) do
           {:ok, _payload} = ok ->
-            telemetry(path, :accepted, status, ok)
+            telemetry(path, :accepted, status, ok, request_corr)
             ok
 
           {:error, :invalid_response} = err ->
-            telemetry(path, :invalid_response, status, err)
+            telemetry(path, :invalid_response, status, err, request_corr)
             err
         end
 
       {:ok, %Req.Response{status: status, body: body}} when status in 400..499 ->
-        telemetry(path, :rejected, status, nil)
+        telemetry(path, :rejected, status, nil, request_corr)
         {:error, {:adapter_rejected, status, body}}
 
       {:ok, %Req.Response{status: status, body: body}} ->
-        telemetry(path, :error, status, nil)
+        telemetry(path, :error, status, nil, request_corr)
         {:error, {:adapter_error, status, body}}
 
       {:error, reason} ->
@@ -372,22 +382,47 @@ defmodule Bank.AdapterClient do
           "Bank.AdapterClient #{path} unavailable (category=#{reason_category(reason)})"
         )
 
-        telemetry(path, :unavailable, nil, nil)
+        telemetry(path, :unavailable, nil, nil, request_corr)
         {:error, :adapter_unavailable}
     end
   end
 
   # `outcome_meta` is the caller's `{:ok, payload}` / `{:error, reason}`
   # tuple — we extract a small safe-by-construction correlation slice
-  # (`execution_plan_id`, `smart_account_id`) without ever leaking the
-  # raw payload.
-  defp telemetry(path, outcome, status, outcome_meta) do
-    meta = %{}
+  # from the parsed response. `request_corr` is the same slice derived
+  # from the OUTBOUND payload before the HTTP call, so failure
+  # branches that never see a parsed response still carry correlation.
+  # Response-side keys win on conflict so the adapter's authoritative
+  # `execution_plan_id` (which the contract guarantees matches the
+  # outbound one) is the value rendered to ops dashboards.
+  defp telemetry(path, outcome, status, outcome_meta, request_corr) do
+    meta = request_corr
     meta = if is_integer(status), do: Map.put(meta, :status, status), else: meta
     meta = Map.merge(meta, outcome_meta_correlation(outcome_meta))
 
     Bank.Runtime.Telemetry.adapter_dispatch(path, outcome, meta)
   end
+
+  # Pull a safe correlation slice off the OUTBOUND request payload.
+  # Per `Bank.Runtime.Telemetry.adapter_dispatch/3`'s allowlist, only
+  # `:execution_plan_id`, `:intent_id`, and `:smart_account_id` flow
+  # through. Address/target, signing requirements, delegation payload,
+  # permission blob, and Authorization headers are intentionally
+  # NEVER copied even though they may exist on the payload.
+  defp request_correlation(:transfer, %{
+         execution_plan_id: ep_id,
+         intent_id: intent_id,
+         smart_account_id: sa_id
+       })
+       when is_binary(ep_id) and is_binary(intent_id) and is_binary(sa_id) do
+    %{execution_plan_id: ep_id, intent_id: intent_id, smart_account_id: sa_id}
+  end
+
+  defp request_correlation(kind, %{smart_account_id: sa_id})
+       when kind in [:revoke, :grant] and is_binary(sa_id),
+       do: %{smart_account_id: sa_id}
+
+  defp request_correlation(_, _), do: %{}
 
   defp outcome_meta_correlation({:ok, %{execution_plan_id: id}}) when is_binary(id),
     do: %{execution_plan_id: id}
