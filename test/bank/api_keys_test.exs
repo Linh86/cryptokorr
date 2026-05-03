@@ -343,6 +343,54 @@ defmodule Bank.APIKeysTest do
       refute json =~ "secret_hash"
     end
 
+    test "broadcasts the api_key.rotated audit event on audit_stream after the txn commits",
+         %{workspace: ws, user: user} do
+      # Pre-fix the rotate path wrote the audit row inside the
+      # transaction via `Audit.append_event/1` (silent insert) but
+      # never broadcast it on `audit_stream`. `BankWeb.AuditLive`
+      # subscribes to `audit_stream` for its real-time tail, so
+      # `api_key.rotated` events were persisted but invisible to
+      # any operator viewing the audit page until they refreshed.
+      # Post-fix the broadcast fires AFTER `Repo.transaction/1`
+      # commits so subscribers only see events that are durably
+      # persisted.
+      {:ok, old_key, _} = APIKeys.create_key(ws, user, :operator, "broadcast-tail")
+
+      :ok = Bank.Runtime.PubSub.subscribe(Bank.Runtime.PubSub.audit_stream())
+
+      assert {:ok, new_key, _raw} = APIKeys.rotate_key(old_key, user)
+
+      new_key_id = new_key.id
+
+      assert_receive %{
+        topic: :audit_stream,
+        event: :appended,
+        payload: %{event_type: "api_key.rotated", subject_id: ^new_key_id}
+      }
+    end
+
+    test "no api_key.rotated audit broadcast when rotate loses the claim_revoke race",
+         %{workspace: ws, user: user} do
+      # The loser path returns {:error, :already_revoked} from
+      # `claim_revoke/2` before the new-key insert and audit append
+      # ever run. The post-commit broadcast must NOT fire on this
+      # path; subscribers should only see the winner's broadcast.
+      {:ok, old_key, _} = APIKeys.create_key(ws, user, :operator, "broadcast-loser")
+      {:ok, _} = APIKeys.revoke_key(old_key, actor: user)
+
+      :ok = Bank.Runtime.PubSub.subscribe(Bank.Runtime.PubSub.audit_stream())
+
+      assert {:error, :already_revoked} = APIKeys.rotate_key(old_key, user)
+
+      old_key_id = old_key.id
+
+      refute_received %{
+        topic: :audit_stream,
+        event: :appended,
+        payload: %{event_type: "api_key.rotated", subject_id: ^old_key_id}
+      }
+    end
+
     test "honours :expires_at override when supplied", %{workspace: ws, user: user} do
       {:ok, old_key, _} = APIKeys.create_key(ws, user, :viewer, "ttl-override")
       assert is_nil(old_key.expires_at)
