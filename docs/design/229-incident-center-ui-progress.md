@@ -105,6 +105,43 @@ This is a working map of progress as of the most recent `main`.
   cache boundary; raw exception text, credentialed RPC URLs, and
   stack traces are excluded by construction. No refresh button. Merge
   SHA `88f409d176389cce606d8579a81852398a1232bf`.
+- [PR #344](https://github.com/Linh86/cryptobank/pull/344) — sanitized
+  problem-job read API for the Incident Center UI (#229,
+  backend-only). Adds `Bank.Ops.Jobs.list_problem_jobs/1`, a
+  workspace-agnostic read function with a hard query cap that
+  surfaces only an allowlisted projection: `id`, `worker`, `queue`,
+  `state`, `attempt`, `max_attempts`, `inserted_at`, `scheduled_at`,
+  `attempted_at`. Filters states `retryable`, `discarded`,
+  `cancelled`. Explicitly **global / ops-wide v1, not
+  workspace-scoped** — Oban `args` are per-worker and not uniform,
+  so the `:workspace_id` opt is deliberately not accepted. Never
+  surfaces `args`, `errors`, `meta`, `tags`, stack traces, raw
+  exception text, RPC URLs, tokens, or signing material — those
+  columns are filtered at the module boundary and have explicit
+  redaction tests. Merge SHA
+  `9ce6ad718a4cfc45778dafbd3862c8c1ec86a66c`.
+- [PR #345](https://github.com/Linh86/cryptobank/pull/345) — SecurityLive
+  incident readiness snapshot. Read-only `#incident-readiness-card`
+  with `data-level` summarizing `critical` / `attention` / `steady`.
+  Per-field stable ids: `#incident-readiness-runtime`,
+  `#incident-readiness-agent-keys`,
+  `#incident-readiness-chain-pauses`,
+  `#incident-readiness-adapter` (with `data-status`),
+  `#incident-readiness-plans`, `#incident-readiness-approvals`,
+  `#incident-readiness-delegations`, `#incident-readiness-events`.
+  Pure projection from already-loaded assigns — no backend call, no
+  new ETS read, no forms / buttons / events. Merge SHA
+  `7ed96ec8391799e8d1e342de9eb502ea242407af`.
+- [PR #348](https://github.com/Linh86/cryptobank/pull/348) — SecurityLive
+  sanitized problem-jobs card. Read-only `#problem-jobs-card` with
+  `data-scope="global"` and `data-count`. Per-row stable ids:
+  `#problem-job-<id>`, `#problem-job-state-<id>` (with `data-state`),
+  `#problem-job-worker-<id>`, `#problem-job-queue-<id>`,
+  `#problem-job-attempt-<id>`, `#problem-job-age-<id>`. Sourced from
+  `Bank.Ops.Jobs.list_problem_jobs(limit: 10)` (the #344 read API).
+  Card explicitly labels itself "Ops-wide" — global, not
+  workspace-isolated, matching the backend posture. Merge SHA
+  `aa0fc020ed3faa53d814e5303ffcb10e64daa06c`.
 
 ## Shipped surfaces
 
@@ -251,6 +288,48 @@ organized by the LiveView they live on.
   in [#342](https://github.com/Linh86/cryptobank/pull/342)
   ("SecurityLive: show cached adapter health (#229)"), merge SHA
   `88f409d`.
+- **Incident readiness card** — compact read-only roll-up of the
+  current `/security` posture. Stable element id
+  `#incident-readiness-card` with a top-level `data-level` of
+  `critical` / `attention` / `steady`. Per-field stable ids:
+  `#incident-readiness-runtime`, `#incident-readiness-agent-keys`,
+  `#incident-readiness-chain-pauses`, `#incident-readiness-adapter`
+  (with `data-status`), `#incident-readiness-plans`,
+  `#incident-readiness-approvals`,
+  `#incident-readiness-delegations`,
+  `#incident-readiness-events`. Implemented as a pure projection
+  from already-loaded assigns: no backend call, no new ETS read, no
+  forms / buttons / events. Levels collapse to `critical` if the
+  runtime is paused, workspace agent keys are paused, an active
+  Base chain pause exists, or adapter health is degraded;
+  `attention` if there is no critical signal but stuck/in-flight
+  plans, pending approvals, or recent safety events; `steady`
+  otherwise. Tests cover the steady / critical / attention branches
+  individually, plus sibling-workspace isolation, coexistence with
+  the other cards, and a secret-negative content assertion. Landed
+  in [#345](https://github.com/Linh86/cryptobank/pull/345)
+  ("SecurityLive: add incident readiness snapshot (#229)"), merge
+  SHA `7ed96ec8`.
+- **Sanitized problem-jobs card** — read-only `#problem-jobs-card`
+  with `data-scope="global"` and `data-count`, surfacing
+  failed / retrying jobs (`retryable`, `discarded`, `cancelled`)
+  bounded to 10 rows ordered by recency. Per-row stable ids:
+  `#problem-job-<id>`, `#problem-job-state-<id>` (with
+  `data-state`), `#problem-job-worker-<id>`,
+  `#problem-job-queue-<id>`, `#problem-job-attempt-<id>`,
+  `#problem-job-age-<id>`. Empty state renders
+  `#problem-jobs-empty` and `data-count="0"`. The card explicitly
+  labels itself "Ops-wide" because the backend read function
+  (`Bank.Ops.Jobs.list_problem_jobs/1` from #344) is global by
+  design — Oban `args` are not uniform across workers and the
+  module deliberately refuses a `:workspace_id` opt rather than
+  pretend-scope unsafely. The LiveView card never reads
+  `args` / `errors` / `meta` / `tags` / stack traces / raw
+  exception text / RPC URLs; those columns are filtered at the
+  context boundary. Landed in
+  [#348](https://github.com/Linh86/cryptobank/pull/348)
+  ("SecurityLive: show sanitized problem jobs (#229)"), merge SHA
+  `aa0fc020`.
 
 ### `BankWeb.DashboardLive` (`/`)
 
@@ -291,15 +370,11 @@ Surfaces already shipped (do **not** rebuild): emergency-action
 confirmation audit (#327), pending approvals card (#329), incident
 summary snapshot (#330), in-flight execution plans card (#324),
 read-only active chain pauses card (#334), Base chain pause/resume
-controls (#337), cached adapter health card (#342). For all of these,
-treat any new request as a follow-up patch to the existing surface,
-not a green-field reimplementation.
+controls (#337), cached adapter health card (#342), incident
+readiness card (#345), sanitized problem-jobs card (#348). For all
+of these, treat any new request as a follow-up patch to the existing
+surface, not a green-field reimplementation.
 
-- **Failed/retrying jobs surface** — `#229` lists "failed/retrying
-  jobs". **Still blocked on a safe backend Oban/read API** — today
-  the operator drops into Oban LiveDashboard or queries the DB. A
-  workspace-scoped read API for the relevant Oban queues would unlock
-  a small per-queue retry panel on the security console.
 - **Non-Base chain pause/resume controls** — Phase 1 pause UI is Base
   only; pausing additional chains is gated on the underlying
   `Bank.Security.Pauses` / dispatch gates accepting them as supported
