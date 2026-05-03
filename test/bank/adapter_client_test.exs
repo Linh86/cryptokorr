@@ -440,7 +440,7 @@ defmodule Bank.AdapterClientTest do
       :ok
     end
 
-    test "accepted dispatch emits :accepted telemetry with execution_plan_id correlation" do
+    test "accepted dispatch emits :accepted telemetry with execution_plan_id + intent_id + smart_account_id correlation" do
       plan = resolvable_plan()
 
       Req.Test.stub(Bank.AdapterClient, fn conn ->
@@ -454,13 +454,17 @@ defmodule Bank.AdapterClientTest do
                         path: "/dispatch/transfer",
                         outcome: :accepted,
                         status: 202,
-                        execution_plan_id: plan_id
+                        execution_plan_id: plan_id,
+                        intent_id: intent_id,
+                        smart_account_id: sa_id
                       }}
 
       assert plan_id == plan.id
+      assert intent_id == plan.intent_id
+      assert sa_id == plan.smart_account_id
     end
 
-    test "rejected dispatch emits :rejected telemetry with status" do
+    test "rejected dispatch emits :rejected telemetry with request-side correlation (#255 P2)" do
       plan = resolvable_plan()
 
       Req.Test.stub(Bank.AdapterClient, fn conn ->
@@ -470,10 +474,25 @@ defmodule Bank.AdapterClientTest do
       assert {:error, {:adapter_rejected, 422, _body}} = AdapterClient.dispatch_transfer(plan)
 
       assert_receive {:telemetry, [:bank, :adapter, :dispatch], %{count: 1},
-                      %{path: "/dispatch/transfer", outcome: :rejected, status: 422}}
+                      %{
+                        path: "/dispatch/transfer",
+                        outcome: :rejected,
+                        status: 422,
+                        execution_plan_id: ep_id,
+                        intent_id: intent_id,
+                        smart_account_id: sa_id
+                      } = meta}
+
+      # Failure transitions the operator must be able to tie back to
+      # the originating intent/plan.
+      assert ep_id == plan.id
+      assert intent_id == plan.intent_id
+      assert sa_id == plan.smart_account_id
+
+      assert_no_unsafe_metadata(meta)
     end
 
-    test "5xx dispatch emits :error telemetry with status" do
+    test "5xx dispatch emits :error telemetry with request-side correlation (#255 P2)" do
       plan = resolvable_plan()
 
       Req.Test.stub(Bank.AdapterClient, fn conn ->
@@ -483,10 +502,23 @@ defmodule Bank.AdapterClientTest do
       assert {:error, {:adapter_error, 503, _}} = AdapterClient.dispatch_transfer(plan)
 
       assert_receive {:telemetry, [:bank, :adapter, :dispatch], %{count: 1},
-                      %{path: "/dispatch/transfer", outcome: :error, status: 503}}
+                      %{
+                        path: "/dispatch/transfer",
+                        outcome: :error,
+                        status: 503,
+                        execution_plan_id: ep_id,
+                        intent_id: intent_id,
+                        smart_account_id: sa_id
+                      } = meta}
+
+      assert ep_id == plan.id
+      assert intent_id == plan.intent_id
+      assert sa_id == plan.smart_account_id
+
+      assert_no_unsafe_metadata(meta)
     end
 
-    test "transport error emits :unavailable telemetry — no status, no raw reason" do
+    test "transport error emits :unavailable telemetry with request-side correlation (#255 P2)" do
       plan = resolvable_plan()
 
       Req.Test.stub(Bank.AdapterClient, fn conn ->
@@ -496,12 +528,69 @@ defmodule Bank.AdapterClientTest do
       assert {:error, :adapter_unavailable} = AdapterClient.dispatch_transfer(plan)
 
       assert_receive {:telemetry, [:bank, :adapter, :dispatch], %{count: 1},
-                      %{path: "/dispatch/transfer", outcome: :unavailable} = meta}
+                      %{
+                        path: "/dispatch/transfer",
+                        outcome: :unavailable,
+                        execution_plan_id: ep_id,
+                        intent_id: intent_id,
+                        smart_account_id: sa_id
+                      } = meta}
 
-      # No raw `:reason`, `:url`, or transport struct in metadata.
-      refute Map.has_key?(meta, :reason)
-      refute Map.has_key?(meta, :url)
+      assert ep_id == plan.id
+      assert intent_id == plan.intent_id
+      assert sa_id == plan.smart_account_id
       assert is_nil(meta[:status])
+
+      assert_no_unsafe_metadata(meta)
+    end
+
+    test "invalid 2xx body emits :invalid_response telemetry with request-side correlation (#255 P2)" do
+      plan = resolvable_plan()
+
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        json_resp(conn, 200, %{"something" => "else"})
+      end)
+
+      assert {:error, :invalid_response} = AdapterClient.dispatch_transfer(plan)
+
+      assert_receive {:telemetry, [:bank, :adapter, :dispatch], %{count: 1},
+                      %{
+                        path: "/dispatch/transfer",
+                        outcome: :invalid_response,
+                        status: 200,
+                        execution_plan_id: ep_id,
+                        intent_id: intent_id,
+                        smart_account_id: sa_id
+                      } = meta}
+
+      assert ep_id == plan.id
+      assert intent_id == plan.intent_id
+      assert sa_id == plan.smart_account_id
+
+      assert_no_unsafe_metadata(meta)
+    end
+
+    # Helper: pin the allowlist. The new request_correlation/2 path
+    # only ever forwards safe identifiers; this asserts we never
+    # accidentally widen the surface to leak target address, signing
+    # requirements, delegation payload, permission blob, body, raw
+    # reason, URL, headers, or Authorization fragments.
+    defp assert_no_unsafe_metadata(meta) do
+      for key <- [
+            :reason,
+            :url,
+            :headers,
+            :payload,
+            :body,
+            :target,
+            :signing_requirements,
+            :delegation_payload,
+            :permission,
+            :authorization
+          ] do
+        refute Map.has_key?(meta, key),
+               "telemetry metadata must not include #{inspect(key)}: #{inspect(meta)}"
+      end
     end
 
     test "transport error log is sanitized — does not echo raw Req error or URL" do
@@ -584,6 +673,61 @@ defmodule Bank.AdapterClientTest do
       # so a dashboard alert can pick it up without parsing logs.
       assert_receive {:telemetry, [:bank, :adapter, :dispatch], %{count: 1},
                       %{path: "/dispatch/transfer", outcome: :invalid_response, status: 200}}
+    end
+
+    test "revoke_delegation rejected dispatch carries smart_account_id correlation (#255 P2)" do
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        json_resp(conn, 422, %{"error" => %{"code" => "unsupported_chain"}})
+      end)
+
+      assert {:error, {:adapter_rejected, 422, _}} =
+               AdapterClient.dispatch_revoke_delegation(%{
+                 smart_account_id: "sa_correlation_test",
+                 delegation_id: "del_correlation_test"
+               })
+
+      assert_receive {:telemetry, [:bank, :adapter, :dispatch], %{count: 1},
+                      %{
+                        path: "/dispatch/revoke_delegation",
+                        outcome: :rejected,
+                        status: 422,
+                        smart_account_id: "sa_correlation_test"
+                      } = meta}
+
+      assert_no_unsafe_metadata(meta)
+      # delegation_id must NOT leak — only the allowlisted identifiers.
+      refute Map.has_key?(meta, :delegation_id)
+    end
+
+    test "grant_delegation transport-error dispatch carries smart_account_id correlation (#255 P2)" do
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        Req.Test.transport_error(conn, :econnrefused)
+      end)
+
+      assert {:error, :adapter_unavailable} =
+               AdapterClient.dispatch_grant_delegation(%{
+                 smart_account_id: "sa_grant_corr",
+                 chain_id: 8453,
+                 account: "0xabc"
+               })
+
+      assert_receive {:telemetry, [:bank, :adapter, :dispatch], %{count: 1},
+                      %{
+                        path: "/dispatch/grant_delegation",
+                        outcome: :unavailable,
+                        smart_account_id: "sa_grant_corr"
+                      } = meta}
+
+      assert is_nil(meta[:status])
+      assert_no_unsafe_metadata(meta)
+      # `account`, `delegation_payload`, `permission`, `scope`, `chain_id`
+      # must never appear in telemetry, even though they are on the
+      # outbound payload.
+      refute Map.has_key?(meta, :account)
+      refute Map.has_key?(meta, :delegation_payload)
+      refute Map.has_key?(meta, :permission)
+      refute Map.has_key?(meta, :scope)
+      refute Map.has_key?(meta, :chain_id)
     end
   end
 end
