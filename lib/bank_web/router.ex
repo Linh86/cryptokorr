@@ -325,6 +325,7 @@ defmodule BankWeb.Router do
       live "/intents", IntentsLive
       live "/audit", AuditLive
       live "/audit/replay/:intent_id", IntentReplayLive
+      live "/sandbox", SandboxLive
     end
 
     # Operator surfaces — pages that carry mutations (approvals,
