@@ -418,4 +418,172 @@ defmodule Bank.AdapterClientTest do
                })
     end
   end
+
+  # --- #255 structured telemetry + redaction --------------------------------
+
+  describe "dispatch_transfer/2 — telemetry + redaction (#255)" do
+    setup do
+      handler_id = "test-adapter-dispatch-#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      :telemetry.attach(
+        handler_id,
+        [:bank, :adapter, :dispatch],
+        fn event, measurements, metadata, _config ->
+          send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      :ok
+    end
+
+    test "accepted dispatch emits :accepted telemetry with execution_plan_id correlation" do
+      plan = resolvable_plan()
+
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        json_resp(conn, 202, %{"accepted" => true, "execution_plan_id" => plan.id})
+      end)
+
+      assert {:ok, _} = AdapterClient.dispatch_transfer(plan)
+
+      assert_receive {:telemetry, [:bank, :adapter, :dispatch], %{count: 1},
+                      %{
+                        path: "/dispatch/transfer",
+                        outcome: :accepted,
+                        status: 202,
+                        execution_plan_id: plan_id
+                      }}
+
+      assert plan_id == plan.id
+    end
+
+    test "rejected dispatch emits :rejected telemetry with status" do
+      plan = resolvable_plan()
+
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        json_resp(conn, 422, %{"error" => %{"code" => "unsupported_chain"}})
+      end)
+
+      assert {:error, {:adapter_rejected, 422, _body}} = AdapterClient.dispatch_transfer(plan)
+
+      assert_receive {:telemetry, [:bank, :adapter, :dispatch], %{count: 1},
+                      %{path: "/dispatch/transfer", outcome: :rejected, status: 422}}
+    end
+
+    test "5xx dispatch emits :error telemetry with status" do
+      plan = resolvable_plan()
+
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        Plug.Conn.resp(conn, 503, "upstream")
+      end)
+
+      assert {:error, {:adapter_error, 503, _}} = AdapterClient.dispatch_transfer(plan)
+
+      assert_receive {:telemetry, [:bank, :adapter, :dispatch], %{count: 1},
+                      %{path: "/dispatch/transfer", outcome: :error, status: 503}}
+    end
+
+    test "transport error emits :unavailable telemetry — no status, no raw reason" do
+      plan = resolvable_plan()
+
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        Req.Test.transport_error(conn, :econnrefused)
+      end)
+
+      assert {:error, :adapter_unavailable} = AdapterClient.dispatch_transfer(plan)
+
+      assert_receive {:telemetry, [:bank, :adapter, :dispatch], %{count: 1},
+                      %{path: "/dispatch/transfer", outcome: :unavailable} = meta}
+
+      # No raw `:reason`, `:url`, or transport struct in metadata.
+      refute Map.has_key?(meta, :reason)
+      refute Map.has_key?(meta, :url)
+      assert is_nil(meta[:status])
+    end
+
+    test "transport error log is sanitized — does not echo raw Req error or URL" do
+      plan = resolvable_plan()
+
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        # Force the URL on the underlying request to look credentialed
+        # so a leaked `inspect/1` would surface it. We can't replace
+        # the URL the client sends, but `transport_error` reasons are
+        # raw atoms in this stub; the test asserts the controlled-shape
+        # log entry, which never echoes URL/struct.
+        Req.Test.transport_error(conn, :econnrefused)
+      end)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, :adapter_unavailable} = AdapterClient.dispatch_transfer(plan)
+        end)
+
+      assert log =~ "Bank.AdapterClient /dispatch/transfer unavailable"
+      assert log =~ "category=econnrefused"
+
+      # Substrings that an `inspect/1` of the Req error or request
+      # could surface — none of them must reach the log.
+      for needle <- [
+            "Req.TransportError",
+            "Req.Request",
+            "Bearer",
+            "Authorization",
+            "https://",
+            "http://",
+            "secret@",
+            "sk_",
+            "private_key",
+            "BEGIN ",
+            "transport_options"
+          ] do
+        refute log =~ needle,
+               "transport-error log must not leak #{needle}: #{inspect(log)}"
+      end
+    end
+
+    test "unexpected 2xx body log is sanitized — only top-level shape, never values" do
+      plan = resolvable_plan()
+
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        json_resp(conn, 200, %{
+          "secret" => "Bearer sk_live_4242",
+          "Authorization" => "Bearer xxx",
+          "url" => "https://[email protected]/healthz",
+          "private_key" => "0xabc"
+        })
+      end)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, :invalid_response} = AdapterClient.dispatch_transfer(plan)
+        end)
+
+      assert log =~ "Bank.AdapterClient: unexpected 2xx body"
+      # Shape descriptor is allowed: it carries only the (operator-known)
+      # adapter contract key names, no values, no host names, no tokens.
+      assert log =~ "shape=map(keys=["
+
+      for needle <- [
+            "Bearer",
+            "sk_live",
+            "sk_",
+            "secret@",
+            "https://",
+            "private_key=0x",
+            "0xabc",
+            "leak"
+          ] do
+        refute log =~ needle,
+               "invalid-response log must not leak #{needle}: #{inspect(log)}"
+      end
+
+      # Telemetry should also fire :invalid_response for this branch
+      # so a dashboard alert can pick it up without parsing logs.
+      assert_receive {:telemetry, [:bank, :adapter, :dispatch], %{count: 1},
+                      %{path: "/dispatch/transfer", outcome: :invalid_response, status: 200}}
+    end
+  end
 end
