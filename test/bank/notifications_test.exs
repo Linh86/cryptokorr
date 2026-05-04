@@ -379,6 +379,54 @@ defmodule Bank.NotificationsTest do
 
       assert {:error, :archived} = Notifications.mark_read(archived)
     end
+
+    # --- stale-struct guard (#233 P2-2) --------------------------------
+
+    test "stale :unread struct cannot mark an already-archived DB row as :read (#233 P2-2)" do
+      # Pre-fix `mark_read/2` trusted the in-memory status on the
+      # passed struct and updated by primary key. A long-held
+      # `:unread` struct loaded BEFORE a concurrent `archive/2`
+      # could therefore overwrite an already-archived DB row back
+      # to `:read`. Post-fix the transition is gated by a
+      # conditional `update_all where status == :unread`, so the
+      # DB enforces the precondition atomically.
+      ws = workspace!()
+      {:ok, stale_unread} = Notifications.create(valid_attrs(%{workspace: ws}))
+      assert stale_unread.status == :unread
+
+      # Concurrent caller archives the row.
+      {:ok, archived} = Notifications.archive(stale_unread)
+      assert archived.status == :archived
+      assert %DateTime{} = archived.archived_at
+
+      # Original caller still holds the stale `:unread` struct
+      # and now calls mark_read. Must NOT regress the archived
+      # row to `:read`.
+      assert {:error, :archived} = Notifications.mark_read(stale_unread)
+
+      # And the DB row stays archived — same archived_at, status
+      # still `:archived`.
+      reloaded = Bank.Repo.get!(Bank.Notifications.Notification, stale_unread.id)
+      assert reloaded.status == :archived
+      assert reloaded.archived_at == archived.archived_at
+      assert is_nil(reloaded.read_at)
+    end
+
+    test "stale :unread struct against an already-:read DB row is idempotent (no read_at bump)" do
+      # Sibling case for the conditional-update path: when the DB
+      # row was already marked read by a concurrent caller, the
+      # stale struct's mark_read should fall through to the
+      # idempotent reload-and-return outcome — no new write.
+      ws = workspace!()
+      {:ok, stale_unread} = Notifications.create(valid_attrs(%{workspace: ws}))
+
+      {:ok, first_read} = Notifications.mark_read(stale_unread)
+      assert %DateTime{} = first_read.read_at
+
+      {:ok, second_read} = Notifications.mark_read(stale_unread)
+      assert second_read.id == first_read.id
+      assert second_read.read_at == first_read.read_at
+    end
   end
 
   # --- archive ----------------------------------------------------------
@@ -516,6 +564,46 @@ defmodule Bank.NotificationsTest do
         })
 
       assert {:ok, _n} = Notifications.create(attrs)
+    end
+
+    # --- dedupe_key secret hygiene (#233 P2-1) -------------------------
+
+    test "rejects dedupe_key containing secret-looking content (#233 P2-1)" do
+      # `dedupe_key` is a persisted notification field. Pre-fix
+      # the changeset only ran the secret-hygiene gate on title /
+      # body / action_link, so an emitter that built a dedupe key
+      # from operator input could quietly persist a Bearer token /
+      # PEM marker / `private_key=` blob into a column that future
+      # inbox listings or log lines would surface.
+      ws = workspace!()
+
+      for marker <- @markers ++ @url_markers do
+        attrs = valid_attrs(%{workspace: ws, dedupe_key: marker})
+        assert {:error, cs} = Notifications.create(attrs)
+
+        assert errors_on(cs).dedupe_key != [],
+               "marker #{inspect(marker)} was accepted in dedupe_key"
+      end
+    end
+
+    test "dedupe_key happy path: clean opaque key passes" do
+      # A future #234 emitter typically composes the dedupe key
+      # as `<event_type>:<subject_id>` or
+      # `<event_type>:<sha256_of_payload>` — both shapes contain
+      # no marker family the gate rejects.
+      ws = workspace!()
+
+      for safe_key <- [
+            "intent.held:" <> Ecto.UUID.generate(),
+            "execution.aborted:tx-0xabc",
+            "decision.approval_required:dec-id-001",
+            ("policy.violation:" <>
+               :crypto.strong_rand_bytes(16))
+            |> Base.encode16(case: :lower)
+          ] do
+        attrs = valid_attrs(%{workspace: ws, dedupe_key: safe_key})
+        assert {:ok, _n} = Notifications.create(attrs), "safe key #{inspect(safe_key)} rejected"
+      end
     end
   end
 

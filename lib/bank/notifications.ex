@@ -207,23 +207,53 @@ defmodule Bank.Notifications do
   already-read notification returns `{:ok, n}` without bumping
   `read_at`. Archived notifications return `{:error, :archived}`
   — once archived, status does not regress.
+
+  ## Stale-struct safety (#233 P2-2)
+
+  The transition is gated by a conditional `update_all` that
+  only flips the row when its DB-side status is currently
+  `:unread`. A stale in-memory struct that was loaded before a
+  concurrent `archive/2` therefore cannot regress an archived
+  row back to `:read`. When the conditional update affects 0
+  rows (i.e. the DB row was archived or already read between the
+  caller's load and this call), the function reloads the row
+  and returns the appropriate outcome:
+
+    * DB row is `:read` → `{:ok, current_db_row}` (idempotent)
+    * DB row is `:archived` → `{:error, :archived}` (refuse)
   """
   @spec mark_read(Notification.t(), keyword()) ::
           {:ok, Notification.t()} | {:error, :archived | Ecto.Changeset.t()}
   def mark_read(%Notification{} = n, opts \\ []) do
-    case n.status do
-      :read ->
-        {:ok, n}
+    at = Keyword.get(opts, :now, DateTime.utc_now())
+    now = DateTime.utc_now()
 
-      :archived ->
-        {:error, :archived}
+    # `select: x` is the only way to read updated rows back out of
+    # `Repo.update_all/3` in Ecto — `returning: true` is an
+    # `insert_all` option, not an `update_all` option.
+    query =
+      from(x in Notification,
+        where: x.id == ^n.id and x.status == ^:unread,
+        select: x
+      )
 
-      :unread ->
-        at = Keyword.get(opts, :now, DateTime.utc_now())
+    case Repo.update_all(query, set: [status: :read, read_at: at, updated_at: now]) do
+      {1, [updated]} ->
+        {:ok, updated}
 
-        n
-        |> Notification.mark_read_changeset(at)
-        |> Repo.update()
+      {0, _} ->
+        case Repo.get(Notification, n.id) do
+          %Notification{status: :read} = current ->
+            {:ok, current}
+
+          # Defensive: a row deleted between the caller's load and
+          # this call (no public delete path today, but #234+ may
+          # add one) collapses to `:archived` so callers see a
+          # terminal-refused outcome rather than a misleading
+          # `{:ok, stale_struct}`.
+          _ ->
+            {:error, :archived}
+        end
     end
   end
 
