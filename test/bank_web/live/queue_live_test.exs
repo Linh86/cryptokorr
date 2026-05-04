@@ -121,7 +121,7 @@ defmodule BankWeb.QueueLiveTest do
 
       assert has_element?(
                view,
-               ~s(a#decision-report-link-#{envelope.id}[href="/v1/intents/#{intent.id}/report"]),
+               ~s(a#decision-report-link-#{envelope.id}[href="/audit/replay/#{intent.id}/report"]),
                "Download report"
              )
 

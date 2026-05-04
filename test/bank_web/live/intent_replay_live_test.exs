@@ -217,10 +217,13 @@ defmodule BankWeb.IntentReplayLiveTest do
       assert has_element?(view, "#decision-report-network")
       assert has_element?(view, "#decision-report-broadcast")
 
-      # The download link points at the existing #250 controller.
+      # The download link points at the browser-session controller
+      # (#251 P2). It deliberately does NOT use the `/v1`
+      # API-key-gated endpoint because a browser viewer would 401
+      # there.
       assert has_element?(
                view,
-               ~s(a#decision-report-download[href="/v1/intents/#{intent.id}/report"])
+               ~s(a#decision-report-download[href="/audit/replay/#{intent.id}/report"])
              )
 
       # Defence-in-depth: the link opens in a new tab so a download

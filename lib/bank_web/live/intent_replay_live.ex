@@ -197,10 +197,15 @@ defmodule BankWeb.IntentReplayLive do
   # --- Section: decision report (#251) -------------------------------------
   #
   # Renders the deterministic Report.flags_section/2 (mainnet/testnet
-  # + live/stub) plus a download link to the existing #250 endpoint
-  # `GET /v1/intents/:id/report`. Read-only: no mutating events on
-  # the surface, no chain calls. The download link reuses the
-  # API-side workspace gate, so cross-workspace ids resolve to 404.
+  # + live/stub) plus a download link to the browser-session
+  # download route `GET /audit/replay/:intent_id/report` (#251 P2).
+  # That route reuses `Bank.Decisions.ReportExport` and the same
+  # workspace-scope guard the LiveView mount applies, so cross-
+  # workspace ids redirect to /audit. The browser-session route
+  # exists so a logged-in viewer/operator can download without
+  # re-authenticating with an API key — `/v1/intents/:id/report`
+  # (#250) remains the SDK / cURL surface and stays unchanged.
+  # Read-only: no mutating events, no chain calls.
 
   attr :intent_id, :string, required: true
   attr :report, :map, required: true
@@ -217,7 +222,7 @@ defmodule BankWeb.IntentReplayLive do
         </h2>
         <.link
           id="decision-report-download"
-          href={~p"/v1/intents/#{@intent_id}/report"}
+          href={~p"/audit/replay/#{@intent_id}/report"}
           target="_blank"
           rel="noopener"
           class="btn btn-sm btn-primary gap-1.5"
