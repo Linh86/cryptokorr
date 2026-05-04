@@ -500,6 +500,118 @@ defmodule Bank.Audit.Events do
   end
 
   @doc """
+  `policy.version.draft_created` — operator opened a new draft
+  policy version (#223). The draft is editable and does not
+  affect runtime; runtime continues to read the prior published
+  version (or the active rule set, until #226 wires the runtime
+  to consult `PolicyVersion`). `supersedes_id` points at the
+  prior published version, or nil for the very first draft in a
+  workspace.
+  """
+  @spec policy_version_draft_created(Bank.Policies.PolicyVersion.t(), keyword()) :: attrs()
+  def policy_version_draft_created(%{__struct__: _} = version, opts \\ []) do
+    %{
+      actor: Keyword.get(opts, :actor, :user),
+      actor_id: Keyword.fetch!(opts, :actor_id),
+      event_type: "policy.version.draft_created",
+      subject_type: "policy_version",
+      subject_id: version.id,
+      correlation_id: version.id,
+      after_ref: policy_version_snapshot(version),
+      workspace_id: version.workspace_id
+    }
+  end
+
+  @doc """
+  `policy.version.published` — a draft policy version was
+  promoted to `:published` (#223). The prior `:published` row
+  (if any) was atomically marked `:superseded` in the same
+  transaction. `before_ref` captures the prior published id +
+  version_number; `after_ref` captures the new published row.
+  Future decisions can now pin against this version.
+  """
+  @spec policy_version_published(
+          Bank.Policies.PolicyVersion.t(),
+          Bank.Policies.PolicyVersion.t() | nil,
+          keyword()
+        ) :: attrs()
+  def policy_version_published(%{__struct__: _} = published, prior, opts \\ []) do
+    %{
+      actor: Keyword.get(opts, :actor, :user),
+      actor_id: Keyword.fetch!(opts, :actor_id),
+      event_type: "policy.version.published",
+      subject_type: "policy_version",
+      subject_id: published.id,
+      correlation_id: published.id,
+      before_ref: policy_version_prior_ref(prior),
+      after_ref: policy_version_snapshot(published),
+      workspace_id: published.workspace_id
+    }
+  end
+
+  @doc """
+  `policy.version.rolled_back` — operator re-published a prior
+  `:superseded` version, atomically marking the current
+  `:published` version `:superseded` in the same transaction
+  (#223). `before_ref` captures the row that was rolled out;
+  `after_ref` captures the row that's now published again.
+  """
+  @spec policy_version_rolled_back(
+          Bank.Policies.PolicyVersion.t(),
+          Bank.Policies.PolicyVersion.t() | nil,
+          keyword()
+        ) :: attrs()
+  def policy_version_rolled_back(%{__struct__: _} = restored, rolled_out, opts \\ []) do
+    %{
+      actor: Keyword.get(opts, :actor, :user),
+      actor_id: Keyword.fetch!(opts, :actor_id),
+      event_type: "policy.version.rolled_back",
+      subject_type: "policy_version",
+      subject_id: restored.id,
+      correlation_id: restored.id,
+      before_ref: policy_version_prior_ref(rolled_out),
+      after_ref: policy_version_snapshot(restored),
+      workspace_id: restored.workspace_id
+    }
+  end
+
+  defp policy_version_prior_ref(nil), do: nil
+
+  defp policy_version_prior_ref(%{__struct__: _} = version) do
+    %{
+      id: version.id,
+      version_number: version.version_number,
+      status: atom_or_nil(version.status)
+    }
+  end
+
+  defp policy_version_snapshot(%{__struct__: _} = version) do
+    items =
+      case version.rule_ids do
+        %{"items" => items} when is_list(items) -> items
+        _ -> []
+      end
+
+    %{
+      id: version.id,
+      workspace_id: version.workspace_id,
+      version_number: version.version_number,
+      status: atom_or_nil(version.status),
+      rule_id_count: length(items),
+      rule_ids: items,
+      supersedes_id: version.supersedes_id,
+      created_by: atom_or_nil(version.created_by),
+      published_by: atom_or_nil(version.published_by),
+      published_at: maybe_dt_iso(version.published_at),
+      effective_at: maybe_dt_iso(version.effective_at)
+    }
+  end
+
+  defp maybe_dt_iso(nil), do: nil
+  defp maybe_dt_iso(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+  defp maybe_dt_iso(other), do: other
+
+  @doc """
   `delegation.state_changed` — the delegation projection transitioned
   to a new state (granted, revoking, revoke_failed, revoked, expired).
   Correlation is nil (runtime-scoped, same as security events).
