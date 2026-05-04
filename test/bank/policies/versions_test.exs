@@ -697,8 +697,14 @@ defmodule Bank.Policies.VersionsTest do
 
       preview = preview_for(intent)
 
+      # Pass `paused?: false` explicitly so the test result does not
+      # depend on `Bank.Security.PauseState`'s process-global state
+      # (CI has seen leakage from sibling test files).
       assert {:ok, result} =
-               Bank.Decisions.evaluate_intent(intent, preview: {:ok, preview})
+               Bank.Decisions.evaluate_intent(intent,
+                 preview: {:ok, preview},
+                 paused?: false
+               )
 
       # Fail-closed: blocked by the policy_version_unresolved guard.
       assert result.outcome == :block
