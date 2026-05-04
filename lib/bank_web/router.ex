@@ -334,6 +334,19 @@ defmodule BankWeb.Router do
       live "/sandbox", SandboxLive
     end
 
+    # Browser-session-authenticated decision report download
+    # (#251 P2). The `/v1/intents/:id/report` API endpoint (#250)
+    # is API-key-gated and so a logged-in browser user clicking a
+    # `/v1` anchor would 401. This route lives on the same
+    # `:browser` pipeline + viewer-tier authority as
+    # `IntentReplayLive` and reuses `Bank.Decisions.ReportExport`
+    # to emit the same Markdown artifact. The controller does its
+    # own session + role check, so the route deliberately sits
+    # outside the `live_session` block.
+    get "/audit/replay/:intent_id/report",
+        DecisionReportDownloadController,
+        :show
+
     # Operator surfaces — pages that carry mutations (approvals,
     # counterparty/policy CRUD, runtime controls). Mount requires
     # `:operator` minimum; admin-only individual handle_event

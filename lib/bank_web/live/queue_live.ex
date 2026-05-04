@@ -446,7 +446,7 @@ defmodule BankWeb.QueueLive do
             <.link
               :if={@decision.intent_id}
               id={"decision-report-link-#{@decision.id}"}
-              href={~p"/v1/intents/#{@decision.intent_id}/report"}
+              href={~p"/audit/replay/#{@decision.intent_id}/report"}
               target="_blank"
               rel="noopener"
               class="link"
