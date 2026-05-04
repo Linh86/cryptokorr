@@ -377,13 +377,83 @@ defmodule Bank.Decisions do
 
   defp maybe_enqueue_approval_expiry(_envelope), do: :ok
 
+  # If the workspace has a published `Bank.Policies.PolicyVersion`
+  # (#223), use its rule_ids list as the authoritative pinned
+  # snapshot (#226). Greenfield workspaces with no published
+  # version fall back to legacy `Bank.Policies.load_active_ruleset/1`
+  # — that's the documented backward-compatibility decision.
   defp evaluate_policy(intent, opts, now) do
     eval_opts = [now: now]
 
-    eval_opts =
-      if Keyword.has_key?(opts, :rules), do: [{:rules, opts[:rules]} | eval_opts], else: eval_opts
+    {rules_opt, version_meta} =
+      cond do
+        Keyword.has_key?(opts, :rules) ->
+          # Test-injected rules — preserve the existing test
+          # injection path; no version pin (caller is in control).
+          {[{:rules, opts[:rules]}], nil}
 
-    Policies.evaluate(intent, eval_opts)
+        intent.workspace_id ->
+          case Bank.Policies.Versions.snapshot_for_workspace(intent.workspace_id) do
+            nil ->
+              {[], nil}
+
+            %{rules: rules, version_id: vid, version_number: vnum} ->
+              {[{:rules, rules}], %{id: vid, number: vnum}}
+          end
+
+        true ->
+          {[], nil}
+      end
+
+    eval_opts = rules_opt ++ eval_opts
+
+    intent
+    |> Policies.evaluate(eval_opts)
+    |> maybe_pin_version(version_meta)
+    |> maybe_fail_closed(version_meta)
+  end
+
+  defp maybe_pin_version(%Bank.Policies.Evaluation{} = ev, nil), do: ev
+
+  defp maybe_pin_version(%Bank.Policies.Evaluation{snapshot_ref: ref} = ev, %{
+         id: vid,
+         number: vnum
+       }) do
+    pinned =
+      ref
+      |> Map.put("policy_version_id", vid)
+      |> Map.put("policy_version_number", vnum)
+
+    %{ev | snapshot_ref: pinned}
+  end
+
+  # Fail-closed: when a published policy version exists for the
+  # workspace BUT the resolved rule set is empty (every id in the
+  # version's rule_ids list is missing or no longer `:active`), do
+  # not pass-through. Append a `policy_version_unresolved` violation
+  # so the autonomy router routes to `:hold`. This addresses the
+  # #226 acceptance bullet "Missing/malformed policy fails closed"
+  # — a published-but-broken policy must not run wide open.
+  defp maybe_fail_closed(%Bank.Policies.Evaluation{} = ev, nil), do: ev
+
+  defp maybe_fail_closed(
+         %Bank.Policies.Evaluation{matched_rule_ids: matched, violations: violations} = ev,
+         %{id: vid, number: vnum}
+       ) do
+    if matched == [] do
+      violation = %{
+        rule_id: nil,
+        rule_type: :policy_version_unresolved,
+        code: "policy_version_unresolved",
+        message:
+          "published policy version v#{vnum} (#{vid}) resolved to 0 active rules; failing closed",
+        details: %{"policy_version_id" => vid, "policy_version_number" => vnum}
+      }
+
+      %{ev | pass?: false, violations: [violation | violations]}
+    else
+      ev
+    end
   end
 
   defp maybe_demote(multi, _key, nil, _fun), do: multi
