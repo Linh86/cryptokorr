@@ -10,6 +10,8 @@ defmodule Bank.Runtime.Workers.ScanStuckPlansTest do
 
   alias Bank.Audit.AuditEvent
   alias Bank.Decisions.ExecutionPlan
+  alias Bank.Notifications
+  alias Bank.Notifications.Notification
   alias Bank.Ops.Health
   alias Bank.Repo
   alias Bank.Runtime.Workers.ScanStuckPlans
@@ -163,6 +165,136 @@ defmodule Bank.Runtime.Workers.ScanStuckPlansTest do
                ),
                :count
              ) == 1
+    end
+
+    test "stuck plan crossing the threshold also emits an ops.stuck_plan alert notification (#256)",
+         %{workspace: ws} do
+      now = DateTime.utc_now()
+      window_iso = now |> Health.detection_window_start() |> DateTime.to_iso8601()
+
+      stuck = stale_plan(:prepared, DateTime.add(now, -20 * 60, :second))
+
+      assert :ok = perform_job(ScanStuckPlans, %{"window_start" => window_iso})
+
+      [alert] =
+        Notifications.list_for_workspace(ws.id, event_type: "ops.stuck_plan")
+
+      assert alert.workspace_id == ws.id
+      assert alert.event_type == "ops.stuck_plan"
+      assert alert.severity == :warning
+      assert alert.role_target == :operator
+      assert alert.subject_type == "execution_plan"
+      assert alert.subject_id == stuck.id
+      assert alert.dedupe_key == "ops.stuck_plan:#{stuck.id}:#{window_iso}"
+      assert alert.body =~ "status=prepared"
+      assert alert.body =~ "threshold_seconds=600"
+      assert alert.body =~ "stuck_for_seconds="
+    end
+
+    test "repeated scans within the same window do not duplicate the ops.stuck_plan alert (#256)",
+         %{workspace: ws} do
+      now = DateTime.utc_now()
+      window_iso = now |> Health.detection_window_start() |> DateTime.to_iso8601()
+
+      _stuck = stale_plan(:prepared, DateTime.add(now, -20 * 60, :second))
+
+      :ok = perform_job(ScanStuckPlans, %{"window_start" => window_iso})
+      :ok = perform_job(ScanStuckPlans, %{"window_start" => window_iso})
+      :ok = perform_job(ScanStuckPlans, %{"window_start" => window_iso})
+
+      assert length(Notifications.list_for_workspace(ws.id, event_type: "ops.stuck_plan")) == 1
+    end
+
+    test "a previously-stuck plan that is no longer stuck emits ops.stuck_plan.resolved (#256)",
+         %{workspace: ws} do
+      now = DateTime.utc_now()
+      window_iso = now |> Health.detection_window_start() |> DateTime.to_iso8601()
+
+      stuck = stale_plan(:prepared, DateTime.add(now, -20 * 60, :second))
+
+      :ok = perform_job(ScanStuckPlans, %{"window_start" => window_iso})
+
+      assert [%Notification{event_type: "ops.stuck_plan"}] =
+               Notifications.list_for_workspace(ws.id, event_type: "ops.stuck_plan")
+
+      # Recover the plan: bump updated_at to "now" so it falls
+      # below every per-status threshold.
+      {1, _} =
+        Repo.update_all(
+          from(p in ExecutionPlan, where: p.id == ^stuck.id),
+          set: [updated_at: now]
+        )
+
+      :ok = perform_job(ScanStuckPlans, %{"window_start" => window_iso})
+
+      events =
+        Notifications.list_for_workspace(ws.id)
+        |> Enum.map(& &1.event_type)
+        |> Enum.sort()
+
+      assert events == ["ops.stuck_plan", "ops.stuck_plan.resolved"]
+
+      [resolved] =
+        Notifications.list_for_workspace(ws.id, event_type: "ops.stuck_plan.resolved")
+
+      assert resolved.severity == :info
+      assert resolved.subject_id == stuck.id
+      assert resolved.title =~ "resolved"
+      assert resolved.dedupe_key =~ ".resolved"
+      assert resolved.dedupe_key =~ window_iso
+    end
+
+    test "recovery is deduped: rerunning the scan after resolve does not emit another resolved row (#256)",
+         %{workspace: ws} do
+      now = DateTime.utc_now()
+      window_iso = now |> Health.detection_window_start() |> DateTime.to_iso8601()
+
+      stuck = stale_plan(:prepared, DateTime.add(now, -20 * 60, :second))
+
+      :ok = perform_job(ScanStuckPlans, %{"window_start" => window_iso})
+
+      {1, _} =
+        Repo.update_all(
+          from(p in ExecutionPlan, where: p.id == ^stuck.id),
+          set: [updated_at: now]
+        )
+
+      :ok = perform_job(ScanStuckPlans, %{"window_start" => window_iso})
+      :ok = perform_job(ScanStuckPlans, %{"window_start" => window_iso})
+      :ok = perform_job(ScanStuckPlans, %{"window_start" => window_iso})
+
+      assert length(
+               Notifications.list_for_workspace(ws.id, event_type: "ops.stuck_plan.resolved")
+             ) == 1
+    end
+
+    test "scan does not emit alerts for stuck plans whose workspace_id is nil (#256)" do
+      now = DateTime.utc_now()
+      window_iso = now |> Health.detection_window_start() |> DateTime.to_iso8601()
+
+      legacy = stale_plan(:prepared, DateTime.add(now, -20 * 60, :second), workspace_id: nil)
+
+      assert :ok = perform_job(ScanStuckPlans, %{"window_start" => window_iso})
+
+      # Audit emission still happens on the unscoped row.
+      assert Repo.aggregate(
+               from(e in AuditEvent,
+                 where:
+                   e.event_type == "ops.stuck_plan_detected" and
+                     e.subject_id == ^legacy.id
+               ),
+               :count
+             ) == 1
+
+      # But no notification — alerts are workspace-scoped by contract.
+      assert Repo.aggregate(
+               from(n in Notification,
+                 where:
+                   n.event_type == "ops.stuck_plan" and
+                     n.subject_id == ^legacy.id
+               ),
+               :count
+             ) == 0
     end
 
     test "fires the [:bank, :ops, :stuck_plan, :detected] telemetry event per emit" do
