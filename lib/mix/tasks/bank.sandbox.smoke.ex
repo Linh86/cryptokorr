@@ -12,11 +12,20 @@ defmodule Mix.Tasks.Bank.Sandbox.Smoke do
 
   ## What it verifies
 
-    * `health` — `Bank.Ops.Health.snapshot/0`'s `database` check is
-      `:ok`. The adapter is allowed to be `:not_configured` or
-      `:down` because Level 1 is local / no-chain — those are
-      expected non-blocking states (#253).
+    * `health` — `Bank.Ops.Health.database/0` is `:ok`. The smoke
+      deliberately does NOT call `Bank.Ops.Health.snapshot/0` /
+      `Bank.Ops.Health.adapter/0` because the adapter probe issues
+      a real `Req.request` to the configured base_url and Level 1
+      is no-chain by definition. DB-only health is the right
+      dependency surface for the sandbox flow.
     * `seeded_workspace` — the demo workspace exists by slug.
+    * `endpoint` — `GET /v1/health` dispatched through
+      `BankWeb.Endpoint` returns `200` with a valid JSON body.
+      This is the route-reachability signal: if any of the Phoenix
+      endpoint, the router pipeline, or the readiness controller
+      regresses to 5xx (501 stub, 502/503 misconfig, 500 raise),
+      the smoke fails. The route is public, DB-only, no adapter,
+      no auth — exactly the surface a Level 1 smoke should touch.
     * `create_intent` — at least one seeded intent reached the
       `agent_intents` table (smokes the create path; if the seed
       stops writing intents, this fails).
@@ -66,16 +75,17 @@ defmodule Mix.Tasks.Bank.Sandbox.Smoke do
 
   ## Example output
 
-      [bank.sandbox.smoke] running 8 checks
+      [bank.sandbox.smoke] running 9 checks
       [bank.sandbox.smoke] PASS health
       [bank.sandbox.smoke] PASS seeded_workspace
+      [bank.sandbox.smoke] PASS endpoint
       [bank.sandbox.smoke] PASS create_intent
       [bank.sandbox.smoke] PASS show_intent
       [bank.sandbox.smoke] PASS simulate_reasons
       [bank.sandbox.smoke] PASS approval
       [bank.sandbox.smoke] PASS cancel_flow
       [bank.sandbox.smoke] PASS replay
-      [bank.sandbox.smoke] 8 / 8 PASS
+      [bank.sandbox.smoke] 9 / 9 PASS
   """
 
   use Mix.Task
@@ -85,6 +95,7 @@ defmodule Mix.Tasks.Bank.Sandbox.Smoke do
   @check_order [
     :health,
     :seeded_workspace,
+    :endpoint,
     :create_intent,
     :show_intent,
     :simulate_reasons,
@@ -92,6 +103,11 @@ defmodule Mix.Tasks.Bank.Sandbox.Smoke do
     :cancel_flow,
     :replay
   ]
+
+  # Path used by the `:endpoint` route-reachability check. Must be a
+  # public route that does NOT trigger any chain/adapter probe. The
+  # `/v1/health` readiness probe verifies Postgres only.
+  @endpoint_smoke_path "/v1/health"
 
   @impl Mix.Task
   def run(argv) do
@@ -146,19 +162,42 @@ defmodule Mix.Tasks.Bank.Sandbox.Smoke do
   # posture as `Bank.Ops.Health` (#253).
 
   defp run_check(:health) do
-    # Local sandbox is no-chain by design: the adapter probe is
-    # expected to be `:not_configured` (no `base_url`) or `:down`
-    # (configured but no live adapter process in CI / on a fresh
-    # checkout). Both are benign locally. The smoke fails only when
-    # the database check is not `:ok` — that is the only dependency
-    # the no-chain product flow actually needs.
-    case Bank.Ops.Health.snapshot() do
-      %{checks: %{database: %{status: :ok}}} -> {:health, :ok, nil}
-      %{checks: %{database: %{status: status}}} -> {:health, :fail, "database status #{status}"}
-      _ -> {:health, :fail, "snapshot missing database check"}
+    # Level 1 is no-chain. The smoke deliberately calls
+    # `Bank.Ops.Health.database/0` directly instead of
+    # `Bank.Ops.Health.snapshot/0` because the snapshot ALSO calls
+    # `Bank.Ops.Health.adapter/0`, which issues a real
+    # `Req.request` against the configured `Bank.AdapterClient`
+    # base_url. In dev that is `localhost:4100`. The sandbox smoke
+    # must never make that HTTP probe — DB connectivity is the
+    # only dependency the local no-chain product flow needs.
+    case Bank.Ops.Health.database() do
+      %{status: :ok} -> {:health, :ok, nil}
+      %{status: status} -> {:health, :fail, "database status #{status}"}
     end
   rescue
-    _ -> {:health, :fail, "snapshot raised"}
+    _ -> {:health, :fail, "database check raised"}
+  end
+
+  defp run_check(:endpoint) do
+    # Route-reachability smoke: dispatches GET @endpoint_smoke_path
+    # through `BankWeb.Endpoint` via `Plug.Test`. If any product
+    # surface regresses to a 5xx — including 501 Not Implemented
+    # for a stubbed action, 503 for a misconfigured pipeline, or
+    # 500 for a raise — this check fails. The path
+    # `/v1/health` is public, DB-only, and never calls
+    # `Bank.AdapterClient`, so the smoke stays Level 1.
+    case dispatch_get(@endpoint_smoke_path) do
+      {:ok, status, _body} when status >= 200 and status < 500 ->
+        {:endpoint, :ok, nil}
+
+      {:ok, status, _body} ->
+        {:endpoint, :fail, "GET #{@endpoint_smoke_path} returned status #{status}"}
+
+      {:error, reason_atom} ->
+        {:endpoint, :fail, "GET #{@endpoint_smoke_path} dispatch failed: #{reason_atom}"}
+    end
+  rescue
+    _ -> {:endpoint, :fail, "endpoint dispatch raised"}
   end
 
   defp run_check(:seeded_workspace) do
@@ -382,4 +421,28 @@ defmodule Mix.Tasks.Bank.Sandbox.Smoke do
 
   defp log(_msg, true), do: :ok
   defp log(msg, _), do: IO.puts("[bank.sandbox.smoke] #{msg}")
+
+  @doc """
+  Dispatches a GET to `path` through `BankWeb.Endpoint` using
+  `Plug.Test.conn/3` and returns `{:ok, status, body}` on a normal
+  response or `{:error, reason}` when the dispatch itself raises.
+
+  This is a public helper rather than a private function so the
+  smoke task's tests can call it directly to assert that no chain
+  adapter HTTP is involved (the dispatch only goes through the
+  Phoenix router and Plug pipeline; nothing here reaches
+  `Bank.AdapterClient`).
+
+  Used by `run_check(:endpoint)`. Exposed in @doc form so a future
+  smoke that wants to add more route checks can reuse this helper
+  rather than re-deriving the dispatch shape.
+  """
+  @spec dispatch_get(String.t()) :: {:ok, non_neg_integer(), binary()} | {:error, atom()}
+  def dispatch_get(path) when is_binary(path) do
+    conn = Plug.Test.conn(:get, path)
+    response = BankWeb.Endpoint.call(conn, BankWeb.Endpoint.init([]))
+    {:ok, response.status, response.resp_body || ""}
+  rescue
+    _ -> {:error, :dispatch_raised}
+  end
 end
