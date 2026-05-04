@@ -201,8 +201,7 @@ defmodule Bank.Decisions.Report do
       decision_envelope:
         latest_section(decisions, &decision_section/1, "no decision envelope recorded"),
       approval: approval_section(decisions),
-      execution_plan:
-        latest_section(plans, &execution_plan_section/1, "no execution plan recorded"),
+      execution_plan: execution_plan_with_matches(plans, bundle[:matched_activities] || []),
       stablecoin_routes: bundle[:stablecoin_route_evidence] || [],
       flags: flags_section(intent, plans),
       residual_limitations: residual_limitations(bundle),
@@ -436,6 +435,17 @@ defmodule Bank.Decisions.Report do
 
   # --- execution plan -------------------------------------------------------
 
+  defp execution_plan_with_matches(nil, _matches), do: missing("no execution plan recorded")
+  defp execution_plan_with_matches([], _matches), do: missing("no execution plan recorded")
+
+  defp execution_plan_with_matches(plans, matches) when is_list(plans) do
+    plan = List.last(plans)
+
+    plan
+    |> execution_plan_section()
+    |> Map.put(:matched_activity, matched_activity_section(plan, matches))
+  end
+
   defp execution_plan_section(%ExecutionPlan{} = p) do
     %{
       available: true,
@@ -451,6 +461,40 @@ defmodule Bank.Decisions.Report do
       nonce: p.nonce,
       adapter_ref: p.adapter_ref,
       active: p.active
+    }
+  end
+
+  # Project the matched-activity rows for THIS plan into a list
+  # of safe scalar maps. The reconciliation surface (#246) writes
+  # `%{activity: %ImportedActivity{}, plan_id: ..., tx_hash: ...}`
+  # into the bundle's `:matched_activities` key; this helper
+  # filters by plan_id and exposes only the fields a reviewer
+  # needs to follow the link, never raw `metadata` or
+  # `provenance` strings (which can carry junk from the source
+  # importer).
+  defp matched_activity_section(%ExecutionPlan{id: plan_id}, matches) when is_list(matches) do
+    matches
+    |> Enum.filter(fn
+      %{plan_id: ^plan_id} -> true
+      _ -> false
+    end)
+    |> Enum.map(&matched_activity_summary/1)
+  end
+
+  defp matched_activity_section(_, _), do: []
+
+  defp matched_activity_summary(%{activity: %{__struct__: _} = a}) do
+    %{
+      id: a.id,
+      tx_hash: a.tx_hash,
+      chain: a.chain,
+      asset: a.asset,
+      direction: maybe_string(a.direction),
+      amount: maybe_decimal_to_string(a.amount),
+      status: maybe_string(a.status),
+      confidence: maybe_string(a.confidence),
+      source_type: maybe_string(a.source_type),
+      occurred_at: maybe_iso(a.occurred_at)
     }
   end
 

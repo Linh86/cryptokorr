@@ -320,6 +320,73 @@ defmodule Bank.AuditTest do
       assert ts_list == Enum.sort(ts_list, DateTime)
     end
 
+    test "bundle includes :matched_activities key (#246) — empty by default, populated when imported activity matches a plan tx_ref" do
+      # Reconciliation surface (#246): the replay bundle should carry a
+      # `:matched_activities` list whose entries link an imported
+      # chain activity row to the execution plan whose `tx_refs`
+      # cite the same `tx_hash`. Workspace-scoped, chain-scoped.
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "audit-recon-#{System.unique_integer([:positive])}",
+          name: "Audit Recon"
+        })
+
+      intent = Fixtures.agent_intent(workspace_id: ws.id)
+      decision = Fixtures.decision_envelope(intent: intent, outcome: :auto_exec, current: true)
+
+      tx_hash = "0xreplay" <> String.duplicate("a", 38)
+
+      plan =
+        Fixtures.execution_plan(
+          decision: decision,
+          intent_id: intent.id,
+          workspace_id: ws.id,
+          execution_status: :confirmed,
+          final_outcome: :confirmed,
+          tx_refs: [tx_hash],
+          chain: intent.chain
+        )
+
+      # An imported activity in the same workspace + chain that
+      # cites the same tx_hash.
+      {:ok, :inserted, activity} =
+        Bank.Activity.create_imported_activity(%{
+          workspace_id: ws.id,
+          source_type: :wallet_chain,
+          source_ref: "wallet:replay",
+          occurred_at: DateTime.utc_now() |> DateTime.truncate(:microsecond),
+          asset: "USDC",
+          chain: intent.chain,
+          amount: Decimal.new("100"),
+          direction: :inbound,
+          status: :confirmed,
+          confidence: :high,
+          tx_hash: tx_hash
+        })
+
+      {:ok, bundle} = Audit.replay(intent.id)
+
+      assert Map.has_key?(bundle, :matched_activities)
+      assert [match] = bundle.matched_activities
+      assert match.activity.id == activity.id
+      assert match.plan_id == plan.id
+      assert match.tx_hash == tx_hash
+    end
+
+    test "bundle :matched_activities is empty when no plan cites a known tx_hash" do
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "audit-recon-empty-#{System.unique_integer([:positive])}",
+          name: "Audit Recon Empty"
+        })
+
+      intent = Fixtures.agent_intent(workspace_id: ws.id)
+      _decision = Fixtures.decision_envelope(intent: intent, outcome: :auto_exec, current: true)
+
+      {:ok, bundle} = Audit.replay(intent.id)
+      assert bundle.matched_activities == []
+    end
+
     test "ignores cached current_*_id pointers on the intent" do
       # The bundle must come from the child tables, not the cached
       # pointer columns. Set a bogus pointer and verify replay still
