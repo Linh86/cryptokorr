@@ -164,6 +164,12 @@ defmodule BankWeb.Router do
     get "/intents/:id", IntentController, :show
     get "/intents/:id/replay", IntentController, :replay
 
+    # Decision report Markdown export (#250) — viewer-readable.
+    # Returns a deterministic Markdown artifact with HTML-comment
+    # metadata header (schema_version, body_sha256, generated_at).
+    # Workspace-scoped via the intent.
+    get "/intents/:id/report", DecisionReportController, :show
+
     # Decision reads — viewer-readable.
     get "/decisions/:id", DecisionController, :show
 

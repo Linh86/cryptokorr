@@ -28,6 +28,7 @@ defmodule BankWeb.OpenApiCoreEndpointsTest do
         "/v1/intents/{id}/simulate",
         "/v1/intents/{id}/cancel",
         "/v1/intents/{id}/replay",
+        "/v1/intents/{id}/report",
         "/v1/decisions/{id}",
         "/v1/decisions/{id}/execute",
         "/v1/approvals",
@@ -80,6 +81,12 @@ defmodule BankWeb.OpenApiCoreEndpointsTest do
                Access.key(:post),
                Access.key(:tags)
              ]) == ["Decisions"]
+
+      # /v1/intents/{id}/report is mounted under the Intents URL
+      # space but logically belongs to the decision-report surface
+      # (#250) — same Markdown body the LiveView would download.
+      assert get_in(paths(), ["/v1/intents/{id}/report", Access.key(:get), Access.key(:tags)]) ==
+               ["Decisions"]
     end
 
     test "approval endpoints carry the Approvals tag" do
