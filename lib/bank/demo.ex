@@ -535,6 +535,7 @@ defmodule Bank.Demo do
 
       :blocked ->
         {:ok, decision} = upsert_decision(intent, :block, :severe)
+        {:ok, _sim} = upsert_simulation(intent, :failed)
         emit_audit(intent, decision, scenario)
         %{intent: intent, decision: decision, plan: nil}
 
@@ -546,6 +547,7 @@ defmodule Bank.Demo do
             decision_risk(scenario.decision_outcome)
           )
 
+        {:ok, _sim} = upsert_simulation(intent, :completed)
         emit_audit(intent, decision, scenario)
         %{intent: intent, decision: decision, plan: nil}
 
@@ -557,6 +559,7 @@ defmodule Bank.Demo do
             decision_risk(scenario.decision_outcome)
           )
 
+        {:ok, _sim} = upsert_simulation(intent, :completed)
         {:ok, plan} = upsert_plan(decision, intent, scenario.execution_status, scenario)
         emit_audit(intent, decision, scenario, plan)
         %{intent: intent, decision: decision, plan: plan}
@@ -626,6 +629,44 @@ defmodule Bank.Demo do
               do: DateTime.utc_now() |> DateTime.add(3600, :second),
               else: nil
             )
+        })
+        |> Repo.insert()
+    end
+  end
+
+  # Idempotently insert a current SimulationReport for the given
+  # intent (#242 P2). The runtime pipeline writes simulation reports
+  # as part of the decision flow (#90), but the seed creates intents
+  # directly via `upsert_intent/4` and so bypasses that pipeline.
+  # Without a row here, the `/sandbox` checklist's `simulate` step
+  # renders incomplete on a fresh seed and `mix bank.sandbox.smoke`
+  # fails its `simulate` check — both surfaces depend on a
+  # SimulationReport existing for decided / planned / blocked
+  # intents. Provider/trace fields are explicitly fake (`sandbox_seed`)
+  # so a reviewer reading the row knows it is not from a real provider.
+  defp upsert_simulation(intent, status) do
+    case Repo.one(
+           from(s in SimulationReport,
+             where: s.intent_id == ^intent.id and s.current == true,
+             limit: 1
+           )
+         ) do
+      %SimulationReport{} = sim ->
+        {:ok, sim}
+
+      nil ->
+        %SimulationReport{}
+        |> SimulationReport.changeset(%{
+          intent_id: intent.id,
+          provider: "sandbox_seed",
+          provider_trace_ref: "sandbox_seed:" <> intent.id,
+          chain: @chain,
+          asset: @asset,
+          predicted_balance_changes: %{"items" => []},
+          generated_at: DateTime.utc_now() |> DateTime.truncate(:microsecond),
+          freshness_ttl_seconds: 3600,
+          status: status,
+          current: true
         })
         |> Repo.insert()
     end

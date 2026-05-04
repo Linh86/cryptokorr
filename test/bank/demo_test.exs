@@ -3,7 +3,7 @@ defmodule Bank.DemoTest do
 
   alias Bank.Audit.AuditEvent
   alias Bank.Counterparties.{AddressLabel, Counterparty, EvidenceArtifact, TrustAssertion}
-  alias Bank.Decisions.{DecisionEnvelope, ExecutionPlan}
+  alias Bank.Decisions.{DecisionEnvelope, ExecutionPlan, SimulationReport}
   alias Bank.Delegations.Delegation
   alias Bank.Demo
   alias Bank.Fixtures
@@ -136,6 +136,49 @@ defmodule Bank.DemoTest do
       # Decisions and executions show up for the planned scenarios.
       assert Enum.any?(events, &(&1.event_type == "decision.recorded"))
       assert Enum.any?(events, &String.starts_with?(&1.event_type, "execution."))
+    end
+
+    test "writes a current SimulationReport for every decided/planned/blocked demo intent (#242 P2)" do
+      :ok = Demo.seed()
+
+      ids = Demo.identifiers()
+
+      decided_intent_ids =
+        AgentIntent
+        |> join(:inner, [i], d in DecisionEnvelope, on: d.intent_id == i.id)
+        |> where([i], i.agent_id in ^ids.agent_ids)
+        |> distinct(true)
+        |> select([i], i.id)
+        |> Repo.all()
+
+      # Every intent that produced a decision must have exactly one
+      # current simulation report on the seeded path. The runbook
+      # promises `/sandbox` is fully green after a fresh seed; that
+      # is now true because `simulate_captured?` returns truthy.
+      assert decided_intent_ids != []
+
+      sim_intents =
+        SimulationReport
+        |> where([s], s.intent_id in ^decided_intent_ids and s.current == true)
+        |> select([s], s.intent_id)
+        |> Repo.all()
+        |> MapSet.new()
+
+      assert sim_intents == MapSet.new(decided_intent_ids)
+
+      # Provider / trace are explicitly fake — never a real provider
+      # token, never a value that looks like a secret.
+      sims =
+        SimulationReport
+        |> where([s], s.intent_id in ^decided_intent_ids and s.current == true)
+        |> Repo.all()
+
+      for sim <- sims do
+        assert sim.provider == "sandbox_seed"
+        assert String.starts_with?(sim.provider_trace_ref, "sandbox_seed:")
+        assert sim.status in [:completed, :failed]
+        assert sim.freshness_ttl_seconds > 0
+      end
     end
   end
 
@@ -584,6 +627,11 @@ defmodule Bank.DemoTest do
         ExecutionPlan
         |> join(:inner, [p], i in AgentIntent, on: i.id == p.intent_id)
         |> where([_p, i], i.agent_id in ^ids.agent_ids)
+        |> Repo.aggregate(:count),
+      simulations:
+        SimulationReport
+        |> join(:inner, [s], i in AgentIntent, on: i.id == s.intent_id)
+        |> where([_s, i], i.agent_id in ^ids.agent_ids)
         |> Repo.aggregate(:count),
       audit_events:
         AuditEvent
