@@ -209,6 +209,93 @@ defmodule BankWeb.OpsDashboardLiveTest do
                "ops dashboard leaked sanitized field: #{inspect(needle)}"
       end
     end
+
+    test "active pause with a secret-looking scope_value is collapsed to [redacted] (#254 P2)",
+         %{conn: conn, workspace: ws} do
+      # `Bank.Security.Pauses.create_pause/4` only validates
+      # `scope_value` as non-empty <=64 chars at the changeset
+      # level, so an operator typo or upstream mistake could plant
+      # a tokenized URL / Authorization header / private-key
+      # marker into the field. The dashboard must not render it.
+      leaks = [
+        "https://u:p@rpc.test/path",
+        "Bearer sk_live_AAAA",
+        "Authorization=token",
+        "BEGIN RSA PRIVATE KEY"
+      ]
+
+      for {leak, idx} <- Enum.with_index(leaks) do
+        # Each pause needs a distinct scope_type+scope_value
+        # tuple to bypass the active-pause unique constraint, but
+        # `create_pause/4` only accepts `:chain`. We work around
+        # by inserting directly via the schema changeset (still
+        # workspace-scoped).
+        {:ok, _pause} =
+          %Bank.Security.Pause{}
+          |> Bank.Security.Pause.create_changeset(%{
+            workspace_id: ws.id,
+            scope_type: :chain,
+            scope_value: leak,
+            paused_at: DateTime.add(DateTime.utc_now(), -idx, :second)
+          })
+          |> Bank.Repo.insert()
+      end
+
+      {:ok, _view, html} = live(conn, "/ops")
+
+      assert html =~ "[redacted]"
+
+      for needle <- [
+            "https://u:p@",
+            "rpc.test",
+            "Bearer ",
+            "sk_live_",
+            "Authorization=",
+            "BEGIN RSA PRIVATE KEY"
+          ] do
+        refute html =~ needle,
+               "active pause scope_value leaked secret marker: #{inspect(needle)}"
+      end
+    end
+
+    test "benign chain scope_value still renders verbatim (#254 P2)",
+         %{conn: conn, workspace: ws} do
+      for chain <- ["base-sepolia", "base", "ethereum-sepolia", "ethereum"] do
+        {:ok, _pause} =
+          %Bank.Security.Pause{}
+          |> Bank.Security.Pause.create_changeset(%{
+            workspace_id: ws.id,
+            scope_type: :chain,
+            scope_value: chain,
+            paused_at: DateTime.utc_now()
+          })
+          |> Bank.Repo.insert()
+      end
+
+      {:ok, _view, html} = live(conn, "/ops")
+
+      for chain <- ["base-sepolia", "base", "ethereum-sepolia", "ethereum"] do
+        assert html =~ "chain:" <> chain,
+               "expected chain scope #{inspect(chain)} to render verbatim"
+      end
+    end
+
+    test "active pause raw `reason` is never rendered (#254 P2)",
+         %{conn: conn, workspace: ws} do
+      sneaky_reason = "operator note: Bearer sk_live_AAAA leaked"
+
+      {:ok, :paused, _pause} =
+        Bank.Security.Pauses.create_pause(ws.id, :chain, "base-sepolia",
+          actor: :runtime,
+          reason: sneaky_reason
+        )
+
+      {:ok, _view, html} = live(conn, "/ops")
+
+      refute html =~ sneaky_reason
+      refute html =~ "Bearer "
+      refute html =~ "sk_live_"
+    end
   end
 
   describe "no chain / dispatch side effects" do
