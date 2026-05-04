@@ -268,6 +268,91 @@ defmodule Bank.Runtime.Workers.ScanStuckPlansTest do
              ) == 1
     end
 
+    test "alerted plan that falls outside the capped scan batch is NOT falsely resolved (#256 P2)",
+         %{workspace: ws} do
+      now = DateTime.utc_now()
+      window_iso = now |> Health.detection_window_start() |> DateTime.to_iso8601()
+
+      # First tick: alert one plan that has been stuck a long
+      # time. (3 h is well past every per-status threshold.)
+      alerted = stale_plan(:prepared, DateTime.add(now, -3 * 3600, :second))
+
+      :ok = perform_job(ScanStuckPlans, %{"window_start" => window_iso})
+
+      [alert] = Notifications.list_for_workspace(ws.id, event_type: "ops.stuck_plan")
+      assert alert.subject_id == alerted.id
+
+      # Now plant 60 OLDER stuck plans so the alerted row falls
+      # outside any reasonable capped detection batch (default
+      # cap is 50, so 60 fillers + 1 alerted = the alerted one
+      # is past the cap when ordered ASC by `updated_at`).
+      filler_ts = DateTime.add(now, -10 * 3600, :second)
+
+      for _i <- 1..60 do
+        _ = stale_plan(:prepared, filler_ts)
+      end
+
+      # Sanity check: the alerted plan is now NOT in the capped
+      # detection batch — proving the regression scenario.
+      capped_ids =
+        Health.stuck_plan_details(now: now)
+        |> Enum.map(& &1.id)
+        |> MapSet.new()
+
+      refute MapSet.member?(capped_ids, alerted.id),
+             "test fixture must place the alerted plan outside the capped scan batch"
+
+      # Second tick: the alerted plan is still stuck (its
+      # `updated_at` was never bumped). The recovery logic must
+      # NOT fire `.resolved` for it just because it fell out of
+      # the capped batch.
+      :ok = perform_job(ScanStuckPlans, %{"window_start" => window_iso})
+
+      assert Notifications.list_for_workspace(ws.id,
+               event_type: "ops.stuck_plan.resolved"
+             ) == []
+
+      # Subject-targeted recheck confirms the alerted plan is
+      # still stuck (so `Health.plans_currently_stuck/2` agrees
+      # with the assertion above).
+      still_stuck = Health.plans_currently_stuck([alerted.id], now: now)
+      assert MapSet.member?(still_stuck, alerted.id)
+    end
+
+    test "subject-targeted recovery still emits resolved when the plan genuinely cleared, even surrounded by other stuck plans (#256 P2)",
+         %{workspace: ws} do
+      now = DateTime.utc_now()
+      window_iso = now |> Health.detection_window_start() |> DateTime.to_iso8601()
+
+      stuck = stale_plan(:prepared, DateTime.add(now, -3 * 3600, :second))
+
+      :ok = perform_job(ScanStuckPlans, %{"window_start" => window_iso})
+      assert length(Notifications.list_for_workspace(ws.id, event_type: "ops.stuck_plan")) == 1
+
+      # Surround it with many other still-stuck plans so the
+      # capped batch on the next tick won't contain `stuck.id`.
+      filler_ts = DateTime.add(now, -10 * 3600, :second)
+
+      for _i <- 1..60 do
+        _ = stale_plan(:prepared, filler_ts)
+      end
+
+      # Now genuinely clear the alerted plan.
+      {1, _} =
+        Repo.update_all(
+          from(p in ExecutionPlan, where: p.id == ^stuck.id),
+          set: [updated_at: now]
+        )
+
+      :ok = perform_job(ScanStuckPlans, %{"window_start" => window_iso})
+
+      [resolved] =
+        Notifications.list_for_workspace(ws.id, event_type: "ops.stuck_plan.resolved")
+
+      assert resolved.subject_id == stuck.id
+      assert resolved.severity == :info
+    end
+
     test "scan does not emit alerts for stuck plans whose workspace_id is nil (#256)" do
       now = DateTime.utc_now()
       window_iso = now |> Health.detection_window_start() |> DateTime.to_iso8601()

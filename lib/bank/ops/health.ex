@@ -385,6 +385,56 @@ defmodule Bank.Ops.Health do
   end
 
   @doc """
+  Subject-targeted stuck-plan check (#256 P2).
+
+  Given a list of `plan_ids`, returns the subset that are
+  currently past their per-status threshold. Unlike
+  `stuck_plan_details/1`, this is NOT capped by `:limit` — the
+  result set is bounded by the input list, so a recovery path
+  cannot falsely conclude "recovered" just because the alerted
+  plan happened to fall outside the capped scan batch.
+
+  ## opts
+
+    * `:thresholds` — same per-status threshold map shape as
+      `stuck_plan_details/1`. Defaults to the configured /
+      built-in thresholds so a recovery check uses the same
+      cutoff the detection used.
+    * `:now` — clock override for tests.
+  """
+  @spec plans_currently_stuck([String.t()], keyword()) :: MapSet.t()
+  def plans_currently_stuck(plan_ids, opts \\ [])
+  def plans_currently_stuck([], _opts), do: MapSet.new()
+
+  def plans_currently_stuck(plan_ids, opts) when is_list(plan_ids) do
+    binary_ids = Enum.filter(plan_ids, &is_binary/1)
+
+    if binary_ids == [] do
+      MapSet.new()
+    else
+      thresholds = resolve_thresholds(opts)
+      now = Keyword.get(opts, :now, DateTime.utc_now())
+
+      thresholds
+      |> Enum.flat_map(fn {status, threshold_seconds} ->
+        cutoff = DateTime.add(now, -threshold_seconds, :second)
+
+        ExecutionPlan
+        |> where(
+          [p],
+          p.execution_status == ^status and
+            p.updated_at < ^cutoff and
+            p.active == true and
+            p.id in ^binary_ids
+        )
+        |> select([p], p.id)
+        |> Repo.all()
+      end)
+      |> MapSet.new()
+    end
+  end
+
+  @doc """
   Tick-aligned dedupe key for `ops.stuck_plan_detected` audit
   emission. Two ticks within the same `#{@detection_window_seconds}`-second
   bucket produce the same window-start, so a per-plan
