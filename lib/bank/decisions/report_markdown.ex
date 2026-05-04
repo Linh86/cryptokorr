@@ -173,6 +173,8 @@ defmodule Bank.Decisions.ReportMarkdown do
       "\n",
       execution_plan_section(r.execution_plan),
       "\n",
+      execution_history_section(Map.get(r, :execution_history) || []),
+      "\n",
       stablecoin_routes_section(r.stablecoin_routes),
       "\n",
       audit_trail_section(r.audit_trail),
@@ -640,6 +642,71 @@ defmodule Bank.Decisions.ReportMarkdown do
   end
 
   defp matched_activity_bullet(_), do: "  - _(activity entry has unexpected shape)_\n"
+
+  # --- execution history (#246 P2) ----------------------------------------
+  #
+  # The `## Execution plan` section above only carries the LATEST
+  # plan + its matched activity. In retry / history flows where
+  # an older plan succeeded with matched imported activity but
+  # the newer plan has none, that older plan's evidence would
+  # otherwise be dropped from the rendered report. This section
+  # surfaces every plan attached to the intent (oldest-first),
+  # with each plan's matched activity sub-list. Suppressed for
+  # the common single-plan case to avoid duplicating the
+  # `## Execution plan` section above.
+
+  defp execution_history_section([]), do: []
+  defp execution_history_section([_only_one]), do: []
+
+  defp execution_history_section(plans) when is_list(plans) do
+    rendered = Enum.with_index(plans, 1) |> Enum.map(&execution_history_bullet/1)
+
+    [
+      "## Execution history\n",
+      "\n",
+      "Total plans: `",
+      to_string(length(plans)),
+      "` (oldest-first; latest also rendered above)\n",
+      "\n"
+      | rendered
+    ]
+  end
+
+  defp execution_history_section(_), do: []
+
+  defp execution_history_bullet({%{} = plan, idx}) do
+    matched = Map.get(plan, :matched_activity) || []
+
+    [
+      "### Plan ",
+      to_string(idx),
+      "\n",
+      "\n",
+      "- Plan ID: `",
+      short(Map.get(plan, :id)),
+      "`\n",
+      "- Execution status: `",
+      to_string(Map.get(plan, :execution_status) || "(unknown)"),
+      "`\n",
+      "- Final outcome: `",
+      to_string(Map.get(plan, :final_outcome) || "(none)"),
+      "`\n",
+      "- Final reason: `",
+      safe_final_reason(Map.get(plan, :final_reason)),
+      "`\n",
+      "- Tx refs: `",
+      tx_refs_inline(Map.get(plan, :tx_refs)),
+      "`\n",
+      matched_activity_block(matched)
+    ]
+  end
+
+  defp execution_history_bullet({_, idx}),
+    do: ["### Plan ", to_string(idx), "\n\n_(plan entry has unexpected shape)_\n"]
+
+  defp tx_refs_inline([]), do: "(none)"
+  defp tx_refs_inline(list) when is_list(list), do: Enum.join(list, ", ")
+  defp tx_refs_inline(_), do: "(none)"
 
   # --- stablecoin routes ---------------------------------------------------
 
