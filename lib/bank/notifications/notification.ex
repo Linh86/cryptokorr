@@ -21,13 +21,18 @@ defmodule Bank.Notifications.Notification do
     * `title` ≤ 200 chars; `body` ≤ 2000 chars; `action_link` ≤ 512 chars
     * `action_link` (when set) must start with `/` (relative path
       only — no schemes, no userinfo, no tokenized RPC URLs)
-    * `title`, `body`, `action_link` are scanned for
-      secret-looking content (`Authorization: Bearer …`,
+    * `title`, `body`, `action_link`, `dedupe_key` are scanned
+      for secret-looking content (`Authorization: Bearer …`,
       `Bearer sk_(test|live)_…`, RPC URLs with userinfo, PEM
       private-key markers, `private_key=…`); any hit rejects the
       changeset with field error `:unsafe_text` rather than
       silently persisting a leak (#233 acceptance: "no secrets in
-      payload")
+      payload"). `dedupe_key` is included because it is a
+      persisted notification field — operators paste arbitrary
+      strings into ad-hoc dedupe keys, and a stray Authorization
+      header in `dedupe_key` would otherwise leak through any
+      future inbox listing / log line that surfaces the column
+      (#233 P2-1).
 
   No update changeset for `event_type`, `severity`, `subject_*`,
   `correlation_id`, `title`, `body`, `action_link`, `dedupe_key`,
@@ -105,6 +110,7 @@ defmodule Bank.Notifications.Notification do
     |> validate_safe_text(:title)
     |> validate_safe_text(:body)
     |> validate_safe_text(:action_link)
+    |> validate_safe_text(:dedupe_key)
     |> unique_constraint(
       [:workspace_id, :dedupe_key],
       name: :notifications_workspace_dedupe_key_uidx,
