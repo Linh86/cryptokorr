@@ -903,6 +903,287 @@ defmodule Bank.Activity.ChainSyncTest do
     end
   end
 
+  describe "sync_address/4 — smart-account first-sync grant retention (#245 P2)" do
+    test "revoked delegation with both anchors imports BOTH grant and revoke rows on first run",
+         %{workspace: ws} do
+      sa = "sa-grant-then-revoke-#{System.unique_integer([:positive])}"
+      grant_tx = "0xgrant-tx-00000000000000000000000000000000000000000000000000001"
+      revoke_tx = "0xrevoke-tx-0000000000000000000000000000000000000000000000000002"
+      granted_at = ~U[2026-01-01 12:00:00.000000Z]
+      revoked_at = ~U[2026-02-01 12:00:00.000000Z]
+
+      _ =
+        Bank.Fixtures.delegation(
+          workspace_id: ws.id,
+          smart_account_id: sa,
+          chain: "base-sepolia",
+          state: :revoked,
+          granted_at: granted_at,
+          install_tx_hash: grant_tx,
+          revoked_at: revoked_at,
+          last_tx_hash: revoke_tx,
+          kernel_version: "0.3.1"
+        )
+
+      # First sync after the row is already terminal must still
+      # import the original grant. Otherwise the on-chain history
+      # is permanently lost from the ledger.
+      assert {:ok, %{inserted: 2, duplicates: 0}} =
+               ChainSync.sync_address(ws.id, "base-sepolia", sa,
+                 source_type: :smart_account_chain
+               )
+
+      rows = Activity.list_imported_activities(workspace_id: ws.id)
+      kinds = rows |> Enum.map(& &1.metadata["kind"]) |> Enum.sort()
+      assert kinds == ["delegation.granted", "delegation.revoked"]
+
+      grant_row = Enum.find(rows, &(&1.metadata["kind"] == "delegation.granted"))
+      revoke_row = Enum.find(rows, &(&1.metadata["kind"] == "delegation.revoked"))
+
+      assert grant_row.tx_hash == grant_tx
+      assert grant_row.direction == :inbound
+      assert grant_row.to_address == sa
+      assert grant_row.from_address == nil
+
+      assert revoke_row.tx_hash == revoke_tx
+      assert revoke_row.direction == :outbound
+      assert revoke_row.from_address == sa
+      assert revoke_row.to_address == nil
+    end
+
+    test "second sync over the same revoked-with-grant row does not duplicate either ledger entry",
+         %{workspace: ws} do
+      sa = "sa-grant-revoke-idem-#{System.unique_integer([:positive])}"
+      grant_tx = "0xidem-grant-000000000000000000000000000000000000000000000000003"
+      revoke_tx = "0xidem-revoke-00000000000000000000000000000000000000000000000004"
+
+      _ =
+        Bank.Fixtures.delegation(
+          workspace_id: ws.id,
+          smart_account_id: sa,
+          chain: "base-sepolia",
+          state: :revoked,
+          granted_at: ~U[2026-01-01 12:00:00.000000Z],
+          install_tx_hash: grant_tx,
+          revoked_at: ~U[2026-02-01 12:00:00.000000Z],
+          last_tx_hash: revoke_tx
+        )
+
+      {:ok, _} =
+        ChainSync.sync_address(ws.id, "base-sepolia", sa, source_type: :smart_account_chain)
+
+      assert {:ok, %{inserted: 0, duplicates: 2}} =
+               ChainSync.sync_address(ws.id, "base-sepolia", sa,
+                 source_type: :smart_account_chain
+               )
+
+      assert length(Activity.list_imported_activities(workspace_id: ws.id)) == 2
+    end
+
+    test "revoke_failed delegation also imports the prior grant",
+         %{workspace: ws} do
+      sa = "sa-revoke-failed-#{System.unique_integer([:positive])}"
+      grant_tx = "0xrf-grant-tx-000000000000000000000000000000000000000000000000005"
+      revoke_tx = "0xrf-revoke-tx-00000000000000000000000000000000000000000000000006"
+
+      _ =
+        Bank.Fixtures.delegation(
+          workspace_id: ws.id,
+          smart_account_id: sa,
+          chain: "base-sepolia",
+          state: :revoke_failed,
+          granted_at: ~U[2026-01-01 12:00:00.000000Z],
+          install_tx_hash: grant_tx,
+          last_tx_hash: revoke_tx
+        )
+
+      assert {:ok, %{inserted: 2}} =
+               ChainSync.sync_address(ws.id, "base-sepolia", sa,
+                 source_type: :smart_account_chain
+               )
+
+      kinds =
+        Activity.list_imported_activities(workspace_id: ws.id)
+        |> Enum.map(& &1.metadata["kind"])
+        |> Enum.sort()
+
+      assert kinds == ["delegation.granted", "delegation.revoke_failed"]
+    end
+
+    test "delegation with only revoke anchor (no install_tx_hash) emits only revoke",
+         %{workspace: ws} do
+      sa = "sa-no-grant-anchor-#{System.unique_integer([:positive])}"
+
+      _ =
+        Bank.Fixtures.delegation(
+          workspace_id: ws.id,
+          smart_account_id: sa,
+          chain: "base-sepolia",
+          state: :revoked,
+          last_tx_hash: "0xrevoke-only-00000000000000000000000000000000000000000000000007",
+          revoked_at: ~U[2026-02-01 12:00:00.000000Z]
+        )
+
+      assert {:ok, %{inserted: 1}} =
+               ChainSync.sync_address(ws.id, "base-sepolia", sa,
+                 source_type: :smart_account_chain
+               )
+
+      [row] = Activity.list_imported_activities(workspace_id: ws.id)
+      assert row.metadata["kind"] == "delegation.revoked"
+    end
+  end
+
+  describe "sync_address/4 — smart-account reason metadata redaction (#245 P2)" do
+    @secret_markers [
+      "Bearer xyz123",
+      "Authorization: token",
+      "sk_live_AAAA",
+      "sk_test_BBBB",
+      "-----BEGIN PRIVATE KEY-----",
+      "private_key=foo",
+      "https://evil.example/?token=abc",
+      "secret@example.com"
+    ]
+
+    test "delegation last_reason carrying secret markers is collapsed to '[REDACTED]'",
+         %{workspace: ws} do
+      for {leak, idx} <- Enum.with_index(@secret_markers) do
+        sa = "sa-leak-d-#{idx}-#{System.unique_integer([:positive])}"
+        revoke_tx = "0xleak-d-#{idx}-000000000000000000000000000000000000000000000000abc"
+
+        _ =
+          Bank.Fixtures.delegation(
+            workspace_id: ws.id,
+            smart_account_id: sa,
+            chain: "base-sepolia",
+            state: :revoked,
+            revoked_at: ~U[2026-02-01 12:00:00.000000Z],
+            last_tx_hash: revoke_tx,
+            last_reason: "operator note: " <> leak <> " end"
+          )
+
+        {:ok, _} =
+          ChainSync.sync_address(ws.id, "base-sepolia", sa, source_type: :smart_account_chain)
+
+        row =
+          Activity.list_imported_activities(workspace_id: ws.id)
+          |> Enum.find(&(&1.metadata["smart_account_id"] == sa))
+
+        assert row, "expected an imported row for #{sa}"
+        assert row.metadata["last_reason"] == "[REDACTED]"
+
+        for needle <- [
+              "Bearer",
+              "Authorization",
+              "sk_live_",
+              "sk_test_",
+              "BEGIN PRIVATE KEY",
+              "private_key",
+              "https://",
+              "secret@"
+            ] do
+          refute String.contains?(row.metadata["last_reason"], needle),
+                 "marker #{inspect(needle)} leaked through last_reason for #{leak}"
+        end
+      end
+    end
+
+    test "execution final_reason carrying secret markers is collapsed to '[REDACTED]'",
+         %{workspace: ws} do
+      for {leak, idx} <- Enum.with_index(@secret_markers) do
+        sa = "sa-leak-x-#{idx}-#{System.unique_integer([:positive])}"
+        tx = "0xleak-x-#{idx}-tx-0000000000000000000000000000000000000000000000def"
+
+        _ =
+          Bank.Fixtures.execution_plan(%{
+            workspace_id: ws.id,
+            smart_account_id: sa,
+            chain: "base-sepolia",
+            asset: "USDC",
+            tx_refs: [tx],
+            execution_status: :reverted,
+            final_outcome: :reverted,
+            final_reason: "adapter said: " <> leak
+          })
+
+        {:ok, _} =
+          ChainSync.sync_address(ws.id, "base-sepolia", sa, source_type: :smart_account_chain)
+
+        row =
+          Activity.list_imported_activities(workspace_id: ws.id)
+          |> Enum.find(&(&1.metadata["smart_account_id"] == sa))
+
+        assert row, "expected an imported row for #{sa}"
+        assert row.metadata["final_reason"] == "[REDACTED]"
+
+        for needle <- [
+              "Bearer",
+              "Authorization",
+              "sk_live_",
+              "sk_test_",
+              "BEGIN PRIVATE KEY",
+              "private_key",
+              "https://",
+              "secret@"
+            ] do
+          refute String.contains?(row.metadata["final_reason"], needle),
+                 "marker #{inspect(needle)} leaked through final_reason for #{leak}"
+        end
+      end
+    end
+
+    test "benign reason text passes through with a length cap",
+         %{workspace: ws} do
+      sa = "sa-benign-#{System.unique_integer([:positive])}"
+      tx = "0xbenign-tx-0000000000000000000000000000000000000000000000000000ee"
+
+      _ =
+        Bank.Fixtures.delegation(
+          workspace_id: ws.id,
+          smart_account_id: sa,
+          chain: "base-sepolia",
+          state: :revoked,
+          revoked_at: ~U[2026-02-01 12:00:00.000000Z],
+          last_tx_hash: tx,
+          last_reason: "operator_request"
+        )
+
+      {:ok, _} =
+        ChainSync.sync_address(ws.id, "base-sepolia", sa, source_type: :smart_account_chain)
+
+      [row] = Activity.list_imported_activities(workspace_id: ws.id)
+      assert row.metadata["last_reason"] == "operator_request"
+    end
+
+    test "extremely long benign reason text is truncated, not redacted",
+         %{workspace: ws} do
+      sa = "sa-long-#{System.unique_integer([:positive])}"
+      tx = "0xlong-tx-00000000000000000000000000000000000000000000000000000aa"
+      huge = String.duplicate("a", 10_000)
+
+      _ =
+        Bank.Fixtures.delegation(
+          workspace_id: ws.id,
+          smart_account_id: sa,
+          chain: "base-sepolia",
+          state: :revoked,
+          revoked_at: ~U[2026-02-01 12:00:00.000000Z],
+          last_tx_hash: tx,
+          last_reason: huge
+        )
+
+      {:ok, _} =
+        ChainSync.sync_address(ws.id, "base-sepolia", sa, source_type: :smart_account_chain)
+
+      [row] = Activity.list_imported_activities(workspace_id: ws.id)
+      reason = row.metadata["last_reason"]
+      assert is_binary(reason)
+      assert byte_size(reason) <= 200
+      assert reason != "[REDACTED]"
+    end
+  end
+
   describe "sync_address/4 — invalid source_type / malformed RPC hex (#245 hardening)" do
     test "unknown :source_type returns :invalid_source_type without writing a cursor",
          %{workspace: ws} do

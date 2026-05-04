@@ -549,69 +549,77 @@ defmodule Bank.Activity.ChainSync do
     )
   end
 
-  # Project a delegation row into 0..N ledger attrs. Only state
-  # transitions with a real on-chain anchor (tx_hash + a row-side
-  # timestamp) and an allowlisted "kind" are projected.
-  # Pending/active-without-anchor rows produce nothing.
+  # Project a delegation row into 0..N ledger attrs. Grant and
+  # revoke are emitted independently — the row is a mutable
+  # projection that retains `install_tx_hash` / `granted_at` after
+  # revocation, so a first-sync that lands after a delegation has
+  # already been revoked still imports the original on-chain
+  # grant. A revoked row with both anchors emits exactly two
+  # activity attrs (one inbound grant, one outbound revoke). Each
+  # attr is keyed by a kind-specific `source_ref` so dedupe
+  # collapses idempotently across re-runs.
   defp delegation_to_attrs(%Delegation{} = d, workspace_id, chain, smart_account_id) do
-    cond do
-      d.state == :active and is_binary(d.install_tx_hash) and not is_nil(d.granted_at) ->
-        kind = "delegation.granted"
+    grant_attrs(d, workspace_id, chain, smart_account_id) ++
+      revoke_attrs(d, workspace_id, chain, smart_account_id)
+  end
 
-        if kind in @allowed_delegation_kinds do
-          [
-            build_smart_account_attrs(
-              workspace_id: workspace_id,
-              chain: chain,
-              smart_account_id: smart_account_id,
-              source_ref:
-                "delegation:" <>
-                  safe_string(d.delegation_id) <> ":granted:" <> d.install_tx_hash,
-              tx_hash: d.install_tx_hash,
-              occurred_at: d.granted_at,
-              direction: :inbound,
-              kind: kind,
-              extra_metadata: %{
-                "delegation_id" => safe_string(d.delegation_id),
-                "kernel_version" => d.kernel_version
-              }
-            )
-          ]
-        else
-          []
-        end
+  defp grant_attrs(%Delegation{} = d, workspace_id, chain, smart_account_id) do
+    if is_binary(d.install_tx_hash) and not is_nil(d.granted_at) and
+         "delegation.granted" in @allowed_delegation_kinds do
+      [
+        build_smart_account_attrs(
+          workspace_id: workspace_id,
+          chain: chain,
+          smart_account_id: smart_account_id,
+          source_ref:
+            "delegation:" <>
+              safe_string(d.delegation_id) <> ":granted:" <> d.install_tx_hash,
+          tx_hash: d.install_tx_hash,
+          occurred_at: d.granted_at,
+          direction: :inbound,
+          kind: "delegation.granted",
+          extra_metadata: %{
+            "delegation_id" => safe_string(d.delegation_id),
+            "kernel_version" => d.kernel_version
+          }
+        )
+      ]
+    else
+      []
+    end
+  end
 
-      d.state in [:revoked, :revoke_failed] and is_binary(d.last_tx_hash) ->
-        kind = "delegation." <> Atom.to_string(d.state)
+  defp revoke_attrs(%Delegation{} = d, workspace_id, chain, smart_account_id) do
+    if d.state in [:revoked, :revoke_failed] and is_binary(d.last_tx_hash) do
+      kind = "delegation." <> Atom.to_string(d.state)
 
-        if kind in @allowed_delegation_kinds do
-          occurred_at = d.revoked_at || d.updated_at
+      if kind in @allowed_delegation_kinds do
+        occurred_at = d.revoked_at || d.updated_at
 
-          [
-            build_smart_account_attrs(
-              workspace_id: workspace_id,
-              chain: chain,
-              smart_account_id: smart_account_id,
-              source_ref:
-                "delegation:" <>
-                  safe_string(d.delegation_id) <>
-                  ":" <> Atom.to_string(d.state) <> ":" <> d.last_tx_hash,
-              tx_hash: d.last_tx_hash,
-              occurred_at: occurred_at,
-              direction: :outbound,
-              kind: kind,
-              extra_metadata: %{
-                "delegation_id" => safe_string(d.delegation_id),
-                "last_reason" => d.last_reason
-              }
-            )
-          ]
-        else
-          []
-        end
-
-      true ->
+        [
+          build_smart_account_attrs(
+            workspace_id: workspace_id,
+            chain: chain,
+            smart_account_id: smart_account_id,
+            source_ref:
+              "delegation:" <>
+                safe_string(d.delegation_id) <>
+                ":" <> Atom.to_string(d.state) <> ":" <> d.last_tx_hash,
+            tx_hash: d.last_tx_hash,
+            occurred_at: occurred_at,
+            direction: :outbound,
+            kind: kind,
+            extra_metadata: %{
+              "delegation_id" => safe_string(d.delegation_id),
+              "last_reason" => sanitize_reason(d.last_reason)
+            }
+          )
+        ]
+      else
         []
+      end
+    else
+      []
     end
   end
 
@@ -643,7 +651,7 @@ defmodule Bank.Activity.ChainSync do
                 kind: kind,
                 extra_metadata: %{
                   "execution_plan_id" => safe_string(p.id),
-                  "final_reason" => p.final_reason
+                  "final_reason" => sanitize_reason(p.final_reason)
                 }
               )
             ]
@@ -777,6 +785,42 @@ defmodule Bank.Activity.ChainSync do
 
   defp sanitize_start_block(n) when is_integer(n) and n >= 0, do: n
   defp sanitize_start_block(_), do: nil
+
+  # Free-text reason fields the adapter callback or operator can
+  # write into (`Delegation.last_reason`,
+  # `ExecutionPlan.final_reason`) are NOT a safe metadata source —
+  # `Bank.Activity.redact_metadata/1` only redacts when the key
+  # itself looks secret, so a value containing tokens / URLs /
+  # PEM markers would land verbatim on `imported_activities`.
+  # We therefore detect a small marker set (case-insensitive) and
+  # collapse the whole value to a fixed `"[REDACTED]"` label
+  # before persistence. Non-flagged text is bounded to a safe
+  # length cap so a runaway free-text payload cannot bloat the
+  # ledger row either.
+  @reason_secret_markers [
+    "bearer",
+    "authorization",
+    "sk_live_",
+    "sk_test_",
+    "begin private key",
+    "private_key",
+    "https://",
+    "secret@"
+  ]
+  @reason_max_length 200
+  defp sanitize_reason(nil), do: nil
+
+  defp sanitize_reason(reason) when is_binary(reason) do
+    lower = String.downcase(reason)
+
+    if Enum.any?(@reason_secret_markers, &String.contains?(lower, &1)) do
+      "[REDACTED]"
+    else
+      String.slice(reason, 0, @reason_max_length)
+    end
+  end
+
+  defp sanitize_reason(_), do: nil
 
   # `String.to_integer/2` raises `ArgumentError` on empty / non-hex
   # input. Wrap it so a malformed RPC response (or fixture) becomes
