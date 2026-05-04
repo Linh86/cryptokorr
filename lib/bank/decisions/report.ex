@@ -63,7 +63,16 @@ defmodule Bank.Decisions.Report do
     * `:approval`            — auto_exec / hold / approval_required /
       block summary derived from the latest decision envelope.
     * `:execution_plan`      — chain, asset, smart_account_id,
-      execution_status, final_outcome, tx_refs (chain-public).
+      execution_status, final_outcome, tx_refs (chain-public),
+      and `:matched_activity` for the **latest** plan only. This
+      is the most recently inserted plan for the intent.
+    * `:execution_history`   — list of safe scalar plan summaries
+      (oldest-first) with their per-plan `:matched_activity`,
+      covering EVERY execution plan attached to the intent — not
+      only the latest one. Required for retry / history flows
+      (#246 P2): an older plan can have matched imported
+      activity even when the latest plan has none, and the
+      report must surface that evidence.
     * `:stablecoin_routes`   — pre-computed route evidence pulled
       from `stablecoin.route_evaluated` audit events.
 
@@ -109,6 +118,7 @@ defmodule Bank.Decisions.Report do
           decision_envelope: map() | missing_section(),
           approval: map() | missing_section(),
           execution_plan: map() | missing_section(),
+          execution_history: [map()],
           stablecoin_routes: [map()],
           flags: map(),
           residual_limitations: [String.t()],
@@ -128,6 +138,7 @@ defmodule Bank.Decisions.Report do
              :decision_envelope,
              :approval,
              :execution_plan,
+             :execution_history,
              :stablecoin_routes,
              :flags,
              :residual_limitations,
@@ -145,6 +156,7 @@ defmodule Bank.Decisions.Report do
     :decision_envelope,
     :approval,
     :execution_plan,
+    :execution_history,
     :stablecoin_routes,
     :flags,
     :residual_limitations,
@@ -202,6 +214,7 @@ defmodule Bank.Decisions.Report do
         latest_section(decisions, &decision_section/1, "no decision envelope recorded"),
       approval: approval_section(decisions),
       execution_plan: execution_plan_with_matches(plans, bundle[:matched_activities] || []),
+      execution_history: execution_history_section(plans, bundle[:matched_activities] || []),
       stablecoin_routes: bundle[:stablecoin_route_evidence] || [],
       flags: flags_section(intent, plans),
       residual_limitations: residual_limitations(bundle),
@@ -444,6 +457,27 @@ defmodule Bank.Decisions.Report do
     plan
     |> execution_plan_section()
     |> Map.put(:matched_activity, matched_activity_section(plan, matches))
+  end
+
+  # `:execution_history` projects EVERY plan attached to the intent
+  # plus its per-plan matched imported activity (#246 P2). The
+  # `:execution_plan` section only carries the latest plan — in
+  # retry / history flows where an older plan succeeded with
+  # matched activity but the newer plan has none, the latest
+  # plan's `matched_activity` is `[]` even though replay has
+  # evidence. This section surfaces that evidence.
+  #
+  # Order: oldest-first, matching the bundle's `:plans` order
+  # (`asc: inserted_at`) — reviewers read history left-to-right.
+  defp execution_history_section(nil, _matches), do: []
+  defp execution_history_section([], _matches), do: []
+
+  defp execution_history_section(plans, matches) when is_list(plans) do
+    Enum.map(plans, fn plan ->
+      plan
+      |> execution_plan_section()
+      |> Map.put(:matched_activity, matched_activity_section(plan, matches))
+    end)
   end
 
   defp execution_plan_section(%ExecutionPlan{} = p) do

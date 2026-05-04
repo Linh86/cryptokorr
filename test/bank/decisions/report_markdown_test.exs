@@ -1261,4 +1261,150 @@ defmodule Bank.Decisions.ReportMarkdownTest do
       refute out =~ "Matched imported activity"
     end
   end
+
+  # --- execution history (#246 P2) --------------------------------------
+
+  describe "render/1 — execution_history (#246 P2)" do
+    defp put_history(report, history) do
+      %{report | execution_history: history}
+    end
+
+    defp history_plan(overrides) do
+      base = %{
+        id: "plan-id-default",
+        execution_status: "confirmed",
+        final_outcome: "confirmed",
+        final_reason: nil,
+        tx_refs: [],
+        matched_activity: []
+      }
+
+      Map.merge(base, overrides)
+    end
+
+    test "single-plan history is suppressed (already covered by Execution plan section above)" do
+      report = put_history(full_report_fixture(), [history_plan(%{id: "plan-only"})])
+      out = ReportMarkdown.render(report)
+
+      refute out =~ "## Execution history"
+    end
+
+    test "empty history is suppressed (no second section to render)" do
+      report = put_history(full_report_fixture(), [])
+      out = ReportMarkdown.render(report)
+
+      refute out =~ "## Execution history"
+    end
+
+    test "nil :execution_history is treated as empty (back-compat)" do
+      # Older callers that built the struct without this field
+      # (or set it to nil) must not crash and must not render the
+      # Execution history section.
+      report = put_history(full_report_fixture(), nil)
+
+      out = ReportMarkdown.render(report)
+      refute out =~ "## Execution history"
+    end
+
+    test "multi-plan history renders per-plan matched activity (#246 P2 regression)" do
+      # The headline #246 P2 regression: an OLDER plan with matched
+      # imported activity must still appear in the rendered output
+      # even when the LATEST plan has no matching activity.
+      older_tx_hash = "0xolder-render-" <> String.duplicate("a", 30)
+
+      history = [
+        # oldest-first per `from_bundle/1`'s contract
+        history_plan(%{
+          id: "plan-older-confirmed",
+          execution_status: "confirmed",
+          final_outcome: "confirmed",
+          tx_refs: [older_tx_hash],
+          matched_activity: [
+            %{
+              id: "activity-older",
+              tx_hash: older_tx_hash,
+              chain: "base-sepolia",
+              asset: "usdc",
+              direction: "inbound",
+              amount: "100",
+              status: "confirmed",
+              confidence: "high",
+              source_type: "wallet_chain",
+              occurred_at: "2026-04-15T12:00:00Z"
+            }
+          ]
+        }),
+        history_plan(%{
+          id: "plan-newer-aborted",
+          execution_status: "aborted",
+          final_outcome: "aborted",
+          tx_refs: [],
+          matched_activity: []
+        })
+      ]
+
+      report = put_history(full_report_fixture(), history)
+      out = ReportMarkdown.render(report)
+
+      # Section header + plan count.
+      assert out =~ "## Execution history"
+      assert out =~ "Total plans: `2` (oldest-first; latest also rendered above)"
+
+      # Per-plan headers.
+      assert out =~ "### Plan 1"
+      assert out =~ "### Plan 2"
+
+      # Older plan exposes its matched activity — the regression
+      # would have dropped this.
+      assert out =~ "Matched imported activity (1):"
+      assert out =~ older_tx_hash
+      assert out =~ "tx_hash: `" <> older_tx_hash <> "`"
+
+      # Per-plan scalar fields appear (no leak of operator-supplied
+      # raw fields — the report builder only projects safe scalars).
+      assert out =~ "- Execution status: `confirmed`"
+      assert out =~ "- Execution status: `aborted`"
+
+      # Deterministic across repeats.
+      assert out == ReportMarkdown.render(report)
+    end
+
+    test "execution history preserves oldest-first ordering across multiple plans" do
+      h1_tx = "0xpos-1-" <> String.duplicate("1", 38)
+      h2_tx = "0xpos-2-" <> String.duplicate("2", 38)
+      h3_tx = "0xpos-3-" <> String.duplicate("3", 38)
+
+      history =
+        for tx <- [h1_tx, h2_tx, h3_tx] do
+          history_plan(%{
+            id: "plan-" <> tx,
+            tx_refs: [tx],
+            matched_activity: [
+              %{
+                id: "activity-" <> tx,
+                tx_hash: tx,
+                chain: "base-sepolia",
+                asset: "usdc",
+                direction: "inbound",
+                amount: "1",
+                status: "confirmed",
+                confidence: "high",
+                source_type: "wallet_chain",
+                occurred_at: "2026-04-15T12:00:00Z"
+              }
+            ]
+          })
+        end
+
+      report = put_history(full_report_fixture(), history)
+      out = ReportMarkdown.render(report)
+
+      pos_1 = :binary.match(out, h1_tx) |> elem(0)
+      pos_2 = :binary.match(out, h2_tx) |> elem(0)
+      pos_3 = :binary.match(out, h3_tx) |> elem(0)
+
+      assert pos_1 < pos_2
+      assert pos_2 < pos_3
+    end
+  end
 end

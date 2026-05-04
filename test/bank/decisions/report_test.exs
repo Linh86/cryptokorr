@@ -707,6 +707,214 @@ defmodule Bank.Decisions.ReportTest do
     end
   end
 
+  # --- execution_history (#246 P2) --------------------------------------
+
+  describe "execution_history (#246 P2 — retry / multi-plan flows)" do
+    test "older plan's matched activity survives even when the latest plan has no matching activity" do
+      # Regression for the #246 P2 finding: `Bank.Audit.replay/1`
+      # already computes `:matched_activities` for ALL plans, but
+      # the pre-fix `Bank.Decisions.Report.from_bundle/1` selected
+      # only `List.last(plans)` for `:execution_plan` and filtered
+      # matched activity to that one plan id. In retry / history
+      # flows where an older plan succeeded but the newer plan has
+      # no matching activity, the older plan's evidence was being
+      # dropped from the report. The new `:execution_history`
+      # field surfaces every plan attached to the intent with its
+      # per-plan matched activity.
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "report-history-#{System.unique_integer([:positive])}",
+          name: "Report History"
+        })
+
+      intent = agent_intent(workspace_id: ws.id)
+      decision = decision_envelope(intent: intent, outcome: :auto_exec, current: true)
+
+      older_tx_hash = "0xolder-confirmed-" <> String.duplicate("a", 26)
+
+      # Test fixtures insert at the same microsecond, so the
+      # `Audit.replay/1` order falls through to the UUID-id tiebreak.
+      # Patch `inserted_at` explicitly so older < newer
+      # deterministically; that exercises the real
+      # `List.last(plans) == newer_plan` path the renderer hits.
+      older_at = ~U[2026-04-15 12:00:00.000000Z]
+      newer_at = ~U[2026-04-15 12:01:00.000000Z]
+
+      older_plan =
+        execution_plan(
+          decision: decision,
+          intent_id: intent.id,
+          workspace_id: ws.id,
+          execution_status: :confirmed,
+          final_outcome: :confirmed,
+          tx_refs: [older_tx_hash],
+          chain: intent.chain,
+          active: false
+        )
+        |> Ecto.Changeset.change(inserted_at: older_at, updated_at: older_at)
+        |> Repo.update!()
+
+      # Newer plan: a retry that has no matching imported activity
+      # (e.g. operator re-fired the intent and it was aborted).
+      newer_plan =
+        execution_plan(
+          decision: decision,
+          intent_id: intent.id,
+          workspace_id: ws.id,
+          execution_status: :aborted,
+          final_outcome: :aborted,
+          tx_refs: [],
+          chain: intent.chain,
+          active: false
+        )
+        |> Ecto.Changeset.change(inserted_at: newer_at, updated_at: newer_at)
+        |> Repo.update!()
+
+      # An imported activity that cites the OLDER plan's tx_hash.
+      {:ok, :inserted, older_activity} =
+        Bank.Activity.create_imported_activity(%{
+          workspace_id: ws.id,
+          source_type: :wallet_chain,
+          source_ref: "wallet:older-confirmed",
+          occurred_at: DateTime.utc_now() |> DateTime.truncate(:microsecond),
+          asset: "USDC",
+          chain: intent.chain,
+          amount: Decimal.new("100"),
+          direction: :inbound,
+          status: :confirmed,
+          confidence: :high,
+          tx_hash: older_tx_hash
+        })
+
+      {:ok, bundle} = Audit.replay(intent.id)
+      report = Report.from_bundle(bundle)
+
+      # Pre-fix shape: latest plan's matched_activity is empty.
+      # Post-fix this is still true (back-compat).
+      assert report.execution_plan.id == newer_plan.id
+      assert report.execution_plan.matched_activity == []
+
+      # Post-fix: execution_history surfaces ALL plans + matches
+      # — oldest-first.
+      assert is_list(report.execution_history)
+      assert length(report.execution_history) == 2
+
+      [history_older, history_newer] = report.execution_history
+      assert history_older.id == older_plan.id
+      assert history_newer.id == newer_plan.id
+
+      # The OLDER plan's matched activity is preserved.
+      assert [older_match] = history_older.matched_activity
+      assert older_match.id == older_activity.id
+      assert older_match.tx_hash == older_tx_hash
+      assert older_match.status == "confirmed"
+      assert older_match.confidence == "high"
+
+      # The newer (latest) plan still shows no matches.
+      assert history_newer.matched_activity == []
+
+      # And the JSON dump preserves the older tx_hash — it would
+      # have been dropped pre-fix.
+      json = Jason.encode!(report)
+      assert json =~ older_tx_hash
+    end
+
+    test "execution_history is empty when no plans exist" do
+      intent = agent_intent()
+      {:ok, bundle} = Audit.replay(intent.id)
+      report = Report.from_bundle(bundle)
+
+      assert report.execution_history == []
+    end
+
+    test "execution_history is a single-element list when only one plan exists" do
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "report-history-single-#{System.unique_integer([:positive])}",
+          name: "Report History Single"
+        })
+
+      intent = agent_intent(workspace_id: ws.id)
+      decision = decision_envelope(intent: intent, outcome: :auto_exec, current: true)
+
+      plan =
+        execution_plan(
+          decision: decision,
+          intent_id: intent.id,
+          workspace_id: ws.id,
+          execution_status: :confirmed,
+          final_outcome: :confirmed,
+          tx_refs: [],
+          chain: intent.chain
+        )
+
+      {:ok, bundle} = Audit.replay(intent.id)
+      report = Report.from_bundle(bundle)
+
+      assert [only_history] = report.execution_history
+      assert only_history.id == plan.id
+      assert only_history.matched_activity == []
+    end
+
+    test "execution_history projection only exposes safe scalar fields (no metadata leak)" do
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "report-history-safe-#{System.unique_integer([:positive])}",
+          name: "Report History Safe"
+        })
+
+      intent = agent_intent(workspace_id: ws.id)
+      decision = decision_envelope(intent: intent, outcome: :auto_exec, current: true)
+
+      tx_hash = "0xsafe-history-" <> String.duplicate("b", 30)
+
+      _plan =
+        execution_plan(
+          decision: decision,
+          intent_id: intent.id,
+          workspace_id: ws.id,
+          execution_status: :confirmed,
+          final_outcome: :confirmed,
+          tx_refs: [tx_hash],
+          chain: intent.chain
+        )
+
+      # Plant a (well-known-key) raw secret in the activity's
+      # metadata. `Bank.Activity.redact_metadata/1` redacts on
+      # write, but the report's execution_history projection must
+      # ALSO never expose `metadata` / `provenance` keys.
+      {:ok, :inserted, _activity} =
+        Bank.Activity.create_imported_activity(%{
+          workspace_id: ws.id,
+          source_type: :wallet_chain,
+          source_ref: "wallet:safe-history",
+          occurred_at: DateTime.utc_now() |> DateTime.truncate(:microsecond),
+          asset: "USDC",
+          chain: intent.chain,
+          amount: Decimal.new("100"),
+          direction: :inbound,
+          status: :confirmed,
+          confidence: :high,
+          tx_hash: tx_hash,
+          metadata: %{"authorization" => "Bearer sk_live_LEAKED_PROBE"},
+          provenance: "Bearer sk_live_PROVENANCE_LEAK"
+        })
+
+      {:ok, bundle} = Audit.replay(intent.id)
+      report = Report.from_bundle(bundle)
+
+      [%{matched_activity: [match]}] = report.execution_history
+
+      refute Map.has_key?(match, :metadata)
+      refute Map.has_key?(match, :provenance)
+
+      # And the full JSON dump carries no marker.
+      json = Jason.encode!(report)
+      refute json =~ "Bearer "
+      refute json =~ ~r/sk_(test|live)_/
+    end
+  end
+
   # Avoid an unused-warning if AuditEvent / TrustAssessment / etc.
   # become unused after refactors.
   _ = {AuditEvent, TrustAssessment, SimulationReport}
