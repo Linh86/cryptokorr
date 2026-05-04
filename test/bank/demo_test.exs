@@ -277,6 +277,108 @@ defmodule Bank.DemoTest do
                "demo counterparty #{inspect(cp.name)} is missing the [Sandbox] prefix"
       end)
     end
+
+    # #241 acceptance: "secret hygiene grep over seed files".
+    #
+    # The earlier test scans the *seeded rows*. This one scans the
+    # *source files* that produce the seed and reset, so a future
+    # change that hard-codes a private key, bearer token, tokenized
+    # RPC URL, or any production/mainnet credential into the seed
+    # path is caught before it ever reaches the DB. The list of
+    # files here is intentionally narrow: the demo helpers and the
+    # mix tasks that exercise them. If new helpers are added, they
+    # should be listed here too.
+    test "no seed/reset source file contains a real-looking private key, API key, bearer secret, tokenized URL, or production literal" do
+      paths = [
+        Path.expand("../../lib/bank/demo.ex", __DIR__),
+        Path.expand("../../lib/mix/tasks/bank.demo.seed.ex", __DIR__),
+        Path.expand("../../lib/mix/tasks/bank.demo.reset.ex", __DIR__)
+      ]
+
+      for path <- paths do
+        assert File.exists?(path), "#241 hygiene scan target missing: #{path}"
+        contents = File.read!(path)
+
+        refute_seed_source_secret(
+          path,
+          contents,
+          ~r/-----BEGIN [A-Z ]*PRIVATE KEY-----/,
+          "PEM private-key block"
+        )
+
+        refute_seed_source_secret(
+          path,
+          contents,
+          ~r/\b(sk_live|pk_live|sk_test)_[A-Za-z0-9_-]+/,
+          "Stripe-style live/test secret token"
+        )
+
+        refute_seed_source_secret(
+          path,
+          contents,
+          ~r/\bauthorization\s*:\s*\"?bearer\s+[A-Za-z0-9._-]+/i,
+          "literal Authorization: Bearer header"
+        )
+
+        refute_seed_source_secret(
+          path,
+          contents,
+          ~r{https?://[^/\s\"`]+:[^@/\s\"`]+@[A-Za-z0-9.-]+},
+          "tokenized https://user:pass@host URL"
+        )
+
+        # 64 hex chars = 32-byte material. The seed has no reason to
+        # carry one. SHA-256 hashes over user-supplied data live in
+        # the DB rows produced at runtime, not as literals in the
+        # seed source.
+        refute_seed_source_secret(
+          path,
+          contents,
+          ~r/\b0x[0-9a-fA-F]{64}\b/,
+          "32-byte hex literal (private-key-shaped)"
+        )
+      end
+    end
+
+    # #241 acceptance: "Demo data cannot be mistaken for
+    # production/mainnet". The runtime-row hygiene test covers
+    # seeded values; this test is the static-side guard that the
+    # seed source cannot accidentally describe a sandbox row as
+    # `mainnet`/`production`/`:live` *in a place that becomes a
+    # row value*. We deliberately scan only quoted strings and
+    # atoms — comments that say "production" in prose (e.g.
+    # describing what the demo is NOT) are fine and expected.
+    test "seed source files contain no production/mainnet/live tokens in string literals or atoms" do
+      paths = [
+        Path.expand("../../lib/bank/demo.ex", __DIR__),
+        Path.expand("../../lib/mix/tasks/bank.demo.seed.ex", __DIR__),
+        Path.expand("../../lib/mix/tasks/bank.demo.reset.ex", __DIR__)
+      ]
+
+      # Each entry is a regex that matches the banned token only in
+      # a code-emitting position: between double quotes, after a
+      # `:` (atom literal), or as the chain field of a known seed
+      # struct. Comments are ignored by construction.
+      patterns = [
+        {~r/"mainnet"/, "string literal \"mainnet\""},
+        {~r/"ethereum_mainnet"/, "string literal \"ethereum_mainnet\""},
+        {~r/:mainnet\b/, ":mainnet atom"},
+        {~r/:ethereum_mainnet\b/, ":ethereum_mainnet atom"},
+        {~r/"production"/, "string literal \"production\""},
+        {~r/:production\b/, ":production atom"},
+        {~r/:live\b/, ":live atom"},
+        {~r/"live"/, "string literal \"live\""}
+      ]
+
+      for path <- paths do
+        contents = File.read!(path)
+
+        for {pattern, label} <- patterns do
+          refute Regex.match?(pattern, contents),
+                 "seed source #{Path.relative_to_cwd(path)} contains #{label}; sandbox seed must stay visibly fake (matched #{inspect(pattern)})"
+        end
+      end
+    end
   end
 
   describe "reset/1" do
@@ -411,6 +513,16 @@ defmodule Bank.DemoTest do
       # Seed re-ran cleanly (sandbox counterparty is back).
       assert Repo.get_by(Counterparty, name: hd(ids.counterparty_names))
     end
+  end
+
+  # Used by the #241 source-file hygiene test. Refutes that a
+  # specific regex appears anywhere in the file content; the failure
+  # message names the file and the kind of credential the regex is
+  # guarding against so a future regression points the implementer
+  # at the offending line directly.
+  defp refute_seed_source_secret(path, contents, pattern, label) do
+    refute Regex.match?(pattern, contents),
+           "#{Path.relative_to_cwd(path)} contains #{label} (matched #{inspect(pattern)})"
   end
 
   defp refute_secret_shape(value) do
