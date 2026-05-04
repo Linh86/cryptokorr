@@ -384,6 +384,94 @@ defmodule Bank.Notifications.EmitterTest do
     end
   end
 
+  describe "emit_access_approved/1 — successful access approvals" do
+    setup do
+      suffix = System.unique_integer([:positive])
+
+      {:ok, user} =
+        Bank.Accounts.find_or_create_from_oauth(%{
+          provider: :google,
+          subject: "approve-#{suffix}",
+          email: "approve-#{suffix}@example.com",
+          name: "Approve User"
+        })
+
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "access-approve-#{suffix}",
+          name: "Access Approve #{suffix}"
+        })
+
+      {:ok, membership} =
+        Bank.Workspaces.create_membership(%{
+          user_id: user.id,
+          workspace_id: ws.id,
+          role: :operator
+        })
+
+      %{user: user, workspace: ws, membership: membership}
+    end
+
+    test "creates an :info notification for the newly admitted user",
+         %{user: user, workspace: ws, membership: m} do
+      assert {:ok, %Notification{} = n} = Emitter.emit_access_approved(m)
+
+      assert n.workspace_id == ws.id
+      assert n.user_id == user.id
+      assert n.role_target == nil
+      assert n.event_type == "access.approved"
+      assert n.severity == :info
+      assert n.subject_type == "membership"
+      assert n.subject_id == m.id
+      assert n.correlation_id == user.id
+      assert n.action_link == "/dashboard"
+      assert n.dedupe_key == "access:approved:#{user.id}:#{ws.id}"
+      assert n.title =~ ws.slug
+      assert n.body =~ to_string(m.role)
+    end
+
+    test "re-emitting the same membership returns {:duplicate, _} with one inbox row",
+         %{workspace: ws, membership: m} do
+      assert {:ok, %Notification{id: first_id}} = Emitter.emit_access_approved(m)
+      assert {:duplicate, %Notification{id: ^first_id}} = Emitter.emit_access_approved(m)
+
+      assert [%Notification{id: ^first_id}] = Notifications.list_for_workspace(ws.id)
+    end
+
+    test "skips when membership has no workspace_id" do
+      partial = %Bank.Workspaces.Membership{
+        id: Ecto.UUID.generate(),
+        user_id: Ecto.UUID.generate(),
+        workspace_id: nil,
+        role: :operator
+      }
+
+      assert {:skip, :no_workspace_id} = Emitter.emit_access_approved(partial)
+    end
+
+    test "skips when membership has no user_id" do
+      partial = %Bank.Workspaces.Membership{
+        id: Ecto.UUID.generate(),
+        user_id: nil,
+        workspace_id: Ecto.UUID.generate(),
+        role: :operator
+      }
+
+      assert {:skip, :no_user_id} = Emitter.emit_access_approved(partial)
+    end
+
+    test "skips when the workspace was deleted out from under the membership" do
+      detached = %Bank.Workspaces.Membership{
+        id: Ecto.UUID.generate(),
+        user_id: Ecto.UUID.generate(),
+        workspace_id: Ecto.UUID.generate(),
+        role: :operator
+      }
+
+      assert {:skip, :workspace_not_found} = Emitter.emit_access_approved(detached)
+    end
+  end
+
   describe "emit_decision_outcome/2 — secret hygiene" do
     test "no notification field reflects the intent's free-text fields" do
       # Realistic regression: operators paste secret-shaped values

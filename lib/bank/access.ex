@@ -680,6 +680,7 @@ defmodule Bank.Access do
         case Workspaces.set_status(m, :active) do
           {:ok, reactivated} ->
             safe_emit(Events.access_admin_approved(reactivated, actor, :inactive))
+            _ = Bank.Notifications.Emitter.emit_access_approved(reactivated)
             {:ok, :membership_reactivated, reactivated}
 
           err ->
@@ -694,6 +695,7 @@ defmodule Bank.Access do
              }) do
           {:ok, m} ->
             safe_emit(Events.access_admin_approved(m, actor, :no_membership))
+            _ = Bank.Notifications.Emitter.emit_access_approved(m)
             {:ok, :membership_created, m}
 
           {:error, %Ecto.Changeset{} = changeset} ->
@@ -710,6 +712,7 @@ defmodule Bank.Access do
                   case Workspaces.set_status(m, :active) do
                     {:ok, reactivated} ->
                       safe_emit(Events.access_admin_approved(reactivated, actor, :inactive))
+                      _ = Bank.Notifications.Emitter.emit_access_approved(reactivated)
                       {:ok, :membership_reactivated, reactivated}
 
                     err ->
