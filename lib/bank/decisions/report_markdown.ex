@@ -1,0 +1,660 @@
+defmodule Bank.Decisions.ReportMarkdown do
+  @moduledoc """
+  Markdown renderer for `Bank.Decisions.Report` (#249).
+
+  Pure function: same `%Bank.Decisions.Report{}` in → byte-stable
+  Markdown out, every render. The report struct is already
+  deterministic (#248) and secret-redacted (#248 P2 / PR #360);
+  this module only projects those safe fields into Markdown.
+
+  ## Section ordering
+
+  Top-to-bottom, fixed:
+
+    1. Header (intent id, workspace id, report version)
+    2. Chain context (chain, mainnet/testnet, live/stub)
+    3. Intent
+    4. Actor / source
+    5. Decision envelope (or labelled missing)
+    6. Approval / rejection (or labelled missing)
+    7. Trust assessment (or labelled missing)
+    8. Simulation (or labelled missing)
+    9. Screening evidence (or labelled missing)
+    10. Policy snapshot (table, or labelled missing)
+    11. Execution plan (or labelled missing)
+    12. Stablecoin route evidence (or "(none)")
+    13. Audit trail (table, or "(none)")
+    14. Residual limitations (or "(none)")
+    15. Footer disclaimer — replay-derived; no safety/production
+        claim is implied.
+
+  ## Tone — no safety overclaim
+
+  Verbs deliberately stay neutral: "recorded", "captured",
+  "reported", "observed". The renderer never claims a decision
+  is "safe", "approved as production-ready", or "successfully
+  executed". The footer makes the replay-derived nature explicit.
+
+  ## Secret hygiene
+
+  The `%Report{}` struct already excludes `signing_requirements`,
+  audit `before_ref`/`after_ref` payloads, raw policy `params`
+  values, and operator-supplied `reasons.items[].message` /
+  `details` (#248 + #248 P2 / PR #360). The renderer additionally:
+
+    * Renders redacted reason items as a one-line placeholder
+      that names the safe `code` + `actor_id` only, never any
+      `message`/`details` shape that may have been added later.
+    * Truncates long ids in tables for readability without
+      exposing additional fields.
+    * Wraps every value in backticks so a stray newline or
+      pipe character cannot break the table layout (defensive).
+
+  ## Determinism
+
+    * Iterates struct fields in fixed order (no `Map.to_list/1`).
+    * Reads list fields in the order the Report builder produced
+      them (already deterministic per #248).
+    * No `DateTime.utc_now/0`, no `:rand`, no IO.
+  """
+
+  alias Bank.Decisions.Report
+
+  @id_short_chars 8
+
+  @spec render(Report.t()) :: String.t()
+  def render(%Report{} = r) do
+    [
+      header(r),
+      "\n",
+      chain_context(r.flags),
+      "\n",
+      intent_section(r.intent),
+      "\n",
+      actor_source_section(r.actor_source),
+      "\n",
+      decision_envelope_section(r.decision_envelope),
+      "\n",
+      approval_section(r.approval),
+      "\n",
+      trust_section(r.trust_assessment),
+      "\n",
+      simulation_section(r.simulation),
+      "\n",
+      screening_section(r.screening_evidence),
+      "\n",
+      policy_section(r.policy_snapshot),
+      "\n",
+      execution_plan_section(r.execution_plan),
+      "\n",
+      stablecoin_routes_section(r.stablecoin_routes),
+      "\n",
+      audit_trail_section(r.audit_trail),
+      "\n",
+      residual_limitations_section(r.residual_limitations),
+      "\n",
+      footer()
+    ]
+    |> IO.iodata_to_binary()
+  end
+
+  # --- header ---------------------------------------------------------------
+
+  defp header(%Report{version: version, generated_from: gf}) do
+    intent_id = Map.get(gf, :intent_id) || "(unknown)"
+    workspace_id = Map.get(gf, :workspace_id) || "(unscoped)"
+
+    [
+      "# Decision report\n",
+      "\n",
+      "- Report version: `",
+      version,
+      "`\n",
+      "- Intent: `",
+      intent_id,
+      "`\n",
+      "- Workspace: `",
+      workspace_id,
+      "`\n"
+    ]
+  end
+
+  # --- chain context --------------------------------------------------------
+
+  defp chain_context(flags) do
+    chain = Map.get(flags, :chain) || "(unknown)"
+    network = network_label(flags)
+    execution = execution_label(flags)
+
+    [
+      "## Chain context\n",
+      "\n",
+      "- Chain: `",
+      chain,
+      "`\n",
+      "- Network: ",
+      network,
+      "\n",
+      "- Execution path: ",
+      execution,
+      "\n"
+    ]
+  end
+
+  defp network_label(%{mainnet?: true}),
+    do: "**mainnet** (chain-broadcast plans persist real funds)"
+
+  defp network_label(%{testnet?: true}), do: "testnet"
+  defp network_label(_), do: "(unknown)"
+
+  defp execution_label(%{live?: true}),
+    do: "live (at least one execution plan reached broadcasting/pending/confirmed)"
+
+  defp execution_label(%{stub?: true}),
+    do: "stub (no execution plan reached chain-broadcast state)"
+
+  defp execution_label(_), do: "(unknown)"
+
+  # --- intent ---------------------------------------------------------------
+
+  defp intent_section(intent) do
+    [
+      "## Intent\n",
+      "\n",
+      "| Field | Value |\n",
+      "| --- | --- |\n",
+      kv_row("ID", short(intent[:id])),
+      kv_row("Kind", intent[:kind]),
+      kv_row("Asset", intent[:asset]),
+      kv_row("Chain", intent[:chain]),
+      kv_row("Amount", intent[:amount]),
+      kv_row("State", intent[:state]),
+      kv_row("Idempotency key", intent[:idempotency_key]),
+      kv_row("Submitted at", intent[:submitted_at]),
+      kv_row("Target", target_label(intent[:target]))
+    ]
+  end
+
+  defp target_label(%{kind: "counterparty"} = t),
+    do:
+      "counterparty: " <> short(t[:counterparty_id]) <> address_label_suffix(t[:address_label_id])
+
+  defp target_label(%{kind: "raw_address"} = t),
+    do: "raw_address: " <> (t[:address] || "")
+
+  defp target_label(%{kind: "unspecified"}), do: "(unspecified)"
+  defp target_label(_), do: "(unknown)"
+
+  defp address_label_suffix(nil), do: ""
+  defp address_label_suffix(id), do: " (address_label: " <> short(id) <> ")"
+
+  # --- actor / source ------------------------------------------------------
+
+  defp actor_source_section(actor) do
+    [
+      "## Actor / source\n",
+      "\n",
+      "- Agent: `",
+      actor[:agent_id] || "(unknown)",
+      "`\n",
+      "- Source: `",
+      actor[:source] || "(unknown)",
+      "`\n",
+      "- Workspace: `",
+      actor[:workspace_id] || "(unscoped)",
+      "`\n"
+    ]
+  end
+
+  # --- decision envelope ---------------------------------------------------
+
+  defp decision_envelope_section(%{available: false, reason: reason}) do
+    section_missing("Decision envelope", reason)
+  end
+
+  defp decision_envelope_section(d) do
+    reasons_block =
+      case d[:reasons] do
+        %{item_count: 0} ->
+          "_(no recorded reasons)_\n"
+
+        %{items: items} when is_list(items) ->
+          ["Reasons:\n" | Enum.map(items, &reason_bullet/1)]
+
+        _ ->
+          "_(no recorded reasons)_\n"
+      end
+
+    [
+      "## Decision envelope\n",
+      "\n",
+      "- ID: `",
+      short(d[:id]),
+      "`\n",
+      "- Outcome: `",
+      d[:outcome] || "(unknown)",
+      "`\n",
+      "- Risk tier: `",
+      d[:risk_tier] || "(unknown)",
+      "`\n",
+      "- Decided at: `",
+      d[:decided_at] || "(unknown)",
+      "`\n",
+      "- Decided by: `",
+      d[:decided_by] || "(unknown)",
+      "`\n",
+      "- State: `",
+      d[:state] || "(unknown)",
+      "`\n",
+      "\n",
+      reasons_block
+    ]
+  end
+
+  # Bare-string reason items are programmer-written labels (e.g.
+  # `"policy.amount_limit ok"`). Map items are the operator
+  # approval/rejection redacted shape from PR #360. The renderer
+  # MUST NOT look at any `message` or `details` field here — the
+  # Report builder strips them, but defend in depth.
+  defp reason_bullet(text) when is_binary(text), do: ["  - `", text, "`\n"]
+
+  defp reason_bullet(%{} = item) do
+    code = Map.get(item, "code") || Map.get(item, :code) || "(unknown)"
+    actor_id = Map.get(item, "actor_id") || Map.get(item, :actor_id)
+    redacted? = Map.get(item, "redacted") || Map.get(item, :redacted)
+
+    actor_suffix =
+      case actor_id do
+        nil -> ""
+        id -> ", actor: `" <> short(id) <> "`"
+      end
+
+    suffix =
+      if redacted?,
+        do: " — operator-supplied body redacted (#248 P2 secret-hygiene)",
+        else: ""
+
+    ["  - code: `", to_string(code), "`", actor_suffix, suffix, "\n"]
+  end
+
+  defp reason_bullet(_), do: "  - _(unrecognised reason item shape)_\n"
+
+  # --- approval ------------------------------------------------------------
+
+  defp approval_section(%{available: false, reason: reason}) do
+    section_missing("Approval / rejection", reason)
+  end
+
+  defp approval_section(a) do
+    [
+      "## Approval / rejection\n",
+      "\n",
+      "- Kind: `",
+      Map.get(a, :kind) || "(unknown)",
+      "`\n",
+      "- Decided by: `",
+      Map.get(a, :decided_by) || "(n/a)",
+      "`\n",
+      "- Decided at: `",
+      Map.get(a, :decided_at) || "(n/a)",
+      "`\n"
+    ]
+  end
+
+  # --- trust ----------------------------------------------------------------
+
+  defp trust_section(%{available: false, reason: reason}) do
+    section_missing("Trust assessment", reason)
+  end
+
+  defp trust_section(t) do
+    [
+      "## Trust assessment\n",
+      "\n",
+      "- Derived trust: `",
+      t[:derived_trust] || "(unknown)",
+      "`\n",
+      "- Confidence: `",
+      t[:confidence] || "(unknown)",
+      "`\n",
+      "- Generated at: `",
+      t[:generated_at] || "(unknown)",
+      "`\n",
+      "- Generated by: `",
+      t[:generated_by] || "(unknown)",
+      "`\n",
+      "- Contradictions: `",
+      to_string(t[:contradictions_count] || 0),
+      "`\n",
+      "- Supporting assertions: `",
+      to_string(length(t[:supporting_assertion_ids] || [])),
+      "`\n",
+      "- Supporting evidence: `",
+      to_string(length(t[:supporting_evidence_ids] || [])),
+      "`\n"
+    ]
+  end
+
+  # --- simulation -----------------------------------------------------------
+
+  defp simulation_section(%{available: false, reason: reason}) do
+    section_missing("Simulation", reason)
+  end
+
+  defp simulation_section(s) do
+    [
+      "## Simulation\n",
+      "\n",
+      "- Provider: `",
+      s[:provider] || "(unknown)",
+      "`\n",
+      "- Provider trace ref: `",
+      s[:provider_trace_ref] || "(none)",
+      "`\n",
+      "- Status: `",
+      s[:status] || "(unknown)",
+      "`\n",
+      "- Estimated gas: `",
+      to_string(s[:estimated_gas] || "(n/a)"),
+      "`\n",
+      "- Expected output: `",
+      to_string(s[:expected_output] || "(n/a)"),
+      "`\n",
+      "- Slippage exposure: `",
+      to_string(s[:slippage_exposure] || "(n/a)"),
+      "`\n",
+      "- Predicted balance changes: `",
+      to_string(s[:predicted_balance_change_count] || 0),
+      "`\n",
+      "- Failure conditions: `",
+      to_string(s[:failure_condition_count] || 0),
+      "`\n"
+    ]
+  end
+
+  # --- screening ------------------------------------------------------------
+
+  defp screening_section(%{available: false, reason: reason}) do
+    section_missing("Screening evidence", reason)
+  end
+
+  defp screening_section(s) do
+    [
+      "## Screening evidence\n",
+      "\n",
+      "- Outcome: `",
+      s[:outcome] || "(unknown)",
+      "`\n",
+      "- Screened address: `",
+      s[:screened_address] || "(none)",
+      "`\n",
+      "- Screened chain: `",
+      s[:screened_chain] || "(none)",
+      "`\n",
+      "- Winning tier: `",
+      s[:winning_tier] || "(none)",
+      "`\n",
+      "- Winning source: `",
+      s[:winning_source] || "(none)",
+      "`\n",
+      "- Total records: `",
+      to_string(s[:total_records] || 0),
+      "`\n"
+    ]
+  end
+
+  # --- policy snapshot table ----------------------------------------------
+
+  defp policy_section(%{available: false, reason: reason}) do
+    section_missing("Policy snapshot", reason)
+  end
+
+  defp policy_section(%{rules: rules}) when is_list(rules) and rules != [] do
+    rows = Enum.map(rules, &policy_row/1)
+
+    [
+      "## Policy snapshot\n",
+      "\n",
+      "Total rules captured: `",
+      to_string(length(rules)),
+      "`\n",
+      "\n",
+      "| Rule | Type | Priority | State | Version | Param keys |\n",
+      "| --- | --- | --- | --- | --- | --- |\n"
+      | rows
+    ]
+  end
+
+  defp policy_section(_), do: section_missing("Policy snapshot", "no policy rules captured")
+
+  defp policy_row(rule) do
+    keys = (rule[:param_keys] || []) |> Enum.join(", ")
+
+    [
+      "| `",
+      short(rule[:id]),
+      "` | `",
+      to_string(rule[:rule_type] || ""),
+      "` | `",
+      to_string(rule[:priority] || ""),
+      "` | `",
+      to_string(rule[:state] || ""),
+      "` | `",
+      to_string(rule[:version] || ""),
+      "` | `",
+      keys,
+      "` |\n"
+    ]
+  end
+
+  # --- execution plan -------------------------------------------------------
+
+  defp execution_plan_section(%{available: false, reason: reason}) do
+    section_missing("Execution plan", reason)
+  end
+
+  defp execution_plan_section(p) do
+    tx_refs =
+      case p[:tx_refs] do
+        [] -> "(none)"
+        list when is_list(list) -> Enum.join(list, ", ")
+        _ -> "(none)"
+      end
+
+    [
+      "## Execution plan\n",
+      "\n",
+      "- Plan ID: `",
+      short(p[:id]),
+      "`\n",
+      "- Decision ID: `",
+      short(p[:decision_id]),
+      "`\n",
+      "- Chain: `",
+      p[:chain] || "(unknown)",
+      "`\n",
+      "- Asset: `",
+      p[:asset] || "(unknown)",
+      "`\n",
+      "- Smart account: `",
+      p[:smart_account_id] || "(unknown)",
+      "`\n",
+      "- Execution status: `",
+      p[:execution_status] || "(unknown)",
+      "`\n",
+      "- Final outcome: `",
+      p[:final_outcome] || "(none)",
+      "`\n",
+      "- Final reason: `",
+      p[:final_reason] || "(none)",
+      "`\n",
+      "- Adapter ref: `",
+      p[:adapter_ref] || "(none)",
+      "`\n",
+      "- Nonce: `",
+      to_string(p[:nonce] || "(none)"),
+      "`\n",
+      "- Active: `",
+      to_string(Map.get(p, :active, false)),
+      "`\n",
+      "- Tx refs: `",
+      tx_refs,
+      "`\n"
+    ]
+  end
+
+  # --- stablecoin routes ---------------------------------------------------
+
+  defp stablecoin_routes_section([]) do
+    [
+      "## Stablecoin route evidence\n",
+      "\n",
+      "_(none recorded)_\n"
+    ]
+  end
+
+  defp stablecoin_routes_section(routes) when is_list(routes) do
+    rendered = Enum.map(routes, &stablecoin_route_bullet/1)
+
+    [
+      "## Stablecoin route evidence\n",
+      "\n",
+      "Captured route evaluations: `",
+      to_string(length(routes)),
+      "`\n",
+      "\n"
+      | rendered
+    ]
+  end
+
+  defp stablecoin_route_bullet(%{} = route) do
+    summary =
+      route
+      |> Map.take(["from", "to", "via", "stablecoin", :from, :to, :via, :stablecoin])
+      |> Enum.sort_by(fn {k, _} -> to_string(k) end)
+      |> Enum.map(fn {k, v} -> [to_string(k), "=", inspect_safe(v)] end)
+      |> Enum.intersperse(" ")
+
+    case summary do
+      [] -> ["- _(route entry has no recognised summary keys)_\n"]
+      _ -> ["- ", summary, "\n"]
+    end
+  end
+
+  defp stablecoin_route_bullet(_), do: "- _(route entry has unexpected shape)_\n"
+
+  defp inspect_safe(v) when is_binary(v), do: v
+  defp inspect_safe(v) when is_number(v), do: to_string(v)
+  defp inspect_safe(v) when is_atom(v), do: Atom.to_string(v)
+  defp inspect_safe(_), do: "(opaque)"
+
+  # --- audit trail table --------------------------------------------------
+
+  defp audit_trail_section([]) do
+    [
+      "## Audit trail\n",
+      "\n",
+      "_(no audit events recorded)_\n"
+    ]
+  end
+
+  defp audit_trail_section(events) when is_list(events) do
+    rows = Enum.map(events, &audit_row/1)
+
+    [
+      "## Audit trail\n",
+      "\n",
+      "Total events: `",
+      to_string(length(events)),
+      "`\n",
+      "\n",
+      "| Timestamp | Event type | Actor | Subject |\n",
+      "| --- | --- | --- | --- |\n"
+      | rows
+    ]
+  end
+
+  defp audit_row(event) do
+    subject =
+      [
+        Map.get(event, :subject_type) || "(unknown)",
+        "#",
+        short(Map.get(event, :subject_id))
+      ]
+
+    [
+      "| `",
+      Map.get(event, :ts) || "(unknown)",
+      "` | `",
+      Map.get(event, :event_type) || "(unknown)",
+      "` | `",
+      to_string(Map.get(event, :actor) || "(unknown)"),
+      "` | `",
+      subject,
+      "` |\n"
+    ]
+  end
+
+  # --- residual limitations ------------------------------------------------
+
+  defp residual_limitations_section([]) do
+    [
+      "## Residual limitations\n",
+      "\n",
+      "_(none — every optional section was populated)_\n"
+    ]
+  end
+
+  defp residual_limitations_section(limits) when is_list(limits) do
+    rendered = Enum.map(limits, fn l -> ["- ", l, "\n"] end)
+
+    ["## Residual limitations\n", "\n" | rendered]
+  end
+
+  # --- footer / hygiene ---------------------------------------------------
+
+  defp footer do
+    """
+
+    ---
+
+    *This report is replay-derived from persisted decision, audit,
+    and execution rows. No business logic was re-run during
+    rendering. The report does not assert ongoing safety,
+    post-decision compliance, or production readiness. Field values
+    reflect what was recorded at the time of decision/execution.
+    Operator-supplied free-text reasons are intentionally redacted
+    here; consult the underlying `decision_envelopes` row for
+    forensic review with appropriate database access.*
+    """
+  end
+
+  # --- shared helpers -----------------------------------------------------
+
+  defp section_missing(title, reason) do
+    [
+      "## ",
+      title,
+      "\n",
+      "\n",
+      "_(missing — ",
+      reason || "no detail recorded",
+      ")_\n"
+    ]
+  end
+
+  defp kv_row(label, value) do
+    ["| ", label, " | `", to_string(value || "(none)"), "` |\n"]
+  end
+
+  defp short(nil), do: "(none)"
+
+  defp short(value) when is_binary(value) do
+    case String.length(value) do
+      n when n <= @id_short_chars -> value
+      _ -> binary_part(value, 0, @id_short_chars) <> "…"
+    end
+  end
+
+  defp short(other), do: to_string(other)
+end
