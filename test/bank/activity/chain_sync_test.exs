@@ -390,6 +390,306 @@ defmodule Bank.Activity.ChainSyncTest do
     end
   end
 
+  describe "sync_address/4 — initial sync window (#245 P2)" do
+    test "fresh cursor on a high-head chain seeds from a recent confirmed range, not genesis",
+         %{workspace: ws} do
+      head = 5_000_000
+      max_blocks = 1_000
+
+      # The recent-window heuristic is
+      # `from = max(confirmed_head - max_blocks + 1, 0)` =
+      # 5_000_000 - 12 - 1_000 + 1 = 4_998_989. A near-head transfer
+      # at block 4_999_500 should land in the first run. A genesis-
+      # window transfer at block 100 must NOT.
+      near_head_block = 4_999_500
+      genesis_block = 100
+
+      near_head =
+        log(
+          tx_hash: "0xnear-head",
+          log_index: "0x0",
+          block_number: near_head_block,
+          from: @sender,
+          to: @watched,
+          amount: 50 * 1_000_000
+        )
+
+      genesis_log =
+        log(
+          tx_hash: "0xgenesis",
+          log_index: "0x0",
+          block_number: genesis_block,
+          from: @sender,
+          to: @watched,
+          amount: 1
+        )
+
+      rpc_fn =
+        canned_rpc(head, %{
+          near_head_block => [near_head],
+          genesis_block => [genesis_log]
+        })
+
+      assert {:ok, %{inserted: 1, last_block: last}} =
+               ChainSync.sync_address(ws.id, "base-sepolia", @watched,
+                 asset_address: @asset_address,
+                 rpc_fn: rpc_fn,
+                 max_blocks: max_blocks
+               )
+
+      # Cursor advanced to head - confirmations (single-run window
+      # exactly covers max_blocks at the tail of the chain).
+      assert last == head - 12
+
+      [row] = Activity.list_imported_activities(workspace_id: ws.id)
+      assert row.tx_hash == "0xnear-head"
+      refute row.tx_hash == "0xgenesis"
+    end
+
+    test ":start_block opt overrides the recent-window heuristic for known deployment block",
+         %{workspace: ws} do
+      head = 5_000_000
+
+      old_block = 100
+
+      old_log =
+        log(
+          tx_hash: "0xold",
+          log_index: "0x0",
+          block_number: old_block,
+          from: @sender,
+          to: @watched,
+          amount: 1_000_000
+        )
+
+      rpc_fn = canned_rpc(head, %{old_block => [old_log]})
+
+      # With :start_block = 50, the first run covers [50, 50 +
+      # max_blocks - 1]. Block 100 must be picked up.
+      assert {:ok, %{inserted: 1}} =
+               ChainSync.sync_address(ws.id, "base-sepolia", @watched,
+                 asset_address: @asset_address,
+                 rpc_fn: rpc_fn,
+                 max_blocks: 1_000,
+                 start_block: 50
+               )
+
+      [row] = Activity.list_imported_activities(workspace_id: ws.id)
+      assert row.tx_hash == "0xold"
+    end
+
+    test "second sync after fresh-window seeding resumes from cursor and reorg-rewind, not genesis",
+         %{workspace: ws} do
+      head_1 = 5_000_000
+      head_2 = 5_000_500
+
+      first =
+        log(
+          tx_hash: "0xrun1",
+          log_index: "0x0",
+          block_number: 4_999_700,
+          from: @sender,
+          to: @watched,
+          amount: 1_000_000
+        )
+
+      rpc_1 = canned_rpc(head_1, %{4_999_700 => [first]})
+
+      {:ok, _} =
+        ChainSync.sync_address(ws.id, "base-sepolia", @watched,
+          asset_address: @asset_address,
+          rpc_fn: rpc_1,
+          max_blocks: 1_000
+        )
+
+      cursor = ChainSync.get_cursor(ws.id, "base-sepolia", :wallet_chain, @watched)
+      assert cursor.last_block_number == head_1 - 12
+
+      # On the second run, the next window is `[last_block + 1 -
+      # rewind, head_2 - confirmations]`. Anything inside that
+      # window — and only that — must surface.
+      second_block = 5_000_400
+
+      second =
+        log(
+          tx_hash: "0xrun2",
+          log_index: "0x0",
+          block_number: second_block,
+          from: @sender,
+          to: @watched,
+          amount: 2_000_000
+        )
+
+      rpc_2 = canned_rpc(head_2, %{second_block => [second]})
+
+      assert {:ok, %{inserted: 1, last_block: last2}} =
+               ChainSync.sync_address(ws.id, "base-sepolia", @watched,
+                 asset_address: @asset_address,
+                 rpc_fn: rpc_2,
+                 max_blocks: 1_000
+               )
+
+      assert last2 == head_2 - 12
+      assert length(Activity.list_imported_activities(workspace_id: ws.id)) == 2
+    end
+  end
+
+  describe "sync_address/4 — block timestamps (#245 P2)" do
+    test "occurred_at uses the real block timestamp, not block-number-as-unix-seconds",
+         %{workspace: ws} do
+      block_number = 800
+      block_ts = 1_710_000_800
+
+      transfer =
+        log(
+          tx_hash: "0xts",
+          log_index: "0x0",
+          block_number: block_number,
+          from: @sender,
+          to: @watched,
+          amount: 1_000_000
+        )
+
+      rpc_fn = fn
+        %{method: "eth_blockNumber"} ->
+          {:ok, "0x3e8"}
+
+        %{method: "eth_getLogs"} ->
+          {:ok, [transfer]}
+
+        %{method: "eth_getBlockByNumber", params: [block_hex, false]} ->
+          assert parse_hex(block_hex) == block_number
+
+          {:ok, %{"timestamp" => "0x" <> (Integer.to_string(block_ts, 16) |> String.downcase())}}
+      end
+
+      assert {:ok, %{inserted: 1}} =
+               ChainSync.sync_address(ws.id, "base-sepolia", @watched,
+                 asset_address: @asset_address,
+                 rpc_fn: rpc_fn
+               )
+
+      [row] = Activity.list_imported_activities(workspace_id: ws.id)
+      # The DB column is utc_datetime_usec, so compare on the
+      # underlying unix second to avoid microsecond-precision
+      # noise.
+      assert DateTime.to_unix(row.occurred_at, :second) == block_ts
+
+      # Block-number-as-unix-seconds (the buggy P2 behavior) would
+      # produce a 1970-era timestamp; assert we did NOT do that.
+      refute DateTime.to_unix(row.occurred_at, :second) == block_number
+      assert row.occurred_at.year >= 2024
+    end
+
+    test "multiple logs in the same block share one eth_getBlockByNumber call",
+         %{workspace: ws} do
+      block_number = 800
+      block_ts = 1_710_000_800
+
+      transfer_a =
+        log(
+          tx_hash: "0xa",
+          log_index: "0x0",
+          block_number: block_number,
+          from: @sender,
+          to: @watched,
+          amount: 1_000_000
+        )
+
+      transfer_b =
+        log(
+          tx_hash: "0xb",
+          log_index: "0x1",
+          block_number: block_number,
+          from: @watched,
+          to: @recipient,
+          amount: 2_000_000
+        )
+
+      counter = :counters.new(1, [])
+
+      rpc_fn = fn
+        %{method: "eth_blockNumber"} ->
+          {:ok, "0x3e8"}
+
+        %{method: "eth_getLogs"} ->
+          {:ok, [transfer_a, transfer_b]}
+
+        %{method: "eth_getBlockByNumber", params: [_block_hex, false]} ->
+          :counters.add(counter, 1, 1)
+
+          {:ok, %{"timestamp" => "0x" <> (Integer.to_string(block_ts, 16) |> String.downcase())}}
+      end
+
+      assert {:ok, %{inserted: 2}} =
+               ChainSync.sync_address(ws.id, "base-sepolia", @watched,
+                 asset_address: @asset_address,
+                 rpc_fn: rpc_fn
+               )
+
+      assert :counters.get(counter, 1) == 1
+    end
+
+    test "block-timestamp fetch failure records sanitized cursor.last_error and does not advance",
+         %{workspace: ws} do
+      transfer =
+        log(
+          tx_hash: "0xts-fail",
+          log_index: "0x0",
+          block_number: 800,
+          from: @sender,
+          to: @watched,
+          amount: 1_000_000
+        )
+
+      rpc_fn = fn
+        %{method: "eth_blockNumber"} ->
+          {:ok, "0x3e8"}
+
+        %{method: "eth_getLogs"} ->
+          {:ok, [transfer]}
+
+        %{method: "eth_getBlockByNumber", params: [_, false]} ->
+          {:error, "timeout"}
+      end
+
+      assert {:error, :rpc_unavailable} =
+               ChainSync.sync_address(ws.id, "base-sepolia", @watched,
+                 asset_address: @asset_address,
+                 rpc_fn: rpc_fn
+               )
+
+      cursor = ChainSync.get_cursor(ws.id, "base-sepolia", :wallet_chain, @watched)
+      assert cursor.last_error == "timeout"
+      assert cursor.last_block_number == 0
+      # Critically: no synthetic 1970 row was inserted.
+      assert Activity.list_imported_activities(workspace_id: ws.id) == []
+    end
+  end
+
+  describe "sync_address/4 — smart-account events (#245 P2)" do
+    test "source_type :smart_account_chain is rejected with explicit blocker error",
+         %{workspace: ws} do
+      # No real smart-account event ABI / topic exists in this repo
+      # yet — the TS adapter surfaces smart-account state via
+      # webhook callbacks. Until a concrete event-log path lands,
+      # this source_type must NOT silently relabel USDC Transfer
+      # events as smart-account events.
+      rpc_fn = fn _ -> {:ok, "0x1"} end
+
+      assert {:error, :smart_account_events_unavailable} =
+               ChainSync.sync_address(ws.id, "base-sepolia", @watched,
+                 asset_address: @asset_address,
+                 source_type: :smart_account_chain,
+                 rpc_fn: rpc_fn
+               )
+
+      # No cursor row written, no activity row.
+      assert is_nil(ChainSync.get_cursor(ws.id, "base-sepolia", :smart_account_chain, @watched))
+      assert Activity.list_imported_activities(workspace_id: ws.id) == []
+    end
+  end
+
   # ---- helpers ----
 
   # ERC-20 Transfer log shape produced by `eth_getLogs`.
@@ -423,9 +723,15 @@ defmodule Bank.Activity.ChainSyncTest do
   end
 
   # Builds an `:rpc_fn` that responds to `eth_blockNumber` with
-  # `head` and to `eth_getLogs` with the union of any logs whose
-  # block_number falls inside the window. `logs_by_block` is a map
-  # `%{block_number => [log_map, ...]}`.
+  # `head`, to `eth_getLogs` with the union of any logs whose
+  # block_number falls inside the window, and to
+  # `eth_getBlockByNumber` with a deterministic synthetic
+  # timestamp `@base_block_ts + block` so multiple tests get
+  # distinct, real `occurred_at` values without coupling to wall
+  # clock. `logs_by_block` is a map `%{block_number => [log_map,
+  # ...]}`.
+  @base_block_ts 1_700_000_000
+
   defp canned_rpc(head, logs_by_block) do
     fn
       %{method: "eth_blockNumber"} ->
@@ -441,6 +747,11 @@ defmodule Bank.Activity.ChainSyncTest do
           |> Enum.flat_map(fn {_, ls} -> ls end)
 
         {:ok, logs}
+
+      %{method: "eth_getBlockByNumber", params: [block_hex, false]} ->
+        block = parse_hex(block_hex)
+        ts = @base_block_ts + block
+        {:ok, %{"timestamp" => "0x" <> (Integer.to_string(ts, 16) |> String.downcase())}}
     end
   end
 

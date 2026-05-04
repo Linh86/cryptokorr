@@ -19,17 +19,45 @@ defmodule Bank.Activity.ChainSync do
   carry `workspace_id` per the existing
   `Bank.Activity.ImportedActivity` contract.
 
+  ## Initial sync window (#245 P2)
+
+  A fresh cursor (`last_block_number == 0` and `last_synced_at ==
+  nil`) is seeded from a recent-confirmed-range heuristic instead
+  of genesis: `from_block = max(confirmed_head - max_blocks + 1,
+  0)`. Callers can override with the `:start_block` opt for a
+  known deployment block. After the first run, the cursor advances
+  normally and the recent-window heuristic is not re-applied.
+
   ## Conservative reorg handling
 
-  The sync window is `[cursor.last_block_number + 1, head_block -
-  confirmations]` minus a small rewind buffer
-  (`@reorg_rewind_blocks`) on every run. That overlap re-fetches
-  the last few blocks each time so a chain reorg that rewrote them
-  is observed as new events from the source — but the activity
+  After the initial seeding, every subsequent sync window is
+  `[cursor.last_block_number + 1 - @reorg_rewind_blocks,
+  head_block - @confirmations]`. The rewind overlap re-fetches the
+  last few blocks each time so a chain reorg that rewrote them is
+  observed as new events from the source — but the activity
   ledger's deterministic dedupe (per
-  `Bank.Activity.compute_dedupe_key/1` on
-  `(source_type, source_ref, occurred_at, asset, direction,
-  amount)`) collapses the duplicates idempotently.
+  `Bank.Activity.compute_dedupe_key/1` on `(source_type,
+  source_ref, occurred_at, asset, direction, amount)`) collapses
+  the duplicates idempotently.
+
+  ## Block timestamps (#245 P2)
+
+  Each unique block touched by the imported logs is resolved via
+  `eth_getBlockByNumber` exactly once per sync call. The real
+  block timestamp is used for `occurred_at`. If the timestamp
+  fetch fails, the run is treated as a source failure: the cursor
+  records the sanitized error label and `last_block_number` is
+  NOT advanced, so the next attempt retries the same window.
+
+  ## Smart-account events (#245 P2)
+
+  Phase 1 only supports `:wallet_chain` source-type ERC-20
+  Transfer sync. Calls with `source_type: :smart_account_chain`
+  return `{:error, :smart_account_events_unavailable}` until a
+  concrete smart-account event ABI / topic constant lands in this
+  repo. The TS adapter currently surfaces smart-account state via
+  webhook callbacks, not on-chain log decoding; relabelling USDC
+  Transfer events as smart-account events would be misleading.
 
   ## Source failures
 
@@ -103,7 +131,9 @@ defmodule Bank.Activity.ChainSync do
       form.
     * `opts`:
         * `:source_type` (default `:wallet_chain`) — must be one of
-          `Bank.Activity.ChainSyncCursor.source_types/0`.
+          `Bank.Activity.ChainSyncCursor.source_types/0`. Phase 1
+          rejects `:smart_account_chain` with
+          `{:error, :smart_account_events_unavailable}`.
         * `:rpc_fn` — test injection (see moduledoc).
         * `:max_blocks` — cap on the `[from, to]` window per call;
           default 1_000. Hard-capped at 5_000 even when callers
@@ -112,6 +142,12 @@ defmodule Bank.Activity.ChainSync do
           watched (USDC). Required; refuses nil.
         * `:asset` — ledger-side asset symbol (default `"USDC"`).
         * `:asset_decimals` — token decimals (default `6` for USDC).
+        * `:start_block` — non-negative integer; explicit initial
+          block for a fresh cursor (e.g. token deployment block).
+          When omitted, a fresh cursor seeds from
+          `max(confirmed_head - max_blocks + 1, 0)` so the first
+          run captures recent activity instead of starting at
+          genesis.
   """
   @spec sync_address(String.t() | nil, String.t() | nil, String.t() | nil, keyword()) ::
           sync_result()
@@ -128,26 +164,33 @@ defmodule Bank.Activity.ChainSync do
       do: {:error, :invalid_address}
 
   def sync_address(workspace_id, chain, address, opts) do
+    source_type = Keyword.get(opts, :source_type, :wallet_chain)
     asset_address = Keyword.get(opts, :asset_address)
 
-    if not is_binary(asset_address) or asset_address == "" do
-      {:error, :missing_asset_address}
-    else
-      source_type = Keyword.get(opts, :source_type, :wallet_chain)
-      rpc_fn = Keyword.get(opts, :rpc_fn, &RpcSource.call/1)
-      max_blocks = opts |> Keyword.get(:max_blocks, 1_000) |> min(5_000) |> max(1)
-      asset = Keyword.get(opts, :asset, "USDC")
-      decimals = Keyword.get(opts, :asset_decimals, 6)
-      lowered_address = String.downcase(address)
+    cond do
+      source_type == :smart_account_chain ->
+        {:error, :smart_account_events_unavailable}
 
-      do_sync(workspace_id, chain, lowered_address, %{
-        source_type: source_type,
-        rpc_fn: rpc_fn,
-        max_blocks: max_blocks,
-        asset: asset,
-        decimals: decimals,
-        asset_address: String.downcase(asset_address)
-      })
+      not is_binary(asset_address) or asset_address == "" ->
+        {:error, :missing_asset_address}
+
+      true ->
+        rpc_fn = Keyword.get(opts, :rpc_fn, &RpcSource.call/1)
+        max_blocks = opts |> Keyword.get(:max_blocks, 1_000) |> min(5_000) |> max(1)
+        asset = Keyword.get(opts, :asset, "USDC")
+        decimals = Keyword.get(opts, :asset_decimals, 6)
+        start_block = sanitize_start_block(Keyword.get(opts, :start_block))
+        lowered_address = String.downcase(address)
+
+        do_sync(workspace_id, chain, lowered_address, %{
+          source_type: source_type,
+          rpc_fn: rpc_fn,
+          max_blocks: max_blocks,
+          asset: asset,
+          decimals: decimals,
+          asset_address: String.downcase(asset_address),
+          start_block: start_block
+        })
     end
   end
 
@@ -214,19 +257,40 @@ defmodule Bank.Activity.ChainSync do
 
   defp run_window(%ChainSyncCursor{} = cursor, head, chain, address, ctx) do
     confirmed_head = max(head - @confirmations, 0)
-    from_block = max(cursor.last_block_number + 1 - @reorg_rewind_blocks, 0)
+    from_block = compute_from_block(cursor, confirmed_head, ctx)
 
     cond do
       confirmed_head < from_block ->
         # Nothing settled to sync yet. Treat as a no-op success;
-        # clear any prior error envelope.
-        advance_cursor(cursor, cursor.last_block_number)
-        {:ok, %{inserted: 0, duplicates: 0, last_block: cursor.last_block_number}}
+        # advance the cursor to `from_block - 1` so a fresh cursor
+        # records its initial position (and is no longer "fresh"
+        # next call). Clears any prior error envelope.
+        effective_last = max(from_block - 1, cursor.last_block_number)
+        advance_cursor(cursor, effective_last)
+        {:ok, %{inserted: 0, duplicates: 0, last_block: effective_last}}
 
       true ->
         to_block = min(confirmed_head, from_block + ctx.max_blocks - 1)
         fetch_and_apply(cursor, chain, address, from_block, to_block, ctx)
     end
+  end
+
+  # Fresh cursor: seed from configured `:start_block` or recent
+  # confirmed range. Avoids the "first run pulls from genesis"
+  # trap on a high-head chain.
+  defp compute_from_block(
+         %ChainSyncCursor{last_block_number: 0, last_synced_at: nil},
+         confirmed_head,
+         ctx
+       ) do
+    case ctx.start_block do
+      n when is_integer(n) and n >= 0 -> n
+      _ -> max(confirmed_head - ctx.max_blocks + 1, 0)
+    end
+  end
+
+  defp compute_from_block(%ChainSyncCursor{} = cursor, _confirmed_head, _ctx) do
+    max(cursor.last_block_number + 1 - @reorg_rewind_blocks, 0)
   end
 
   defp fetch_and_apply(%ChainSyncCursor{} = cursor, chain, address, from_block, to_block, ctx) do
@@ -260,31 +324,71 @@ defmodule Bank.Activity.ChainSync do
   end
 
   defp apply_logs(%ChainSyncCursor{} = cursor, chain, address, logs, to_block, ctx) do
-    {inserted, duplicates} =
-      Enum.reduce(logs, {0, 0}, fn log, {ins, dup} ->
-        case normalize_log(log, cursor.workspace_id, chain, address, ctx) do
-          {:ok, attrs} ->
-            case Activity.create_imported_activity(attrs) do
-              {:ok, :inserted, _} -> {ins + 1, dup}
-              {:ok, :duplicate, _} -> {ins, dup + 1}
-              {:error, _changeset} -> {ins, dup}
+    case fetch_block_timestamps(logs, ctx) do
+      {:ok, ts_by_block} ->
+        {inserted, duplicates} =
+          Enum.reduce(logs, {0, 0}, fn log, {ins, dup} ->
+            case normalize_log(log, cursor.workspace_id, chain, address, ctx, ts_by_block) do
+              {:ok, attrs} ->
+                case Activity.create_imported_activity(attrs) do
+                  {:ok, :inserted, _} -> {ins + 1, dup}
+                  {:ok, :duplicate, _} -> {ins, dup + 1}
+                  {:error, _changeset} -> {ins, dup}
+                end
+
+              :skip ->
+                {ins, dup}
             end
+          end)
 
-          :skip ->
-            {ins, dup}
-        end
-      end)
+        advance_cursor(cursor, to_block)
+        {:ok, %{inserted: inserted, duplicates: duplicates, last_block: to_block}}
 
-    advance_cursor(cursor, to_block)
-    {:ok, %{inserted: inserted, duplicates: duplicates, last_block: to_block}}
+      {:error, label} ->
+        record_error(cursor, label)
+        {:error, :rpc_unavailable}
+    end
   end
 
-  defp normalize_log(log, workspace_id, chain, address, ctx) when is_map(log) do
+  # Per-call cache of block timestamps. Multiple logs in the same
+  # block share one `eth_getBlockByNumber` lookup. A failure halts
+  # the whole run as a source failure — we never persist a synthetic
+  # 1970-era timestamp.
+  defp fetch_block_timestamps(logs, ctx) do
+    block_hexes =
+      logs
+      |> Enum.flat_map(fn
+        %{"blockNumber" => b} when is_binary(b) -> [b]
+        _ -> []
+      end)
+      |> Enum.uniq()
+
+    Enum.reduce_while(block_hexes, {:ok, %{}}, fn block_hex, {:ok, acc} ->
+      case ctx.rpc_fn.(%{method: "eth_getBlockByNumber", params: [block_hex, false]}) do
+        {:ok, %{"timestamp" => ts_hex}} when is_binary(ts_hex) ->
+          ts = parse_hex_quantity(ts_hex)
+
+          case DateTime.from_unix(ts, :second) do
+            {:ok, dt} -> {:cont, {:ok, Map.put(acc, block_hex, dt)}}
+            _ -> {:halt, {:error, "invalid_response"}}
+          end
+
+        {:ok, _other} ->
+          {:halt, {:error, "invalid_response"}}
+
+        {:error, label} when is_binary(label) ->
+          {:halt, {:error, label}}
+      end
+    end)
+  end
+
+  defp normalize_log(log, workspace_id, chain, address, ctx, ts_by_block) when is_map(log) do
     with %{"topics" => [_event, from_topic, to_topic]} <- log,
          %{"data" => data} when is_binary(data) <- log,
          %{"transactionHash" => tx_hash} when is_binary(tx_hash) <- log,
          %{"logIndex" => log_index} when is_binary(log_index) <- log,
-         %{"blockNumber" => block_hex} when is_binary(block_hex) <- log do
+         %{"blockNumber" => block_hex} when is_binary(block_hex) <- log,
+         %DateTime{} = occurred_at <- Map.get(ts_by_block, block_hex) do
       from_addr = topic_to_address(from_topic)
       to_addr = topic_to_address(to_topic)
 
@@ -300,7 +404,7 @@ defmodule Bank.Activity.ChainSync do
             source_type: ctx.source_type,
             source_ref: tx_hash <> ":" <> log_index,
             source_hash: tx_hash,
-            occurred_at: pseudo_occurred_at(block_hex, log_index),
+            occurred_at: occurred_at,
             asset: ctx.asset,
             chain: chain,
             amount: amount,
@@ -320,7 +424,7 @@ defmodule Bank.Activity.ChainSync do
     end
   end
 
-  defp normalize_log(_, _, _, _, _), do: :skip
+  defp normalize_log(_, _, _, _, _, _), do: :skip
 
   defp upsert_cursor(workspace_id, chain, source_type, address) do
     case Repo.one(
@@ -386,6 +490,9 @@ defmodule Bank.Activity.ChainSync do
   defp sanitize_error_label(label) when label in @allowed_error_labels, do: label
   defp sanitize_error_label(_), do: "rpc_error"
 
+  defp sanitize_start_block(n) when is_integer(n) and n >= 0, do: n
+  defp sanitize_start_block(_), do: nil
+
   defp parse_hex_quantity("0x" <> rest), do: String.to_integer(rest, 16)
   defp parse_hex_quantity(s) when is_binary(s), do: String.to_integer(s, 16)
 
@@ -425,14 +532,4 @@ defmodule Bank.Activity.ChainSync do
 
   defp pow10(0), do: 1
   defp pow10(n) when n > 0, do: Enum.reduce(1..n, 1, fn _, acc -> acc * 10 end)
-
-  # Without a separate `eth_getBlockByNumber` lookup we use the
-  # block number as a deterministic time anchor. Operators get
-  # log_index for sub-block ordering through `source_ref`. A
-  # follow-up can plug in real block timestamps via batched
-  # `eth_getBlockByNumber` once the indexer source lands.
-  defp pseudo_occurred_at(block_hex, _log_index) do
-    block = parse_hex_quantity(block_hex)
-    DateTime.from_unix!(block, :second)
-  end
 end
