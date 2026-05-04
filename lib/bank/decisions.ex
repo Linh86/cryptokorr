@@ -287,6 +287,11 @@ defmodule Bank.Decisions do
           prior_simulation
         )
 
+        # Inbox notification (#234). Best-effort: emitter logs and
+        # returns on validation failure so the decision path is not
+        # broken by a notification-side error.
+        _ = Bank.Notifications.Emitter.emit_decision_outcome(updated_intent, envelope)
+
         maybe_enqueue_approval_expiry(envelope)
 
         {dispatch, plan} = maybe_dispatch_auto_exec(updated_intent, envelope, opts)

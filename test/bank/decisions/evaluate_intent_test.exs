@@ -439,4 +439,89 @@ defmodule Bank.Decisions.EvaluateIntentTest do
 
     updated
   end
+
+  describe "notification emission (#234)" do
+    setup do
+      suffix = System.unique_integer([:positive])
+
+      {:ok, workspace} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "notif-emit-#{suffix}",
+          name: "Notif Emit #{suffix}"
+        })
+
+      %{workspace: workspace}
+    end
+
+    test "an :approval_required outcome lands a workspace-scoped warning notification",
+         %{workspace: ws} do
+      intent =
+        Fixtures.agent_intent(
+          target_counterparty_id: nil,
+          target_raw_address: "0x" <> String.duplicate("c", 40),
+          amount: Decimal.new("10"),
+          workspace_id: ws.id
+        )
+
+      assert {:ok, result} =
+               Decisions.evaluate_intent(intent, preview: {:ok, ok_preview(intent)})
+
+      assert result.outcome == :approval_required
+
+      [n] = Bank.Notifications.list_for_workspace(ws.id)
+      assert n.event_type == "decision.approval_required"
+      assert n.severity == :warning
+      assert n.role_target == :operator
+      assert n.subject_type == "decision_envelope"
+      assert n.subject_id == result.decision.id
+      assert n.correlation_id == intent.id
+      assert n.action_link == "/queue#pending-approvals-section"
+      assert n.dedupe_key == "decision:#{intent.id}:approval_required"
+    end
+
+    test ":auto_exec produces no inbox row — operators do not need it for the happy path",
+         %{workspace: ws} do
+      cp = Fixtures.counterparty(workspace_id: ws.id)
+      _ = Fixtures.address_label(counterparty: cp, chain: "base")
+      _ = Fixtures.trust_assertion(subject: cp, level: :trusted, scope: %{})
+
+      intent =
+        Fixtures.agent_intent(
+          counterparty: cp,
+          amount: Decimal.new("25"),
+          workspace_id: ws.id
+        )
+
+      assert {:ok, result} =
+               Decisions.evaluate_intent(intent, preview: {:ok, ok_preview(intent)})
+
+      assert result.outcome == :auto_exec
+      assert Bank.Notifications.list_for_workspace(ws.id) == []
+    end
+
+    test "re-evaluating the same intent to the same outcome dedupes (single inbox row)",
+         %{workspace: ws} do
+      intent =
+        Fixtures.agent_intent(
+          target_counterparty_id: nil,
+          target_raw_address: "0x" <> String.duplicate("d", 40),
+          amount: Decimal.new("10"),
+          workspace_id: ws.id
+        )
+
+      assert {:ok, _} =
+               Decisions.evaluate_intent(intent, preview: {:ok, ok_preview(intent)})
+
+      # Re-evaluation produces a fresh DecisionEnvelope (the prior
+      # one is demoted), but the surfaced outcome is identical, so
+      # the operator inbox should not gain a second row.
+      reloaded = Repo.get!(AgentIntent, intent.id)
+
+      assert {:ok, _} =
+               Decisions.evaluate_intent(reloaded, preview: {:ok, ok_preview(intent)})
+
+      assert [%Bank.Notifications.Notification{}] =
+               Bank.Notifications.list_for_workspace(ws.id)
+    end
+  end
 end
