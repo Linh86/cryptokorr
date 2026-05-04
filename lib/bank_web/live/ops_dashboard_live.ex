@@ -435,7 +435,7 @@ defmodule BankWeb.OpsDashboardLive do
         <p class="text-warning font-semibold mb-1">Active pauses</p>
         <ul class="space-y-0.5 text-base-content/70">
           <li :for={pause <- @active_pauses} data-pause-id={pause.id} class="font-mono truncate">
-            {pause.scope_type}:{pause.scope_value}
+            {pause.scope_type}:{safe_scope_value(pause.scope_value)}
           </li>
         </ul>
       </div>
@@ -480,4 +480,30 @@ defmodule BankWeb.OpsDashboardLive do
   end
 
   defp truncate_id(other), do: to_string(other)
+
+  # `Bank.Security.Pauses.create_pause/4` only validates
+  # `scope_value` as non-empty / <=64 chars at the changeset level
+  # (#254 P2). A secret-looking value the operator typed by mistake
+  # — `Bearer sk_live_…`, `https://u:p@rpc.test`, a PEM marker —
+  # would otherwise leak through this LiveView.
+  #
+  # Phase 1's `:chain` scope only ever expects a kebab-case chain
+  # id (`base-sepolia`, `base`, `ethereum-sepolia`, …). We therefore
+  # render the value verbatim only when it matches that strict
+  # shape: lowercase alphanumerics + dashes, no slashes / colons /
+  # `@` / whitespace. Anything outside the shape collapses to a
+  # fixed `"[redacted]"` label so a token / URL / header value
+  # cannot reach the rendered HTML.
+  @safe_scope_value_re ~r/\A[a-z0-9]+(-[a-z0-9]+)*\z/
+
+  defp safe_scope_value(value) when is_binary(value) do
+    cond do
+      String.length(value) == 0 -> "[redacted]"
+      String.length(value) > 32 -> "[redacted]"
+      Regex.match?(@safe_scope_value_re, value) -> value
+      true -> "[redacted]"
+    end
+  end
+
+  defp safe_scope_value(_), do: "[redacted]"
 end
