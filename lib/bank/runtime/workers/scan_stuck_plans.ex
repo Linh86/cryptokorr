@@ -132,7 +132,7 @@ defmodule Bank.Runtime.Workers.ScanStuckPlans do
       end)
 
     emit_stuck_plan_alerts(details, window_start_iso)
-    emit_stuck_plan_recoveries(details, window_start_iso)
+    emit_stuck_plan_recoveries(window_start_iso, now)
 
     :telemetry.execute(
       [:bank, :ops, :stuck_plan, :scan_completed],
@@ -188,14 +188,26 @@ defmodule Bank.Runtime.Workers.ScanStuckPlans do
   end
 
   # For every non-archived `ops.stuck_plan` notification whose
-  # `subject_id` (plan id) is NOT in the current stuck-set, emit a
-  # paired `.resolved` notification keyed on the original alert's
-  # `window_start` so two ticks observing the same recovery
-  # collapse to one resolved row.
-  defp emit_stuck_plan_recoveries(details, scan_window_iso) do
-    current_ids = MapSet.new(details, & &1.id)
-
+  # alerted plan is NO LONGER currently past its per-status
+  # threshold, emit a paired `.resolved` notification keyed on
+  # the original alert's `window_start` so two ticks observing
+  # the same recovery collapse to one resolved row.
+  #
+  # Recovery is decided by an UNCAPPED, subject-targeted DB
+  # re-check (`Bank.Ops.Health.plans_currently_stuck/2`) — NOT
+  # by membership in the capped detection batch. A still-stuck
+  # plan that fell outside the top-N detection window must NOT
+  # be falsely resolved (#256 P2).
+  defp emit_stuck_plan_recoveries(scan_window_iso, now) do
     open_alerts = list_open_stuck_plan_notifications()
+
+    candidate_plan_ids =
+      open_alerts
+      |> Enum.map(& &1.subject_id)
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+
+    still_stuck = Health.plans_currently_stuck(candidate_plan_ids, now: now)
 
     Enum.each(open_alerts, fn n ->
       plan_id = n.subject_id
@@ -207,7 +219,7 @@ defmodule Bank.Runtime.Workers.ScanStuckPlans do
         is_nil(n.workspace_id) ->
           :ok
 
-        MapSet.member?(current_ids, plan_id) ->
+        MapSet.member?(still_stuck, plan_id) ->
           :ok
 
         true ->
