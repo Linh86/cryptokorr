@@ -184,6 +184,206 @@ defmodule Bank.Notifications.EmitterTest do
     end
   end
 
+  describe "emit_execution_outcome/1 — failure-side terminal outcomes" do
+    test ":reverted lands a critical operator notification linked to the intent replay" do
+      intent = agent_intent()
+      envelope = decision_envelope(intent: intent, outcome: :auto_exec, current: true)
+
+      plan =
+        execution_plan(
+          decision: envelope,
+          execution_status: :reverted,
+          final_outcome: :reverted,
+          final_reason: "chain_revert:out_of_gas",
+          active: false
+        )
+        |> Bank.Repo.preload(:intent)
+
+      assert {:ok, %Notification{} = n} = Emitter.emit_execution_outcome(plan)
+
+      assert n.workspace_id == intent.workspace_id
+      assert n.role_target == :operator
+      assert n.user_id == nil
+      assert n.event_type == "execution.reverted"
+      assert n.severity == :critical
+      assert n.subject_type == "execution_plan"
+      assert n.subject_id == plan.id
+      assert n.correlation_id == intent.id
+      assert n.action_link == "/audit/replay/#{intent.id}"
+      assert n.dedupe_key == "execution:#{plan.id}:reverted"
+      assert n.title =~ "Execution reverted"
+      assert n.title =~ to_string(intent.kind)
+      # Final reason MUST NOT bleed into the inbox payload.
+      refute n.title =~ "out_of_gas"
+      refute n.body =~ "out_of_gas"
+      refute (n.action_link || "") =~ "out_of_gas"
+    end
+
+    test ":aborted lands a warning operator notification linked to the intent replay" do
+      intent = agent_intent()
+      envelope = decision_envelope(intent: intent, outcome: :auto_exec, current: true)
+
+      plan =
+        execution_plan(
+          decision: envelope,
+          execution_status: :aborted,
+          final_outcome: :aborted,
+          final_reason: "operator_aborted:incident-1234",
+          active: false
+        )
+        |> Bank.Repo.preload(:intent)
+
+      assert {:ok, %Notification{} = n} = Emitter.emit_execution_outcome(plan)
+
+      assert n.severity == :warning
+      assert n.event_type == "execution.aborted"
+      assert n.action_link == "/audit/replay/#{intent.id}"
+      assert n.dedupe_key == "execution:#{plan.id}:aborted"
+      assert n.title =~ "Execution aborted"
+      refute n.title =~ "incident-1234"
+      refute n.body =~ "incident-1234"
+    end
+
+    test "skips :confirmed — opt-in setting is a remaining #234 blocker" do
+      intent = agent_intent()
+      envelope = decision_envelope(intent: intent, outcome: :auto_exec, current: true)
+
+      plan =
+        execution_plan(
+          decision: envelope,
+          execution_status: :confirmed,
+          final_outcome: :confirmed,
+          active: false
+        )
+        |> Bank.Repo.preload(:intent)
+
+      assert {:skip, {:not_failure_terminal, :confirmed}} =
+               Emitter.emit_execution_outcome(plan)
+
+      assert Notifications.list_for_workspace(intent.workspace_id) == []
+    end
+
+    test "skips non-terminal interim statuses (e.g. :broadcasting)" do
+      intent = agent_intent()
+      envelope = decision_envelope(intent: intent, outcome: :auto_exec, current: true)
+
+      plan =
+        execution_plan(
+          decision: envelope,
+          execution_status: :broadcasting,
+          active: true
+        )
+        |> Bank.Repo.preload(:intent)
+
+      assert {:skip, {:not_failure_terminal, :broadcasting}} =
+               Emitter.emit_execution_outcome(plan)
+    end
+  end
+
+  describe "emit_execution_outcome/1 — dedupe" do
+    test "re-emitting the same plan + same terminal outcome dedupes to one row" do
+      intent = agent_intent()
+      envelope = decision_envelope(intent: intent, outcome: :auto_exec, current: true)
+
+      plan =
+        execution_plan(
+          decision: envelope,
+          execution_status: :reverted,
+          final_outcome: :reverted,
+          active: false
+        )
+        |> Bank.Repo.preload(:intent)
+
+      assert {:ok, %Notification{id: first_id}} = Emitter.emit_execution_outcome(plan)
+
+      # A second emission for the exact same plan + terminal
+      # status — the protective dedupe-key guard collapses it.
+      assert {:duplicate, %Notification{id: ^first_id}} =
+               Emitter.emit_execution_outcome(plan)
+
+      assert [%Notification{id: ^first_id}] =
+               Notifications.list_for_workspace(intent.workspace_id)
+    end
+  end
+
+  describe "emit_execution_outcome/1 — workspace isolation" do
+    test "an execution failure in workspace A does not list under workspace B" do
+      intent_a = agent_intent()
+      env_a = decision_envelope(intent: intent_a, outcome: :auto_exec, current: true)
+
+      plan_a =
+        execution_plan(
+          decision: env_a,
+          execution_status: :reverted,
+          final_outcome: :reverted,
+          active: false
+        )
+        |> Bank.Repo.preload(:intent)
+
+      {:ok, ws_b} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "exec-iso-#{System.unique_integer([:positive])}",
+          name: "Sibling exec"
+        })
+
+      intent_b = agent_intent(workspace_id: ws_b.id)
+      env_b = decision_envelope(intent: intent_b, outcome: :auto_exec, current: true)
+
+      plan_b =
+        execution_plan(
+          decision: env_b,
+          execution_status: :aborted,
+          final_outcome: :aborted,
+          active: false,
+          workspace_id: ws_b.id
+        )
+        |> Bank.Repo.preload(:intent)
+
+      assert {:ok, _} = Emitter.emit_execution_outcome(plan_a)
+      assert {:ok, _} = Emitter.emit_execution_outcome(plan_b)
+
+      [n_a] = Notifications.list_for_workspace(intent_a.workspace_id)
+      [n_b] = Notifications.list_for_workspace(ws_b.id)
+
+      assert n_a.workspace_id == intent_a.workspace_id
+      assert n_b.workspace_id == ws_b.id
+      assert n_a.event_type == "execution.reverted"
+      assert n_b.event_type == "execution.aborted"
+    end
+  end
+
+  describe "emit_execution_outcome/1 — secret hygiene" do
+    test "raw final_reason and tx_refs do not appear in the inbox payload" do
+      intent = agent_intent()
+      envelope = decision_envelope(intent: intent, outcome: :auto_exec, current: true)
+
+      plan =
+        execution_plan(
+          decision: envelope,
+          execution_status: :reverted,
+          final_outcome: :reverted,
+          # Both fields here are realistic regression probes —
+          # operators / adapters do paste structured/free-text
+          # values into them.
+          final_reason: "Authorization: Bearer LEAKED_PROBE",
+          tx_refs: ["0xLEAKED_TXREF_PROBE"],
+          active: false
+        )
+        |> Bank.Repo.preload(:intent)
+
+      assert {:ok, n} = Emitter.emit_execution_outcome(plan)
+
+      refute n.title =~ "LEAKED_PROBE"
+      refute n.body =~ "LEAKED_PROBE"
+      refute (n.action_link || "") =~ "LEAKED_PROBE"
+      refute n.title =~ "LEAKED_TXREF_PROBE"
+      refute n.body =~ "LEAKED_TXREF_PROBE"
+      refute (n.action_link || "") =~ "LEAKED_TXREF_PROBE"
+      refute n.title =~ "Bearer"
+      refute n.body =~ "Bearer"
+    end
+  end
+
   describe "emit_decision_outcome/2 — secret hygiene" do
     test "no notification field reflects the intent's free-text fields" do
       # Realistic regression: operators paste secret-shaped values
