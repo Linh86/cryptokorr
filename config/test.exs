@@ -104,6 +104,14 @@ config :bank, Bank.Stablecoins.Providers.Jupiter,
   base_url: "http://jupiter.test",
   req_options: [plug: {Req.Test, Bank.Stablecoins.Providers.Jupiter}]
 
+# Morpho Blue GraphQL client (#198): route HTTP to Req.Test so tests
+# stub per-process. The default base_url is the literal real
+# endpoint; tests override `:req_options` so no live network call
+# can leak from the test pool.
+config :bank, Bank.DefiVenues.Morpho.Client,
+  base_url: "http://morpho.test",
+  req_options: [plug: {Req.Test, Bank.DefiVenues.Morpho.Client}]
+
 # Auth foundation (epic #153, issue #154): use the deterministic
 # in-process stub instead of calling Google.
 config :bank, Bank.Accounts.OAuthProvider, provider: Bank.Accounts.OAuthProvider.Stub
