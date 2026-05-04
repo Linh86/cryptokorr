@@ -667,25 +667,303 @@ defmodule Bank.Activity.ChainSyncTest do
     end
   end
 
-  describe "sync_address/4 — smart-account events (#245 P2)" do
-    test "source_type :smart_account_chain is rejected with explicit blocker error",
+  describe "sync_address/4 — smart-account callback-backed import (#245)" do
+    test "active delegation with on-chain anchors imports as :inbound ledger row",
          %{workspace: ws} do
-      # No real smart-account event ABI / topic exists in this repo
-      # yet — the TS adapter surfaces smart-account state via
-      # webhook callbacks. Until a concrete event-log path lands,
-      # this source_type must NOT silently relabel USDC Transfer
-      # events as smart-account events.
-      rpc_fn = fn _ -> {:ok, "0x1"} end
+      sa = "sa-grant-#{System.unique_integer([:positive])}"
+      tx = "0xinstalltxhashgranted000000000000000000000000000000000000000000001"
+      granted_at = DateTime.utc_now() |> DateTime.truncate(:second)
 
-      assert {:error, :smart_account_events_unavailable} =
+      _ =
+        Bank.Fixtures.delegation(
+          workspace_id: ws.id,
+          smart_account_id: sa,
+          chain: "base-sepolia",
+          state: :active,
+          granted_at: granted_at,
+          install_tx_hash: tx,
+          kernel_version: "0.3.1"
+        )
+
+      assert {:ok, %{inserted: 1, duplicates: 0}} =
+               ChainSync.sync_address(ws.id, "base-sepolia", sa,
+                 source_type: :smart_account_chain
+               )
+
+      [row] = Activity.list_imported_activities(workspace_id: ws.id)
+      assert row.workspace_id == ws.id
+      assert row.source_type == :smart_account_chain
+      assert row.chain == "base-sepolia"
+      assert row.direction == :inbound
+      assert row.tx_hash == tx
+      assert row.from_address == nil
+      assert row.to_address == sa
+      assert row.provenance == "smart_account_callback"
+      assert row.confidence == :high
+      assert row.metadata["kind"] == "delegation.granted"
+      assert row.metadata["smart_account_id"] == sa
+      assert row.metadata["kernel_version"] == "0.3.1"
+      assert Decimal.equal?(row.amount, Decimal.new(0))
+    end
+
+    test "revoked delegation imports as :outbound ledger row",
+         %{workspace: ws} do
+      sa = "sa-revoke-#{System.unique_integer([:positive])}"
+      tx = "0xrevoketxhash000000000000000000000000000000000000000000000000002"
+      revoked_at = DateTime.utc_now() |> DateTime.truncate(:second)
+
+      _ =
+        Bank.Fixtures.delegation(
+          workspace_id: ws.id,
+          smart_account_id: sa,
+          chain: "base-sepolia",
+          state: :revoked,
+          revoked_at: revoked_at,
+          last_tx_hash: tx,
+          last_reason: "operator_request"
+        )
+
+      assert {:ok, %{inserted: 1}} =
+               ChainSync.sync_address(ws.id, "base-sepolia", sa,
+                 source_type: :smart_account_chain
+               )
+
+      [row] = Activity.list_imported_activities(workspace_id: ws.id)
+      assert row.direction == :outbound
+      assert row.from_address == sa
+      assert row.to_address == nil
+      assert row.tx_hash == tx
+      assert row.metadata["kind"] == "delegation.revoked"
+      assert row.metadata["last_reason"] == "operator_request"
+    end
+
+    test "execution plan with confirmed final_outcome imports one row per tx_ref",
+         %{workspace: ws} do
+      sa = "sa-exec-#{System.unique_integer([:positive])}"
+      tx_a = "0xexec-tx-a-0000000000000000000000000000000000000000000000000003"
+      tx_b = "0xexec-tx-b-0000000000000000000000000000000000000000000000000004"
+
+      _ =
+        Bank.Fixtures.execution_plan(%{
+          workspace_id: ws.id,
+          smart_account_id: sa,
+          chain: "base-sepolia",
+          asset: "USDC",
+          tx_refs: [tx_a, tx_b],
+          execution_status: :confirmed,
+          final_outcome: :confirmed,
+          final_reason: "ok"
+        })
+
+      assert {:ok, %{inserted: 2}} =
+               ChainSync.sync_address(ws.id, "base-sepolia", sa,
+                 source_type: :smart_account_chain
+               )
+
+      rows =
+        Activity.list_imported_activities(workspace_id: ws.id)
+        |> Enum.sort_by(& &1.tx_hash)
+
+      assert length(rows) == 2
+      assert Enum.all?(rows, &(&1.source_type == :smart_account_chain))
+      assert Enum.all?(rows, &(&1.direction == :outbound))
+      assert Enum.all?(rows, &(&1.from_address == sa))
+      assert Enum.all?(rows, &(&1.metadata["kind"] == "execution.confirmed"))
+      assert Enum.map(rows, & &1.tx_hash) == Enum.sort([tx_a, tx_b])
+    end
+
+    test "in-flight execution plan (no final_outcome) is NOT imported",
+         %{workspace: ws} do
+      sa = "sa-pending-#{System.unique_integer([:positive])}"
+
+      _ =
+        Bank.Fixtures.execution_plan(%{
+          workspace_id: ws.id,
+          smart_account_id: sa,
+          chain: "base-sepolia",
+          tx_refs: ["0xpending-tx-000000000000000000000000000000000000000000000005"],
+          execution_status: :pending_confirmation,
+          final_outcome: nil
+        })
+
+      assert {:ok, %{inserted: 0, duplicates: 0}} =
+               ChainSync.sync_address(ws.id, "base-sepolia", sa,
+                 source_type: :smart_account_chain
+               )
+
+      assert Activity.list_imported_activities(workspace_id: ws.id) == []
+    end
+
+    test "rerunning the smart-account sync does not duplicate ledger rows",
+         %{workspace: ws} do
+      sa = "sa-idem-#{System.unique_integer([:positive])}"
+      tx = "0xidempotent-tx-000000000000000000000000000000000000000000000006"
+      granted_at = DateTime.utc_now() |> DateTime.truncate(:second)
+
+      _ =
+        Bank.Fixtures.delegation(
+          workspace_id: ws.id,
+          smart_account_id: sa,
+          chain: "base-sepolia",
+          state: :active,
+          granted_at: granted_at,
+          install_tx_hash: tx
+        )
+
+      {:ok, _} =
+        ChainSync.sync_address(ws.id, "base-sepolia", sa, source_type: :smart_account_chain)
+
+      {:ok, %{inserted: ins2, duplicates: dup2}} =
+        ChainSync.sync_address(ws.id, "base-sepolia", sa, source_type: :smart_account_chain)
+
+      assert ins2 == 0
+      assert dup2 == 1
+      assert length(Activity.list_imported_activities(workspace_id: ws.id)) == 1
+    end
+
+    test "smart-account sync is workspace-scoped: ws-A activity does not leak into ws-B",
+         %{workspace: ws_a} do
+      {:ok, ws_b} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "chainsync-sa-iso-#{System.unique_integer([:positive])}",
+          name: "ChainSync SA ISO"
+        })
+
+      sa = "sa-iso-#{System.unique_integer([:positive])}"
+      tx = "0xiso-sa-tx-00000000000000000000000000000000000000000000000000007"
+      granted_at = DateTime.utc_now() |> DateTime.truncate(:second)
+
+      _ =
+        Bank.Fixtures.delegation(
+          workspace_id: ws_a.id,
+          smart_account_id: sa,
+          chain: "base-sepolia",
+          state: :active,
+          granted_at: granted_at,
+          install_tx_hash: tx
+        )
+
+      {:ok, _} =
+        ChainSync.sync_address(ws_a.id, "base-sepolia", sa, source_type: :smart_account_chain)
+
+      # Even with the same smart_account_id, ws-B sees nothing.
+      {:ok, %{inserted: 0}} =
+        ChainSync.sync_address(ws_b.id, "base-sepolia", sa, source_type: :smart_account_chain)
+
+      assert length(Activity.list_imported_activities(workspace_id: ws_a.id)) == 1
+      assert Activity.list_imported_activities(workspace_id: ws_b.id) == []
+    end
+
+    test "no chain side effects: smart-account sync emits no Oban jobs / plans / audit events",
+         %{workspace: ws} do
+      sa = "sa-nosfx-#{System.unique_integer([:positive])}"
+      tx = "0xno-sfx-tx-00000000000000000000000000000000000000000000000000008"
+
+      _ =
+        Bank.Fixtures.delegation(
+          workspace_id: ws.id,
+          smart_account_id: sa,
+          chain: "base-sepolia",
+          state: :active,
+          granted_at: DateTime.utc_now() |> DateTime.truncate(:second),
+          install_tx_hash: tx
+        )
+
+      audit_count_before = Repo.aggregate(AuditEvent, :count, :id)
+      plan_count_before = Repo.aggregate(ExecutionPlan, :count, :id)
+
+      {:ok, _} =
+        ChainSync.sync_address(ws.id, "base-sepolia", sa, source_type: :smart_account_chain)
+
+      # Sync wrote the imported_activity row, but did NOT emit
+      # any audit event, did NOT create any new execution plan,
+      # and did NOT enqueue any dispatch job.
+      assert Repo.aggregate(AuditEvent, :count, :id) == audit_count_before
+      assert Repo.aggregate(ExecutionPlan, :count, :id) == plan_count_before
+
+      refute_enqueued(worker: Bank.Runtime.Workers.RunExecution)
+      refute_enqueued(worker: Bank.Runtime.Workers.GrantDelegation)
+      refute_enqueued(worker: Bank.Runtime.Workers.RevokeDelegation)
+    end
+
+    test "no smart-account rows = no-op success with cursor advanced",
+         %{workspace: ws} do
+      sa = "sa-empty-#{System.unique_integer([:positive])}"
+
+      assert {:ok, %{inserted: 0, duplicates: 0}} =
+               ChainSync.sync_address(ws.id, "base-sepolia", sa,
+                 source_type: :smart_account_chain
+               )
+
+      assert %ChainSyncCursor{} =
+               cursor = ChainSync.get_cursor(ws.id, "base-sepolia", :smart_account_chain, sa)
+
+      assert cursor.last_synced_at != nil
+      assert is_nil(cursor.last_error)
+    end
+  end
+
+  describe "sync_address/4 — invalid source_type / malformed RPC hex (#245 hardening)" do
+    test "unknown :source_type returns :invalid_source_type without writing a cursor",
+         %{workspace: ws} do
+      assert {:error, :invalid_source_type} =
                ChainSync.sync_address(ws.id, "base-sepolia", @watched,
                  asset_address: @asset_address,
-                 source_type: :smart_account_chain,
+                 source_type: :csv
+               )
+
+      # No cursor written for an invalid source_type.
+      assert is_nil(ChainSync.get_cursor(ws.id, "base-sepolia", :csv, @watched))
+    end
+
+    test "malformed eth_blockNumber hex records sanitized 'invalid_response' instead of crashing",
+         %{workspace: ws} do
+      # A real RPC provider can return non-hex garbage on a bad day.
+      # `String.to_integer/2` would raise ArgumentError; we must
+      # surface a sanitized cursor error instead.
+      rpc_fn = fn
+        %{method: "eth_blockNumber"} -> {:ok, "0xZZZZ"}
+        %{method: _} -> {:error, "rpc_unavailable"}
+      end
+
+      assert {:error, :invalid_response} =
+               ChainSync.sync_address(ws.id, "base-sepolia", @watched,
+                 asset_address: @asset_address,
                  rpc_fn: rpc_fn
                )
 
-      # No cursor row written, no activity row.
-      assert is_nil(ChainSync.get_cursor(ws.id, "base-sepolia", :smart_account_chain, @watched))
+      cursor = ChainSync.get_cursor(ws.id, "base-sepolia", :wallet_chain, @watched)
+      assert cursor.last_error == "invalid_response"
+      assert cursor.last_block_number == 0
+      assert Activity.list_imported_activities(workspace_id: ws.id) == []
+    end
+
+    test "malformed eth_getBlockByNumber timestamp hex records sanitized error",
+         %{workspace: ws} do
+      transfer =
+        log(
+          tx_hash: "0xbadts",
+          log_index: "0x0",
+          block_number: 800,
+          from: @sender,
+          to: @watched,
+          amount: 1_000_000
+        )
+
+      rpc_fn = fn
+        %{method: "eth_blockNumber"} -> {:ok, "0x3e8"}
+        %{method: "eth_getLogs"} -> {:ok, [transfer]}
+        %{method: "eth_getBlockByNumber"} -> {:ok, %{"timestamp" => "0xQQQ"}}
+      end
+
+      assert {:error, :rpc_unavailable} =
+               ChainSync.sync_address(ws.id, "base-sepolia", @watched,
+                 asset_address: @asset_address,
+                 rpc_fn: rpc_fn
+               )
+
+      cursor = ChainSync.get_cursor(ws.id, "base-sepolia", :wallet_chain, @watched)
+      assert cursor.last_error == "invalid_response"
       assert Activity.list_imported_activities(workspace_id: ws.id) == []
     end
   end
