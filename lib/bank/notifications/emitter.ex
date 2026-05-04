@@ -14,6 +14,12 @@ defmodule Bank.Notifications.Emitter do
       call. Surfaces `:approval_required` / `:hold` / `:block`
       envelopes; `:auto_exec` is intentionally silent (no operator
       action required).
+    * `emit_execution_outcome/1` — every `Bank.Decisions.apply_execution_callback/1`
+      call that transitions an `%ExecutionPlan{}` to a *failure-side*
+      terminal status. Surfaces `:reverted` (critical) and
+      `:aborted` (warning). `:confirmed` is intentionally silent
+      until #234 ships an opt-in workspace setting (the issue
+      body's "execution confirmed if configured" item).
 
   ## Dedupe semantics
 
@@ -53,6 +59,7 @@ defmodule Bank.Notifications.Emitter do
   require Logger
 
   alias Bank.Decisions.DecisionEnvelope
+  alias Bank.Decisions.ExecutionPlan
   alias Bank.Intents.AgentIntent
   alias Bank.Notifications
 
@@ -124,6 +131,101 @@ defmodule Bank.Notifications.Emitter do
       dedupe_key: "decision:#{intent.id}:#{outcome}"
     }
   end
+
+  @doc """
+  Emit (or dedupe) a notification for a terminal
+  `Bank.Decisions.apply_execution_callback/1` transition. Always
+  returns; never raises. Non-terminal statuses, `:confirmed`
+  (until a workspace opt-in setting ships), and intents whose
+  workspace boundary is missing all return `{:skip, reason}` so
+  the caller can ignore the result.
+
+  Free-text adapter fields (`final_reason`, `tx_refs`, raw
+  `params`) are intentionally never threaded into the
+  notification payload — only the controlled enum
+  `final_outcome` and id fragments reach the inbox.
+  """
+  @spec emit_execution_outcome(ExecutionPlan.t()) :: outcome_result()
+  def emit_execution_outcome(%ExecutionPlan{} = plan) do
+    cond do
+      plan.execution_status not in [:reverted, :aborted] ->
+        # `:confirmed` lands here too — silent until a workspace
+        # opt-in setting exists. `:broadcasting` / `:signing` /
+        # `:prepared` are interim and never produce inbox rows.
+        {:skip, {:not_failure_terminal, plan.execution_status}}
+
+      not match?(%AgentIntent{}, plan.intent) ->
+        {:skip, :intent_not_loaded}
+
+      is_nil(plan.intent.workspace_id) ->
+        {:skip, :no_workspace_id}
+
+      true ->
+        intent = plan.intent
+        outcome = plan.execution_status
+        attrs = build_execution_outcome_attrs(intent, plan, outcome)
+
+        case Notifications.create(attrs) do
+          {:ok, _} = ok ->
+            ok
+
+          {:duplicate, _} = dup ->
+            dup
+
+          {:error, changeset} = err ->
+            Logger.warning(
+              "Bank.Notifications.Emitter: execution-outcome notification rejected " <>
+                "(plan=#{plan.id} outcome=#{outcome} errors=#{inspect(changeset.errors)})"
+            )
+
+            err
+        end
+    end
+  end
+
+  defp build_execution_outcome_attrs(intent, plan, outcome) do
+    %{
+      workspace_id: intent.workspace_id,
+      role_target: :operator,
+      event_type: "execution.#{outcome}",
+      severity: execution_severity_for(outcome),
+      subject_type: "execution_plan",
+      subject_id: plan.id,
+      correlation_id: intent.id,
+      title: execution_title_for(outcome, intent),
+      body: execution_body_for(plan),
+      action_link: execution_action_link_for(intent),
+      # Same plan + same terminal outcome dedupes. The lock-step
+      # terminal guard in `apply_execution_callback/1` already
+      # rejects duplicate callbacks at the DB layer; this is a
+      # belt-and-suspenders check for retries that bypass the
+      # transaction (e.g. an emitter-side retry after a
+      # transient `Repo.insert` error).
+      dedupe_key: "execution:#{plan.id}:#{outcome}"
+    }
+  end
+
+  defp execution_severity_for(:reverted), do: :critical
+  defp execution_severity_for(:aborted), do: :warning
+
+  defp execution_title_for(:reverted, %AgentIntent{} = intent),
+    do: "Execution reverted on #{intent.kind} intent #{short_id(intent.id)}"
+
+  defp execution_title_for(:aborted, %AgentIntent{} = intent),
+    do: "Execution aborted on #{intent.kind} intent #{short_id(intent.id)}"
+
+  # Body is composed strictly from controlled fields. We
+  # deliberately do NOT include `plan.final_reason` (operator-
+  # /adapter-supplied free text), `plan.tx_refs` (chain-side
+  # data), or any raw callback params.
+  defp execution_body_for(%ExecutionPlan{} = plan) do
+    chain = plan.chain || "unknown"
+    asset = plan.asset || "unknown"
+    "Plan #{short_id(plan.id)} on #{chain}/#{asset} reached terminal #{plan.execution_status}."
+  end
+
+  defp execution_action_link_for(%AgentIntent{id: intent_id}) when is_binary(intent_id),
+    do: "/audit/replay/#{intent_id}"
 
   defp severity_for(:approval_required), do: :warning
   defp severity_for(:hold), do: :warning

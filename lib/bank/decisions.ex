@@ -1456,7 +1456,13 @@ defmodule Bank.Decisions do
               %{
                 plan: updated_plan,
                 prior_plan_status: prior_status,
-                intent_transition: intent_transition
+                intent_transition: intent_transition,
+                # Carry the preloaded intent forward so the
+                # post-commit notification emitter can pull
+                # `intent.workspace_id` without an extra round-
+                # trip. The wrapper below pops this out of the
+                # public return shape.
+                __intent: plan.intent
               }
 
             {:error, changeset} ->
@@ -1465,8 +1471,20 @@ defmodule Bank.Decisions do
       end
     end)
     |> case do
-      {:ok, result} -> {:ok, result}
-      {:error, reason} -> {:error, reason}
+      {:ok, %{__intent: intent, plan: %ExecutionPlan{} = plan} = result} ->
+        # Inbox notification (#234). Best-effort: the emitter logs
+        # and returns rather than raising on a validation failure,
+        # so the callback path is never broken by a notification-
+        # side error. Emission happens *after* the multi commits
+        # so the underlying execution-state transition is durable
+        # before the inbox row is attempted.
+        plan_with_intent = %{plan | intent: intent}
+        _ = Bank.Notifications.Emitter.emit_execution_outcome(plan_with_intent)
+
+        {:ok, Map.delete(result, :__intent)}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

@@ -1167,4 +1167,165 @@ defmodule Bank.DecisionsTest do
       end
     end
   end
+
+  describe "apply_execution_callback/1 — execution notification emission (#234)" do
+    alias Bank.Decisions.ExecutionPlan
+    alias Bank.Notifications
+    alias Bank.Notifications.Notification
+
+    setup do
+      suffix = System.unique_integer([:positive])
+
+      {:ok, workspace} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "exec-notif-#{suffix}",
+          name: "Exec Notif #{suffix}"
+        })
+
+      %{workspace: workspace}
+    end
+
+    test "execution.reverted lands a critical operator notification", %{workspace: ws} do
+      intent = agent_intent(state: :executing, workspace_id: ws.id)
+      envelope = decision_envelope(intent: intent, outcome: :auto_exec, current: true)
+
+      plan =
+        execution_plan(
+          decision: envelope,
+          execution_status: :broadcasting,
+          active: true,
+          workspace_id: ws.id
+        )
+
+      assert {:ok, _result} =
+               Decisions.apply_execution_callback(%{
+                 "kind" => "execution.reverted",
+                 "execution_plan_id" => plan.id,
+                 "reason" => "chain_revert:Authorization Bearer LEAKED_PROBE"
+               })
+
+      [n] = Notifications.list_for_workspace(ws.id)
+      assert n.event_type == "execution.reverted"
+      assert n.severity == :critical
+      assert n.role_target == :operator
+      assert n.subject_type == "execution_plan"
+      assert n.subject_id == plan.id
+      assert n.correlation_id == intent.id
+      assert n.action_link == "/audit/replay/#{intent.id}"
+      assert n.dedupe_key == "execution:#{plan.id}:reverted"
+      # Adapter free-text reason MUST NOT bleed into the inbox.
+      refute n.title =~ "LEAKED_PROBE"
+      refute n.body =~ "LEAKED_PROBE"
+    end
+
+    test "execution.aborted lands a warning operator notification", %{workspace: ws} do
+      intent = agent_intent(state: :executing, workspace_id: ws.id)
+      envelope = decision_envelope(intent: intent, outcome: :auto_exec, current: true)
+
+      plan =
+        execution_plan(
+          decision: envelope,
+          execution_status: :broadcasting,
+          active: true,
+          workspace_id: ws.id
+        )
+
+      assert {:ok, _result} =
+               Decisions.apply_execution_callback(%{
+                 "kind" => "execution.aborted",
+                 "execution_plan_id" => plan.id,
+                 "reason" => "operator_aborted:incident-1234"
+               })
+
+      [n] = Notifications.list_for_workspace(ws.id)
+      assert n.event_type == "execution.aborted"
+      assert n.severity == :warning
+      assert n.action_link == "/audit/replay/#{intent.id}"
+      assert n.dedupe_key == "execution:#{plan.id}:aborted"
+      refute n.title =~ "incident-1234"
+      refute n.body =~ "incident-1234"
+    end
+
+    test "execution.confirmed produces NO inbox row (no opt-in setting yet)",
+         %{workspace: ws} do
+      intent = agent_intent(state: :executing, workspace_id: ws.id)
+      envelope = decision_envelope(intent: intent, outcome: :auto_exec, current: true)
+
+      plan =
+        execution_plan(
+          decision: envelope,
+          execution_status: :broadcasting,
+          active: true,
+          workspace_id: ws.id
+        )
+
+      assert {:ok, _result} =
+               Decisions.apply_execution_callback(%{
+                 "kind" => "execution.confirmed",
+                 "execution_plan_id" => plan.id
+               })
+
+      assert Notifications.list_for_workspace(ws.id) == []
+    end
+
+    test "duplicate adapter callback for the same terminal outcome leaves a single notification",
+         %{workspace: ws} do
+      intent = agent_intent(state: :executing, workspace_id: ws.id)
+      envelope = decision_envelope(intent: intent, outcome: :auto_exec, current: true)
+
+      plan =
+        execution_plan(
+          decision: envelope,
+          execution_status: :broadcasting,
+          active: true,
+          workspace_id: ws.id
+        )
+
+      assert {:ok, _} =
+               Decisions.apply_execution_callback(%{
+                 "kind" => "execution.reverted",
+                 "execution_plan_id" => plan.id,
+                 "reason" => "chain_revert:out_of_gas"
+               })
+
+      # The terminal-state guard already rejects the second
+      # callback at the DB lock layer ({:terminal_state, _}). The
+      # decision context does not even reach the emitter, but
+      # the inbox dedupe key would also collapse a hypothetical
+      # retry. Either way, a single row.
+      assert {:error, {:terminal_state, :reverted}} =
+               Decisions.apply_execution_callback(%{
+                 "kind" => "execution.reverted",
+                 "execution_plan_id" => plan.id,
+                 "reason" => "chain_revert:out_of_gas"
+               })
+
+      assert [%Notification{}] = Notifications.list_for_workspace(ws.id)
+    end
+
+    test "the broadcast (non-terminal) callback does not emit a notification",
+         %{workspace: ws} do
+      intent = agent_intent(state: :executing, workspace_id: ws.id)
+      envelope = decision_envelope(intent: intent, outcome: :auto_exec, current: true)
+
+      plan =
+        execution_plan(
+          decision: envelope,
+          execution_status: :signing,
+          active: true,
+          workspace_id: ws.id
+        )
+
+      assert {:ok, _} =
+               Decisions.apply_execution_callback(%{
+                 "kind" => "execution.broadcast",
+                 "execution_plan_id" => plan.id,
+                 "tx_refs" => ["0x" <> String.duplicate("a", 64)]
+               })
+
+      reloaded = Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :broadcasting
+      assert Notifications.list_for_workspace(ws.id) == []
+    end
+  end
 end
