@@ -659,4 +659,410 @@ defmodule Bank.Decisions.ReportMarkdownTest do
       end
     end
   end
+
+  # --- final_reason secret hygiene (#249 P2) ----------------------------
+
+  describe "render/1 — execution_plan.final_reason secret hygiene (#249 P2)" do
+    # `Bank.Decisions.apply_execution_callback/1` for
+    # `execution.reverted` / `execution.aborted` writes the adapter
+    # callback's `params["reason"]` straight into
+    # `execution_plans.final_reason` (lib/bank/decisions.ex:1841,1855).
+    # That field can therefore carry pasted Authorization headers,
+    # tokenized RPC URLs, PEM markers, `sk_(test|live)_…` tokens, or
+    # 0x-prefixed key handles. Pre-fix the renderer echoed the value
+    # verbatim — pre-fix #249 P2 review finding.
+
+    defp put_final_reason(report, reason) do
+      %{
+        report
+        | execution_plan: Map.put(report.execution_plan, :final_reason, reason)
+      }
+    end
+
+    test "allowlisted runtime atom reasons render verbatim" do
+      for safe <-
+            ~w(runtime_paused chain_paused delegation_not_active operator_requested sandbox_seed) do
+        out = full_report_fixture() |> put_final_reason(safe) |> ReportMarkdown.render()
+
+        assert out =~ "Final reason: `" <> safe <> "`",
+               "renderer dropped safe runtime atom reason: #{safe}"
+      end
+    end
+
+    test "allowlisted target_not_resolvable causes render verbatim" do
+      for cause <-
+            ~w(intent_missing label_retired label_missing no_label ambiguous_label missing_target) do
+        reason = "target_not_resolvable:" <> cause
+
+        out = full_report_fixture() |> put_final_reason(reason) |> ReportMarkdown.render()
+
+        assert out =~ "Final reason: `" <> reason <> "`",
+               "renderer dropped safe target_not_resolvable cause: #{cause}"
+      end
+    end
+
+    test "unknown target_not_resolvable cause is redacted (default-deny on suffix)" do
+      out =
+        full_report_fixture()
+        |> put_final_reason("target_not_resolvable:unrecognised_future_cause")
+        |> ReportMarkdown.render()
+
+      assert out =~ "Final reason: `(redacted free-text reason)`"
+      refute out =~ "unrecognised_future_cause"
+    end
+
+    test "adapter_rejected:<status>:<summary> renders status only, summary dropped" do
+      # `lib/bank/runtime/workers/run_execution.ex` summarises up to
+      # 80 chars of the adapter response body into the suffix. A
+      # poisoned adapter could put pasted secrets there. Drop the
+      # whole summary regardless of content; render only the status.
+      planted_summary = "Bearer sk_live_HIDDEN | private_key=hex | 0xdeadbeef"
+      reason = "adapter_rejected:422:" <> planted_summary
+
+      out = full_report_fixture() |> put_final_reason(reason) |> ReportMarkdown.render()
+
+      assert out =~ "Final reason: `adapter_rejected:422`"
+      refute out =~ "Bearer "
+      refute out =~ ~r/sk_(test|live)_/
+      refute out =~ "private_key"
+      refute out =~ "0xdeadbeef"
+      refute out =~ "Final reason: `adapter_rejected:422:"
+    end
+
+    test "adapter_rejected with no numeric status is redacted" do
+      out =
+        full_report_fixture()
+        |> put_final_reason("adapter_rejected:NaN:body")
+        |> ReportMarkdown.render()
+
+      assert out =~ "Final reason: `(redacted free-text reason)`"
+      refute out =~ "adapter_rejected:NaN"
+    end
+
+    test "adapter_rejected:<status> with no summary still renders" do
+      out =
+        full_report_fixture()
+        |> put_final_reason("adapter_rejected:500")
+        |> ReportMarkdown.render()
+
+      assert out =~ "Final reason: `adapter_rejected:500`"
+    end
+
+    test "operator/provider free-text reason is redacted, even without secret markers" do
+      # `params["reason"]` from an adapter callback can be any
+      # string. Pre-fix the renderer echoed it verbatim. Post-fix it
+      # falls through to `(redacted free-text reason)`.
+      out =
+        full_report_fixture()
+        |> put_final_reason("simulation mismatch on chain")
+        |> ReportMarkdown.render()
+
+      assert out =~ "Final reason: `(redacted free-text reason)`"
+      refute out =~ "simulation mismatch on chain"
+    end
+
+    test "secret-bearing adapter callback final_reason does not leak (regression for #249 P2-1)" do
+      # The exact secret-marker family the review finding called out:
+      # Authorization header, Bearer sk_live_..., RPC URL with
+      # embedded credentials, PEM marker, `private_key`,
+      # `0xdeadbeef`-style key handle. Plant them all into one
+      # poisoned `params["reason"]` body and prove the renderer's
+      # output contains none of them.
+      planted =
+        "Authorization: Bearer sk_live_LEAKED_PROBE | " <>
+          "Bearer sk_live_REPEAT | " <>
+          "https://secret@example.test/rpc | " <>
+          "-----BEGIN PRIVATE KEY----- | " <>
+          "private_key=hex_blob | " <>
+          "0xdeadbeefcafebabe1234567890abcdef12345678"
+
+      out = full_report_fixture() |> put_final_reason(planted) |> ReportMarkdown.render()
+
+      assert out =~ "Final reason: `(redacted free-text reason)`"
+      refute out =~ "Bearer "
+      refute out =~ "Authorization:"
+      refute out =~ "BEGIN PRIVATE KEY"
+      refute out =~ "private_key"
+      refute out =~ "https://secret@example.test"
+      refute out =~ "0xdeadbeef"
+      refute out =~ ~r/sk_(test|live)_/
+    end
+
+    test "nil and empty final_reason render as (none)" do
+      for empty <- [nil, ""] do
+        out = full_report_fixture() |> put_final_reason(empty) |> ReportMarkdown.render()
+        assert out =~ "Final reason: `(none)`"
+      end
+    end
+
+    test "non-binary final_reason values are defensively redacted" do
+      # Defence-in-depth: if someone ever puts a non-string into the
+      # report struct's `:final_reason` field, the renderer must not
+      # crash and must not echo the value through `to_string/1`.
+      out =
+        full_report_fixture()
+        |> put_final_reason(%{"raw_authorization" => "Bearer sk_live_LEAKED"})
+        |> ReportMarkdown.render()
+
+      assert out =~ "Final reason: `(redacted free-text reason)`"
+      refute out =~ "Bearer "
+      refute out =~ "raw_authorization"
+      refute out =~ ~r/sk_(test|live)_/
+    end
+  end
+
+  # --- stablecoin route real-shape rendering (#249 P2) ------------------
+
+  describe "render/1 — stablecoin_route_evidence real-shape rendering (#249 P2)" do
+    # `Bank.Stablecoins.IntentRouting.build_evidence/1` produces the
+    # real route map shape, written into the audit row's `after_ref`
+    # and pulled back by `Bank.Audit.replay/1` into
+    # `bundle.stablecoin_route_evidence`. Pre-fix the renderer only
+    # recognised invented `from`/`to`/`via`/`stablecoin` keys, so
+    # every real route was rendered as `_(route entry has no
+    # recognised summary keys)_`. Post-fix an allowlisted scalar
+    # subset of the actual shape is rendered, with raw nested
+    # structures (`quote_request`, `legs`, `selector_metadata`,
+    # `policy_reasons`, human-readable `reason`) excluded.
+
+    # Mirrors the actual return shape of
+    # `Bank.Stablecoins.IntentRouting.build_evidence/1`'s
+    # `:stablecoin_route` value, with string keys (the shape that
+    # comes back from the DB after a JSON round-trip).
+    defp real_route_evidence_string_keys do
+      %{
+        "decision" => "auto_exec",
+        "execution_state" => "requires_adapter",
+        "reason_code" => "stablecoin_route_allowed",
+        "reason" => "Route allowed by policy.",
+        "policy_decision" => "allowed",
+        "policy_reasons" => [
+          %{"rule" => "amount_limit", "detail" => "ok", "severity" => "info"}
+        ],
+        "score" => 0.92,
+        "fee_summary" => %{
+          "gas_fee" => "0.05",
+          "protocol_fee" => "0.10",
+          "bridge_fee" => nil,
+          "cryptobank_fee" => "0.45",
+          "total_fee" => "0.60",
+          "output_impact_pct" => "0.05"
+        },
+        "route_kind" => "swap",
+        "provider" => "fake-provider",
+        "input_amount" => "100.000000",
+        "output_amount" => "99.400000",
+        "eta_seconds" => 12,
+        "expires_at" => "2026-04-15T12:30:00Z",
+        "quoted_at" => "2026-04-15T12:00:00Z",
+        "quote_request" => %{
+          "source_chain" => "base-sepolia",
+          "source_asset" => "usdc",
+          "dest_chain" => "ethereum-sepolia",
+          "dest_asset" => "usdc",
+          "amount" => "100.000000",
+          "slippage_bps" => 50,
+          "route_kind" => "swap"
+        },
+        "legs" => [
+          %{
+            "step" => 1,
+            "kind" => "swap",
+            "source_chain" => "base-sepolia",
+            "source_asset" => "usdc",
+            "dest_chain" => "ethereum-sepolia",
+            "dest_asset" => "usdc",
+            "input_amount" => "100.000000",
+            "output_amount" => "99.400000",
+            "protocol" => "fake-pool",
+            "pool_address" => "0xpool0000000000000000000000000000000fake"
+          }
+        ],
+        "selector_metadata" => %{
+          "considered" => 3,
+          "errors" => [
+            %{"provider" => "stub-broken", "error" => "Bearer sk_live_HIDDEN_IN_ERROR"}
+          ]
+        },
+        "evaluated_at" => "2026-04-15T12:00:01Z"
+      }
+    end
+
+    defp atomise_top_level(map) do
+      Map.new(map, fn {k, v} -> {String.to_atom(k), v} end)
+    end
+
+    defp put_routes(report, routes) do
+      %{report | stablecoin_routes: routes}
+    end
+
+    test "renders allowlisted scalar fields from the real route shape (string-keyed)" do
+      out =
+        full_report_fixture()
+        |> put_routes([real_route_evidence_string_keys()])
+        |> ReportMarkdown.render()
+
+      # Header + count.
+      assert out =~ "## Stablecoin route evidence"
+      assert out =~ "Captured route evaluations: `1`"
+
+      # Allowlisted scalar fields appear as bullets.
+      assert out =~ "- decision: `auto_exec`"
+      assert out =~ "- execution_state: `requires_adapter`"
+      assert out =~ "- reason_code: `stablecoin_route_allowed`"
+      assert out =~ "- policy_decision: `allowed`"
+      assert out =~ "- provider: `fake-provider`"
+      assert out =~ "- route_kind: `swap`"
+      assert out =~ "- input_amount: `100.000000`"
+      assert out =~ "- output_amount: `99.400000`"
+      assert out =~ "- score: `0.92`"
+      assert out =~ "- eta_seconds: `12`"
+      assert out =~ "- quoted_at: `2026-04-15T12:00:00Z`"
+      assert out =~ "- evaluated_at: `2026-04-15T12:00:01Z`"
+      assert out =~ "- expires_at: `2026-04-15T12:30:00Z`"
+
+      # fee_summary subsection with allowlisted fee keys.
+      assert out =~ "fee_summary:"
+      assert out =~ "- total_fee: `0.60`"
+      assert out =~ "- gas_fee: `0.05`"
+      assert out =~ "- protocol_fee: `0.10`"
+      assert out =~ "- cryptobank_fee: `0.45`"
+      assert out =~ "- output_impact_pct: `0.05`"
+    end
+
+    test "renders allowlisted scalar fields from the real route shape (atom-keyed)" do
+      # The in-memory shape from build_evidence/1 is atom-keyed
+      # before JSON round-trip. The renderer must accept either
+      # shape so a reader of an in-memory bundle (no DB round-trip)
+      # gets the same render as a reader of a replayed bundle.
+      atom_keyed = atomise_top_level(real_route_evidence_string_keys())
+
+      out =
+        full_report_fixture()
+        |> put_routes([atom_keyed])
+        |> ReportMarkdown.render()
+
+      assert out =~ "- decision: `auto_exec`"
+      assert out =~ "- execution_state: `requires_adapter`"
+      assert out =~ "- provider: `fake-provider`"
+      assert out =~ "- input_amount: `100.000000`"
+    end
+
+    test "does NOT render raw nested route shapes (#249 P2 hard allowlist)" do
+      # `quote_request`, `legs`, `selector_metadata`, `policy_reasons`
+      # and the human-readable `reason` field are NOT in the
+      # allowlist. They must not appear in the output even if a
+      # caller hands them to the renderer.
+      out =
+        full_report_fixture()
+        |> put_routes([real_route_evidence_string_keys()])
+        |> ReportMarkdown.render()
+
+      refute out =~ "quote_request"
+      refute out =~ "selector_metadata"
+      refute out =~ "policy_reasons"
+
+      # The `legs` key name itself must not appear, and neither
+      # should the leg's pool_address / protocol details.
+      refute out =~ "- legs"
+      refute out =~ "0xpool0000"
+      refute out =~ "fake-pool"
+
+      # The free-text `reason` field is excluded; only the
+      # programmer-set `reason_code` is rendered.
+      refute out =~ "Route allowed by policy."
+
+      # The selector_metadata.errors list may carry a provider
+      # error string echoed from a third-party — never render it.
+      refute out =~ "Bearer "
+      refute out =~ "sk_live_HIDDEN_IN_ERROR"
+    end
+
+    test "secret-bearing nested values do not leak (regression for #249 P2-2)" do
+      # Even if a future caller plants a secret string into a
+      # nested key the renderer never reads, prove the output
+      # carries none of it. This is the structural defence: the
+      # renderer can ONLY render allowlisted top-level scalar
+      # leaves, not nested values.
+      poisoned =
+        real_route_evidence_string_keys()
+        |> Map.put("quote_request", %{
+          "raw_authorization" => "Bearer sk_test_LEAKED_QR",
+          "rpc_url" => "https://secret@example.test/rpc"
+        })
+        |> Map.put("legs", [
+          %{"private_key_pem" => "-----BEGIN PRIVATE KEY-----"}
+        ])
+        |> Map.put("selector_metadata", %{
+          "errors" => [%{"error" => "0xdeadbeefcafebabe1234567890abcdef12345678"}]
+        })
+        |> Map.put("policy_reasons", [
+          %{"detail" => "Authorization: Bearer sk_live_PLANTED"}
+        ])
+
+      out = full_report_fixture() |> put_routes([poisoned]) |> ReportMarkdown.render()
+
+      refute out =~ "Bearer "
+      refute out =~ "Authorization:"
+      refute out =~ "BEGIN PRIVATE KEY"
+      refute out =~ "private_key"
+      refute out =~ "raw_authorization"
+      refute out =~ "rpc_url"
+      refute out =~ "https://secret@example.test"
+      refute out =~ "0xdeadbeef"
+      refute out =~ ~r/sk_(test|live)_/
+    end
+
+    test "multiple route evaluations are rendered in input order (deterministic)" do
+      first = Map.put(real_route_evidence_string_keys(), "provider", "first-provider")
+      second = Map.put(real_route_evidence_string_keys(), "provider", "second-provider")
+
+      report = put_routes(full_report_fixture(), [first, second])
+      out = ReportMarkdown.render(report)
+
+      assert out =~ "Captured route evaluations: `2`"
+
+      first_pos = :binary.match(out, "first-provider") |> elem(0)
+      second_pos = :binary.match(out, "second-provider") |> elem(0)
+      assert first_pos < second_pos, "renderer reordered route evaluations"
+
+      # And the render is byte-stable across repeats.
+      assert ReportMarkdown.render(report) == ReportMarkdown.render(report)
+    end
+
+    test "a route map with no allowlisted keys renders the labelled placeholder" do
+      out =
+        full_report_fixture()
+        |> put_routes([%{"unknown_key" => "value", "another" => 1}])
+        |> ReportMarkdown.render()
+
+      assert out =~ "_(route entry has no allowlisted fields)_"
+      refute out =~ "unknown_key"
+      refute out =~ "another"
+    end
+
+    test "missing fee_summary subsection is silently skipped (deterministic)" do
+      no_fees = Map.delete(real_route_evidence_string_keys(), "fee_summary")
+
+      out = full_report_fixture() |> put_routes([no_fees]) |> ReportMarkdown.render()
+
+      assert out =~ "- decision: `auto_exec`"
+      refute out =~ "fee_summary:"
+    end
+
+    test "fee_summary with no allowlisted keys is silently skipped" do
+      route =
+        Map.put(real_route_evidence_string_keys(), "fee_summary", %{
+          "private_key" => "BEGIN PRIVATE KEY",
+          "raw_authorization" => "Bearer sk_live_LEAKED"
+        })
+
+      out = full_report_fixture() |> put_routes([route]) |> ReportMarkdown.render()
+
+      refute out =~ "fee_summary:"
+      refute out =~ "private_key"
+      refute out =~ "Bearer "
+      refute out =~ "raw_authorization"
+    end
+  end
 end
