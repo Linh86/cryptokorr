@@ -96,7 +96,7 @@ defmodule Bank.Decisions.ReportMarkdownTest do
       screening_evidence: %{
         available: true,
         outcome: "passed",
-        screened_address: "0xrecipientPublicAddr",
+        screened_address: "0x1234567890abcdef1234567890abcdef12345678",
         screened_chain: "base-sepolia",
         winning_tier: "low",
         winning_source: "chainalysis-screening",
@@ -305,7 +305,7 @@ defmodule Bank.Decisions.ReportMarkdownTest do
       # screening
       assert out =~ "## Screening evidence"
       assert out =~ "Outcome: `passed`"
-      assert out =~ "Screened address: `0xrecipientPublicAddr`"
+      assert out =~ "Screened address: `0x1234567890abcdef1234567890abcdef12345678`"
       assert out =~ "Winning tier: `low`"
       assert out =~ "Winning source: `chainalysis-screening`"
 
@@ -1063,6 +1063,104 @@ defmodule Bank.Decisions.ReportMarkdownTest do
       refute out =~ "private_key"
       refute out =~ "Bearer "
       refute out =~ "raw_authorization"
+    end
+  end
+
+  # --- raw target address allowlist (#250 P2) ----------------------------
+
+  describe "render/1 — intent.target.address (raw_address) secret hygiene (#250 P2)" do
+    # `Bank.Intents` accepts any non-empty `target_raw_address`,
+    # so an agent or operator could paste an Authorization header,
+    # `sk_(test|live)_…` token, tokenized URL, or PEM marker into
+    # the field. Pre-fix the renderer concatenated `t[:address]`
+    # verbatim into the Markdown body, leaking it through every
+    # downstream surface (Markdown render, export artifact,
+    # `GET /v1/intents/:id/report`). Post-fix only the EVM
+    # `0x[a-f0-9]{40}` shape passes; everything else collapses to
+    # `(redacted non-address raw target)`.
+
+    defp put_raw_address_target(report, address) do
+      target = %{kind: "raw_address", address: address}
+      %{report | intent: Map.put(report.intent, :target, target)}
+    end
+
+    test "valid EVM raw addresses (lowercase / mixed case) render verbatim" do
+      for addr <- [
+            "0x1234567890abcdef1234567890abcdef12345678",
+            "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01",
+            "0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+          ] do
+        out = full_report_fixture() |> put_raw_address_target(addr) |> ReportMarkdown.render()
+
+        assert out =~ "Target | `raw_address: " <> addr <> "`",
+               "valid EVM raw address #{addr} was redacted"
+
+        refute out =~ "(redacted non-address raw target)"
+      end
+    end
+
+    test "secret-bearing raw_address does not leak (regression for #250 P2)" do
+      # Plant every marker from the P2 finding into one poisoned
+      # raw_address and prove none survive the render.
+      planted_markers = [
+        "Authorization: Bearer sk_live_PROBE_LEAKED",
+        "Bearer sk_test_PROBE_LEAKED",
+        "https://secret@example.test/rpc",
+        "https://user:pass@example.test/rpc",
+        "-----BEGIN PRIVATE KEY-----",
+        "private_key=hex_blob",
+        "0xdeadbeefcafebabe1234567890abcdef12345678abcdef"
+      ]
+
+      for planted <- planted_markers do
+        out = full_report_fixture() |> put_raw_address_target(planted) |> ReportMarkdown.render()
+
+        assert out =~ "Target | `raw_address: (redacted non-address raw target)`"
+
+        refute out =~ "Bearer "
+        refute out =~ "Authorization:"
+        refute out =~ "BEGIN PRIVATE KEY"
+        refute out =~ "private_key"
+        refute out =~ "secret@"
+        refute out =~ "user:pass@"
+        refute out =~ ~r/sk_(test|live)_/
+      end
+    end
+
+    test "non-EVM-shaped binary (too short, too long, non-hex) is redacted" do
+      for not_evm <- [
+            "0x1234",
+            "0x" <> String.duplicate("a", 41),
+            "0x" <> String.duplicate("g", 40),
+            "1234567890abcdef1234567890abcdef12345678",
+            "not-an-address-at-all"
+          ] do
+        out = full_report_fixture() |> put_raw_address_target(not_evm) |> ReportMarkdown.render()
+        assert out =~ "Target | `raw_address: (redacted non-address raw target)`"
+        refute out =~ "raw_address: " <> not_evm
+      end
+    end
+
+    test "nil and empty raw_address render as (none), not as a leak" do
+      for empty <- [nil, ""] do
+        out = full_report_fixture() |> put_raw_address_target(empty) |> ReportMarkdown.render()
+        assert out =~ "Target | `raw_address: (none)`"
+      end
+    end
+
+    test "non-binary raw_address values are defensively redacted" do
+      # Defence-in-depth: if a future caller ever puts a non-string
+      # into the report struct's target.address field, the renderer
+      # must not crash and must not echo the value through to_string/1.
+      out =
+        full_report_fixture()
+        |> put_raw_address_target(%{"raw_authorization" => "Bearer sk_live_LEAKED"})
+        |> ReportMarkdown.render()
+
+      assert out =~ "Target | `raw_address: (redacted non-address raw target)`"
+      refute out =~ "Bearer "
+      refute out =~ "raw_authorization"
+      refute out =~ ~r/sk_(test|live)_/
     end
   end
 end
