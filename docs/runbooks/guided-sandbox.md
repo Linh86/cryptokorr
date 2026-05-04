@@ -62,27 +62,28 @@ Open <http://localhost:4000>. You will land on the dashboard for the seeded `san
 mix bank.sandbox.smoke
 ```
 
-`mix bank.sandbox.smoke` is the automated counterpart to the manual `/sandbox` checklist walk below. It runs eight named checks against the seeded sandbox dataset and prints a concise pass/fail report:
+`mix bank.sandbox.smoke` is the automated counterpart to the manual `/sandbox` checklist walk below. It runs nine named checks against the seeded sandbox dataset and prints a concise pass/fail report:
 
 ```
-[bank.sandbox.smoke] running 8 checks
+[bank.sandbox.smoke] running 9 checks
 [bank.sandbox.smoke] PASS health
 [bank.sandbox.smoke] PASS seeded_workspace
+[bank.sandbox.smoke] PASS endpoint
 [bank.sandbox.smoke] PASS create_intent
 [bank.sandbox.smoke] PASS show_intent
 [bank.sandbox.smoke] PASS simulate_reasons
 [bank.sandbox.smoke] PASS approval
 [bank.sandbox.smoke] PASS cancel_flow
 [bank.sandbox.smoke] PASS replay
-[bank.sandbox.smoke] 8 / 8 PASS
+[bank.sandbox.smoke] 9 / 9 PASS
 ```
 
-The task exits non-zero on any failure and surfaces the failed check name on stdout, so it is safe to wire into CI as `mix bank.sandbox.smoke` (no flags) once the seed has been applied.
+The task exits non-zero on any failure and surfaces the failed check name on stdout, so it is safe to wire into CI as `mix bank.sandbox.smoke` (no flags) once the seed has been applied. The `endpoint` check dispatches `GET /v1/health` through `BankWeb.Endpoint` via `Plug.Test`, so a Phoenix route or controller regressing to a 5xx (501 stub, 503 misconfig, 500 raise) makes the smoke red — that is the "fails on 501/stubbed endpoint regressions" anti-acceptance.
 
 Useful flags:
 
 - `--seed` — runs `Bank.Demo.seed/0` first, so a fresh CI runner that has not seeded yet still gets a green pass/fail line. Equivalent to `mix bank.demo.seed && mix bank.sandbox.smoke`.
-- `--quiet` — suppresses per-check `PASS` lines; only failures and the trailing `N / 8 PASS` summary are printed.
+- `--quiet` — suppresses per-check `PASS` lines; only failures and the trailing `N / 9 PASS` summary are printed.
 
 What it does **not** do (Level 1 boundary):
 
