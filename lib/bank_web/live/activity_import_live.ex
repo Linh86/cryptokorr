@@ -39,6 +39,14 @@ defmodule BankWeb.ActivityImportLive do
      |> assign(:preview, nil)
      |> assign(:commit_result, nil)
      |> assign(:parse_error, nil)
+     # Cache the consumed CSV binary so the preview→commit user
+     # flow does not need a re-upload (#244 P2).
+     # `consume_uploaded_entries/3` is one-shot — without this
+     # cache the second `obtain_csv_body/1` call returns
+     # `:empty` because the upload entries are already drained.
+     # Cleared on successful commit and on the explicit Clear
+     # button, so the operator can preview a fresh upload.
+     |> assign(:csv_body, nil)
      |> allow_upload(:csv,
        accept: ~w(.csv),
        max_entries: 1,
@@ -54,8 +62,8 @@ defmodule BankWeb.ActivityImportLive do
   end
 
   def handle_event("preview", _params, socket) do
-    case consume_first_csv(socket) do
-      {:ok, body} ->
+    case obtain_csv_body(socket) do
+      {:ok, body, socket} ->
         workspace_id = socket.assigns.current_scope.workspace.id
 
         case CsvImport.preview(body, workspace_id) do
@@ -82,8 +90,8 @@ defmodule BankWeb.ActivityImportLive do
   end
 
   def handle_event("commit", _params, socket) do
-    case consume_first_csv(socket) do
-      {:ok, body} ->
+    case obtain_csv_body(socket) do
+      {:ok, body, socket} ->
         workspace_id = socket.assigns.current_scope.workspace.id
 
         case CsvImport.commit(body, workspace_id) do
@@ -95,6 +103,11 @@ defmodule BankWeb.ActivityImportLive do
              |> assign(:preview, nil)
              |> assign(:commit_result, result)
              |> assign(:parse_error, nil)
+             # Drop the cached body after a successful commit so a
+             # subsequent unrelated upload starts fresh. Without
+             # this, clicking Commit again would replay the same
+             # file as duplicates.
+             |> assign(:csv_body, nil)
              |> put_flash(
                :info,
                "Imported #{summary.inserted}, skipped #{summary.duplicate} duplicate(s), #{summary.invalid} invalid row(s)."
@@ -119,7 +132,8 @@ defmodule BankWeb.ActivityImportLive do
      socket
      |> assign(:preview, nil)
      |> assign(:commit_result, nil)
-     |> assign(:parse_error, nil)}
+     |> assign(:parse_error, nil)
+     |> assign(:csv_body, nil)}
   end
 
   # --- Render -----------------------------------------------------------
@@ -300,23 +314,36 @@ defmodule BankWeb.ActivityImportLive do
 
   # --- Helpers ----------------------------------------------------------
 
-  defp consume_first_csv(socket) do
-    entries = socket.assigns.uploads.csv.entries
+  # Returns the CSV body to operate on, plus the (possibly
+  # cache-updated) socket. Three cases, in order:
+  #
+  #   1. A previous Preview already consumed and cached the
+  #      body in `:csv_body` — reuse it. This is the
+  #      preview→commit flow that the #244 P2 ships:
+  #      `consume_uploaded_entries/3` is one-shot, so without
+  #      caching the second click would hit `:empty`.
+  #   2. An upload entry is pending (direct Commit without
+  #      Preview, or a fresh upload after Clear) — consume it
+  #      once and cache the binary.
+  #   3. Nothing to operate on — return `:empty`.
+  defp obtain_csv_body(socket) do
+    cond do
+      is_binary(socket.assigns[:csv_body]) ->
+        {:ok, socket.assigns.csv_body, socket}
 
-    case entries do
-      [] ->
-        :empty
+      socket.assigns.uploads.csv.entries != [] ->
+        case consume_uploaded_entries(socket, :csv, fn %{path: path}, _entry ->
+               {:ok, File.read!(path)}
+             end) do
+          [body] when is_binary(body) ->
+            {:ok, body, assign(socket, :csv_body, body)}
 
-      [_ | _] ->
-        results =
-          consume_uploaded_entries(socket, :csv, fn %{path: path}, _entry ->
-            {:ok, File.read!(path)}
-          end)
-
-        case results do
-          [body] -> {:ok, body}
-          _ -> :empty
+          _ ->
+            :empty
         end
+
+      true ->
+        :empty
     end
   end
 

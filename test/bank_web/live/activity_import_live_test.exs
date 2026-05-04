@@ -226,6 +226,78 @@ defmodule BankWeb.ActivityImportLiveTest do
     end
   end
 
+  # --- preview → commit (#244 P2 regression) ---------------------------
+
+  describe "preview → commit (#244 P2)" do
+    test "after Preview, clicking Commit without re-uploading still imports",
+         %{conn: conn, workspace: ws} do
+      # Pre-fix: `consume_uploaded_entries/3` ran inside Preview
+      # AND inside Commit. Preview drained the entry, so the
+      # second (Commit) click hit `:empty` and the import never
+      # ran. The cached `:csv_body` assign fixes the flow.
+      {:ok, view, _html} = live(conn, "/activity/import")
+
+      upload = upload_csv(view, @valid_csv)
+      render_upload(upload, "input.csv")
+
+      # Preview consumes the upload and stores the body in the
+      # LiveView assigns. The preview card appears.
+      view |> form("#activity-import-form") |> render_submit()
+      assert has_element?(view, ~s|#activity-import-preview[data-new="2"]|)
+
+      # Commit WITHOUT re-uploading. The cached body is reused.
+      view |> element("#activity-import-commit-submit") |> render_click()
+
+      assert has_element?(view, ~s|#activity-import-commit-result[data-inserted="2"]|)
+      assert [_, _] = Activity.list_imported_activities(workspace_id: ws.id)
+
+      # Side-effect contract preserved: still no execution.
+      assert all_enqueued() == []
+    end
+
+    test "Clear after Preview lets a fresh upload preview again",
+         %{conn: conn, workspace: ws} do
+      {:ok, view, _html} = live(conn, "/activity/import")
+
+      upload1 = upload_csv(view, @valid_csv)
+      render_upload(upload1, "input.csv")
+      view |> form("#activity-import-form") |> render_submit()
+      assert has_element?(view, "#activity-import-preview")
+
+      # Clear drops the cached CSV body and resets the preview /
+      # commit / parse-error cards. A subsequent upload behaves
+      # like a fresh session.
+      view |> element("#activity-import-clear") |> render_click()
+      refute has_element?(view, "#activity-import-preview")
+
+      upload2 = upload_csv(view, @valid_csv)
+      render_upload(upload2, "input.csv")
+      view |> form("#activity-import-form") |> render_submit()
+      assert has_element?(view, ~s|#activity-import-preview[data-new="2"]|)
+
+      assert Activity.list_imported_activities(workspace_id: ws.id) == []
+    end
+
+    test "Commit clears the cached body so a re-click does not re-import",
+         %{conn: conn, workspace: ws} do
+      {:ok, view, _html} = live(conn, "/activity/import")
+
+      upload = upload_csv(view, @valid_csv)
+      render_upload(upload, "input.csv")
+
+      view |> element("#activity-import-commit-submit") |> render_click()
+      assert has_element?(view, ~s|#activity-import-commit-result[data-inserted="2"]|)
+      assert [_, _] = Activity.list_imported_activities(workspace_id: ws.id)
+
+      # Second click without a fresh upload: cached body is gone,
+      # no upload entry remains, so the operator sees the
+      # "Choose a CSV file first" flash. Critically, we do NOT
+      # re-import the same body silently.
+      _ = view |> element("#activity-import-commit-submit") |> render_click()
+      assert Repo.aggregate(ImportedActivity, :count, :id) == 2
+    end
+  end
+
   # --- helpers ----------------------------------------------------------
 
   defp upload_csv(view, csv) do

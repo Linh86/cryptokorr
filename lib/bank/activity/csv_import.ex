@@ -312,11 +312,20 @@ defmodule Bank.Activity.CsvImport do
          {:ok, confidence} <-
            parse_enum_optional(recognised["confidence"], "confidence", @confidences, "medium"),
          {:ok, asset} <- presence(recognised["asset"], "asset") do
+      # Per #244 P2: identity is derived from CSV row CONTENT
+      # only — never from the row index. Re-uploading the same
+      # activity at line 3 instead of line 2 must dedupe.
+      # `source_ref` is left nil so `Bank.Activity.compute_dedupe_key/1`
+      # falls through to `source_hash` (the content digest).
+      # The row number is preserved in metadata so operators can
+      # still trace a row back to its position in the upload.
+      metadata = Map.put(unknown_metadata, "csv_row_index", row_number)
+
       {:ok,
        %{
          source_type: :csv,
          source_hash: source_hash_for(recognised, unknown_metadata),
-         source_ref: "csv:row:#{row_number}",
+         source_ref: nil,
          occurred_at: occurred_at,
          asset: asset,
          chain: blank_to_nil(recognised["chain"]),
@@ -330,7 +339,7 @@ defmodule Bank.Activity.CsvImport do
          provenance: blank_to_nil(recognised["provenance"]),
          confidence: confidence,
          counterparty_id: blank_to_nil(recognised["counterparty_id"]),
-         metadata: unknown_metadata
+         metadata: metadata
        }}
     else
       {:error, msg} -> {:error, [msg]}
