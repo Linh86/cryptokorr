@@ -2,10 +2,23 @@ defmodule Bank.Activity.ChainSync do
   @moduledoc """
   Read-only wallet/smart-account chain activity sync (#245).
 
-  Pulls USDC transfer events from a configured RPC source and
-  normalizes them into the `Bank.Activity` imported-activity
-  ledger. **Strictly read-only**: this module never broadcasts a
-  transaction, signs a payload, calls
+  Two source-types share this module:
+
+    * `:wallet_chain` — pulls USDC `Transfer` events for a watched
+      EOA via JSON-RPC and normalizes them into the
+      `Bank.Activity` imported-activity ledger.
+
+    * `:smart_account_chain` — imports smart-account on-chain
+      activity (delegation grants/revokes, executed plans) from
+      this Phoenix instance's adapter-callback projections
+      (`Bank.Delegations.Delegation` and
+      `Bank.Decisions.ExecutionPlan`) into the same ledger. No
+      RPC call is made; the durable callback stream is the
+      authoritative source until the smart-account contract event
+      ABI lands in this repo (see "Smart-account events" below).
+
+  Both paths are **strictly read-only**: this module never
+  broadcasts a transaction, signs a payload, calls
   `Bank.AdapterClient`, creates an `ExecutionPlan`, or enqueues an
   Oban dispatch job. The only write surface is
   `Bank.Activity.create_imported_activity/1` plus the cursor row
@@ -17,9 +30,11 @@ defmodule Bank.Activity.ChainSync do
   is workspace-keyed (`chain_sync_cursors_uniq` on
   `(workspace_id, chain, source_type, address)`). Activity rows
   carry `workspace_id` per the existing
-  `Bank.Activity.ImportedActivity` contract.
+  `Bank.Activity.ImportedActivity` contract. The smart-account
+  path queries `delegations` and `execution_plans` with explicit
+  `workspace_id` filters so rows from other tenants cannot leak.
 
-  ## Initial sync window (#245 P2)
+  ## Wallet-chain initial sync window (#245 P2)
 
   A fresh cursor (`last_block_number == 0` and `last_synced_at ==
   nil`) is seeded from a recent-confirmed-range heuristic instead
@@ -28,7 +43,7 @@ defmodule Bank.Activity.ChainSync do
   known deployment block. After the first run, the cursor advances
   normally and the recent-window heuristic is not re-applied.
 
-  ## Conservative reorg handling
+  ## Conservative reorg handling (wallet-chain)
 
   After the initial seeding, every subsequent sync window is
   `[cursor.last_block_number + 1 - @reorg_rewind_blocks,
@@ -40,7 +55,7 @@ defmodule Bank.Activity.ChainSync do
   source_ref, occurred_at, asset, direction, amount)`) collapses
   the duplicates idempotently.
 
-  ## Block timestamps (#245 P2)
+  ## Block timestamps (wallet-chain, #245 P2)
 
   Each unique block touched by the imported logs is resolved via
   `eth_getBlockByNumber` exactly once per sync call. The real
@@ -49,19 +64,34 @@ defmodule Bank.Activity.ChainSync do
   records the sanitized error label and `last_block_number` is
   NOT advanced, so the next attempt retries the same window.
 
-  ## Smart-account events (#245 P2)
+  ## Smart-account events
 
-  Phase 1 only supports `:wallet_chain` source-type ERC-20
-  Transfer sync. Calls with `source_type: :smart_account_chain`
-  return `{:error, :smart_account_events_unavailable}` until a
-  concrete smart-account event ABI / topic constant lands in this
-  repo. The TS adapter currently surfaces smart-account state via
-  webhook callbacks, not on-chain log decoding; relabelling USDC
-  Transfer events as smart-account events would be misleading.
+  The TS chain adapter is the authoritative producer of
+  smart-account state transitions today: it watches the on-chain
+  Kernel/ZeroDev contract, decodes the relevant events
+  (delegation install/uninstall, executed user-operation), and
+  posts a normalized callback to
+  `POST /internal/adapter/callback`. Phoenix persists the result
+  on `Bank.Delegations.Delegation` and
+  `Bank.Decisions.ExecutionPlan` rows that carry the on-chain
+  anchor (`install_tx_hash`, `last_tx_hash`, `tx_refs`, `chain`,
+  outcome timestamps).
+
+  This module reads those rows by
+  `(workspace_id, chain, smart_account_id)` and projects them as
+  imported-activity ledger rows with a fixed `provenance:
+  "smart_account_callback"` and a deterministic `source_ref` so a
+  re-run is idempotent. We do not parse arbitrary on-chain logs —
+  only the hard-allowlisted projection fields documented below
+  reach the ledger. When the smart-account contract ABI / event
+  topic constants land in this repo a future iteration can swap
+  the read-side from "callback projection" to "decoded event
+  log" behind the same `:smart_account_chain` source type.
 
   ## Source failures
 
-  Any RPC failure is captured as a fixed-shape sanitized label
+  Any wallet-chain RPC failure (transport, malformed hex, 4xx,
+  5xx, timeout) is captured as a fixed-shape sanitized label
   (`"rpc_unavailable"`, `"rpc_error_5xx"`, `"timeout"`,
   `"invalid_response"`, etc.) on the cursor's `:last_error` /
   `:last_error_at` columns. The cursor's `:last_block_number` is
@@ -74,12 +104,11 @@ defmodule Bank.Activity.ChainSync do
   `sync_address/4` accepts `:rpc_fn` in opts — a 1-arity function
   that takes a request map (`%{method: ..., params: [...]}`) and
   returns `{:ok, body}` / `{:error, label}`. Tests use this to
-  drive every branch deterministically without hitting the
-  network. The default RPC implementation is
-  `Bank.Activity.ChainSync.RpcSource.call/1`, which itself returns
-  `{:error, "rpc_not_configured"}` when no `:base_url` is set
-  (the production-safe default for environments without an RPC
-  endpoint).
+  drive every wallet-chain branch deterministically without
+  hitting the network. The smart-account path doesn't use the
+  RPC source at all (the adapter has already done the chain
+  read), so `:rpc_fn` is ignored for `source_type:
+  :smart_account_chain`.
   """
 
   import Ecto.Query
@@ -87,6 +116,8 @@ defmodule Bank.Activity.ChainSync do
   alias Bank.Activity
   alias Bank.Activity.ChainSyncCursor
   alias Bank.Activity.ChainSync.RpcSource
+  alias Bank.Decisions.ExecutionPlan
+  alias Bank.Delegations.Delegation
   alias Bank.Repo
 
   # Number of confirmed blocks below head we treat as "settled".
@@ -103,6 +134,16 @@ defmodule Bank.Activity.ChainSync do
   # ERC-20 Transfer(address,address,uint256) topic.
   @transfer_topic "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
+  # Fixed provenance string for smart-account callback-backed
+  # imports. Searchable by operators / reconcilers.
+  @smart_account_provenance "smart_account_callback"
+
+  # Hard-allowlisted "kind" labels we project from the callback
+  # state into ledger metadata. Anything outside this list is
+  # ignored — preserves the read-only-projection invariant.
+  @allowed_delegation_kinds ~w(delegation.granted delegation.revoked delegation.revoke_failed)
+  @allowed_execution_kinds ~w(execution.confirmed execution.reverted execution.aborted)
+
   @typedoc "RPC source result for a single eth_* call."
   @type rpc_result :: {:ok, term()} | {:error, String.t()}
 
@@ -117,8 +158,8 @@ defmodule Bank.Activity.ChainSync do
           | {:error, atom() | String.t()}
 
   @doc """
-  Sync USDC `Transfer` events for `address` on `chain` into the
-  workspace's imported-activity ledger.
+  Sync chain activity for `address` on `chain` into the workspace's
+  imported-activity ledger.
 
   ## Args
 
@@ -126,28 +167,28 @@ defmodule Bank.Activity.ChainSync do
       cross-workspace writes.
     * `chain` — string chain id (Phase 1 supports `"base-sepolia"`
       only).
-    * `address` — wallet or smart-account address watched.
-      Lowercased server-side; the cursor stores the lowercased
-      form.
+    * `address` — for `:wallet_chain`, a 0x-prefixed 20-byte hex
+      address (lowercased server-side). For
+      `:smart_account_chain`, the adapter's free-form
+      `smart_account_id` (used as-is for the
+      `delegations` / `execution_plans` join).
     * `opts`:
         * `:source_type` (default `:wallet_chain`) — must be one of
-          `Bank.Activity.ChainSyncCursor.source_types/0`. Phase 1
-          rejects `:smart_account_chain` with
-          `{:error, :smart_account_events_unavailable}`.
-        * `:rpc_fn` — test injection (see moduledoc).
-        * `:max_blocks` — cap on the `[from, to]` window per call;
-          default 1_000. Hard-capped at 5_000 even when callers
-          pass higher.
-        * `:asset_address` — ERC-20 contract address of the asset
-          watched (USDC). Required; refuses nil.
-        * `:asset` — ledger-side asset symbol (default `"USDC"`).
-        * `:asset_decimals` — token decimals (default `6` for USDC).
-        * `:start_block` — non-negative integer; explicit initial
-          block for a fresh cursor (e.g. token deployment block).
-          When omitted, a fresh cursor seeds from
-          `max(confirmed_head - max_blocks + 1, 0)` so the first
-          run captures recent activity instead of starting at
-          genesis.
+          `Bank.Activity.ChainSyncCursor.source_types/0`.
+        * `:rpc_fn` — wallet-chain test injection (see moduledoc).
+          Ignored for `:smart_account_chain`.
+        * `:max_blocks` — wallet-chain only; cap on the
+          `[from, to]` window per call. Default 1_000. Hard-capped
+          at 5_000.
+        * `:asset_address` — wallet-chain only; ERC-20 contract
+          address of the asset watched (USDC). Required for
+          `:wallet_chain`.
+        * `:asset` — wallet-chain ledger-side asset symbol
+          (default `"USDC"`).
+        * `:asset_decimals` — wallet-chain token decimals
+          (default `6`).
+        * `:start_block` — wallet-chain only; non-negative
+          integer; explicit initial block for a fresh cursor.
   """
   @spec sync_address(String.t() | nil, String.t() | nil, String.t() | nil, keyword()) ::
           sync_result()
@@ -164,34 +205,80 @@ defmodule Bank.Activity.ChainSync do
       do: {:error, :invalid_address}
 
   def sync_address(workspace_id, chain, address, opts) do
-    source_type = Keyword.get(opts, :source_type, :wallet_chain)
+    case Keyword.get(opts, :source_type, :wallet_chain) do
+      :wallet_chain ->
+        sync_wallet_chain(workspace_id, chain, address, opts)
+
+      :smart_account_chain ->
+        sync_smart_account_chain(workspace_id, chain, address, opts)
+
+      _ ->
+        {:error, :invalid_source_type}
+    end
+  end
+
+  defp sync_wallet_chain(workspace_id, chain, address, opts) do
     asset_address = Keyword.get(opts, :asset_address)
 
-    cond do
-      source_type == :smart_account_chain ->
-        {:error, :smart_account_events_unavailable}
+    if not is_binary(asset_address) or asset_address == "" do
+      {:error, :missing_asset_address}
+    else
+      rpc_fn = Keyword.get(opts, :rpc_fn, &RpcSource.call/1)
+      max_blocks = opts |> Keyword.get(:max_blocks, 1_000) |> min(5_000) |> max(1)
+      asset = Keyword.get(opts, :asset, "USDC")
+      decimals = Keyword.get(opts, :asset_decimals, 6)
+      start_block = sanitize_start_block(Keyword.get(opts, :start_block))
+      lowered_address = String.downcase(address)
 
-      not is_binary(asset_address) or asset_address == "" ->
-        {:error, :missing_asset_address}
-
-      true ->
-        rpc_fn = Keyword.get(opts, :rpc_fn, &RpcSource.call/1)
-        max_blocks = opts |> Keyword.get(:max_blocks, 1_000) |> min(5_000) |> max(1)
-        asset = Keyword.get(opts, :asset, "USDC")
-        decimals = Keyword.get(opts, :asset_decimals, 6)
-        start_block = sanitize_start_block(Keyword.get(opts, :start_block))
-        lowered_address = String.downcase(address)
-
-        do_sync(workspace_id, chain, lowered_address, %{
-          source_type: source_type,
-          rpc_fn: rpc_fn,
-          max_blocks: max_blocks,
-          asset: asset,
-          decimals: decimals,
-          asset_address: String.downcase(asset_address),
-          start_block: start_block
-        })
+      do_sync_wallet(workspace_id, chain, lowered_address, %{
+        source_type: :wallet_chain,
+        rpc_fn: rpc_fn,
+        max_blocks: max_blocks,
+        asset: asset,
+        decimals: decimals,
+        asset_address: String.downcase(asset_address),
+        start_block: start_block
+      })
     end
+  end
+
+  # Smart-account path: callback-backed projection. Reads the
+  # `delegations` + `execution_plans` rows the adapter callback
+  # has already populated for this workspace + smart account, and
+  # writes one ledger row per terminal/anchored state transition.
+  # No RPC, no signing, no broadcast — just a workspace-scoped
+  # `SELECT ... INSERT ... ON CONFLICT (dedupe_key) DO NOTHING`
+  # via the existing `Bank.Activity.create_imported_activity/1`.
+  defp sync_smart_account_chain(workspace_id, chain, smart_account_id, _opts) do
+    cursor = upsert_cursor(workspace_id, chain, :smart_account_chain, smart_account_id)
+
+    delegation_attrs =
+      workspace_id
+      |> fetch_delegations(chain, smart_account_id)
+      |> Enum.flat_map(&delegation_to_attrs(&1, workspace_id, chain, smart_account_id))
+
+    execution_attrs =
+      workspace_id
+      |> fetch_execution_plans(chain, smart_account_id)
+      |> Enum.flat_map(&execution_to_attrs(&1, workspace_id, chain, smart_account_id))
+
+    {inserted, duplicates} =
+      Enum.reduce(delegation_attrs ++ execution_attrs, {0, 0}, fn attrs, {ins, dup} ->
+        case Activity.create_imported_activity(attrs) do
+          {:ok, :inserted, _} -> {ins + 1, dup}
+          {:ok, :duplicate, _} -> {ins, dup + 1}
+          {:error, _changeset} -> {ins, dup}
+        end
+      end)
+
+    advance_cursor(cursor, cursor.last_block_number)
+
+    {:ok,
+     %{
+       inserted: inserted,
+       duplicates: duplicates,
+       last_block: cursor.last_block_number
+     }}
   end
 
   @doc """
@@ -208,14 +295,18 @@ defmodule Bank.Activity.ChainSync do
 
   def get_cursor(workspace_id, chain, source_type, address)
       when is_binary(chain) and is_atom(source_type) and is_binary(address) do
-    Repo.one(
-      from c in ChainSyncCursor,
-        where:
-          c.workspace_id == ^workspace_id and
-            c.chain == ^chain and
-            c.source_type == ^source_type and
-            c.address == ^String.downcase(address)
-    )
+    if source_type in ChainSyncCursor.source_types() do
+      Repo.one(
+        from c in ChainSyncCursor,
+          where:
+            c.workspace_id == ^workspace_id and
+              c.chain == ^chain and
+              c.source_type == ^source_type and
+              c.address == ^cursor_address(source_type, address)
+      )
+    else
+      nil
+    end
   end
 
   @doc """
@@ -235,15 +326,24 @@ defmodule Bank.Activity.ChainSync do
     |> Repo.all()
   end
 
-  # --- internals ---------------------------------------------------------
+  # --- wallet-chain internals -------------------------------------------
 
-  defp do_sync(workspace_id, chain, address, %{source_type: source_type} = ctx) do
+  defp do_sync_wallet(workspace_id, chain, address, %{source_type: source_type} = ctx) do
     cursor = upsert_cursor(workspace_id, chain, source_type, address)
 
     case ctx.rpc_fn.(%{method: "eth_blockNumber", params: []}) do
       {:ok, head_hex} when is_binary(head_hex) ->
-        head = parse_hex_quantity(head_hex)
-        run_window(cursor, head, chain, address, ctx)
+        case safe_parse_hex_quantity(head_hex) do
+          {:ok, head} ->
+            run_window(cursor, head, chain, address, ctx)
+
+          :error ->
+            # Malformed eth_blockNumber response (non-hex, empty,
+            # missing 0x prefix) — sanitized "invalid_response"
+            # rather than letting `String.to_integer/2` raise.
+            record_error(cursor, "invalid_response")
+            {:error, :invalid_response}
+        end
 
       {:ok, _other} ->
         record_error(cursor, "invalid_response")
@@ -366,10 +466,10 @@ defmodule Bank.Activity.ChainSync do
     Enum.reduce_while(block_hexes, {:ok, %{}}, fn block_hex, {:ok, acc} ->
       case ctx.rpc_fn.(%{method: "eth_getBlockByNumber", params: [block_hex, false]}) do
         {:ok, %{"timestamp" => ts_hex}} when is_binary(ts_hex) ->
-          ts = parse_hex_quantity(ts_hex)
-
-          case DateTime.from_unix(ts, :second) do
-            {:ok, dt} -> {:cont, {:ok, Map.put(acc, block_hex, dt)}}
+          with {:ok, ts} <- safe_parse_hex_quantity(ts_hex),
+               {:ok, dt} <- DateTime.from_unix(ts, :second) do
+            {:cont, {:ok, Map.put(acc, block_hex, dt)}}
+          else
             _ -> {:halt, {:error, "invalid_response"}}
           end
 
@@ -426,14 +526,190 @@ defmodule Bank.Activity.ChainSync do
 
   defp normalize_log(_, _, _, _, _, _), do: :skip
 
+  # --- smart-account internals ------------------------------------------
+
+  defp fetch_delegations(workspace_id, chain, smart_account_id) do
+    Repo.all(
+      from d in Delegation,
+        where:
+          d.workspace_id == ^workspace_id and
+            d.chain == ^chain and
+            d.smart_account_id == ^smart_account_id
+    )
+  end
+
+  defp fetch_execution_plans(workspace_id, chain, smart_account_id) do
+    Repo.all(
+      from p in ExecutionPlan,
+        where:
+          p.workspace_id == ^workspace_id and
+            p.chain == ^chain and
+            p.smart_account_id == ^smart_account_id and
+            fragment("array_length(?, 1) > 0", p.tx_refs)
+    )
+  end
+
+  # Project a delegation row into 0..N ledger attrs. Only state
+  # transitions with a real on-chain anchor (tx_hash + a row-side
+  # timestamp) and an allowlisted "kind" are projected.
+  # Pending/active-without-anchor rows produce nothing.
+  defp delegation_to_attrs(%Delegation{} = d, workspace_id, chain, smart_account_id) do
+    cond do
+      d.state == :active and is_binary(d.install_tx_hash) and not is_nil(d.granted_at) ->
+        kind = "delegation.granted"
+
+        if kind in @allowed_delegation_kinds do
+          [
+            build_smart_account_attrs(
+              workspace_id: workspace_id,
+              chain: chain,
+              smart_account_id: smart_account_id,
+              source_ref:
+                "delegation:" <>
+                  safe_string(d.delegation_id) <> ":granted:" <> d.install_tx_hash,
+              tx_hash: d.install_tx_hash,
+              occurred_at: d.granted_at,
+              direction: :inbound,
+              kind: kind,
+              extra_metadata: %{
+                "delegation_id" => safe_string(d.delegation_id),
+                "kernel_version" => d.kernel_version
+              }
+            )
+          ]
+        else
+          []
+        end
+
+      d.state in [:revoked, :revoke_failed] and is_binary(d.last_tx_hash) ->
+        kind = "delegation." <> Atom.to_string(d.state)
+
+        if kind in @allowed_delegation_kinds do
+          occurred_at = d.revoked_at || d.updated_at
+
+          [
+            build_smart_account_attrs(
+              workspace_id: workspace_id,
+              chain: chain,
+              smart_account_id: smart_account_id,
+              source_ref:
+                "delegation:" <>
+                  safe_string(d.delegation_id) <>
+                  ":" <> Atom.to_string(d.state) <> ":" <> d.last_tx_hash,
+              tx_hash: d.last_tx_hash,
+              occurred_at: occurred_at,
+              direction: :outbound,
+              kind: kind,
+              extra_metadata: %{
+                "delegation_id" => safe_string(d.delegation_id),
+                "last_reason" => d.last_reason
+              }
+            )
+          ]
+        else
+          []
+        end
+
+      true ->
+        []
+    end
+  end
+
+  # Project an execution plan into one ledger attr per `tx_ref`.
+  # Only plans with a terminal `final_outcome` produce activity —
+  # in-flight plans are not yet "happened on chain".
+  defp execution_to_attrs(%ExecutionPlan{} = p, workspace_id, chain, smart_account_id) do
+    if p.final_outcome in [:confirmed, :reverted, :aborted] and is_list(p.tx_refs) do
+      kind = "execution." <> Atom.to_string(p.final_outcome)
+
+      if kind in @allowed_execution_kinds do
+        p.tx_refs
+        |> Enum.with_index()
+        |> Enum.flat_map(fn {tx_hash, idx} ->
+          if is_binary(tx_hash) and tx_hash != "" do
+            [
+              build_smart_account_attrs(
+                workspace_id: workspace_id,
+                chain: chain,
+                smart_account_id: smart_account_id,
+                source_ref:
+                  "execution:" <>
+                    safe_string(p.id) <>
+                    ":" <> Integer.to_string(idx) <> ":" <> tx_hash,
+                tx_hash: tx_hash,
+                occurred_at: p.updated_at,
+                direction: :outbound,
+                asset: p.asset || "USDC",
+                kind: kind,
+                extra_metadata: %{
+                  "execution_plan_id" => safe_string(p.id),
+                  "final_reason" => p.final_reason
+                }
+              )
+            ]
+          else
+            []
+          end
+        end)
+      else
+        []
+      end
+    else
+      []
+    end
+  end
+
+  defp build_smart_account_attrs(opts) do
+    direction = Keyword.fetch!(opts, :direction)
+    smart_account_id = Keyword.fetch!(opts, :smart_account_id)
+
+    {from_address, to_address} =
+      case direction do
+        :inbound -> {nil, smart_account_id}
+        :outbound -> {smart_account_id, nil}
+      end
+
+    base_metadata = %{
+      "kind" => Keyword.fetch!(opts, :kind),
+      "smart_account_id" => smart_account_id
+    }
+
+    metadata =
+      opts
+      |> Keyword.get(:extra_metadata, %{})
+      |> Map.merge(base_metadata)
+
+    %{
+      workspace_id: Keyword.fetch!(opts, :workspace_id),
+      source_type: :smart_account_chain,
+      source_ref: Keyword.fetch!(opts, :source_ref),
+      source_hash: Keyword.fetch!(opts, :tx_hash),
+      occurred_at: Keyword.fetch!(opts, :occurred_at),
+      asset: Keyword.get(opts, :asset, "delegation"),
+      chain: Keyword.fetch!(opts, :chain),
+      amount: Decimal.new(0),
+      direction: direction,
+      from_address: from_address,
+      to_address: to_address,
+      tx_hash: Keyword.fetch!(opts, :tx_hash),
+      provenance: @smart_account_provenance,
+      confidence: :high,
+      metadata: metadata
+    }
+  end
+
+  # --- shared cursor + helpers ------------------------------------------
+
   defp upsert_cursor(workspace_id, chain, source_type, address) do
+    stored_address = cursor_address(source_type, address)
+
     case Repo.one(
            from c in ChainSyncCursor,
              where:
                c.workspace_id == ^workspace_id and
                  c.chain == ^chain and
                  c.source_type == ^source_type and
-                 c.address == ^address
+                 c.address == ^stored_address
          ) do
       %ChainSyncCursor{} = cursor ->
         cursor
@@ -443,7 +719,7 @@ defmodule Bank.Activity.ChainSync do
           workspace_id: workspace_id,
           chain: chain,
           source_type: source_type,
-          address: address
+          address: stored_address
         }
 
         case Repo.insert(ChainSyncCursor.create_changeset(%ChainSyncCursor{}, attrs)) do
@@ -459,11 +735,20 @@ defmodule Bank.Activity.ChainSync do
                   c.workspace_id == ^workspace_id and
                     c.chain == ^chain and
                     c.source_type == ^source_type and
-                    c.address == ^address
+                    c.address == ^stored_address
             )
         end
     end
   end
+
+  # The wallet-chain path lowercases EOAs to keep cursors keyed
+  # consistently. The smart-account path uses the adapter's
+  # opaque `smart_account_id` verbatim — Phoenix never parses it.
+  defp cursor_address(:wallet_chain, address) when is_binary(address),
+    do: String.downcase(address)
+
+  defp cursor_address(:smart_account_chain, address) when is_binary(address), do: address
+  defp cursor_address(_, address) when is_binary(address), do: address
 
   defp advance_cursor(%ChainSyncCursor{} = cursor, last_block) do
     cursor
@@ -493,8 +778,20 @@ defmodule Bank.Activity.ChainSync do
   defp sanitize_start_block(n) when is_integer(n) and n >= 0, do: n
   defp sanitize_start_block(_), do: nil
 
-  defp parse_hex_quantity("0x" <> rest), do: String.to_integer(rest, 16)
-  defp parse_hex_quantity(s) when is_binary(s), do: String.to_integer(s, 16)
+  # `String.to_integer/2` raises `ArgumentError` on empty / non-hex
+  # input. Wrap it so a malformed RPC response (or fixture) becomes
+  # a sanitized `:error` instead of crashing the sync process.
+  defp safe_parse_hex_quantity("0x" <> rest), do: safe_parse_hex_quantity(rest)
+
+  defp safe_parse_hex_quantity(s) when is_binary(s) and byte_size(s) > 0 do
+    try do
+      {:ok, String.to_integer(s, 16)}
+    rescue
+      ArgumentError -> :error
+    end
+  end
+
+  defp safe_parse_hex_quantity(_), do: :error
 
   defp to_hex_quantity(0), do: "0x0"
 
@@ -524,12 +821,18 @@ defmodule Bank.Activity.ChainSync do
   defp topic_to_address(_), do: nil
 
   defp parse_token_amount("0x" <> rest, decimals) do
-    int = String.to_integer(rest, 16)
-    Decimal.div(Decimal.new(int), Decimal.new(pow10(decimals)))
+    case safe_parse_hex_quantity(rest) do
+      {:ok, int} -> Decimal.div(Decimal.new(int), Decimal.new(pow10(decimals)))
+      :error -> Decimal.new(0)
+    end
   end
 
   defp parse_token_amount(_, _), do: Decimal.new(0)
 
   defp pow10(0), do: 1
   defp pow10(n) when n > 0, do: Enum.reduce(1..n, 1, fn _, acc -> acc * 10 end)
+
+  defp safe_string(nil), do: ""
+  defp safe_string(s) when is_binary(s), do: s
+  defp safe_string(other), do: to_string(other)
 end
