@@ -363,6 +363,8 @@ defmodule Bank.Decisions.Report do
   # --- decision envelope ----------------------------------------------------
 
   defp decision_section(%DecisionEnvelope{} = d) do
+    {policy_version_id, policy_version_number} = snapshot_version(d.policy_snapshot_ref)
+
     %{
       available: true,
       id: d.id,
@@ -378,12 +380,21 @@ defmodule Bank.Decisions.Report do
       policy_snapshot_rule_ids:
         d.policy_snapshot_ref
         |> snapshot_rule_ids()
-        |> Enum.sort()
+        |> Enum.sort(),
+      policy_version_id: policy_version_id,
+      policy_version_number: policy_version_number
     }
   end
 
   defp snapshot_rule_ids(%{} = ref), do: Map.get(ref, "rule_ids") || Map.get(ref, :rule_ids) || []
   defp snapshot_rule_ids(_), do: []
+
+  defp snapshot_version(%{} = ref) do
+    {Map.get(ref, "policy_version_id") || Map.get(ref, :policy_version_id),
+     Map.get(ref, "policy_version_number") || Map.get(ref, :policy_version_number)}
+  end
+
+  defp snapshot_version(_), do: {nil, nil}
 
   defp reasons_summary(%{} = reasons) do
     raw = Map.get(reasons, "items") || Map.get(reasons, :items) || []

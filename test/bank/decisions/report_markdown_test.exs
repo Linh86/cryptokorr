@@ -1407,4 +1407,36 @@ defmodule Bank.Decisions.ReportMarkdownTest do
       assert pos_2 < pos_3
     end
   end
+
+  # --- pinned policy version (#226) -------------------------------------
+
+  describe "render/1 — decision_envelope.policy_version_id (#226)" do
+    defp put_policy_version(report, id, num) do
+      envelope = report.decision_envelope
+      envelope = Map.put(envelope, :policy_version_id, id)
+      envelope = Map.put(envelope, :policy_version_number, num)
+      %{report | decision_envelope: envelope}
+    end
+
+    test "renders the pinned version line when both id and number are present" do
+      report = put_policy_version(full_report_fixture(), "ver-id-1234567890ab", 7)
+      out = ReportMarkdown.render(report)
+
+      assert out =~ "Policy version: `v7` (ver-id-1…)"
+    end
+
+    test "omits the line when policy_version_id is nil (legacy decision)" do
+      report = put_policy_version(full_report_fixture(), nil, nil)
+      out = ReportMarkdown.render(report)
+
+      refute out =~ "Policy version:"
+    end
+
+    test "omits the line when policy_version_number is nil (defensive)" do
+      report = put_policy_version(full_report_fixture(), "ver-id-defensive", nil)
+      out = ReportMarkdown.render(report)
+
+      refute out =~ "Policy version:"
+    end
+  end
 end

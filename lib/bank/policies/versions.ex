@@ -120,6 +120,64 @@ defmodule Bank.Policies.Versions do
   def current_published(_), do: nil
 
   @doc """
+  Resolve the workspace's currently-pinned policy snapshot for a
+  decision (#226).
+
+  When a `:published` PolicyVersion exists for the workspace,
+  returns:
+
+      %{
+        rules:           [%PolicyRule{}, ...],   # active rules in version's rule_ids list
+        rule_ids_in_version: [<uuid>, ...],      # the version's authoritative list
+        version_id:      <uuid>,
+        version_number:  <integer>
+      }
+
+  When no `:published` PolicyVersion exists, returns `nil` — the
+  caller (typically `Bank.Decisions.evaluate_policy/3`) should
+  fall back to legacy `Bank.Policies.load_active_ruleset/1`
+  behavior. This preserves backward compatibility for workspaces
+  that were created before the policy-version surface
+  (greenfield + alpha workspaces).
+
+  Rules in the version's `rule_ids` list that no longer resolve
+  to an `:active` `PolicyRule` are silently dropped from the
+  returned `:rules` list, but the original `:rule_ids_in_version`
+  list is preserved verbatim so the decision envelope can pin
+  the original list and a reviewer can spot drift later. The
+  caller's fail-closed logic decides what to do when the
+  resolved rule list is empty (e.g. produce a hold outcome).
+  """
+  @spec snapshot_for_workspace(binary()) :: map() | nil
+  def snapshot_for_workspace(workspace_id) when is_binary(workspace_id) do
+    case current_published(workspace_id) do
+      nil ->
+        nil
+
+      %PolicyVersion{} = version ->
+        ids = PolicyVersion.rule_ids_list(version)
+
+        rules =
+          if ids == [] do
+            []
+          else
+            Bank.Policies.PolicyRule
+            |> Ecto.Query.where([r], r.id in ^ids and r.state == ^:active)
+            |> Bank.Repo.all()
+          end
+
+        %{
+          rules: rules,
+          rule_ids_in_version: ids,
+          version_id: version.id,
+          version_number: version.version_number
+        }
+    end
+  end
+
+  def snapshot_for_workspace(_), do: nil
+
+  @doc """
   Lists policy versions for a workspace.
 
   Options:

@@ -489,4 +489,242 @@ defmodule Bank.Policies.VersionsTest do
       )
     )
   end
+
+  # --- snapshot_for_workspace + decision pinning (#226) -----------------
+
+  describe "snapshot_for_workspace/1 (#226)" do
+    test "returns nil when no published version exists for the workspace",
+         %{workspace: ws} do
+      assert is_nil(Versions.snapshot_for_workspace(ws.id))
+    end
+
+    test "returns nil for non-binary workspace_id (defensive)" do
+      assert is_nil(Versions.snapshot_for_workspace(nil))
+      assert is_nil(Versions.snapshot_for_workspace(123))
+    end
+
+    test "returns rules + version metadata when a published version exists",
+         %{workspace: ws, actor_id: actor_id} do
+      rule_a = Bank.Fixtures.policy_rule(rule_type: :amount_limit, state: :active)
+      rule_b = Bank.Fixtures.policy_rule(rule_type: :amount_limit, state: :active)
+
+      {:ok, draft} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [rule_a.id, rule_b.id]}
+        )
+
+      {:ok, published} = Versions.publish_draft(draft, published_by: :user, actor_id: actor_id)
+
+      snapshot = Versions.snapshot_for_workspace(ws.id)
+
+      assert snapshot.version_id == published.id
+      assert snapshot.version_number == published.version_number
+
+      ids_returned = snapshot.rules |> Enum.map(& &1.id) |> Enum.sort()
+      assert ids_returned == Enum.sort([rule_a.id, rule_b.id])
+      assert snapshot.rule_ids_in_version == [rule_a.id, rule_b.id]
+    end
+
+    test "drops rule_ids that no longer resolve to :active rules but preserves the version's authoritative list",
+         %{workspace: ws, actor_id: actor_id} do
+      rule_active = Bank.Fixtures.policy_rule(rule_type: :amount_limit, state: :active)
+      rule_archived = Bank.Fixtures.policy_rule(rule_type: :amount_limit, state: :archived)
+      ghost_id = Ecto.UUID.generate()
+
+      {:ok, draft} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [rule_active.id, rule_archived.id, ghost_id]}
+        )
+
+      {:ok, _} = Versions.publish_draft(draft, published_by: :user, actor_id: actor_id)
+
+      snapshot = Versions.snapshot_for_workspace(ws.id)
+
+      # Only the :active rule is returned in :rules.
+      assert Enum.map(snapshot.rules, & &1.id) == [rule_active.id]
+
+      # But the version's authoritative list is preserved verbatim
+      # so a reviewer / decision can pin the ORIGINAL list.
+      assert snapshot.rule_ids_in_version == [rule_active.id, rule_archived.id, ghost_id]
+    end
+  end
+
+  # --- end-to-end decision pinning (#226) -------------------------------
+
+  describe "decision pinning (#226 end-to-end via Bank.Decisions.evaluate_intent/2)" do
+    test "decision in a workspace WITH a published version pins to it",
+         %{workspace: ws, actor_id: actor_id} do
+      rule = Bank.Fixtures.policy_rule(rule_type: :amount_limit, state: :active)
+
+      {:ok, draft} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [rule.id]}
+        )
+
+      {:ok, published} = Versions.publish_draft(draft, published_by: :user, actor_id: actor_id)
+
+      cp = Bank.Fixtures.counterparty(workspace_id: ws.id)
+      _label = Bank.Fixtures.address_label(counterparty: cp, chain: "base")
+
+      _ =
+        Bank.Fixtures.trust_assertion(
+          subject: cp,
+          level: :trusted,
+          scope: %{}
+        )
+
+      intent =
+        Bank.Fixtures.agent_intent(
+          counterparty: cp,
+          workspace_id: ws.id,
+          amount: Decimal.new("25")
+        )
+
+      preview = preview_for(intent)
+
+      assert {:ok, result} =
+               Bank.Decisions.evaluate_intent(intent, preview: {:ok, preview})
+
+      ref = result.decision.policy_snapshot_ref
+      assert ref["policy_version_id"] == published.id
+      assert ref["policy_version_number"] == published.version_number
+      assert is_list(ref["rule_ids"])
+    end
+
+    test "decision in a workspace WITHOUT a published version stamps no version metadata (legacy fallback)",
+         _context do
+      # Greenfield workspace with no published version. The legacy
+      # rule-loading path runs and the snapshot ref carries only
+      # rule_ids — no version_id / version_number keys.
+      cp = Bank.Fixtures.counterparty()
+      _label = Bank.Fixtures.address_label(counterparty: cp, chain: "base")
+      _ = Bank.Fixtures.trust_assertion(subject: cp, level: :trusted, scope: %{})
+
+      intent = Bank.Fixtures.agent_intent(counterparty: cp, amount: Decimal.new("25"))
+      preview = preview_for(intent)
+
+      assert {:ok, result} =
+               Bank.Decisions.evaluate_intent(intent, preview: {:ok, preview})
+
+      ref = result.decision.policy_snapshot_ref
+      refute Map.has_key?(ref, "policy_version_id")
+      refute Map.has_key?(ref, "policy_version_number")
+    end
+
+    test "old decision's pinned version survives a new publish (replay determinism)",
+         %{workspace: ws, actor_id: actor_id} do
+      rule_v1 = Bank.Fixtures.policy_rule(rule_type: :amount_limit, state: :active)
+
+      {:ok, draft1} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [rule_v1.id]}
+        )
+
+      {:ok, v1} = Versions.publish_draft(draft1, published_by: :user, actor_id: actor_id)
+
+      cp = Bank.Fixtures.counterparty(workspace_id: ws.id)
+      _label = Bank.Fixtures.address_label(counterparty: cp, chain: "base")
+      _ = Bank.Fixtures.trust_assertion(subject: cp, level: :trusted, scope: %{})
+
+      intent =
+        Bank.Fixtures.agent_intent(
+          counterparty: cp,
+          workspace_id: ws.id,
+          amount: Decimal.new("25")
+        )
+
+      preview = preview_for(intent)
+
+      {:ok, result} = Bank.Decisions.evaluate_intent(intent, preview: {:ok, preview})
+
+      assert result.decision.policy_snapshot_ref["policy_version_id"] == v1.id
+      assert result.decision.policy_snapshot_ref["policy_version_number"] == 1
+
+      # Operator publishes a new version with a different rule id.
+      rule_v2 = Bank.Fixtures.policy_rule(rule_type: :amount_limit, state: :active)
+
+      {:ok, draft2} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [rule_v2.id]}
+        )
+
+      {:ok, _v2} = Versions.publish_draft(draft2, published_by: :user, actor_id: actor_id)
+
+      # The OLD decision's pinned snapshot is unchanged. Replay
+      # determinism is preserved at the decision row level — the
+      # decision was pinned to v1 and stays pinned to v1.
+      reloaded = Repo.get!(Bank.Decisions.DecisionEnvelope, result.decision.id)
+      assert reloaded.policy_snapshot_ref["policy_version_id"] == v1.id
+      assert reloaded.policy_snapshot_ref["policy_version_number"] == 1
+    end
+
+    test "fail-closed: published version that resolves to 0 active rules blocks the decision",
+         %{workspace: ws, actor_id: actor_id} do
+      # Publish a version with rule_ids that don't resolve to any
+      # :active rule (use a ghost UUID and an :archived rule).
+      rule_archived = Bank.Fixtures.policy_rule(rule_type: :amount_limit, state: :archived)
+      ghost = Ecto.UUID.generate()
+
+      {:ok, draft} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [rule_archived.id, ghost]}
+        )
+
+      {:ok, _published} = Versions.publish_draft(draft, published_by: :user, actor_id: actor_id)
+
+      cp = Bank.Fixtures.counterparty(workspace_id: ws.id)
+      _label = Bank.Fixtures.address_label(counterparty: cp, chain: "base")
+      _ = Bank.Fixtures.trust_assertion(subject: cp, level: :trusted, scope: %{})
+
+      intent =
+        Bank.Fixtures.agent_intent(
+          counterparty: cp,
+          workspace_id: ws.id,
+          amount: Decimal.new("25")
+        )
+
+      preview = preview_for(intent)
+
+      # Pass `paused?: false` explicitly so the test result does not
+      # depend on `Bank.Security.PauseState`'s process-global state
+      # (CI has seen leakage from sibling test files).
+      assert {:ok, result} =
+               Bank.Decisions.evaluate_intent(intent,
+                 preview: {:ok, preview},
+                 paused?: false
+               )
+
+      # Fail-closed: blocked by the policy_version_unresolved guard.
+      assert result.outcome == :block
+    end
+  end
+
+  # --- preview helper --------------------------------------------------
+
+  defp preview_for(intent) do
+    %Bank.Quotes.Preview{
+      balance_impact: %{intent.asset => Decimal.negate(intent.amount)},
+      estimated_gas: 120_000,
+      estimated_fee: Decimal.new("0.00015"),
+      fee_asset: "ETH",
+      route: %{"type" => "erc20_transfer", "asset" => intent.asset},
+      failure_conditions: ["balance falls below requested amount"],
+      provider: "stub",
+      provider_trace_ref: "stub-fixture",
+      generated_at: DateTime.utc_now(),
+      freshness_ttl_seconds: 30
+    }
+  end
 end

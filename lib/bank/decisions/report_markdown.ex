@@ -334,9 +334,33 @@ defmodule Bank.Decisions.ReportMarkdown do
       "- State: `",
       d[:state] || "(unknown)",
       "`\n",
+      policy_version_pin_line(d),
       "\n",
       reasons_block
     ]
+  end
+
+  # Render the decision's pinned policy version (#226) when
+  # present. Legacy decisions (made before the policy-version
+  # surface) carry no version metadata; render nothing in that
+  # case so the existing snapshot stays back-compat.
+  defp policy_version_pin_line(d) do
+    case {Map.get(d, :policy_version_id), Map.get(d, :policy_version_number)} do
+      {nil, _} ->
+        []
+
+      {_id, nil} ->
+        []
+
+      {id, num} ->
+        [
+          "- Policy version: `v",
+          to_string(num),
+          "` (",
+          short(id),
+          ")\n"
+        ]
+    end
   end
 
   # Bare-string reason items are programmer-written labels (e.g.

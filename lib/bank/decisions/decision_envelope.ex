@@ -8,12 +8,27 @@ defmodule Bank.Decisions.DecisionEnvelope do
 
   `policy_snapshot_ref` is a jsonb object of the shape:
 
-      %{"rule_ids" => ["uuid-1", "uuid-2", ...]}
+      %{
+        "rule_ids" => ["uuid-1", "uuid-2", ...],
+        # Optional, set when the workspace had a published
+        # `Bank.Policies.PolicyVersion` at decision time (#226):
+        "policy_version_id" => "uuid",
+        "policy_version_number" => 3
+      }
 
-  Those uuids point at `policy_rules.id`. Because the `policy_rules`
-  table is append-only (edits supersede rather than mutate), capturing
-  the rule uuids at decision time is sufficient for deterministic
-  replay — the referenced rows never change.
+  Those rule uuids point at `policy_rules.id`. Because the
+  `policy_rules` table is append-only (edits supersede rather
+  than mutate), capturing the rule uuids at decision time is
+  sufficient for deterministic replay — the referenced rows
+  never change.
+
+  When `policy_version_id` is present, the decision was pinned
+  to a specific published policy version (#223 / #226). Replay
+  reads continue to work even if a future operator publishes a
+  new version or rolls back: the original decision's pinned ids
+  resolve to the same `policy_rules` rows. Decisions made before
+  the policy-version surface (legacy) carry only `rule_ids` and
+  no version metadata; that path remains valid.
 
   ## Approval path
 
@@ -130,6 +145,19 @@ defmodule Bank.Decisions.DecisionEnvelope do
       do: ids
 
   def snapshot_rule_ids(_), do: []
+
+  @doc """
+  Extract `{policy_version_id, policy_version_number}` from the
+  `policy_snapshot_ref` (#226). Returns `{nil, nil}` for legacy
+  envelopes that pre-date the policy-version surface.
+  """
+  @spec snapshot_version(t() | nil) ::
+          {String.t() | nil, integer() | nil}
+  def snapshot_version(%__MODULE__{policy_snapshot_ref: ref}) when is_map(ref) do
+    {Map.get(ref, "policy_version_id"), Map.get(ref, "policy_version_number")}
+  end
+
+  def snapshot_version(_), do: {nil, nil}
 
   defp validate_policy_snapshot_shape(changeset) do
     case get_field(changeset, :policy_snapshot_ref) do
