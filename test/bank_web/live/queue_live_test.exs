@@ -110,6 +110,26 @@ defmodule BankWeb.QueueLiveTest do
       # Total items > 0 so badge appears
       refute html =~ ~s(id="empty-queue")
     end
+
+    test "expanded row shows a Download report link pointing at the #250 endpoint (#251)",
+         %{conn: conn, envelope: envelope, intent: intent} do
+      {:ok, view, _html} = live(conn, "/queue")
+
+      # The "Details" expander reveals the intent-replay + report
+      # links. Click it before asserting on the link's presence.
+      view |> element("#details-btn-#{envelope.id}") |> render_click()
+
+      assert has_element?(
+               view,
+               ~s(a#decision-report-link-#{envelope.id}[href="/v1/intents/#{intent.id}/report"]),
+               "Download report"
+             )
+
+      assert has_element?(
+               view,
+               ~s(a#decision-report-link-#{envelope.id}[target="_blank"])
+             )
+    end
   end
 
   # --- Held actions ---------------------------------------------------------

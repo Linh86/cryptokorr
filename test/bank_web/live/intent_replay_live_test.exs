@@ -201,6 +201,90 @@ defmodule BankWeb.IntentReplayLiveTest do
     end
   end
 
+  describe "decision report panel (#251)" do
+    setup do
+      intent = agent_intent(chain: "base")
+      %{intent: intent}
+    end
+
+    test "renders the report panel with stable element ids and a download link to the #250 endpoint",
+         %{conn: conn, intent: intent} do
+      {:ok, view, _html} = live(conn, "/audit/replay/#{intent.id}")
+
+      assert has_element?(view, "#decision-report-panel")
+      assert has_element?(view, "#decision-report-flags")
+      assert has_element?(view, "#decision-report-chain")
+      assert has_element?(view, "#decision-report-network")
+      assert has_element?(view, "#decision-report-broadcast")
+
+      # The download link points at the existing #250 controller.
+      assert has_element?(
+               view,
+               ~s(a#decision-report-download[href="/v1/intents/#{intent.id}/report"])
+             )
+
+      # Defence-in-depth: the link opens in a new tab so a download
+      # cannot replace the operator's replay page; `noopener`
+      # prevents the new tab from referencing window.opener.
+      assert has_element?(view, "a#decision-report-download[target=\"_blank\"]")
+      assert has_element?(view, "a#decision-report-download[rel=\"noopener\"]")
+    end
+
+    test "labels the network as testnet for base-sepolia and stub for an un-broadcast intent",
+         %{conn: conn} do
+      intent = agent_intent(chain: "base-sepolia")
+
+      {:ok, view, _html} = live(conn, "/audit/replay/#{intent.id}")
+
+      assert has_element?(
+               view,
+               ~s(#decision-report-network[data-network="testnet"]),
+               "Testnet"
+             )
+
+      assert has_element?(
+               view,
+               ~s(#decision-report-broadcast[data-broadcast="stub"]),
+               "Stub / no broadcast"
+             )
+
+      assert has_element?(
+               view,
+               ~s(#decision-report-chain[data-chain="base-sepolia"])
+             )
+    end
+
+    test "labels the network as mainnet when the intent is on a mainnet chain",
+         %{conn: conn} do
+      intent = agent_intent(chain: "base")
+
+      {:ok, view, _html} = live(conn, "/audit/replay/#{intent.id}")
+
+      assert has_element?(
+               view,
+               ~s(#decision-report-network[data-network="mainnet"]),
+               "Mainnet"
+             )
+    end
+
+    test "cross-workspace mount still hides the panel (page redirects with 'not found')",
+         %{conn: conn} do
+      {:ok, ws_b} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "iso-report-b-#{System.unique_integer([:positive])}",
+          name: "Report sibling"
+        })
+
+      cp_b = counterparty(workspace_id: ws_b.id)
+      intent_b = agent_intent(workspace_id: ws_b.id, target_counterparty_id: cp_b.id)
+
+      assert {:error, {:live_redirect, %{to: "/audit", flash: flash}}} =
+               live(conn, "/audit/replay/#{intent_b.id}")
+
+      assert flash["error"] =~ "not found"
+    end
+  end
+
   describe "refresh" do
     test "refresh button reloads the bundle", %{conn: conn} do
       intent = agent_intent()

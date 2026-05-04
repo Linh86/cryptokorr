@@ -435,13 +435,23 @@ defmodule BankWeb.QueueLive do
         </div>
         <div class="col-span-2">
           <dt class="text-base-content/40">Intent replay</dt>
-          <dd>
+          <dd class="flex flex-wrap items-center gap-x-4 gap-y-1">
             <.link
               :if={@decision.intent_id}
               navigate={~p"/audit/replay/#{@decision.intent_id}"}
               class="link link-primary"
             >
               Open timeline
+            </.link>
+            <.link
+              :if={@decision.intent_id}
+              id={"decision-report-link-#{@decision.id}"}
+              href={~p"/v1/intents/#{@decision.intent_id}/report"}
+              target="_blank"
+              rel="noopener"
+              class="link"
+            >
+              Download report
             </.link>
           </dd>
         </div>

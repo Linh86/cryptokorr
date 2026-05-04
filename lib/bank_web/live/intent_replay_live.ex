@@ -28,6 +28,7 @@ defmodule BankWeb.IntentReplayLive do
   use BankWeb, :live_view
 
   alias Bank.{Audit, Intents}
+  alias Bank.Decisions.Report
 
   @impl true
   def mount(%{"intent_id" => intent_id}, _session, socket) do
@@ -54,6 +55,7 @@ defmodule BankWeb.IntentReplayLive do
         |> assign(page_title: "Replay")
         |> assign(:intent_id, uuid)
         |> assign(:bundle, bundle)
+        |> assign(:report, Report.from_bundle(bundle))
 
       {:ok, socket}
     else
@@ -74,6 +76,7 @@ defmodule BankWeb.IntentReplayLive do
         {:noreply,
          socket
          |> assign(:bundle, bundle)
+         |> assign(:report, Report.from_bundle(bundle))
          |> put_flash(:info, "Replay refreshed")}
 
       {:error, :not_found} ->
@@ -86,8 +89,14 @@ defmodule BankWeb.IntentReplayLive do
   @impl true
   def handle_info(%{topic: topic}, socket) when topic in [:audit_stream, :intent_lifecycle] do
     case Audit.replay(socket.assigns.intent_id) do
-      {:ok, bundle} -> {:noreply, assign(socket, :bundle, bundle)}
-      {:error, :not_found} -> {:noreply, socket}
+      {:ok, bundle} ->
+        {:noreply,
+         socket
+         |> assign(:bundle, bundle)
+         |> assign(:report, Report.from_bundle(bundle))}
+
+      {:error, :not_found} ->
+        {:noreply, socket}
     end
   end
 
@@ -122,6 +131,7 @@ defmodule BankWeb.IntentReplayLive do
       <%!-- Sections in operator-reading order --%>
       <div class="space-y-6">
         <.intent_card intent={@bundle.intent} />
+        <.decision_report_card intent_id={@intent_id} report={@report} />
         <.audit_timeline_card events={@bundle.audit} />
         <.stablecoin_route_card routes={@bundle[:stablecoin_route_evidence] || []} />
         <.trust_history_card trust_assessments={@bundle.trust_assessments} />
@@ -179,6 +189,93 @@ defmodule BankWeb.IntentReplayLive do
         />
         <.detail_item label="Submitted" value={format_datetime(@intent.submitted_at)} />
         <.detail_item label="Idempotency key" value={@intent.idempotency_key} mono />
+      </div>
+    </section>
+    """
+  end
+
+  # --- Section: decision report (#251) -------------------------------------
+  #
+  # Renders the deterministic Report.flags_section/2 (mainnet/testnet
+  # + live/stub) plus a download link to the existing #250 endpoint
+  # `GET /v1/intents/:id/report`. Read-only: no mutating events on
+  # the surface, no chain calls. The download link reuses the
+  # API-side workspace gate, so cross-workspace ids resolve to 404.
+
+  attr :intent_id, :string, required: true
+  attr :report, :map, required: true
+
+  defp decision_report_card(assigns) do
+    ~H"""
+    <section
+      id="decision-report-panel"
+      class="rounded-xl border border-base-300 bg-base-100 shadow-sm overflow-hidden"
+    >
+      <header class="px-6 py-4 border-b border-base-300 flex items-center justify-between">
+        <h2 class="text-sm font-semibold flex items-center gap-1.5">
+          <.icon name="hero-document-arrow-down" class="size-4" /> Decision report
+        </h2>
+        <.link
+          id="decision-report-download"
+          href={~p"/v1/intents/#{@intent_id}/report"}
+          target="_blank"
+          rel="noopener"
+          class="btn btn-sm btn-primary gap-1.5"
+        >
+          <.icon name="hero-arrow-down-tray" class="size-3.5" /> Download Markdown
+        </.link>
+      </header>
+      <div class="px-6 py-5 space-y-3">
+        <div id="decision-report-flags" class="flex flex-wrap items-center gap-2 text-xs">
+          <span class="text-base-content/40">Chain</span>
+          <span
+            id="decision-report-chain"
+            class="badge badge-sm badge-ghost font-mono"
+            data-chain={@report.flags.chain || ""}
+          >
+            {@report.flags.chain || "—"}
+          </span>
+
+          <span
+            id="decision-report-network"
+            class={[
+              "badge badge-sm",
+              cond do
+                @report.flags.mainnet? -> "badge-error"
+                @report.flags.testnet? -> "badge-warning"
+                true -> "badge-ghost"
+              end
+            ]}
+            data-network={
+              cond do
+                @report.flags.mainnet? -> "mainnet"
+                @report.flags.testnet? -> "testnet"
+                true -> "unknown"
+              end
+            }
+          >
+            {cond do
+              @report.flags.mainnet? -> "Mainnet"
+              @report.flags.testnet? -> "Testnet"
+              true -> "Network: unknown"
+            end}
+          </span>
+
+          <span
+            id="decision-report-broadcast"
+            class={["badge badge-sm", if(@report.flags.live?, do: "badge-error", else: "badge-info")]}
+            data-broadcast={if @report.flags.live?, do: "live", else: "stub"}
+          >
+            {if @report.flags.live?, do: "Live broadcast", else: "Stub / no broadcast"}
+          </span>
+        </div>
+
+        <p class="text-xs text-base-content/60">
+          The report is a deterministic Markdown projection of the
+          replay bundle (no secrets, no signing material). Same
+          intent → same body, byte-stable. Workspace-scoped: a
+          sibling workspace's intent id resolves to 404.
+        </p>
       </div>
     </section>
     """
