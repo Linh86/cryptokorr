@@ -338,4 +338,132 @@ defmodule Bank.AccessAdminTest do
     Enum.find(rows, fn row -> row.user.id == user_id end)
     |> Map.get(:classification)
   end
+
+  describe "approve_pending_user/3 — notification emission (#234)" do
+    alias Bank.Notifications
+    alias Bank.Notifications.Notification
+
+    test "creating a fresh membership lands an :info notification for the new user" do
+      put_admins(["admin@example.com"])
+      admin = create_user(email: "admin@example.com")
+      target = create_user(email: "alice@example.com")
+      ws = create_workspace("notif-ws-fresh")
+
+      assert {:ok, :membership_created, m} =
+               Access.approve_pending_user(admin, target,
+                 workspace_id: ws.id,
+                 role: :operator
+               )
+
+      [n] = Notifications.list_for_workspace(ws.id)
+      assert %Notification{} = n
+      assert n.event_type == "access.approved"
+      assert n.severity == :info
+      assert n.user_id == target.id
+      assert n.role_target == nil
+      assert n.subject_type == "membership"
+      assert n.subject_id == m.id
+      assert n.correlation_id == target.id
+      assert n.action_link == "/dashboard"
+      assert n.dedupe_key == "access:approved:#{target.id}:#{ws.id}"
+      assert n.title =~ "notif-ws-fresh"
+      assert n.body =~ "operator"
+    end
+
+    test "reactivating an inactive membership also lands a notification" do
+      put_admins(["admin@example.com"])
+      admin = create_user(email: "admin@example.com")
+      target = create_user(email: "alice@example.com")
+      ws = create_workspace("notif-ws-react")
+
+      {:ok, m} =
+        Workspaces.create_membership(%{
+          user_id: target.id,
+          workspace_id: ws.id,
+          role: :operator
+        })
+
+      {:ok, _} = Workspaces.set_status(m, :inactive)
+
+      assert {:ok, :membership_reactivated, _reactivated} =
+               Access.approve_pending_user(admin, target,
+                 workspace_id: ws.id,
+                 role: :operator
+               )
+
+      [n] = Notifications.list_for_workspace(ws.id)
+      assert n.event_type == "access.approved"
+      assert n.user_id == target.id
+      assert n.dedupe_key == "access:approved:#{target.id}:#{ws.id}"
+    end
+
+    test ":already_member is a silent no-op (no second notification row)" do
+      put_admins(["admin@example.com"])
+      admin = create_user(email: "admin@example.com")
+      target = create_user(email: "alice@example.com")
+      ws = create_workspace("notif-ws-idem")
+
+      {:ok, _m} =
+        Workspaces.create_membership(%{
+          user_id: target.id,
+          workspace_id: ws.id,
+          role: :operator
+        })
+
+      # No prior notification rows — the `:already_member` arm
+      # short-circuits with no audit and no inbox emission.
+      assert {:ok, :already_member, _} =
+               Access.approve_pending_user(admin, target,
+                 workspace_id: ws.id,
+                 role: :operator
+               )
+
+      assert Notifications.list_for_workspace(ws.id) == []
+    end
+
+    test "cross-workspace isolation: an approval in workspace A does not list under workspace B" do
+      put_admins(["admin@example.com"])
+      admin = create_user(email: "admin@example.com")
+      target = create_user(email: "alice@example.com")
+      ws_a = create_workspace("notif-ws-a")
+      ws_b = create_workspace("notif-ws-b")
+
+      assert {:ok, :membership_created, _} =
+               Access.approve_pending_user(admin, target,
+                 workspace_id: ws_a.id,
+                 role: :operator
+               )
+
+      assert [%Notification{workspace_id: a_id}] = Notifications.list_for_workspace(ws_a.id)
+      assert a_id == ws_a.id
+      assert Notifications.list_for_workspace(ws_b.id) == []
+    end
+
+    test "no inbox row even if Workspaces.create_workspace name carries a free-text-looking value " <>
+           "— title is composed from the slug only" do
+      put_admins(["admin@example.com"])
+      admin = create_user(email: "admin@example.com")
+      target = create_user(email: "alice@example.com")
+      # Even an operator-supplied workspace name like "Authorization
+      # Bearer LEAKED_PROBE" would never reach the inbox because we
+      # only embed the validated `slug` (regex `[a-z0-9_-]{1,63}`).
+      {:ok, ws} =
+        Workspaces.create_workspace(%{
+          slug: "notif-ws-secret",
+          name: "Authorization: Bearer LEAKED_PROBE"
+        })
+
+      assert {:ok, :membership_created, _} =
+               Access.approve_pending_user(admin, target,
+                 workspace_id: ws.id,
+                 role: :operator
+               )
+
+      [n] = Notifications.list_for_workspace(ws.id)
+      refute n.title =~ "Bearer"
+      refute n.title =~ "LEAKED_PROBE"
+      refute n.body =~ "Bearer"
+      refute n.body =~ "LEAKED_PROBE"
+    end
+  end
 end

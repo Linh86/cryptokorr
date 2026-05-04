@@ -20,6 +20,13 @@ defmodule Bank.Notifications.Emitter do
       `:aborted` (warning). `:confirmed` is intentionally silent
       until #234 ships an opt-in workspace setting (the issue
       body's "execution confirmed if configured" item).
+    * `emit_access_approved/1` — every `Bank.Access.approve_pending_user/3`
+      call that creates or reactivates a membership. Surfaces an
+      `:info` notification to the newly admitted user, scoped to
+      the workspace they were just admitted to. The pending /
+      requested and rejected access source paths are intentionally
+      silent here because they have no clean workspace boundary in
+      the current model — listed as remaining #234 blockers.
 
   ## Dedupe semantics
 
@@ -62,6 +69,8 @@ defmodule Bank.Notifications.Emitter do
   alias Bank.Decisions.ExecutionPlan
   alias Bank.Intents.AgentIntent
   alias Bank.Notifications
+  alias Bank.Workspaces.Membership
+  alias Bank.Workspaces.Workspace
 
   @type outcome_result ::
           {:ok, Notifications.Notification.t()}
@@ -226,6 +235,82 @@ defmodule Bank.Notifications.Emitter do
 
   defp execution_action_link_for(%AgentIntent{id: intent_id}) when is_binary(intent_id),
     do: "/audit/replay/#{intent_id}"
+
+  @doc """
+  Emit (or dedupe) an inbox notification for a successful
+  `Bank.Access.approve_pending_user/3` transition. The recipient
+  is the newly admitted user (`user_id`), so they see a concrete
+  inbox row when their membership lands. Always returns; never
+  raises — the access path's own `safe_emit/1` audit pattern is
+  preserved unchanged.
+
+  Caller passes the `%Membership{}` returned from
+  `Workspaces.create_membership/1` or
+  `Workspaces.set_status(_, :active)`. The workspace slug is
+  fetched here so the title can carry a stable, controlled-shape
+  identifier without threading it through every call site.
+  """
+  @spec emit_access_approved(Membership.t() | %{required(:workspace) => Workspace.t()}) ::
+          outcome_result()
+  def emit_access_approved(%Membership{} = membership) do
+    cond do
+      is_nil(membership.user_id) ->
+        {:skip, :no_user_id}
+
+      is_nil(membership.workspace_id) ->
+        {:skip, :no_workspace_id}
+
+      true ->
+        case Bank.Workspaces.get_workspace(membership.workspace_id) do
+          %Workspace{} = workspace ->
+            do_emit_access_approved(membership, workspace)
+
+          nil ->
+            {:skip, :workspace_not_found}
+        end
+    end
+  end
+
+  defp do_emit_access_approved(%Membership{} = membership, %Workspace{} = workspace) do
+    attrs = build_access_approved_attrs(membership, workspace)
+
+    case Notifications.create(attrs) do
+      {:ok, _} = ok ->
+        ok
+
+      {:duplicate, _} = dup ->
+        dup
+
+      {:error, changeset} = err ->
+        Logger.warning(
+          "Bank.Notifications.Emitter: access-approved notification rejected " <>
+            "(membership=#{membership.id} errors=#{inspect(changeset.errors)})"
+        )
+
+        err
+    end
+  end
+
+  defp build_access_approved_attrs(%Membership{} = membership, %Workspace{} = workspace) do
+    %{
+      workspace_id: membership.workspace_id,
+      user_id: membership.user_id,
+      event_type: "access.approved",
+      severity: :info,
+      subject_type: "membership",
+      subject_id: membership.id,
+      correlation_id: membership.user_id,
+      title: "Access approved: workspace #{workspace.slug}",
+      body: "Role: #{membership.role}",
+      action_link: "/dashboard",
+      # Re-running the approve path on an existing membership
+      # currently short-circuits at `Workspaces.set_status` /
+      # `Workspaces.create_membership`. Even so, the dedupe key
+      # keys on (user_id, workspace_id) so a hypothetical retry
+      # of the emit does not double-write.
+      dedupe_key: "access:approved:#{membership.user_id}:#{membership.workspace_id}"
+    }
+  end
 
   defp severity_for(:approval_required), do: :warning
   defp severity_for(:hold), do: :warning
