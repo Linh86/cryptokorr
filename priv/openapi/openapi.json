@@ -4091,6 +4091,53 @@
         ]
       }
     },
+    "/v1/intents/{id}/report": {
+      "get": {
+        "callbacks": {},
+        "description": "Returns a deterministic Markdown decision report for the given\nintent, wrapped with a metadata block (`schema_version`,\n`report_version`, `intent_id`, `workspace_id`, `generated_at`,\n`body_sha256`). The artifact is the canonical\n`Bank.Decisions.Report` (#248) rendered via\n`Bank.Decisions.ReportMarkdown` (#249) and wrapped via\n`Bank.Decisions.ReportExport` (#250).\n\nThe response sets `Content-Disposition: attachment;\nfilename=\"decision-report-<intent>-<hash>.md\"` for browser /\ncURL download. The same intent's replay bundle always produces\nthe same Markdown body and the same `body_sha256` digest, so\nthe artifact is suitable for audit cross-checks.\n\nWorkspace-scoped: cross-workspace intent ids collapse to 404.\nViewer-readable.\n",
+        "operationId": "BankWeb.API.V1.DecisionReportController.show",
+        "parameters": [
+          {
+            "description": "Opaque runtime-assigned agent intent id (UUID).",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Id"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/RequestIdIn"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/markdown": {
+                "schema": {
+                  "description": "Markdown body with HTML-comment metadata block at the top",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Decision report Markdown artifact"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        },
+        "summary": "Download decision report Markdown artifact",
+        "tags": [
+          "Decisions"
+        ]
+      }
+    },
     "/v1/intents/{id}/simulate": {
       "post": {
         "callbacks": {},
