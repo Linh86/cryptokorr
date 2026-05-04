@@ -54,7 +54,7 @@ transact against this record." disclaimer.
 
 One active delegation on `sa_demo_01` / `del_demo_01` / `base`.
 
-### Intents (9)
+### Intents (10)
 
 Every intent uses agent id `sandbox-demo-agent` and an idempotency
 key prefixed with `sandbox-`.
@@ -68,6 +68,7 @@ key prefixed with `sandbox-`.
 | `partner-x-approved`            | `[Sandbox] New Partner X`        | 1000   | `:executed`        | `:approval_required` | confirmed    |
 | `treasury-held`                 | `[Sandbox] Treasury Ops`         | 400    | `:decided`         | `:hold`              | —            |
 | `treasury-executing`            | `[Sandbox] Treasury Ops`         | 100    | `:executing`       | `:auto_exec`         | broadcasting |
+| `treasury-reverted`             | `[Sandbox] Treasury Ops`         | 200    | `:blocked`         | `:auto_exec`         | reverted     |
 | `unknown-blocked`               | `[Sandbox] Unverified Recipient` | 500    | `:blocked`         | `:block`             | —            |
 | `cancelled-pre-decision`        | `[Sandbox] Payroll Provider`     | 60     | `:cancelled`       | — (no decision)      | —            |
 

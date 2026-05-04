@@ -44,7 +44,7 @@ mix ecto.setup        # create + migrate from empty
 mix bank.demo.seed
 ```
 
-The full dataset is documented in [`docs/demo.md`](../demo.md): four `[Sandbox]`-prefixed counterparties, four active policy rules, one delegation on `sa_demo_01`, and nine intents covering submitted / decided-pending / executed / approval-required / held / executing / blocked / cancelled. Every row is visibly fake (`[Sandbox]` name, `0x111…1`-style addresses, `sandbox-demo-agent` agent id) and the seed is idempotent — re-running it does not duplicate rows.
+The full dataset is documented in [`docs/demo.md`](../demo.md): four `[Sandbox]`-prefixed counterparties, four active policy rules, one delegation on `sa_demo_01`, and ten intents covering submitted / decided-pending / executed / approval-required / held / executing / reverted / blocked / cancelled. Every row is visibly fake (`[Sandbox]` name, `0x111…1`-style addresses, `sandbox-demo-agent` agent id) and the seed is idempotent — re-running it does not duplicate rows.
 
 `mix bank.demo.seed` does **not** make any HTTP call, does **not** talk to the chain adapter, and does **not** require any environment variables.
 

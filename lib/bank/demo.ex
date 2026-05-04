@@ -499,6 +499,26 @@ defmodule Bank.Demo do
         final_status: nil,
         tx_hash: nil
       },
+      # `treasury-reverted` covers the "failed execution" example
+      # called out by #252: a planned dispatch that confirmed on the
+      # adapter side as `:reverted` (the on-chain transaction reverted
+      # or the bundler rejected it). Runtime maps this to
+      # `intent.state = :blocked` (see
+      # `Bank.Decisions.target_intent_state/1`), and the plan keeps
+      # `execution_status = :reverted` + `final_outcome = :reverted`
+      # — distinct from the policy-blocked scenario below, which has
+      # no plan at all.
+      %{
+        name: "treasury-reverted",
+        counterparty: "treasury",
+        amount: Decimal.new("200"),
+        phase: :planned,
+        decision_outcome: :auto_exec,
+        intent_state: :blocked,
+        execution_status: :reverted,
+        final_status: :reverted,
+        tx_hash: "0xabc333...sandbox-reverted"
+      },
       %{
         name: "unknown-blocked",
         counterparty: "unverified",
@@ -693,12 +713,17 @@ defmodule Bank.Demo do
           signing_requirements: %{"delegation_id" => @delegation_id, "scope" => %{}},
           tx_refs: if(scenario.tx_hash, do: [scenario.tx_hash], else: []),
           final_outcome: scenario.final_status,
-          final_reason: if(scenario.final_status == :confirmed, do: "sandbox_seed", else: nil),
+          final_reason: sandbox_final_reason(scenario.final_status),
           workspace_id: demo_workspace_id()
         })
         |> Repo.insert()
     end
   end
+
+  defp sandbox_final_reason(:confirmed), do: "sandbox_seed"
+  defp sandbox_final_reason(:reverted), do: "sandbox_seed: simulated revert"
+  defp sandbox_final_reason(:aborted), do: "sandbox_seed: simulated abort"
+  defp sandbox_final_reason(_), do: nil
 
   defp emit_submitted_audit(intent) do
     insert_audit_event(%{

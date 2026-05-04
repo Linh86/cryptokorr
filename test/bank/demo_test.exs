@@ -57,7 +57,7 @@ defmodule Bank.DemoTest do
         |> where([i], i.agent_id in ^ids.agent_ids)
         |> Repo.all()
 
-      assert length(intents) == 9
+      assert length(intents) == 10
     end
 
     test "covers every #238 intent state (submitted, decided, approval_required, held, cancelled, executing, executed, blocked)" do
@@ -482,7 +482,7 @@ defmodule Bank.DemoTest do
 
       assert AgentIntent
              |> where([i], i.agent_id in ^ids.agent_ids)
-             |> Repo.aggregate(:count) == 9
+             |> Repo.aggregate(:count) == 10
     end
 
     test "cleans up legacy unprefixed counterparties + demo-agent rows" do

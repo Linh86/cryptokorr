@@ -352,7 +352,17 @@ defmodule BankWeb.SandboxLiveTest do
       refute html =~ "Authorization:"
       refute html =~ "cb_"
       refute html =~ "sk_"
-      refute html =~ "0x"
+      # Match `0x` only when followed by ≥ 20 hex chars — the shape
+      # of a real Ethereum address (40), tx_hash (64), or private
+      # key (64). The earlier bare `"0x"` substring check was
+      # structurally flaky against the page's `data-phx-session`
+      # base64 blob, whose alphabet includes `0` and `x` and so can
+      # incidentally produce `0x` as a 2-char substring with no
+      # leak shape behind it. Real Eth-flavored leaks always have
+      # ≥ 20 hex chars right after `0x`.
+      refute html =~ ~r/\b0x[0-9a-fA-F]{20,}\b/,
+             "page rendered a real Eth-shaped hex blob"
+
       refute html =~ "BEGIN "
       refute html =~ "private_key"
       refute html =~ "signing"
