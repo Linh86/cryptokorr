@@ -103,6 +103,12 @@ defmodule BankWeb.Layouts do
             active={@active_page == :security}
           />
           <.nav_item
+            href="/ops"
+            icon="hero-cpu-chip"
+            label="Operations"
+            active={@active_page == :ops}
+          />
+          <.nav_item
             :if={@admin_visible?}
             href="/admin/api_keys"
             icon="hero-key"
