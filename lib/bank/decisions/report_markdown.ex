@@ -58,6 +58,18 @@ defmodule Bank.Decisions.ReportMarkdown do
       a small fee-summary subset. Nested raw shapes
       (`quote_request`, `legs`, `selector_metadata`,
       `policy_reasons`, `reason`) are NOT rendered (#249 P2).
+    * Allowlists every renderable raw-address surface
+      (`intent.target.address` for the raw-address target kind +
+      `screening_evidence.screened_address`) to the EVM
+      `0x[a-f0-9]{40}` shape. `Bank.Intents` accepts any non-empty
+      `target_raw_address` string and the screening flow echoes
+      the same value into `screened_address`, so an agent or
+      operator could otherwise paste an Authorization header, a
+      `sk_(test|live)_…` token, a tokenized URL, or a PEM marker
+      into the field and have it render verbatim into the
+      exported decision report. Anything that does not match the
+      EVM-address shape collapses to
+      `(redacted non-address raw target)` (#250 P2).
     * Truncates long ids in tables for readability without
       exposing additional fields.
     * Wraps every value in backticks so a stray newline or
@@ -254,7 +266,7 @@ defmodule Bank.Decisions.ReportMarkdown do
       "counterparty: " <> short(t[:counterparty_id]) <> address_label_suffix(t[:address_label_id])
 
   defp target_label(%{kind: "raw_address"} = t),
-    do: "raw_address: " <> (t[:address] || "")
+    do: "raw_address: " <> safe_raw_address(t[:address])
 
   defp target_label(%{kind: "unspecified"}), do: "(unspecified)"
   defp target_label(_), do: "(unknown)"
@@ -460,7 +472,7 @@ defmodule Bank.Decisions.ReportMarkdown do
       s[:outcome] || "(unknown)",
       "`\n",
       "- Screened address: `",
-      s[:screened_address] || "(none)",
+      safe_raw_address(s[:screened_address]),
       "`\n",
       "- Screened chain: `",
       s[:screened_chain] || "(none)",
@@ -831,4 +843,32 @@ defmodule Bank.Decisions.ReportMarkdown do
   defp numeric_status?(s) when is_binary(s) do
     s != "" and String.match?(s, ~r/^\d+$/)
   end
+
+  # --- raw target address allowlist (#250 P2) -----------------------------
+  #
+  # `Bank.Intents` accepts any non-empty `target_raw_address`
+  # string. Agents/operators can therefore paste arbitrary content
+  # (Authorization headers, `sk_(test|live)_…` tokens, RPC URLs
+  # with embedded credentials, PEM markers) and have it render
+  # verbatim into the exported decision report. Default-deny
+  # against the EVM `0x[a-f0-9]{40}` shape (case-insensitive on
+  # the hex body), which is the only address shape any v0.1 chain
+  # in the codebase emits (`base`, `ethereum`, `base-sepolia`,
+  # `sepolia`, `goerli`). Anything else collapses to
+  # `(redacted non-address raw target)` so the export still tells
+  # a reviewer that a raw_address target was set, just not what
+  # operator-supplied bytes were in it.
+
+  @evm_raw_address_regex ~r/^0x[a-fA-F0-9]{40}$/
+
+  defp safe_raw_address(nil), do: "(none)"
+  defp safe_raw_address(""), do: "(none)"
+
+  defp safe_raw_address(value) when is_binary(value) do
+    if String.match?(value, @evm_raw_address_regex),
+      do: value,
+      else: "(redacted non-address raw target)"
+  end
+
+  defp safe_raw_address(_), do: "(redacted non-address raw target)"
 end

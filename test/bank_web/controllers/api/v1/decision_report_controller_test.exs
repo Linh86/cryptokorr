@@ -243,6 +243,92 @@ defmodule BankWeb.API.V1.DecisionReportControllerTest do
       refute body =~ "raw_provider_payload"
       refute body =~ ~r/sk_(test|live)_/
     end
+
+    # --- raw target address (#250 P2) -----------------------------------
+
+    test "secret-bearing target_raw_address does not leak through the export (#250 P2)",
+         %{conn: conn} do
+      # `Bank.Intents` accepts any non-empty `target_raw_address`,
+      # so an agent or operator could paste arbitrary content into
+      # the field. Pre-#250-P2 the renderer concatenated the value
+      # into the Intent table verbatim, leaking it through the
+      # export body, the body_sha256 / filename derivation, and
+      # the response headers.
+      planted =
+        "Authorization: Bearer sk_live_RAW_ADDR_PROBE | " <>
+          "https://secret@example.test/rpc | " <>
+          "-----BEGIN PRIVATE KEY----- | private_key=hex_blob"
+
+      intent =
+        agent_intent(
+          target_counterparty_id: nil,
+          target_raw_address: planted
+        )
+
+      _decision = decision_envelope(intent: intent, outcome: :auto_exec, current: true)
+
+      conn = get(conn, ~p"/v1/intents/#{intent.id}/report")
+
+      body = response(conn, 200)
+      [disposition] = get_resp_header(conn, "content-disposition")
+      [hash_header] = get_resp_header(conn, "x-decision-report-hash")
+      [generated_at_header] = get_resp_header(conn, "x-decision-report-generated-at")
+
+      # Body asserts — the markers from the P2 finding must NOT
+      # appear anywhere in the rendered Markdown body.
+      refute body =~ "Bearer "
+      refute body =~ "Authorization:"
+      refute body =~ "BEGIN PRIVATE KEY"
+      refute body =~ "private_key"
+      refute body =~ "secret@example.test"
+      refute body =~ "secret@"
+      refute body =~ "user:pass@"
+      refute body =~ ~r/sk_(test|live)_/
+
+      # Body MUST still mention the raw_address kind, with the
+      # safe redaction placeholder — preserves the
+      # "missing/redacted evidence is labelled, not hidden" contract.
+      assert body =~ "raw_address: (redacted non-address raw target)"
+
+      # Filename / response headers MUST also be free of the
+      # planted markers (filename derives from intent UUID + body
+      # hash; headers from generated_at + body hash + schema
+      # version — none of which can echo operator-supplied bytes).
+      refute disposition =~ "Bearer"
+      refute disposition =~ ~r/sk_(test|live)_/
+      refute disposition =~ "BEGIN"
+      refute disposition =~ "private_key"
+      refute disposition =~ "secret@"
+
+      assert hash_header =~ ~r/^sha256:[a-f0-9]{64}$/
+      refute hash_header =~ "Bearer"
+      refute hash_header =~ "private_key"
+
+      refute generated_at_header =~ "Bearer"
+      refute generated_at_header =~ "private_key"
+    end
+
+    test "valid EVM target_raw_address renders verbatim (regression backstop)",
+         %{conn: conn} do
+      # Backstop: the redaction MUST NOT break the legitimate path.
+      # A valid EVM address is real evidence and should appear in
+      # the export so a reviewer can cross-check on a chain explorer.
+      addr = "0x1234567890abcdef1234567890abcdef12345678"
+
+      intent =
+        agent_intent(
+          target_counterparty_id: nil,
+          target_raw_address: addr
+        )
+
+      _decision = decision_envelope(intent: intent, outcome: :auto_exec, current: true)
+
+      conn = get(conn, ~p"/v1/intents/#{intent.id}/report")
+      body = response(conn, 200)
+
+      assert body =~ "raw_address: " <> addr
+      refute body =~ "(redacted non-address raw target)"
+    end
   end
 
   # --- helpers -----------------------------------------------------------
