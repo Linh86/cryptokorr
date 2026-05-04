@@ -1184,6 +1184,210 @@ defmodule Bank.Activity.ChainSyncTest do
     end
   end
 
+  describe "sync_address/4 — reason sanitizer hardening (#245 P2 follow-up)" do
+    # The earlier sanitizer only checked a substring list. These
+    # patterns slip past `https://` and `begin private key` exact
+    # substrings — they must still collapse to "[REDACTED]" in
+    # both `last_reason` (delegation) and `final_reason`
+    # (execution_plan) projections.
+    @credentialed_url_leaks [
+      "http://user:pass@example.test/rpc",
+      "https://user:pass@example.test",
+      "wss://user:pass@example.test",
+      "ws://user:secret@host:8080/feed",
+      "ftp://admin:password@files.example.test"
+    ]
+
+    @pem_variants [
+      "-----BEGIN RSA PRIVATE KEY-----",
+      "-----BEGIN EC PRIVATE KEY-----",
+      "-----BEGIN OPENSSH PRIVATE KEY-----",
+      "-----BEGIN ENCRYPTED PRIVATE KEY-----",
+      "-----BEGIN DSA PRIVATE KEY-----"
+    ]
+
+    @marker_needles [
+      "user:pass@",
+      "user:secret@",
+      "admin:password@",
+      "BEGIN RSA PRIVATE KEY",
+      "BEGIN EC PRIVATE KEY",
+      "BEGIN OPENSSH PRIVATE KEY",
+      "BEGIN ENCRYPTED PRIVATE KEY",
+      "BEGIN DSA PRIVATE KEY"
+    ]
+
+    test "delegation last_reason with credentialed URL variants collapses to '[REDACTED]'",
+         %{workspace: ws} do
+      for {leak, idx} <- Enum.with_index(@credentialed_url_leaks) do
+        sa = "sa-url-d-#{idx}-#{System.unique_integer([:positive])}"
+        revoke_tx = "0xurl-d-#{idx}-tx-000000000000000000000000000000000000000000000aaa"
+
+        _ =
+          Bank.Fixtures.delegation(
+            workspace_id: ws.id,
+            smart_account_id: sa,
+            chain: "base-sepolia",
+            state: :revoked,
+            revoked_at: ~U[2026-02-01 12:00:00.000000Z],
+            last_tx_hash: revoke_tx,
+            last_reason: "callback note: " <> leak <> " end"
+          )
+
+        {:ok, _} =
+          ChainSync.sync_address(ws.id, "base-sepolia", sa, source_type: :smart_account_chain)
+
+        row =
+          Activity.list_imported_activities(workspace_id: ws.id)
+          |> Enum.find(&(&1.metadata["smart_account_id"] == sa))
+
+        assert row, "expected an imported row for #{sa}"
+
+        assert row.metadata["last_reason"] == "[REDACTED]",
+               "credentialed URL leaked through last_reason for #{leak}"
+
+        for needle <- @marker_needles do
+          refute String.contains?(row.metadata["last_reason"], needle),
+                 "needle #{inspect(needle)} leaked through last_reason for #{leak}"
+        end
+      end
+    end
+
+    test "execution final_reason with credentialed URL variants collapses to '[REDACTED]'",
+         %{workspace: ws} do
+      for {leak, idx} <- Enum.with_index(@credentialed_url_leaks) do
+        sa = "sa-url-x-#{idx}-#{System.unique_integer([:positive])}"
+        tx = "0xurl-x-#{idx}-tx-0000000000000000000000000000000000000000000000bbb"
+
+        _ =
+          Bank.Fixtures.execution_plan(%{
+            workspace_id: ws.id,
+            smart_account_id: sa,
+            chain: "base-sepolia",
+            asset: "USDC",
+            tx_refs: [tx],
+            execution_status: :reverted,
+            final_outcome: :reverted,
+            final_reason: "adapter said: " <> leak
+          })
+
+        {:ok, _} =
+          ChainSync.sync_address(ws.id, "base-sepolia", sa, source_type: :smart_account_chain)
+
+        row =
+          Activity.list_imported_activities(workspace_id: ws.id)
+          |> Enum.find(&(&1.metadata["smart_account_id"] == sa))
+
+        assert row, "expected an imported row for #{sa}"
+
+        assert row.metadata["final_reason"] == "[REDACTED]",
+               "credentialed URL leaked through final_reason for #{leak}"
+
+        for needle <- @marker_needles do
+          refute String.contains?(row.metadata["final_reason"], needle),
+                 "needle #{inspect(needle)} leaked through final_reason for #{leak}"
+        end
+      end
+    end
+
+    test "delegation last_reason with PEM private-key variants collapses to '[REDACTED]'",
+         %{workspace: ws} do
+      for {leak, idx} <- Enum.with_index(@pem_variants) do
+        sa = "sa-pem-d-#{idx}-#{System.unique_integer([:positive])}"
+        revoke_tx = "0xpem-d-#{idx}-tx-000000000000000000000000000000000000000000000ccc"
+
+        _ =
+          Bank.Fixtures.delegation(
+            workspace_id: ws.id,
+            smart_account_id: sa,
+            chain: "base-sepolia",
+            state: :revoked,
+            revoked_at: ~U[2026-02-01 12:00:00.000000Z],
+            last_tx_hash: revoke_tx,
+            last_reason: "operator pasted: " <> leak <> "MIIE..."
+          )
+
+        {:ok, _} =
+          ChainSync.sync_address(ws.id, "base-sepolia", sa, source_type: :smart_account_chain)
+
+        row =
+          Activity.list_imported_activities(workspace_id: ws.id)
+          |> Enum.find(&(&1.metadata["smart_account_id"] == sa))
+
+        assert row, "expected an imported row for #{sa}"
+
+        assert row.metadata["last_reason"] == "[REDACTED]",
+               "PEM variant leaked through last_reason for #{leak}"
+
+        for needle <- @marker_needles do
+          refute String.contains?(row.metadata["last_reason"], needle),
+                 "needle #{inspect(needle)} leaked through last_reason for #{leak}"
+        end
+      end
+    end
+
+    test "execution final_reason with PEM private-key variants collapses to '[REDACTED]'",
+         %{workspace: ws} do
+      for {leak, idx} <- Enum.with_index(@pem_variants) do
+        sa = "sa-pem-x-#{idx}-#{System.unique_integer([:positive])}"
+        tx = "0xpem-x-#{idx}-tx-0000000000000000000000000000000000000000000000ddd"
+
+        _ =
+          Bank.Fixtures.execution_plan(%{
+            workspace_id: ws.id,
+            smart_account_id: sa,
+            chain: "base-sepolia",
+            asset: "USDC",
+            tx_refs: [tx],
+            execution_status: :reverted,
+            final_outcome: :reverted,
+            final_reason: "stack: " <> leak
+          })
+
+        {:ok, _} =
+          ChainSync.sync_address(ws.id, "base-sepolia", sa, source_type: :smart_account_chain)
+
+        row =
+          Activity.list_imported_activities(workspace_id: ws.id)
+          |> Enum.find(&(&1.metadata["smart_account_id"] == sa))
+
+        assert row, "expected an imported row for #{sa}"
+
+        assert row.metadata["final_reason"] == "[REDACTED]",
+               "PEM variant leaked through final_reason for #{leak}"
+
+        for needle <- @marker_needles do
+          refute String.contains?(row.metadata["final_reason"], needle),
+                 "needle #{inspect(needle)} leaked through final_reason for #{leak}"
+        end
+      end
+    end
+
+    test "benign URL without credentials still passes through",
+         %{workspace: ws} do
+      sa = "sa-benign-url-#{System.unique_integer([:positive])}"
+      revoke_tx = "0xbenign-url-tx-00000000000000000000000000000000000000000000000eee"
+
+      _ =
+        Bank.Fixtures.delegation(
+          workspace_id: ws.id,
+          smart_account_id: sa,
+          chain: "base-sepolia",
+          state: :revoked,
+          revoked_at: ~U[2026-02-01 12:00:00.000000Z],
+          last_tx_hash: revoke_tx,
+          # No userinfo, no `https://` substring — should pass.
+          last_reason: "see runbook at intranet/runbooks/revoke#step-3"
+        )
+
+      {:ok, _} =
+        ChainSync.sync_address(ws.id, "base-sepolia", sa, source_type: :smart_account_chain)
+
+      [row] = Activity.list_imported_activities(workspace_id: ws.id)
+      assert row.metadata["last_reason"] == "see runbook at intranet/runbooks/revoke#step-3"
+    end
+  end
+
   describe "sync_address/4 — invalid source_type / malformed RPC hex (#245 hardening)" do
     test "unknown :source_type returns :invalid_source_type without writing a cursor",
          %{workspace: ws} do

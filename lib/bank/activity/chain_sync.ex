@@ -792,31 +792,55 @@ defmodule Bank.Activity.ChainSync do
   # `Bank.Activity.redact_metadata/1` only redacts when the key
   # itself looks secret, so a value containing tokens / URLs /
   # PEM markers would land verbatim on `imported_activities`.
-  # We therefore detect a small marker set (case-insensitive) and
-  # collapse the whole value to a fixed `"[REDACTED]"` label
-  # before persistence. Non-flagged text is bounded to a safe
-  # length cap so a runaway free-text payload cannot bloat the
-  # ledger row either.
+  # We therefore detect both a substring marker set AND a regex
+  # pattern set (both case-insensitive) and collapse the whole
+  # value to a fixed `"[REDACTED]"` label before persistence.
+  # Non-flagged text is bounded to a safe length cap so a runaway
+  # free-text payload cannot bloat the ledger row either.
   @reason_secret_markers [
     "bearer",
     "authorization",
     "sk_live_",
     "sk_test_",
-    "begin private key",
     "private_key",
     "https://",
     "secret@"
   ]
+
+  # Regex-driven patterns catch shapes a substring scan would miss:
+  #
+  #   * Credentialed URLs (`://user:pass@host`) on any scheme,
+  #     including `http://`, `wss://`, `ws://`, `ftp://`. The
+  #     plain `https://` substring marker only flagged TLS URLs;
+  #     a `http://user:pass@example.test/rpc` previously passed
+  #     through.
+  #
+  #   * PEM private-key headers in any algorithm variant —
+  #     `BEGIN PRIVATE KEY`, `BEGIN RSA PRIVATE KEY`,
+  #     `BEGIN EC PRIVATE KEY`, `BEGIN OPENSSH PRIVATE KEY`,
+  #     `BEGIN ENCRYPTED PRIVATE KEY`. The previous fixed
+  #     `"begin private key"` substring missed every one of those
+  #     except the bare `BEGIN PRIVATE KEY` form.
+  @reason_secret_patterns [
+    ~r{://[^\s/@]+:[^\s/@]+@}i,
+    ~r{BEGIN[ A-Z0-9]*PRIVATE KEY}i
+  ]
+
   @reason_max_length 200
   defp sanitize_reason(nil), do: nil
 
   defp sanitize_reason(reason) when is_binary(reason) do
     lower = String.downcase(reason)
 
-    if Enum.any?(@reason_secret_markers, &String.contains?(lower, &1)) do
-      "[REDACTED]"
-    else
-      String.slice(reason, 0, @reason_max_length)
+    cond do
+      Enum.any?(@reason_secret_markers, &String.contains?(lower, &1)) ->
+        "[REDACTED]"
+
+      Enum.any?(@reason_secret_patterns, &Regex.match?(&1, reason)) ->
+        "[REDACTED]"
+
+      true ->
+        String.slice(reason, 0, @reason_max_length)
     end
   end
 
