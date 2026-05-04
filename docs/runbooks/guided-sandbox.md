@@ -7,10 +7,11 @@
 > open and feed back into this page once they land:
 >
 > - **[#240](https://github.com/Linh86/cryptobank/issues/240)** —
->   automated Level 1 sandbox smoke command. Until #240 ships, the
->   "Run smoke" step is a *manual `/sandbox` checklist walk* (eight
->   stable-id steps). When #240 lands, the per-environment table and
->   the run-smoke section need to cite the actual command.
+>   automated Level 1 sandbox smoke command. Shipped as
+>   `mix bank.sandbox.smoke` (see "Run the automated smoke" below
+>   and the per-environment table). The manual `/sandbox` walk
+>   stays useful for human review; the Mix task is the
+>   non-interactive smoke for CI / runbook self-checks.
 > - **[#241](https://github.com/Linh86/cryptobank/issues/241)** —
 >   safe sandbox reset and fixture hygiene. The "Reset between takes"
 >   section below describes `mix bank.demo.reset` as it ships **today**;
@@ -78,8 +79,6 @@ Open <http://localhost:4000>. You will land on the dashboard for the seeded `san
 
 ## Walk the guided checklist at `/sandbox`
 
-> **Interim smoke.** Until [#240](https://github.com/Linh86/cryptobank/issues/240) ships an automated Level 1 sandbox smoke command, walking the eight `/sandbox` steps below by hand IS the smoke. When #240 merges, this section needs an additional "run the automated smoke" subsection citing the actual command, and the per-environment table above needs the same update.
-
 Open <http://localhost:4000/sandbox>. You will see a one-page guided checklist (`#sandbox-guide`) with a progress badge (`#sandbox-progress`) and eight steps. Each step is keyed by a stable element id (`#sandbox-step-<id>`) with a navigation link (`#sandbox-step-link-<id>`) to the operator page where the corresponding action lives. The checklist itself is **read-only** — no buttons, no form submissions, no chain calls; each step's `complete?` flag is a bounded `LIMIT 1` workspace-scoped DB read.
 
 Walk the eight steps in order:
@@ -98,6 +97,31 @@ Walk the eight steps in order:
 The progress badge updates on the next mount or on the `refresh` event. After a fresh seed, all eight steps render as complete.
 
 A reviewer who is *new* to the runtime should also exercise the no-action path: open `/security` to see the empty `#chain-pauses-card`, the `#adapter-health-card` showing `not_configured` (because no adapter is running locally), and the `#incident-readiness-card` rolled up to `data-level="steady"`. None of these surfaces require credentials.
+
+## Run the automated smoke
+
+For a non-interactive pass/fail signal, run:
+
+```sh
+mix bank.sandbox.smoke
+```
+
+The task exercises the same Level 1 review-flow surfaces as the `/sandbox` checklist plus a deep-health snapshot, and prints a per-check report. It is **read-only by construction**: the database is the only external dependency, no secrets / `.env` are read, no HTTP is made to the adapter, no chain RPC, no broadcast, no signing, no Oban jobs, no audit rows are written. Exits 0 on PASS and 1 on FAIL so a CI step can pick up the outcome without parsing stdout.
+
+The checks (in order) and what makes them fail:
+
+1. `health` — `Bank.Ops.Health.snapshot/0` overall status. `:not_configured` for the adapter is benign; `:degraded` / `:down` / `:unknown` for any check fails.
+2. `workspace` — `sandbox-demo` workspace exists. Run `mix bank.demo.seed` if missing.
+3. `policies` — at least one active `PolicyRule` in the workspace.
+4. `counterparty` — at least one counterparty with a non-`:unknown` trust assertion.
+5. `intent` — `Bank.Intents.list/1` and the workspace-scoped `get_in_workspace/2` round-trip return the same row (catches stub regressions where list returns rows but the get path is stubbed to `nil`).
+6. `simulate` — at least one `SimulationReport` is recorded for an intent in this workspace.
+7. `approval` — at least one `DecisionEnvelope` with outcome `:approval_required`.
+8. `held_or_blocked` — at least one decision with outcome `:hold` or `:block` — proves the safety rails fired.
+9. `cancel` — at least one `:cancelled` intent with a matching `intent.cancelled` audit event.
+10. `replay` — `Bank.Audit.replay/1` for a recent decision returns a non-empty audit slice.
+
+If the demo workspace has not been seeded yet the task short-circuits with a single `seed` failure check pointing to `mix bank.demo.seed`, so the first-run experience tells the operator exactly what to do next.
 
 ## Reset between takes
 
@@ -126,7 +150,7 @@ The reset is guarded behind an env allowlist — `:dev`, `:test`, `:staging` onl
 
 | Environment | Chain calls | Secrets / `.env` | Broadcast posture | Smoke command |
 |---|---|---|---|---|
-| **Local sandbox** (this runbook) | None. The seed inserts canned `:executed` rows with synthetic `tx_refs`. | None required. | No HTTP to the adapter; deep-health reports `adapter: not_configured`. | Manual `/sandbox` checklist today; automated Level 1 smoke pending [#240](https://github.com/Linh86/cryptobank/issues/240). |
+| **Local sandbox** (this runbook) | None. The seed inserts canned `:executed` rows with synthetic `tx_refs`. | None required. | No HTTP to the adapter; deep-health reports `adapter: not_configured`. | `mix bank.sandbox.smoke` (read-only Level 1 smoke; manual `/sandbox` checklist for human review). |
 | **Staging** | Real adapter, but Base Sepolia by default. | Requires `ADAPTER_BASE_URL`, `ADAPTER_DISPATCH_SECRET`, `ADAPTER_CALLBACK_SECRET`. | Broadcasts to Base Sepolia bundler. | `mix bank.smoke.transfer`, `mix bank.smoke.revoke`. |
 | **Testnet (Base Sepolia)** | Real chain. | Same staging secrets plus a funded smart account and an active delegation. | Broadcasts; on-chain calls land. | See [`docs/base-sepolia-execution-day.md`](../base-sepolia-execution-day.md). |
 | **Mainnet** | Real chain. | Production-tier secrets, controlled by deploy. | Broadcasts; real value moves. | See [`docs/deploy.md`](../deploy.md). |
@@ -148,6 +172,7 @@ The shipped surfaces this runbook walks are pinned by:
 
 - `test/bank/demo_test.exs` — seed idempotency and reset scoping.
 - `test/bank_web/live/sandbox_live_test.exs` — `/sandbox` rendering and per-step `complete?` predicates against fixture state.
+- `test/bank/sandbox/smoke_test.exs` — `mix bank.sandbox.smoke` runner: happy-path PASS on a freshly seeded workspace, no-side-effect contract (no Oban / no audit writes), and regression detection when a check's underlying rows go missing.
 - `test/bank_web/controllers/health_controller_test.exs` — `not_configured` adapter does not falsely fail the local readiness probe.
 
 Run them as part of the pre-merge gate:
