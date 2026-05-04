@@ -241,6 +241,90 @@ defmodule Bank.Activity.CsvImportTest do
     end
   end
 
+  # --- dedupe identity (#244 P2) ---------------------------------------
+
+  describe "dedupe identity" do
+    test "same activity at a different row index dedupes",
+         %{workspace: ws} do
+      # Pre-fix: dedupe key seeded from `source_ref:
+      # "csv:row:<n>"` so re-uploading the same activity at a
+      # different line produced a different key and inserted a
+      # duplicate row. The fix moves the row index out of the
+      # dedupe seed (it lives in `metadata["csv_row_index"]` for
+      # traceability) and relies on the content-derived
+      # `source_hash`.
+      activity_csv = """
+      occurred_at,asset,chain,amount,direction
+      2026-04-01T12:00:00Z,USDC,base,100,inbound
+      """
+
+      shifted_csv = """
+      occurred_at,asset,chain,amount,direction
+      2026-04-02T12:00:00Z,USDC,base,250,outbound
+      2026-04-01T12:00:00Z,USDC,base,100,inbound
+      """
+
+      assert {:ok, %{summary: %{inserted: 1}}} =
+               CsvImport.commit(activity_csv, ws.id)
+
+      assert {:ok, second} = CsvImport.commit(shifted_csv, ws.id)
+      # The shifted CSV adds one new row (the outbound on row 2)
+      # AND re-imports the original inbound on row 3. The
+      # original must classify as duplicate, not inserted.
+      assert second.summary == %{inserted: 1, duplicate: 1, invalid: 0}
+      assert Repo.aggregate(ImportedActivity, :count, :id) == 2
+    end
+
+    test "row number lands in metadata for traceability",
+         %{workspace: ws} do
+      csv = """
+      occurred_at,asset,chain,amount,direction
+      2026-04-01T12:00:00Z,USDC,base,100,inbound
+      2026-04-02T12:00:00Z,USDC,base,200,outbound
+      """
+
+      assert {:ok, %{summary: %{inserted: 2}}} = CsvImport.commit(csv, ws.id)
+
+      rows = Activity.list_imported_activities(workspace_id: ws.id)
+      indexes = rows |> Enum.map(& &1.metadata["csv_row_index"]) |> Enum.sort()
+      assert indexes == [2, 3]
+    end
+
+    test "two distinct activities at the same row index do NOT collide",
+         %{workspace: ws} do
+      # Defence-in-depth: dropping the row-index from the
+      # dedupe seed must not accidentally make different
+      # activities collapse onto the same key just because
+      # they share an index.
+      a_csv = """
+      occurred_at,asset,chain,amount,direction
+      2026-04-01T12:00:00Z,USDC,base,100,inbound
+      """
+
+      b_csv = """
+      occurred_at,asset,chain,amount,direction
+      2026-04-02T12:00:00Z,USDC,base,200,outbound
+      """
+
+      assert {:ok, %{summary: %{inserted: 1}}} = CsvImport.commit(a_csv, ws.id)
+      assert {:ok, %{summary: %{inserted: 1}}} = CsvImport.commit(b_csv, ws.id)
+      assert Repo.aggregate(ImportedActivity, :count, :id) == 2
+    end
+
+    test "forbidden header protections (workspace_id, dedupe_key, id, source_type) still hold" do
+      # Pin that the P2 fix did NOT loosen the hostile-header
+      # gates. Each one of these must still abort the parse.
+      for header <- ~w(workspace_id dedupe_key id source_type) do
+        csv = """
+        occurred_at,asset,amount,direction,#{header}
+        2026-04-01T12:00:00Z,USDC,100,inbound,hostile-value
+        """
+
+        assert {:error, {:forbidden_column, ^header}} = CsvImport.parse(csv)
+      end
+    end
+  end
+
   # --- secret hygiene ----------------------------------------------------
 
   describe "secret hygiene" do
