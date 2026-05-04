@@ -323,7 +323,8 @@ defmodule Bank.Audit do
       plans: plans,
       audit: audit,
       screening_evidence: Bank.WalletScreening.Evidence.for_intent(intent),
-      stablecoin_route_evidence: stablecoin_route_evidence(audit)
+      stablecoin_route_evidence: stablecoin_route_evidence(audit),
+      matched_activities: Bank.Activity.Reconciliation.match_for_plans(plans)
     }
   end
 

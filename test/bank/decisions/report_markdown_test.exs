@@ -155,7 +155,8 @@ defmodule Bank.Decisions.ReportMarkdownTest do
         tx_refs: ["0xabcdef1234567890"],
         nonce: 7,
         adapter_ref: "adp-fixed-001",
-        active: false
+        active: false,
+        matched_activity: []
       },
       stablecoin_routes: [],
       flags: %{
@@ -1161,6 +1162,103 @@ defmodule Bank.Decisions.ReportMarkdownTest do
       refute out =~ "Bearer "
       refute out =~ "raw_authorization"
       refute out =~ ~r/sk_(test|live)_/
+    end
+  end
+
+  # --- matched imported activity (#246) ---------------------------------
+
+  describe "render/1 — execution_plan.matched_activity (#246 reconciliation)" do
+    defp put_matched_activity(report, matched) do
+      %{
+        report
+        | execution_plan: Map.put(report.execution_plan, :matched_activity, matched)
+      }
+    end
+
+    test "renders the (none recorded) placeholder when matched_activity is empty" do
+      out = full_report_fixture() |> put_matched_activity([]) |> ReportMarkdown.render()
+      assert out =~ "Matched imported activity: _(none recorded)_"
+    end
+
+    test "renders a matched-activity bullet list with safe scalar fields" do
+      matched = [
+        %{
+          id: "activity-id-1",
+          tx_hash: "0xrender-match-1234567890abcdef1234567890abcd",
+          chain: "base-sepolia",
+          asset: "usdc",
+          direction: "inbound",
+          amount: "100.50",
+          status: "confirmed",
+          confidence: "high",
+          source_type: "wallet_chain",
+          occurred_at: "2026-04-15T12:00:00Z"
+        }
+      ]
+
+      out = full_report_fixture() |> put_matched_activity(matched) |> ReportMarkdown.render()
+
+      assert out =~ "Matched imported activity (1):"
+      assert out =~ "tx_hash: `0xrender-match-1234567890abcdef1234567890abcd`"
+      assert out =~ "chain: `base-sepolia`"
+      assert out =~ "asset: `usdc`"
+      assert out =~ "direction: `inbound`"
+      assert out =~ "amount: `100.50`"
+      assert out =~ "status: `confirmed`"
+      assert out =~ "confidence: `high`"
+      assert out =~ "source: `wallet_chain`"
+    end
+
+    test "renders multiple matched-activity bullets in the order supplied (deterministic)" do
+      matched = [
+        %{
+          id: "activity-id-a",
+          tx_hash: "0xfirst-match-" <> String.duplicate("a", 32),
+          chain: "base-sepolia",
+          asset: "usdc",
+          direction: "inbound",
+          amount: "100",
+          status: "confirmed",
+          confidence: "high",
+          source_type: "wallet_chain",
+          occurred_at: "2026-04-15T12:00:00Z"
+        },
+        %{
+          id: "activity-id-b",
+          tx_hash: "0xsecond-match-" <> String.duplicate("b", 31),
+          chain: "base-sepolia",
+          asset: "usdc",
+          direction: "outbound",
+          amount: "30",
+          status: "confirmed",
+          confidence: "high",
+          source_type: "smart_account_chain",
+          occurred_at: "2026-04-15T12:01:00Z"
+        }
+      ]
+
+      report = put_matched_activity(full_report_fixture(), matched)
+      out = ReportMarkdown.render(report)
+
+      assert out =~ "Matched imported activity (2):"
+
+      first_pos = :binary.match(out, "0xfirst-match-") |> elem(0)
+      second_pos = :binary.match(out, "0xsecond-match-") |> elem(0)
+      assert first_pos < second_pos
+
+      assert out == ReportMarkdown.render(report), "renderer must be deterministic"
+    end
+
+    test "missing :matched_activity key on the section is silently dropped (back-compat)" do
+      # Pre-#246 reports may have been built with no matched_activity
+      # field. The renderer must not crash and must not invent data.
+      report = full_report_fixture()
+
+      legacy_plan = Map.delete(report.execution_plan, :matched_activity)
+      report = %{report | execution_plan: legacy_plan}
+
+      out = ReportMarkdown.render(report)
+      refute out =~ "Matched imported activity"
     end
   end
 end

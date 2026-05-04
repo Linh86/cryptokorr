@@ -164,6 +164,10 @@ defmodule Bank.Decisions.ReportTest do
       assert report.execution_plan.final_outcome == "confirmed"
       assert "0xabc1234567890def" in report.execution_plan.tx_refs
 
+      # matched_activity (#246 reconciliation surface): an empty
+      # list when no imported activity cites the plan's tx_refs.
+      assert report.execution_plan.matched_activity == []
+
       # flags
       assert report.flags.chain == intent.chain
       # confirmed plan implies live (production-equivalent dispatch)
@@ -593,6 +597,114 @@ defmodule Bank.Decisions.ReportTest do
     # `Oban.Testing.all_enqueued/1` already exists; rename the local
     # helper to avoid the default-args conflict.
     Repo.all(Oban.Job)
+  end
+
+  # --- matched_activity (#246) ------------------------------------------
+
+  describe "execution_plan.matched_activity (#246 reconciliation)" do
+    test "exposes the imported activity row that cites the plan's tx_hash" do
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "report-recon-#{System.unique_integer([:positive])}",
+          name: "Report Recon"
+        })
+
+      tx_hash = "0xreport-match-" <> String.duplicate("a", 30)
+      intent = agent_intent(workspace_id: ws.id)
+      decision = decision_envelope(intent: intent, outcome: :auto_exec, current: true)
+
+      plan =
+        execution_plan(
+          decision: decision,
+          intent_id: intent.id,
+          workspace_id: ws.id,
+          execution_status: :confirmed,
+          final_outcome: :confirmed,
+          tx_refs: [tx_hash],
+          chain: intent.chain
+        )
+
+      {:ok, :inserted, activity} =
+        Bank.Activity.create_imported_activity(%{
+          workspace_id: ws.id,
+          source_type: :wallet_chain,
+          source_ref: "wallet:report-match",
+          occurred_at: DateTime.utc_now() |> DateTime.truncate(:microsecond),
+          asset: "USDC",
+          chain: intent.chain,
+          amount: Decimal.new("100"),
+          direction: :inbound,
+          status: :confirmed,
+          confidence: :high,
+          tx_hash: tx_hash
+        })
+
+      {:ok, bundle} = Audit.replay(intent.id)
+      report = Report.from_bundle(bundle)
+
+      assert report.execution_plan.id == plan.id
+      assert [matched] = report.execution_plan.matched_activity
+
+      assert matched.id == activity.id
+      assert matched.tx_hash == tx_hash
+      assert matched.chain == intent.chain
+      assert matched.asset == "USDC"
+      assert matched.direction == "inbound"
+      assert matched.amount == "100"
+      assert matched.status == "confirmed"
+      assert matched.confidence == "high"
+      assert matched.source_type == "wallet_chain"
+      assert is_binary(matched.occurred_at)
+
+      # Safe scalar projection only — never echo raw provider /
+      # source metadata fields the activity row may carry.
+      refute Map.has_key?(matched, :metadata)
+      refute Map.has_key?(matched, :provenance)
+    end
+
+    test "matched_activity is JSON-encodable (deterministic surface)" do
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "report-recon-json-#{System.unique_integer([:positive])}",
+          name: "Report Recon JSON"
+        })
+
+      tx_hash = "0xjson-match-" <> String.duplicate("b", 32)
+      intent = agent_intent(workspace_id: ws.id)
+      decision = decision_envelope(intent: intent, outcome: :auto_exec, current: true)
+
+      _plan =
+        execution_plan(
+          decision: decision,
+          intent_id: intent.id,
+          workspace_id: ws.id,
+          execution_status: :confirmed,
+          final_outcome: :confirmed,
+          tx_refs: [tx_hash],
+          chain: intent.chain
+        )
+
+      {:ok, :inserted, _activity} =
+        Bank.Activity.create_imported_activity(%{
+          workspace_id: ws.id,
+          source_type: :wallet_chain,
+          source_ref: "wallet:json-match",
+          occurred_at: DateTime.utc_now() |> DateTime.truncate(:microsecond),
+          asset: "USDC",
+          chain: intent.chain,
+          amount: Decimal.new("100"),
+          direction: :inbound,
+          status: :confirmed,
+          confidence: :high,
+          tx_hash: tx_hash
+        })
+
+      {:ok, bundle} = Audit.replay(intent.id)
+      report = Report.from_bundle(bundle)
+
+      json = Jason.encode!(report)
+      assert json =~ tx_hash
+    end
   end
 
   # Avoid an unused-warning if AuditEvent / TrustAssessment / etc.

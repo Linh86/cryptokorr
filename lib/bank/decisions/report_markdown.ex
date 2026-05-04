@@ -585,9 +585,61 @@ defmodule Bank.Decisions.ReportMarkdown do
       "`\n",
       "- Tx refs: `",
       tx_refs,
+      "`\n",
+      matched_activity_block(p[:matched_activity])
+    ]
+  end
+
+  # Render the #246 reconciliation evidence as a sub-block under
+  # the execution plan. Empty list (no matches, or the report
+  # builder's projection placed nothing here) renders the
+  # missing-evidence label so the reviewer can tell "no matched
+  # activity was found" apart from "the renderer dropped the
+  # field".
+  defp matched_activity_block([]) do
+    [
+      "\n",
+      "Matched imported activity: _(none recorded)_\n"
+    ]
+  end
+
+  defp matched_activity_block(matches) when is_list(matches) do
+    rendered = Enum.map(matches, &matched_activity_bullet/1)
+
+    [
+      "\n",
+      "Matched imported activity (",
+      to_string(length(matches)),
+      "):\n"
+      | rendered
+    ]
+  end
+
+  defp matched_activity_block(_), do: []
+
+  defp matched_activity_bullet(%{} = m) do
+    [
+      "  - tx_hash: `",
+      to_string(Map.get(m, :tx_hash) || "(unknown)"),
+      "` chain: `",
+      to_string(Map.get(m, :chain) || "(unknown)"),
+      "` asset: `",
+      to_string(Map.get(m, :asset) || "(unknown)"),
+      "` direction: `",
+      to_string(Map.get(m, :direction) || "(unknown)"),
+      "` amount: `",
+      to_string(Map.get(m, :amount) || "(none)"),
+      "` status: `",
+      to_string(Map.get(m, :status) || "(unknown)"),
+      "` confidence: `",
+      to_string(Map.get(m, :confidence) || "(unknown)"),
+      "` source: `",
+      to_string(Map.get(m, :source_type) || "(unknown)"),
       "`\n"
     ]
   end
+
+  defp matched_activity_bullet(_), do: "  - _(activity entry has unexpected shape)_\n"
 
   # --- stablecoin routes ---------------------------------------------------
 
