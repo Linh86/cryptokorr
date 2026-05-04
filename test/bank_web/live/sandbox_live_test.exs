@@ -204,6 +204,51 @@ defmodule BankWeb.SandboxLiveTest do
     end
   end
 
+  describe "fresh Demo.seed/0 — runbook claim (#242 P2)" do
+    # Pre-fix: the seed created intents directly via `upsert_intent/4`,
+    # bypassing the runtime simulation pipeline, so `/sandbox`'s
+    # `simulate` step stayed incomplete after a fresh seed and the
+    # runbook's "all eight steps render as complete" claim was false.
+    # This test pins the post-fix surface.
+    test "after Bank.Demo.seed/0, every /sandbox step including simulate is complete (8/8)",
+         %{conn: conn} do
+      :ok = Bank.Demo.seed()
+
+      suffix = System.unique_integer([:positive])
+
+      {:ok, demo_user} =
+        Bank.Accounts.find_or_create_from_oauth(%{
+          provider: :google,
+          subject: "demo-#{suffix}",
+          email: "demo-#{suffix}@example.com",
+          name: "Demo Reviewer"
+        })
+
+      {:ok, _membership} =
+        Bank.Workspaces.create_membership(%{
+          user_id: demo_user.id,
+          workspace_id: Bank.Demo.demo_workspace_id(),
+          role: :operator
+        })
+
+      conn =
+        conn
+        |> Plug.Test.init_test_session(%{})
+        |> Plug.Conn.put_session(:user_id, demo_user.id)
+
+      {:ok, view, _html} = live(conn, "/sandbox")
+
+      for step <-
+            ~w(workspace policies counterparty intent simulate approval replay held-blocked) do
+        assert has_element?(view, ~s|#sandbox-step-#{step}[data-complete="true"]|),
+               "step #{step} must be complete on a freshly seeded sandbox-demo workspace"
+      end
+
+      assert has_element?(view, ~s|#sandbox-guide[data-completed="8"]|)
+      assert has_element?(view, "#sandbox-progress", "8/8")
+    end
+  end
+
   describe "cross-workspace isolation" do
     test "sibling-workspace data does NOT mark current workspace steps complete",
          %{conn: conn} do
