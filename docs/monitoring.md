@@ -26,14 +26,28 @@ not every second).
   "service": "bank",
   "version": "0.1.0",
   "checks": {
-    "database":    { "status": "ok",    "detail": null },
-    "adapter":     { "status": "error", "detail": "%Req.TransportError{reason: :econnrefused}" },
-    "stuck_plans": { "status": "ok",    "count": 0, "threshold_minutes": 15 }
+    "database":    { "status": "ok",       "detail": null },
+    "adapter":     { "status": "down",     "detail": "transport_error" },
+    "stuck_plans": { "status": "ok",       "count": 0, "threshold_minutes": 15 }
   }
 }
 ```
 
-Top-level `status` is `ok` iff every check is `ok`.
+Per-check `detail` is drawn from a fixed allowlist (`http_2xx`,
+`http_3xx`, `http_4xx`, `http_5xx`, `transport_error`,
+`adapter_base_url_not_configured`, `adapter_check_raised`,
+`adapter_check_timeout`, `database_unreachable`,
+`database_check_raised`, `database_check_exit`) — it never carries
+an `inspect/1`'d struct, an exception message, or an RPC URL, so
+the readiness payload is safe to surface in a paging UI.
+
+Top-level `status` is `ok` only when every check is `ok` **or**
+`not_configured` (a deliberately-absent dependency on local/dev is
+benign). `unknown` is **never** treated as `ok` — an unknown
+dependency status cannot be reported healthy. See
+`Bank.Ops.Health.snapshot/0` for the rollup rules and
+[`docs/runbooks/production-observability.md`](runbooks/production-observability.md)
+for the operator triage flow.
 
 ## Telemetry + metrics
 
