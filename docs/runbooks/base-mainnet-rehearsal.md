@@ -289,6 +289,13 @@ operation at every layer with `:mainnet_disabled` — see the
 
 ## Cross-links
 
+- [`docs/runbooks/base-mainnet-go-no-go.md`](base-mainnet-go-no-go.md) —
+  formal closure review for epic #166. The rehearsal output below
+  is one of the required artifacts; row 4 of the go/no-go checklist
+  cites this runbook.
+- [`docs/runbooks/base-mainnet-canary.md`](base-mainnet-canary.md) —
+  capped first-broadcast operator runbook (#181). Run **after** this
+  rehearsal clears.
 - [`docs/runbooks/production-observability.md`](production-observability.md)
   — daily operator triage; § Base mainnet feature gate (#178) and
   § Base mainnet preflight (#179).

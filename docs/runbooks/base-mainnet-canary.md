@@ -360,6 +360,10 @@ sufficient.
 
 ## Cross-links
 
+- [`docs/runbooks/base-mainnet-go-no-go.md`](base-mainnet-go-no-go.md) —
+  formal closure review for epic #166. The cap values referenced
+  in row 5 of the go/no-go checklist are the same ones enforced
+  in `Bank.Chains.CanaryCaps` and named below.
 - [`docs/runbooks/base-mainnet-rehearsal.md`](base-mainnet-rehearsal.md) —
   no-broadcast rehearsal (#180). **Must** clear before this
   runbook is invoked.

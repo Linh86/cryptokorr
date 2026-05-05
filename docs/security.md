@@ -5,6 +5,13 @@ and the controls expected at each boundary. Issue #33 hardened the
 Phoenix ↔ adapter surface, which is the highest-leverage boundary
 today.
 
+> **Mainnet readiness gate.** Before any first Base mainnet broadcast,
+> review and sign [`docs/runbooks/base-mainnet-go-no-go.md`](runbooks/base-mainnet-go-no-go.md) —
+> it grades the boundaries below against the rehearsal (#180) and
+> the capped canary (#181) and produces an explicit GO / NO-GO
+> verdict per scope. The verdict is binding only with all three
+> signatures (operator, workspace admin, repo maintainer).
+
 ## Trust boundaries
 
 ```
