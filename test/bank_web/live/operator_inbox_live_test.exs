@@ -277,6 +277,170 @@ defmodule BankWeb.OperatorInboxLiveTest do
     end
   end
 
+  describe "recipient visibility (#235 P2)" do
+    # The list query already excludes notifications addressed to
+    # another user_id or to a higher role_target than the current
+    # principal. The mutation paths (mark_read / archive) must
+    # apply the same predicate — otherwise a same-workspace user
+    # can smuggle the id of an invisible notification and act on
+    # it. Each test below plants a same-workspace row that the
+    # principal cannot see, then asserts the row stays untouched
+    # after a `mark_read` / `archive` hook with that id.
+
+    test "operator cannot mark_read a same-workspace notification addressed to another user",
+         %{conn: conn, current_user: operator, workspace: ws} do
+      {:ok, other_user} =
+        Bank.Accounts.find_or_create_from_oauth(%{
+          provider: :google,
+          subject: "inbox-vis-other-#{System.unique_integer([:positive])}",
+          email: "inbox-vis-other-#{System.unique_integer([:positive])}@example.com",
+          name: "Inbox Vis Other"
+        })
+
+      {:ok, _m} =
+        Bank.Workspaces.create_membership(%{
+          user_id: other_user.id,
+          workspace_id: ws.id,
+          role: :operator
+        })
+
+      # Notification addressed to the OTHER user (not via role_target).
+      # Same workspace as the operator viewing the inbox.
+      {:ok, n} =
+        create_notification(ws.id,
+          user_id: other_user.id,
+          role_target: nil,
+          title: "Targeted to other user"
+        )
+
+      refute n.user_id == operator.id
+
+      {:ok, view, html} = live(conn, "/inbox")
+      refute html =~ ~s(id="inbox-notification-#{n.id}")
+
+      render_hook(view, "mark_read", %{"id" => n.id})
+
+      reloaded = Notifications.get_in_workspace(n.id, ws.id)
+      assert reloaded.status == :unread
+      assert reloaded.read_at == nil
+    end
+
+    test "operator cannot archive a same-workspace notification addressed to another user",
+         %{conn: conn, workspace: ws} do
+      {:ok, other_user} =
+        Bank.Accounts.find_or_create_from_oauth(%{
+          provider: :google,
+          subject: "inbox-vis-arch-#{System.unique_integer([:positive])}",
+          email: "inbox-vis-arch-#{System.unique_integer([:positive])}@example.com",
+          name: "Inbox Vis Arch"
+        })
+
+      {:ok, _m} =
+        Bank.Workspaces.create_membership(%{
+          user_id: other_user.id,
+          workspace_id: ws.id,
+          role: :operator
+        })
+
+      {:ok, n} =
+        create_notification(ws.id,
+          user_id: other_user.id,
+          role_target: nil
+        )
+
+      {:ok, view, _html} = live(conn, "/inbox")
+
+      render_hook(view, "archive", %{"id" => n.id})
+
+      reloaded = Notifications.get_in_workspace(n.id, ws.id)
+      assert reloaded.status == :unread
+      assert reloaded.archived_at == nil
+    end
+
+    test "operator cannot mutate an admin-only role_target notification", %{conn: _conn} do
+      # ConnCase default is admin; we need an operator-tier conn
+      # for this test so admin-targeted rows are invisible to it.
+      {:ok, conn: operator_conn, current_user: _, workspace: ws} =
+        register_and_log_in_user_with_role(%{conn: build_conn()}, :operator)
+
+      {:ok, n} =
+        create_notification(ws.id,
+          user_id: nil,
+          role_target: :admin,
+          title: "Admin-only audit"
+        )
+
+      {:ok, view, html} = live(operator_conn, "/inbox")
+      refute html =~ ~s(id="inbox-notification-#{n.id}")
+
+      render_hook(view, "mark_read", %{"id" => n.id})
+
+      reloaded = Notifications.get_in_workspace(n.id, ws.id)
+      assert reloaded.status == :unread
+
+      render_hook(view, "archive", %{"id" => n.id})
+
+      reloaded = Notifications.get_in_workspace(n.id, ws.id)
+      assert reloaded.status == :unread
+      assert reloaded.archived_at == nil
+    end
+
+    test "admin can still mutate admin/operator/viewer role_target notifications",
+         %{conn: conn, workspace: ws} do
+      {:ok, viewer_n} =
+        create_notification(ws.id, user_id: nil, role_target: :viewer)
+
+      {:ok, operator_n} =
+        create_notification(ws.id, user_id: nil, role_target: :operator)
+
+      {:ok, admin_n} =
+        create_notification(ws.id, user_id: nil, role_target: :admin)
+
+      # Switch the inbox filter to "all" so admin's own role
+      # cascade includes all three rows in the rendered list.
+      {:ok, view, _html} = live(conn, "/inbox")
+
+      view
+      |> form("#inbox-filters", %{
+        "filters[status]" => "all",
+        "filters[severity]" => "all",
+        "filters[event_type]" => ""
+      })
+      |> render_change()
+
+      for n <- [viewer_n, operator_n, admin_n] do
+        view
+        |> element("#inbox-mark-read-#{n.id}")
+        |> render_click()
+
+        reloaded = Notifications.get_in_workspace(n.id, ws.id)
+
+        assert reloaded.status == :read,
+               "expected admin mark_read to succeed for role=#{n.role_target}"
+      end
+    end
+
+    test "user can still mark_read a row addressed to their own user_id",
+         %{conn: conn, current_user: user, workspace: ws} do
+      {:ok, n} =
+        create_notification(ws.id,
+          user_id: user.id,
+          role_target: nil,
+          title: "Direct to me"
+        )
+
+      {:ok, view, html} = live(conn, "/inbox")
+      assert html =~ ~s(id="inbox-notification-#{n.id}")
+
+      view
+      |> element("#inbox-mark-read-#{n.id}")
+      |> render_click()
+
+      reloaded = Notifications.get_in_workspace(n.id, ws.id)
+      assert reloaded.status == :read
+    end
+  end
+
   # --- helpers --------------------------------------------------------
 
   defp create_notification(workspace_id, opts) do
