@@ -79,8 +79,65 @@ defmodule Bank.DefiVenues.Morpho.Snapshots do
         {:ok, existing}
 
       existing ->
-        do_supersede_and_insert(snap, vault_address, existing, opts)
+        do_supersede_and_insert_with_dedupe(
+          snap,
+          chain_id,
+          vault_address,
+          payload_hash,
+          existing,
+          opts
+        )
     end
+  end
+
+  # #199 P2: two concurrent persists of the same successor payload
+  # can both observe `existing` as the OLD current. The first
+  # transaction wins the partial unique index; the second hits
+  # `morpho_vault_snapshots_current_uidx` and would otherwise
+  # surface a changeset error. Catch that case, refetch the
+  # winning row, and treat it as a benign idempotent no-op when
+  # the winning row carries the same `payload_hash`. A
+  # genuinely-different payload race still surfaces the error so
+  # callers don't silently mask a real conflict.
+  defp do_supersede_and_insert_with_dedupe(
+         snap,
+         chain_id,
+         vault_address,
+         payload_hash,
+         existing,
+         opts
+       ) do
+    case do_supersede_and_insert(snap, vault_address, existing, opts) do
+      {:ok, row} ->
+        {:ok, row}
+
+      {:error, %Ecto.Changeset{} = changeset} = err ->
+        if current_uidx_violation?(changeset) do
+          case get_current(chain_id, vault_address) do
+            %PersistedVaultSnapshot{payload_hash: ^payload_hash} = winner ->
+              {:ok, winner}
+
+            _ ->
+              err
+          end
+        else
+          err
+        end
+
+      other ->
+        other
+    end
+  end
+
+  defp current_uidx_violation?(%Ecto.Changeset{errors: errors}) do
+    Enum.any?(errors, fn
+      {_field, {_msg, opts}} ->
+        Keyword.get(opts, :constraint) == :unique and
+          Keyword.get(opts, :constraint_name) == "morpho_vault_snapshots_current_uidx"
+
+      _ ->
+        false
+    end)
   end
 
   @doc """

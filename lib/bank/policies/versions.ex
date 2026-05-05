@@ -157,12 +157,23 @@ defmodule Bank.Policies.Versions do
       %PolicyVersion{} = version ->
         ids = PolicyVersion.rule_ids_list(version)
 
+        # #226 P2: scope rule resolution to the requested
+        # workspace's `policy_rules.workspace_id`. Without this
+        # filter, a malformed PolicyVersion in workspace A whose
+        # `rule_ids` list cited a rule id from workspace B would
+        # cause the runtime to evaluate B's rule in A's decision
+        # path. Strict same-workspace match only — there is no
+        # legacy "global rule" path to allow.
         rules =
           if ids == [] do
             []
           else
             Bank.Policies.PolicyRule
-            |> Ecto.Query.where([r], r.id in ^ids and r.state == ^:active)
+            |> Ecto.Query.where(
+              [r],
+              r.id in ^ids and r.state == ^:active and
+                r.workspace_id == ^workspace_id
+            )
             |> Bank.Repo.all()
           end
 
