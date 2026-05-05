@@ -39,6 +39,8 @@ defmodule BankWeb.ControlLiveTest do
       assert html =~ ~s(id="next-steps-card")
       assert html =~ ~s(id="runtime-card")
       assert html =~ ~s(id="architecture-info")
+      assert html =~ ~s(id="wallet-status-card")
+      assert html =~ ~s(id="wallet-status")
     end
 
     test "shows next step guidance for establishing delegation", %{conn: conn} do
@@ -348,6 +350,195 @@ defmodule BankWeb.ControlLiveTest do
 
       refute html =~ ~s(id="account-selector")
       assert html =~ "sa_solo"
+    end
+  end
+
+  # --- Wallet status region (#168) -----------------------------------------
+  #
+  # The `WalletConnect` JS hook on `#wallet-status-card` pushes events
+  # for each EIP-1193 transition. These tests cover the server-side
+  # state machine using `render_hook/3` to simulate hook pushes.
+
+  describe "wallet status region — initial render" do
+    test "shows disconnected state with Connect button", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/")
+
+      assert html =~ ~s(id="wallet-status-card")
+      assert html =~ ~s(id="wallet-status")
+      assert html =~ ~s(id="wallet-status-disconnected")
+      assert html =~ ~s(id="wallet-connect-btn")
+      assert html =~ "Connect wallet"
+      refute html =~ ~s(id="wallet-status-connected")
+      refute html =~ ~s(id="wallet-status-wrong-chain")
+      refute html =~ ~s(id="wallet-status-not-installed")
+      refute html =~ ~s(id="wallet-disconnect-btn")
+    end
+
+    test "wallet card mounts the WalletConnect hook", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/")
+
+      # The hook attaches to the wrapper; click delegation finds the inner button.
+      assert html =~ ~s(phx-hook="WalletConnect")
+    end
+  end
+
+  describe "wallet status region — unavailable provider" do
+    test "wallet_connect:unavailable shows install guidance", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      html = render_hook(view, "wallet_connect:unavailable", %{"reason" => "no_provider"})
+
+      assert html =~ ~s(id="wallet-status-not-installed")
+      assert html =~ "No browser wallet detected"
+      assert html =~ "Install MetaMask"
+      refute html =~ ~s(id="wallet-status-disconnected")
+      refute html =~ ~s(id="wallet-connect-btn")
+    end
+  end
+
+  describe "wallet status region — connecting" do
+    test "wallet_connect:connecting shows in-flight state", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      html = render_hook(view, "wallet_connect:connecting", %{})
+
+      assert html =~ ~s(id="wallet-status-connecting")
+      assert html =~ "Connecting"
+      refute html =~ ~s(id="wallet-connect-btn")
+    end
+  end
+
+  describe "wallet status region — connected" do
+    test "wallet_connect:connected shows the address and disconnect button", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      html =
+        render_hook(view, "wallet_connect:connected", %{
+          "account" => "0x1234567890abcdef1234567890abcdef12345678",
+          "chain_id" => 84_532
+        })
+
+      assert html =~ ~s(id="wallet-status-connected")
+      assert html =~ ~s(id="wallet-status-address")
+      assert html =~ "0x1234567890abcdef1234567890abcdef12345678"
+      assert html =~ ~s(id="wallet-status-chain")
+      assert html =~ "Base Sepolia"
+      assert html =~ "84532"
+      assert html =~ ~s(id="wallet-disconnect-btn")
+      refute html =~ ~s(id="wallet-status-disconnected")
+      refute html =~ ~s(id="wallet-status-wrong-chain")
+    end
+
+    test "Base mainnet chain renders Base label", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      html =
+        render_hook(view, "wallet_connect:connected", %{
+          "account" => "0xabc",
+          "chain_id" => 8453
+        })
+
+      assert html =~ "Base (8453)"
+    end
+  end
+
+  describe "wallet status region — wrong chain" do
+    test "wallet_connect:wrong_chain shows non-destructive warning with chain id", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      html =
+        render_hook(view, "wallet_connect:wrong_chain", %{
+          "account" => "0xdeadbeef",
+          "chain_id" => 1
+        })
+
+      assert html =~ ~s(id="wallet-status-wrong-chain")
+      assert html =~ ~s(id="wallet-status-wrong-chain-id")
+      assert html =~ "Switch to Base"
+      assert html =~ "84532"
+      assert html =~ "0xdeadbeef"
+      assert html =~ ~s(id="wallet-disconnect-btn")
+      # Wrong chain is non-destructive: connected card and address are not shown.
+      refute html =~ ~s(id="wallet-status-connected")
+    end
+  end
+
+  describe "wallet status region — disconnected" do
+    test "wallet_connect:disconnected resets to disconnected state", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      _ =
+        render_hook(view, "wallet_connect:connected", %{
+          "account" => "0xabc",
+          "chain_id" => 84_532
+        })
+
+      html = render_hook(view, "wallet_connect:disconnected", %{})
+
+      assert html =~ ~s(id="wallet-status-disconnected")
+      assert html =~ ~s(id="wallet-connect-btn")
+      refute html =~ ~s(id="wallet-status-connected")
+      refute html =~ ~s(id="wallet-disconnect-btn")
+    end
+
+    test "wallet_connect:cancelled resets to disconnected state", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      _ = render_hook(view, "wallet_connect:connecting", %{})
+      html = render_hook(view, "wallet_connect:cancelled", %{})
+
+      assert html =~ ~s(id="wallet-status-disconnected")
+      refute html =~ ~s(id="wallet-status-connecting")
+    end
+
+    test "clicking disconnect button clears the connected state locally", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      _ =
+        render_hook(view, "wallet_connect:connected", %{
+          "account" => "0xfeedface",
+          "chain_id" => 84_532
+        })
+
+      html = view |> element("#wallet-disconnect-btn") |> render_click()
+
+      assert html =~ ~s(id="wallet-status-disconnected")
+      refute html =~ "0xfeedface"
+    end
+  end
+
+  describe "wallet status region — error" do
+    test "wallet_connect:error shows error message and retry button", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      html =
+        render_hook(view, "wallet_connect:error", %{"message" => "User rejected the request"})
+
+      assert html =~ ~s(id="wallet-status-error")
+      assert html =~ ~s(id="wallet-status-error-message")
+      assert html =~ "User rejected the request"
+      assert html =~ ~s(id="wallet-connect-btn")
+    end
+  end
+
+  describe "wallet status region — chain change after connect" do
+    test "wrong_chain after connected swaps the visible region", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      _ =
+        render_hook(view, "wallet_connect:connected", %{
+          "account" => "0xabc",
+          "chain_id" => 84_532
+        })
+
+      html =
+        render_hook(view, "wallet_connect:wrong_chain", %{
+          "account" => "0xabc",
+          "chain_id" => 1
+        })
+
+      assert html =~ ~s(id="wallet-status-wrong-chain")
+      refute html =~ ~s(id="wallet-status-connected")
     end
   end
 end

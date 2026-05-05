@@ -16,12 +16,14 @@ defmodule BankWeb.ControlLive do
 
   ## Design decisions
 
-  **No browser wallet integration in v0.1.** The repo does not yet
-  include a client-side wallet SDK (WalletConnect, wagmi, etc.).
-  Delegation is established through the adapter callback flow, not
-  through a browser-native sign-in. The UI makes this limitation
-  explicit and shows the delegation state the backend already
-  tracks.
+  **Read-only browser wallet connect.** The page renders a wallet
+  status region driven by the EIP-1193 `WalletConnect` JS hook.
+  The hook reads provider state only — it never asks the wallet to
+  sign or broadcast — so an alpha operator can confirm their EOA
+  address and chain without granting a delegation. Delegation is
+  still established through the adapter callback flow; a browser
+  signing path lands with the SDK + adapter integration tracked
+  in `docs/wallet-connect.md`.
 
   **Multi-account aware.** Operators routinely run more than one
   smart account (e.g. production treasury plus a sandbox account).
@@ -47,6 +49,10 @@ defmodule BankWeb.ControlLive do
     socket =
       socket
       |> assign(page_title: "Connection")
+      |> assign(wallet_status: :not_connected)
+      |> assign(wallet_account: nil)
+      |> assign(wallet_chain_id: nil)
+      |> assign(wallet_error_message: nil)
       |> load_state()
 
     {:ok, socket}
@@ -115,41 +121,87 @@ defmodule BankWeb.ControlLive do
     end
   end
 
-  # --- Wallet connect events (v1.1 scaffolding) ---------------------------
+  # --- Wallet connect events ----------------------------------------------
   #
-  # The `WalletConnect` JS hook pushes one of these events after the
-  # EIP-1193 handshake. Full signing + adapter dispatch lands once the
-  # SDK + adapter endpoint decisions in `docs/wallet-connect.md` land.
+  # The `WalletConnect` JS hook pushes these events after the EIP-1193
+  # handshake. The hook only reads provider state — no signing or
+  # broadcasting happens here. Full signing + delegation grant land with
+  # the SDK + adapter integration tracked in `docs/wallet-connect.md`.
 
   def handle_event("wallet_connect:unavailable", _params, socket) do
     {:noreply,
-     put_flash(socket, :error, "No browser wallet detected. Install MetaMask or equivalent.")}
+     socket
+     |> assign(wallet_status: :not_installed)
+     |> assign(wallet_account: nil)
+     |> assign(wallet_chain_id: nil)
+     |> assign(wallet_error_message: nil)}
   end
 
-  def handle_event("wallet_connect:wrong_chain", %{"chainId" => chain_id}, socket) do
+  def handle_event("wallet_connect:connecting", _params, socket) do
     {:noreply,
-     put_flash(
-       socket,
-       :error,
-       "Wallet is on chain #{chain_id}. Switch to Base (8453) or Base Sepolia (84532)."
-     )}
+     socket
+     |> assign(wallet_status: :connecting)
+     |> assign(wallet_error_message: nil)}
+  end
+
+  def handle_event(
+        "wallet_connect:connected",
+        %{"account" => account, "chain_id" => chain_id},
+        socket
+      ) do
+    {:noreply,
+     socket
+     |> assign(wallet_status: :connected)
+     |> assign(wallet_account: account)
+     |> assign(wallet_chain_id: chain_id)
+     |> assign(wallet_error_message: nil)}
+  end
+
+  def handle_event(
+        "wallet_connect:wrong_chain",
+        %{"chain_id" => chain_id} = params,
+        socket
+      ) do
+    {:noreply,
+     socket
+     |> assign(wallet_status: :wrong_chain)
+     |> assign(wallet_account: Map.get(params, "account"))
+     |> assign(wallet_chain_id: chain_id)
+     |> assign(wallet_error_message: nil)}
   end
 
   def handle_event("wallet_connect:cancelled", _params, socket) do
-    {:noreply, put_flash(socket, :info, "Wallet connect cancelled.")}
-  end
-
-  def handle_event("wallet_connect:stub", params, socket) do
     {:noreply,
-     put_flash(
-       socket,
-       :info,
-       "Wallet detected (#{params["account"]}). Signing flow is scaffolded — see docs/wallet-connect.md."
-     )}
+     socket
+     |> assign(wallet_status: :not_connected)
+     |> assign(wallet_account: nil)
+     |> assign(wallet_chain_id: nil)
+     |> assign(wallet_error_message: nil)}
   end
 
-  def handle_event("wallet_connect:error", %{"message" => msg}, socket) do
-    {:noreply, put_flash(socket, :error, "Wallet connect error: #{msg}")}
+  def handle_event("wallet_connect:disconnected", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(wallet_status: :not_connected)
+     |> assign(wallet_account: nil)
+     |> assign(wallet_chain_id: nil)
+     |> assign(wallet_error_message: nil)}
+  end
+
+  def handle_event("wallet_connect:disconnect", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(wallet_status: :not_connected)
+     |> assign(wallet_account: nil)
+     |> assign(wallet_chain_id: nil)
+     |> assign(wallet_error_message: nil)}
+  end
+
+  def handle_event("wallet_connect:error", params, socket) do
+    {:noreply,
+     socket
+     |> assign(wallet_status: :error)
+     |> assign(wallet_error_message: Map.get(params, "message", "Unknown wallet error"))}
   end
 
   # --- PubSub handlers ----------------------------------------------------
@@ -236,6 +288,12 @@ defmodule BankWeb.ControlLive do
 
         <%!-- Right column: status + actions --%>
         <div class="space-y-6">
+          <.wallet_status_card
+            status={@wallet_status}
+            account={@wallet_account}
+            chain_id={@wallet_chain_id}
+            error_message={@wallet_error_message}
+          />
           <.next_steps_card
             delegation={@selected_delegation}
             paused={@paused}
@@ -542,23 +600,6 @@ defmodule BankWeb.ControlLive do
           status={:info}
           text="Intents submitted by agents will be evaluated and routed"
         />
-        <li :if={is_nil(@delegation)} class="flex items-start gap-2">
-          <.icon name="hero-wallet" class="size-4 mt-0.5 text-base-content/40 shrink-0" />
-          <div class="flex flex-col gap-1">
-            <button
-              id="wallet-connect-btn"
-              type="button"
-              phx-hook="WalletConnect"
-              class="btn btn-xs btn-outline"
-              title="Requires a browser wallet (Base / Base Sepolia). SDK integration lands in v1.1."
-            >
-              Connect wallet
-            </button>
-            <span class="text-xs text-base-content/50">
-              Browser wallet flow is scaffolded — see docs/wallet-connect.md.
-            </span>
-          </div>
-        </li>
       </ul>
     </div>
     """
@@ -592,6 +633,143 @@ defmodule BankWeb.ControlLive do
       />
       <span>{@text}</span>
     </li>
+    """
+  end
+
+  # --- Component: wallet status card ---------------------------------------
+
+  attr :status, :atom, required: true
+  attr :account, :string, default: nil
+  attr :chain_id, :integer, default: nil
+  attr :error_message, :string, default: nil
+
+  defp wallet_status_card(assigns) do
+    ~H"""
+    <div
+      id="wallet-status-card"
+      phx-hook="WalletConnect"
+      class="rounded-xl border border-base-300 bg-base-100 shadow-sm p-5"
+    >
+      <h3 class="text-sm font-semibold mb-3 flex items-center gap-1.5">
+        <.icon name="hero-wallet" class="size-4" /> Browser wallet
+      </h3>
+
+      <div id="wallet-status" class="space-y-3">
+        <div
+          :if={@status == :not_installed}
+          id="wallet-status-not-installed"
+          class="flex items-start gap-2 text-sm text-base-content/70"
+        >
+          <.icon name="hero-exclamation-triangle" class="size-4 mt-0.5 text-warning shrink-0" />
+          <p>
+            No browser wallet detected. Install MetaMask (or another EIP-1193 wallet) and reload this page.
+          </p>
+        </div>
+
+        <div
+          :if={@status == :connecting}
+          id="wallet-status-connecting"
+          class="flex items-center gap-2 text-sm text-base-content/70"
+        >
+          <.icon name="hero-arrow-path" class="size-4 animate-spin text-base-content/50" />
+          <p>Connecting — confirm the prompt in your wallet…</p>
+        </div>
+
+        <div
+          :if={@status == :connected}
+          id="wallet-status-connected"
+          class="space-y-2 text-sm"
+        >
+          <div class="flex items-center gap-2">
+            <.icon name="hero-check-circle-solid" class="size-4 text-success" />
+            <span class="text-base-content/70">Connected</span>
+          </div>
+          <div>
+            <dt class="text-[0.65rem] uppercase tracking-wider text-base-content/40 mb-0.5">
+              Address
+            </dt>
+            <dd id="wallet-status-address" class="font-mono text-sm text-base-content/80 break-all">
+              {@account}
+            </dd>
+          </div>
+          <div>
+            <dt class="text-[0.65rem] uppercase tracking-wider text-base-content/40 mb-0.5">
+              Chain
+            </dt>
+            <dd id="wallet-status-chain" class="text-sm text-base-content/80">
+              {chain_label(@chain_id)}
+            </dd>
+          </div>
+          <button
+            id="wallet-disconnect-btn"
+            type="button"
+            phx-click="wallet_connect:disconnect"
+            class="btn btn-ghost btn-xs gap-1.5"
+          >
+            <.icon name="hero-link-slash" class="size-3.5" /> Disconnect
+          </button>
+        </div>
+
+        <div
+          :if={@status == :wrong_chain}
+          id="wallet-status-wrong-chain"
+          class="space-y-2 text-sm"
+        >
+          <div class="flex items-start gap-2 text-warning">
+            <.icon name="hero-exclamation-triangle" class="size-4 mt-0.5 shrink-0" />
+            <p class="text-base-content/80">
+              Wallet is on chain id <span id="wallet-status-wrong-chain-id">{@chain_id}</span>. Switch to Base (8453) or Base Sepolia (84532) to continue.
+            </p>
+          </div>
+          <p :if={@account} class="text-xs text-base-content/50 font-mono break-all">
+            {@account}
+          </p>
+          <button
+            id="wallet-disconnect-btn"
+            type="button"
+            phx-click="wallet_connect:disconnect"
+            class="btn btn-ghost btn-xs gap-1.5"
+          >
+            <.icon name="hero-link-slash" class="size-3.5" /> Disconnect
+          </button>
+        </div>
+
+        <div
+          :if={@status == :error}
+          id="wallet-status-error"
+          class="space-y-2 text-sm"
+        >
+          <div class="flex items-start gap-2 text-error">
+            <.icon name="hero-exclamation-circle" class="size-4 mt-0.5 shrink-0" />
+            <p id="wallet-status-error-message" class="text-base-content/80">{@error_message}</p>
+          </div>
+          <button
+            id="wallet-connect-btn"
+            type="button"
+            class="btn btn-xs btn-outline"
+          >
+            Try again
+          </button>
+        </div>
+
+        <div
+          :if={@status == :not_connected}
+          id="wallet-status-disconnected"
+          class="space-y-2 text-sm"
+        >
+          <p class="text-base-content/70">
+            Connect a browser wallet to view your public address. Base Sepolia (84532) is the supported chain.
+          </p>
+          <button
+            id="wallet-connect-btn"
+            type="button"
+            class="btn btn-primary btn-sm gap-1.5"
+          >
+            <.icon name="hero-wallet" class="size-3.5" /> Connect wallet
+          </button>
+        </div>
+      </div>
+    </div>
     """
   end
 
@@ -664,6 +842,11 @@ defmodule BankWeb.ControlLive do
   defp short_id(nil), do: "-"
   defp short_id(id) when byte_size(id) > 12, do: String.slice(id, 0, 8) <> "..."
   defp short_id(id), do: id
+
+  defp chain_label(8453), do: "Base (8453)"
+  defp chain_label(84_532), do: "Base Sepolia (84532)"
+  defp chain_label(nil), do: "-"
+  defp chain_label(id) when is_integer(id), do: "Chain #{id}"
 
   defp short_hash(nil), do: "-"
   defp short_hash(hash) when byte_size(hash) > 14, do: String.slice(hash, 0, 10) <> "..."

@@ -77,16 +77,19 @@ callback kind.
   `POST /dispatch/grant_delegation` (no longer stubbed — wired
   end-to-end since #58, confirmed live on Base Sepolia under PR
   #132).
-- `assets/js/hooks/wallet_connect.js` — scaffold with EIP-1193
-  detection, clear `TODO` markers for the wagmi/viem integration, and
-  the `phx:wallet_connect:request` push that calls the controller.
-  Until a wallet SDK lands, the hook reports
-  `wallet_connect:stub` and operator-driven flows post a
-  `delegation_payload: null` body directly.
-- Control tower: replace the passive "not yet available" text with
-  a **Connect wallet** button that talks to the hook. When the hook
-  is stubbed (no wallet SDK installed), the button stays disabled
-  and shows a tooltip.
+- `assets/js/hooks/wallet_connect.js` — read-only EIP-1193 hook
+  (#168). On user click it requests accounts, reads `eth_chainId`,
+  and pushes `wallet_connect:connected`, `wallet_connect:wrong_chain`,
+  `wallet_connect:cancelled`, or `wallet_connect:error` to the
+  LiveView. It also subscribes to `accountsChanged` and
+  `chainChanged` so the UI tracks live wallet state. The hook does
+  not sign anything; signing + delegation grant land with the SDK
+  decision below.
+- Control tower: a `wallet-status-card` region renders disconnected,
+  connecting, connected, wrong-chain, not-installed, and error
+  states. The Connect button is enabled; the disconnect button
+  clears the local UI state without touching the wallet (EIP-1193
+  has no programmatic disconnect).
 
 ## Remaining work (the actual SDK integration)
 
@@ -140,13 +143,15 @@ Server-side flow now lands end-to-end:
   revoke takes the cryptographic `Kernel.uninstallValidation(...)`
   path (#58 PR #129).
 
-**Still client-side scaffolding**: `assets/js/hooks/wallet_connect.js`
-detects EIP-1193 providers and pushes a `wallet_connect:request`
-event, but the actual signing of a delegation payload requires a
-wallet SDK choice (wagmi vs WalletConnect) plus a delegation
-type (ERC-7579 session key vs EntryPoint v0.7 native session
-key). Until that lands the JS hook reports `wallet_connect:stub`
-and the controller's `delegation_payload` field carries `null`.
+**Still client-side scaffolding for the grant flow**:
+`assets/js/hooks/wallet_connect.js` lands the read-only connect UX
+under #168 — accounts, chain id, wrong-chain warning, disconnect.
+Signing a delegation payload still needs a wallet SDK choice
+(wagmi vs WalletConnect) plus a delegation type (ERC-7579 session
+key vs EntryPoint v0.7 native session key). Until that lands, the
+adapter-callback flow remains the production path and
+`POST /v1/connect/smart_account` carries `delegation_payload:
+null` for operator-driven flows.
 
 **Operator runbook**: end-to-end cryptographic grant + revoke
 runs against a provisioned `OPERATOR_PRIVATE_KEY` matching the

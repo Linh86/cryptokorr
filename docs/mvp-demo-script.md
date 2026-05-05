@@ -104,9 +104,11 @@ end-to-end smokes.
   manually via `POST /v1/decisions/{id}/execute`. Multi-tenant
   deployments will need an explicit `smart_account_id` on the
   intent contract.
-- Browser-native wallet connect. `assets/js/hooks/wallet_connect.js`
-  is a scaffold; v0.1 connect is operator-driven via the adapter
-  callback. (See `docs/wallet-connect.md`.)
+- Browser-native wallet connect (signing). The EIP-1193 read flow
+  ships under #168 — operators can connect, see their EOA + chain,
+  and hit a wrong-chain warning. Signing a delegation payload is
+  still client-side scaffolding; v0.1 grants flow through the
+  adapter callback. (See `docs/wallet-connect.md`.)
 - Wallet-risk intelligence (sanctions, scam feeds, attribution).
   Counterparties are hand-curated; epic #55 is the future track.
 - Swap. `/dispatch/swap` validates the request, then sends a

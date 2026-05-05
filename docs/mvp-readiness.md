@@ -157,12 +157,15 @@ documented escape hatch.
   placeholders; per-tenant key issuance is tracked separately
   (`docs/security.md`). Manual writes attribute to `:user` with
   no actor id.
-- **Browser wallet connect is a stub.** `assets/js/hooks/wallet_connect.js`
-  pushes `wallet_connect:stub`; the LiveView toast says "Signing
-  flow is scaffolded — see docs/wallet-connect.md". Server-side
-  connect endpoint + grant flow are real (PR #130); the JS hook
-  needs wagmi/viem or WalletConnect picked, installed, and wired
-  to actually sign a delegation payload. (Was #43.)
+- **Browser wallet connect is read-only.**
+  `assets/js/hooks/wallet_connect.js` lands the EIP-1193 read flow
+  under #168: an alpha operator can connect, see their EOA + chain,
+  hit a wrong-chain warning, and disconnect locally. Server-side
+  connect endpoint + grant flow are real (PR #130). The JS hook
+  still needs wagmi/viem or WalletConnect picked, installed, and
+  wired to actually sign a delegation payload — until then the
+  adapter-callback flow remains the only path that creates
+  `:active` delegations. (Was #43.)
 - **Cloud staging blocked on credentials.** `docs/staging.md`:
   code-side ready, but provider, Postgres, bundler keys, paymaster
   keys, DNS, smoke run all manual. (Was #35 remainder.)
