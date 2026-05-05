@@ -70,12 +70,13 @@ defmodule Bank.Decisions do
     DecisionEnvelope,
     ExecutionPlan,
     SimulationReport,
+    SwapDispatchSafety,
     SwapRouteArtifacts,
     TrustAssessment
   }
 
   alias Bank.Delegations
-  alias Bank.Intents.{AgentIntent, SwapRoute}
+  alias Bank.Intents.AgentIntent
   alias Bank.Policies
   alias Bank.Quotes
   alias Bank.Repo
@@ -1207,25 +1208,27 @@ defmodule Bank.Decisions do
   On success, creates an execution plan in `:prepared` state and
   enqueues it for execution via `Bank.Runtime.enqueue_execution/1`.
 
-  ## Swap kind (#190)
+  ## Swap kind (#190 + #191)
 
   When the parent intent's `kind` is `:swap`, callers must pass
   `swap_route: route_map` in `opts`. The route is validated through
-  `Bank.Intents.SwapRoute.validate/2`; structural / cap / freshness
-  failures surface as the validator's atom vocabulary
-  (`:swap_chain_not_supported`, `:swap_asset_not_supported`,
-  `:swap_route_field_missing`, `:swap_amount_invalid`,
-  `:swap_slippage_exceeded`, `:swap_deadline_expired`,
-  `:swap_chain_id_mismatch`). A `:swap` envelope without a route
-  returns `{:error, :swap_route_missing}`.
+  the centralised `Bank.Decisions.SwapDispatchSafety.validate/3`
+  gate (#191), which composes route shape
+  (`Bank.Intents.SwapRoute.validate/2`, #189), route↔intent
+  cross-checks (`:swap_chain_mismatch_with_intent`,
+  `:swap_amount_mismatch_with_intent`,
+  `:swap_native_value_disallowed`), and the universal pause /
+  mainnet gates (`:runtime_paused`, `:chain_paused`,
+  `:mainnet_disabled`). A `:swap` envelope without a route returns
+  `{:error, :swap_route_missing}`.
 
   On success the plan's `chain` / `asset` come from the route
   (`route.chain` and `route.destination_asset`) and the normalised
   route artifacts — including a deterministic `route_hash`,
   `route_provider`, addresses, amounts, and freshness — are
-  persisted on the plan's `:steps` JSON map for dispatch and replay.
-  Tests can override the validator's caps and now-instant via
-  `swap_route_caps: caps` and `swap_route_now: dt`.
+  persisted on the plan's `:steps` JSON map for dispatch and
+  replay. Tests can override the validator's caps and now-instant
+  via `swap_route_caps: caps` and `swap_route_now: dt`.
 
   Returns `{:ok, plan}` or `{:error, reason}`.
   """
@@ -1323,22 +1326,23 @@ defmodule Bank.Decisions do
 
   defp create_execution_plan(envelope, smart_account_id, source, opts)
        when source in [:manual, :auto] do
-    # Resolve the workspace_id and intent kind up front so the
-    # chain/asset selection and the chain-pause gate (#228 Phase 1)
-    # can consult workspace and intent-shape context together.
-    # Legacy unscoped intents (#158 tail) leave `workspace_id` as
-    # `nil`; the chain-pause check tolerates that and falls through
-    # to the global-pause result.
-    %{workspace_id: workspace_id, kind: intent_kind} =
-      lookup_intent_workspace_and_kind(envelope.intent_id)
+    # Load the parent intent so the swap-dispatch safety gate
+    # (#191) can cross-check route↔intent fields and so the chain
+    # selection / pause gate can consult workspace context. Legacy
+    # unscoped intents (#158 tail) leave `workspace_id` as `nil`;
+    # the chain-pause check tolerates that and falls through to
+    # the global-pause result.
+    intent = Repo.get(AgentIntent, envelope.intent_id)
+    workspace_id = intent && intent.workspace_id
+    intent_kind = intent && intent.kind
 
-    with {:ok, swap_artifacts} <- maybe_build_swap_artifacts(intent_kind, opts),
+    with {:ok, swap_artifacts} <-
+           maybe_validate_and_build_swap(intent_kind, intent, workspace_id, opts),
          {chain, asset} <- resolve_chain_and_asset(swap_artifacts),
          :ok <- validate_executable_envelope(envelope),
          :ok <- validate_no_active_plan(envelope.id),
          :ok <- validate_stablecoin_adapter_ready(envelope),
-         :ok <- validate_not_paused(workspace_id, chain),
-         :ok <- Bank.Chains.validate_mainnet_allowed(chain, workspace_id),
+         :ok <- maybe_validate_universal_gates(intent_kind, workspace_id, chain),
          :ok <- validate_delegation_active(smart_account_id) do
       reason = Keyword.get(opts, :reason, default_reason_for(source))
 
@@ -1376,37 +1380,44 @@ defmodule Bank.Decisions do
     end
   end
 
-  defp lookup_intent_workspace_and_kind(intent_id) when is_binary(intent_id) do
-    Repo.one(
-      from(i in AgentIntent,
-        where: i.id == ^intent_id,
-        select: %{workspace_id: i.workspace_id, kind: i.kind}
-      )
-    ) || %{workspace_id: nil, kind: nil}
-  end
-
-  # Build artifacts for swap kind from the operator-supplied route.
-  # Validation is delegated to `Bank.Intents.SwapRoute.validate/2`
-  # (#189) so the failure-atom vocabulary stays single-sourced and
-  # `:caps` / `:now` test injection works without persistence.
-  defp maybe_build_swap_artifacts(:swap, opts) do
+  # Validate + build swap artifacts. Validation is delegated to the
+  # centralised `Bank.Decisions.SwapDispatchSafety.validate/3` gate
+  # (#191) which composes route shape (`Bank.Intents.SwapRoute`,
+  # #189), route↔intent cross-checks, and the universal pause /
+  # mainnet gates. The atom vocabulary stays single-sourced.
+  defp maybe_validate_and_build_swap(:swap, %AgentIntent{} = intent, workspace_id, opts) do
     case Keyword.get(opts, :swap_route) do
       nil ->
         {:error, :swap_route_missing}
 
       route when is_map(route) ->
-        validate_opts = swap_route_validate_opts(opts)
+        context = %{intent: intent, workspace_id: workspace_id}
+        gate_opts = swap_safety_gate_opts(opts)
 
-        case SwapRoute.validate(route, validate_opts) do
+        case SwapDispatchSafety.validate(route, context, gate_opts) do
           :ok -> {:ok, SwapRouteArtifacts.from_route(route)}
           {:error, reason} -> {:error, reason}
         end
     end
   end
 
-  defp maybe_build_swap_artifacts(_kind, _opts), do: {:ok, nil}
+  defp maybe_validate_and_build_swap(_kind, _intent, _workspace_id, _opts), do: {:ok, nil}
 
-  defp swap_route_validate_opts(opts) do
+  # `:swap` envelopes already had their pause + mainnet gates
+  # checked inside `SwapDispatchSafety.validate/3`. Re-running them
+  # here would just be a redundant DB read; skip them and avoid
+  # duplicating the failure path. Other intent kinds keep the
+  # existing universal gates.
+  defp maybe_validate_universal_gates(:swap, _workspace_id, _chain), do: :ok
+
+  defp maybe_validate_universal_gates(_kind, workspace_id, chain) do
+    with :ok <- validate_not_paused(workspace_id, chain),
+         :ok <- Bank.Chains.validate_mainnet_allowed(chain, workspace_id) do
+      :ok
+    end
+  end
+
+  defp swap_safety_gate_opts(opts) do
     Enum.flat_map(opts, fn
       {:swap_route_caps, caps} -> [caps: caps]
       {:swap_route_now, now} -> [now: now]

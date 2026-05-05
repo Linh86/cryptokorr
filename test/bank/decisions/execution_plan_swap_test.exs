@@ -64,7 +64,10 @@ defmodule Bank.Decisions.ExecutionPlanSwapTest do
   end
 
   defp swap_envelope do
-    intent = agent_intent(kind: :swap, chain: "base-sepolia")
+    # Intent.amount must match the route's input_amount or the
+    # #191 SwapDispatchSafety gate rejects with
+    # `:swap_amount_mismatch_with_intent`.
+    intent = agent_intent(kind: :swap, chain: "base-sepolia", amount: Decimal.new("100"))
     decision_envelope(intent: intent, outcome: :auto_exec, current: true)
   end
 
@@ -194,7 +197,14 @@ defmodule Bank.Decisions.ExecutionPlanSwapTest do
           mainnet_enabled: false
         })
 
-      intent = agent_intent(kind: :swap, chain: "base-sepolia", workspace_id: ws.id)
+      intent =
+        agent_intent(
+          kind: :swap,
+          chain: "base-sepolia",
+          amount: Decimal.new("100"),
+          workspace_id: ws.id
+        )
+
       envelope = decision_envelope(intent: intent, outcome: :auto_exec, current: true)
       sa = grant("ws")
 
