@@ -143,16 +143,29 @@ regression-tested by `Bank.AdapterConfigTest` and
 ## Operator console (`/`, `/dashboard`, …)
 
 - Served over HTTPS.
-- Session auth is out of scope for alpha (single-operator deployments
-  sit behind a corporate VPN). v1.1 will add SSO.
+- **Session auth is in scope for the private alpha.** Google OAuth is
+  the identity layer; admin approval into a workspace grants product
+  access. There is no public signup. The full operator-facing
+  walkthrough — required env vars (`GOOGLE_OAUTH_CLIENT_ID/SECRET/
+  REDIRECT_URI`, `BANK_ADMIN_EMAILS`), the Stub provider for local
+  dev, the pending → approve flow, and the role/workspace gates —
+  lives in [`docs/runbooks/auth-and-access.md`](runbooks/auth-and-access.md).
 - CSRF protection is enabled on all non-GET browser routes via the
   `:browser` pipeline.
 
 ## External `/v1/` API
 
 - HTTPS only.
-- API-key authentication is expected; the pipeline is scaffolded but
-  key issuance is tracked separately.
+- **API-key authentication is wired.** Workspace-scoped keys
+  (`Authorization: Bearer cb_<body>`) are verified by
+  `BankWeb.Plugs.VerifyAPIKey`, which also refuses `:revoked`,
+  `:expired`, and `:workspace_paused` keys. The plug populates the
+  same `current_scope` shape the browser path resolves, so domain
+  code reads workspace + role uniformly across surfaces. See
+  [`docs/runbooks/api-key-auth-smoke.md`](runbooks/api-key-auth-smoke.md)
+  for issuance / rotation, and
+  [`docs/runbooks/auth-and-access.md`](runbooks/auth-and-access.md)
+  for how the API-key path composes with the workspace gate.
 - Rate limiting and quota enforcement are out of scope for alpha.
 
 ## Telegram bot operator surface (#54)
