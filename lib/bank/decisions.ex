@@ -206,6 +206,15 @@ defmodule Bank.Decisions do
     end
   end
 
+  defp do_evaluate_intent(
+         %AgentIntent{kind: :defi_yield_deposit, state: state} = intent,
+         opts
+       )
+       when state in @evaluable_states do
+    intent = Repo.preload(intent, [:target_address_label, :target_counterparty])
+    Bank.Decisions.MorphoEvaluator.evaluate(intent, opts)
+  end
+
   defp do_evaluate_intent(%AgentIntent{state: state} = intent, opts)
        when state in @evaluable_states do
     intent = Repo.preload(intent, [:target_address_label, :target_counterparty])
