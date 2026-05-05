@@ -611,6 +611,93 @@ defmodule BankWeb.PolicyBuilderLiveTest do
       assert html =~ "block"
       # Matched-rule link points at the published rule's stable id.
       assert has_element?(view, "#policy-builder-simulator-published-matched-#{rule.id}")
+
+      # And the link href points at the published-side rule anchor
+      # (#225 P2 — published links use the published-rule prefix).
+      assert html =~ ~s(href="#policy-builder-published-rule-#{rule.id}")
+    end
+
+    test "draft-only matched rule link points to the draft-rule anchor (#225 P2)",
+         %{conn: conn, workspace: ws, current_user: user} do
+      # Published v1 with one rule that does NOT block the
+      # simulated intent (large amount limit).
+      published_rule =
+        Bank.Fixtures.policy_rule(
+          rule_type: :amount_limit,
+          state: :active,
+          workspace_id: ws.id,
+          params: %{"max_per_tx" => "1000"}
+        )
+
+      {:ok, pub_draft} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: user.id,
+          rule_ids: %{"items" => [published_rule.id]}
+        )
+
+      {:ok, _} = Versions.publish_draft(pub_draft, published_by: :user, actor_id: user.id)
+
+      # Open a new draft and add a draft-only rule that DOES match
+      # the simulated intent (tightened limit).
+      draft_only_rule =
+        Bank.Fixtures.policy_rule(
+          rule_type: :amount_limit,
+          state: :draft,
+          workspace_id: ws.id,
+          params: %{"max_per_tx" => "10"}
+        )
+
+      {:ok, _draft} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: user.id,
+          rule_ids: %{"items" => [draft_only_rule.id]}
+        )
+
+      {:ok, view, _html} = live(conn, "/policies/builder")
+
+      html =
+        view
+        |> form("#policy-builder-simulator-form", %{
+          "simulation" => %{
+            "kind" => "transfer",
+            "asset" => "USDC",
+            "chain" => "base",
+            "amount" => "100"
+          }
+        })
+        |> render_submit()
+
+      # Both sides have a matched-rule entry with stable list ids.
+      assert has_element?(
+               view,
+               "#policy-builder-simulator-published-matched-#{published_rule.id}"
+             )
+
+      assert has_element?(
+               view,
+               "#policy-builder-simulator-draft-matched-#{draft_only_rule.id}"
+             )
+
+      # Pre-fix: the draft-side <a> href incorrectly pointed at
+      # `#policy-builder-published-rule-<id>` even though the
+      # draft-only rule renders under `#policy-builder-draft-rule-<id>`.
+      # Post-fix: published side links to published anchors;
+      # draft side links to draft anchors.
+      assert html =~
+               ~s(href="#policy-builder-published-rule-#{published_rule.id}")
+
+      assert html =~
+               ~s(href="#policy-builder-draft-rule-#{draft_only_rule.id}")
+
+      # And the published side does NOT carry a draft-anchor href
+      # for its matched id, nor vice-versa.
+      refute html =~
+               ~s(href="#policy-builder-draft-rule-#{published_rule.id}")
+
+      refute html =~
+               ~s(href="#policy-builder-published-rule-#{draft_only_rule.id}")
     end
 
     test "draft tightens the limit; the changed banner appears",

@@ -1112,11 +1112,13 @@ defmodule BankWeb.PolicyBuilderLive do
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
         <.simulator_side
           dom_prefix="policy-builder-simulator-published"
+          rule_link_prefix="policy-builder-published-rule"
           label="Published"
           side={@result.published}
         />
         <.simulator_side
           dom_prefix="policy-builder-simulator-draft"
+          rule_link_prefix="policy-builder-draft-rule"
           label="Draft"
           side={@result.draft}
         />
@@ -1126,6 +1128,7 @@ defmodule BankWeb.PolicyBuilderLive do
   end
 
   attr :dom_prefix, :string, required: true
+  attr :rule_link_prefix, :string, required: true
   attr :label, :string, required: true
   attr :side, :map, required: true
 
@@ -1175,7 +1178,7 @@ defmodule BankWeb.PolicyBuilderLive do
             <ul class="space-y-0.5">
               <%= for rule_id <- @side.matched_rule_ids do %>
                 <li id={"#{@dom_prefix}-matched-#{rule_id}"}>
-                  <a href={"#policy-builder-published-rule-#{rule_id}"} class="link link-hover">
+                  <a href={"##{@rule_link_prefix}-#{rule_id}"} class="link link-hover">
                     {rule_id}
                   </a>
                 </li>
