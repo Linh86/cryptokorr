@@ -330,11 +330,12 @@ Each LiveView passes an `active_page` assign to the shared
 
 **What is not yet included:**
 
-* **Browser wallet integration.** The repo does not yet include a
-  client-side wallet SDK (WalletConnect, wagmi). Delegation is
-  established through the adapter callback flow; the UI reflects
-  the state the backend already tracks. This limitation is made
-  explicit in the UI.
+* **Browser wallet signing.** The connection page now includes a
+  read-only EIP-1193 connect surface (#168) so an operator can
+  expose their EOA + chain to the UI. The repo does not yet include
+  a client-side wallet SDK (WalletConnect, wagmi) for *signing*
+  delegation payloads — delegation is still established through
+  the adapter callback flow.
 * **Public intent intake.** `POST /v1/intents`, `GET /v1/intents/:id`,
   `POST /v1/intents/:id/simulate`, and `POST /v1/intents/:id/cancel`
   remain stubbed while the trust + simulation pipeline is still being
@@ -918,10 +919,11 @@ deferred:
   engines are present as building blocks, but the public
   `/v1/intents*` submission and inspection surface remains stubbed until
   the full end-to-end intake flow is wired.
-* **Browser wallet integration.** The connection page shows delegation
-  state from the backend but does not yet include a client-side
-  wallet SDK. A browser-native "connect wallet" flow (WalletConnect
-  / wagmi) is a follow-up once the adapter supports it.
+* **Browser wallet signing.** The connection page renders a
+  read-only EIP-1193 connect surface (#168) plus the delegation
+  state the backend already tracks. A browser-native *signing* flow
+  (WalletConnect / wagmi) for delegation payloads is a follow-up
+  once the adapter supports it.
 * **Wallet risk intelligence.** Runtime routing does not yet hard-block
   sanctioned addresses, challenge scam/phishing-labelled addresses, or
   enrich counterparties from public crypto attribution tagpacks and
