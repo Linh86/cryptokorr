@@ -134,7 +134,14 @@ This key must **not** match `OPERATOR_PRIVATE_KEY`.
 
 ### 6. Obtain `BASE_RPC_URL`
 
-Get a Base Sepolia RPC endpoint from your provider.
+Get a Base RPC endpoint from your provider.
+
+For a **Base Sepolia** (testnet) deployment, the endpoint must
+return chain id `84532`. For a **Base mainnet** deployment, it must
+return chain id `8453`. Mismatched URLs (e.g. a Sepolia URL on a
+mainnet deployment) are caught by `mix bank.chain.mainnet.preflight`
+(#179) — see [`docs/runbooks/production-observability.md`](runbooks/production-observability.md)
+§ "Base mainnet preflight".
 
 Save the full endpoint as `BASE_RPC_URL`.
 
@@ -142,11 +149,30 @@ Treat it as sensitive config because the URL may contain an API key.
 
 ### 7. Obtain `BUNDLER_RPC_URL`
 
-Get an ERC-4337 v0.7 bundler endpoint for Base Sepolia.
+Get an ERC-4337 v0.7 bundler endpoint for the same chain as
+`BASE_RPC_URL` (Base Sepolia or Base mainnet).
 
 Save the full endpoint as `BUNDLER_RPC_URL`.
 
 Treat it as sensitive config for the same reason as the RPC URL.
+
+### 7a. Set `BASE_CHAIN_ID` (#179)
+
+Declare the deployment's chain id explicitly: `84532` for Base
+Sepolia, `8453` for Base mainnet.
+
+```text
+BASE_CHAIN_ID=84532   # Base Sepolia
+# OR
+BASE_CHAIN_ID=8453    # Base mainnet
+```
+
+The mainnet preflight (`mix bank.chain.mainnet.preflight`) cross-
+checks this against the RPC's `eth_chainId` response and refuses to
+proceed if they disagree. Workspace mainnet eligibility (#178) is
+the second gate: even with the right env, an admin must call
+`Bank.Workspaces.set_mainnet_enabled(workspace, true)` to admit
+mainnet broadcasts.
 
 ### 8. Record `PHOENIX_BASE_URL`
 

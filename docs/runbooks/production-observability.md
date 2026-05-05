@@ -439,6 +439,92 @@ It does **not** call `Bank.AdapterClient` over real HTTP, does
 **not** read `.env`, does **not** broadcast, and does **not** sign
 anything.
 
+## Base mainnet preflight (#179)
+
+Companion to the workspace mainnet eligibility flag from #178:
+the workspace flag controls *whether a workspace may run
+mainnet*; the preflight verifies *whether the deployment is
+configured correctly to talk to Base mainnet at all*. Both must
+clear before a mainnet broadcast can land in production.
+
+```sh
+mix bank.chain.mainnet.preflight
+# → prints one PASS / WARN / FAIL line per check, exits non-zero on
+#   any :down / :unknown status. :not_configured (e.g. local/dev
+#   that has not provisioned a mainnet RPC URL) is benign at the
+#   rollup level.
+```
+
+### Checks
+
+`Bank.Chains.MainnetPreflight.run/1` issues read-only JSON-RPC
+calls (`eth_chainId`, `eth_getCode`, `eth_getBalance`) and
+returns a fixed-shape result:
+
+| Check | What it asserts |
+| --- | --- |
+| `:config_present` | `BASE_RPC_URL`, `BUNDLER_RPC_URL`, `BASE_CHAIN_ID`, `SMART_ACCOUNT_ADDRESS` are non-empty |
+| `:chain_id_declared` | `BASE_CHAIN_ID == 8453` (Base mainnet) |
+| `:chain_id_rpc` | RPC `eth_chainId` round-trips and returns `0x2105` (8453) — load-bearing: catches "Sepolia RPC URL pasted into a mainnet deployment" |
+| `:entrypoint_code` | `eth_getCode` at `0x0000000071727De22E5E9d8BAf0edAc6f37da032` (ERC-4337 v0.7) returns non-empty bytecode |
+| `:smart_account_address_shape` | `SMART_ACCOUNT_ADDRESS` is a 20-byte `0x` address |
+| `:smart_account_code` | `eth_getCode` at SA — `:ok` if deployed, `:degraded` (informational, not a hard fail) if not. ZeroDev kernel install is a separate provisioning step (#171) |
+| `:smart_account_balance` | `eth_getBalance` at SA round-trips. We do **not** gate on amount — funding is the operator's responsibility |
+| `:bundler_url_shape` | `BUNDLER_RPC_URL` is `http(s)`. Bundler RPC round-trip (`eth_supportedEntryPoints`) is deferred to a v1.1 follow-up |
+
+### Rollup
+
+Mirrors `Bank.Ops.Health.snapshot/0`:
+
+- `:ok` — every check is `:ok` or `:not_configured`.
+- `:degraded` — at least one check is `:degraded` or `:unknown`
+  (e.g. SA not yet deployed; transient RPC raise).
+- `:down` — at least one check is `:down` (chain id mismatch,
+  entrypoint missing, transport error, 5xx).
+- `:not_configured` — every required env key is missing
+  (the local/dev posture).
+
+The Mix task exits non-zero on `:down` or `:degraded`, exits 0
+on `:ok` or `:not_configured`.
+
+### What it does NOT do
+
+- **No broadcast.** Every RPC call is `eth_*` read-only —
+  `eth_chainId`, `eth_getCode`, `eth_getBalance`. No
+  `eth_sendRawTransaction`, no UserOp, no signing.
+- **No bundler RPC.** `BUNDLER_RPC_URL` shape is checked but
+  the bundler is not contacted; the bundler probe is part of
+  the runtime dispatch surface, not the static preflight.
+- **No `Bank.AdapterClient` HTTP.** The preflight reaches the
+  RPC directly via `Req.post`; the adapter binding is
+  unaffected.
+- **No secret leak.** Every error `detail` is drawn from a
+  fixed allowlist (`config_missing:<KEY>`,
+  `chain_id_declared_mismatch`, `chain_id_rpc_mismatch`,
+  `entrypoint_missing`, `transport_error`, `http_5xx`,
+  `invalid_response`, `rpc_error`, `rpc_check_raised`,
+  `rpc_check_timeout`, `bundler_url_invalid`,
+  `smart_account_address_invalid`,
+  `smart_account_not_deployed`). Raw URLs, exception messages,
+  and RPC response bodies are NEVER surfaced — same posture
+  as `Bank.Ops.Health.adapter/0` (#253).
+
+### Operator workflow
+
+Before flipping `Bank.Workspaces.set_mainnet_enabled(workspace,
+true)` for a new tenant, an admin should:
+
+1. Provision the deployment's mainnet env (`BASE_RPC_URL`,
+   `BUNDLER_RPC_URL`, `BASE_CHAIN_ID=8453`,
+   `SMART_ACCOUNT_ADDRESS`).
+2. Run `mix bank.chain.mainnet.preflight` and confirm all
+   checks are `:ok` or `:degraded` with `smart_account_not_deployed`
+   (followed by a #171 onboarding pass).
+3. Then flip the workspace flag — at this point the runtime
+   gates from #178 admit mainnet operations; without the
+   preflight, a misconfigured deployment would silently route
+   mainnet intents to a Sepolia RPC.
+
 ## Caveats
 
 - This document is **runtime triage**, not a SOC dashboard. It
