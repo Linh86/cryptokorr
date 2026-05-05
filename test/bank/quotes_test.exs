@@ -138,10 +138,32 @@ defmodule Bank.QuotesTest do
                Quotes.preview(intent, provider: :stub)
     end
 
-    test ":live provider opt resolves to LiveProvider — returns :not_yet_implemented pre-#174" do
+    test ":live provider opt resolves to LiveProvider and produces a live preview (post-#174)" do
+      # With #174 in place, `:live` resolves to a real Req-backed
+      # client. The default `config/test.exs` wires
+      # `Bank.Quotes.LiveProvider` to `Req.Test`, so we stub a
+      # success body and assert the preview surfaces with
+      # `source: :live, provider: "tenderly"`. Detailed live-provider
+      # behaviour (failure modes, secret hygiene) lives in
+      # `test/bank/quotes/live_provider_test.exs`.
+      Req.Test.stub(LiveProvider, fn conn ->
+        Req.Test.json(conn, %{
+          "success" => true,
+          "trace_id" => "trace-#{System.unique_integer([:positive])}",
+          "estimated_gas" => 120_000,
+          "estimated_fee" => "0.00015",
+          "fee_asset" => "ETH",
+          "balance_changes" => %{"USDC" => "-10.5"},
+          "failure_conditions" => [],
+          "risk_flags" => [],
+          "freshness_ttl_seconds" => 30
+        })
+      end)
+
       intent = Fixtures.agent_intent(chain: "base")
 
-      assert {:error, :not_yet_implemented} = Quotes.preview(intent, provider: :live)
+      assert {:ok, %Preview{source: :live, provider: "tenderly"}} =
+               Quotes.preview(intent, provider: :live)
     end
 
     test ":disabled provider opt short-circuits with :provider_disabled" do
@@ -201,37 +223,38 @@ defmodule Bank.QuotesTest do
     end
   end
 
-  describe "Bank.Quotes.LiveProvider (#173 skeleton)" do
+  describe "Bank.Quotes.LiveProvider (post-#174)" do
+    # Detailed live-provider behaviour — failure modes, secret
+    # hygiene, request-shape pinning — lives in
+    # `test/bank/quotes/live_provider_test.exs` (async: false because
+    # those cases mutate `:bank, Bank.Quotes.LiveProvider` config).
+    # This describe block stays focused on the contract surface
+    # `Bank.Quotes` itself depends on.
+
     test "implements the Bank.Quotes.Provider behaviour" do
       assert Bank.Quotes.Provider in (LiveProvider.module_info(:attributes)
                                       |> Keyword.get_values(:behaviour)
                                       |> List.flatten())
     end
 
-    test "preview/2 returns :not_yet_implemented for any intent" do
-      intent = Fixtures.agent_intent(chain: "base")
-
-      assert {:error, :not_yet_implemented} = LiveProvider.preview(intent, [])
-      assert {:error, :not_yet_implemented} = LiveProvider.preview(intent)
-    end
-
-    test "no chain HTTP is called from the skeleton — pin via Req.Test stub" do
-      # Defensive: even though preview/2 is a hardcoded :error
-      # tuple today, future-proof against a regression that adds
-      # an HTTP call before the error return. If the skeleton ever
-      # tried to call out, the stub would ping us.
-      parent = self()
-
+    test "preview/2 produces a live preview with source: :live when configured" do
       Req.Test.stub(LiveProvider, fn conn ->
-        send(parent, :live_provider_called)
-        Plug.Conn.resp(conn, 500, "")
+        Req.Test.json(conn, %{
+          "success" => true,
+          "trace_id" => "trace-abc",
+          "estimated_gas" => 90_000,
+          "estimated_fee" => "0.00009",
+          "fee_asset" => "ETH",
+          "balance_changes" => %{"USDC" => "-10.5"},
+          "failure_conditions" => [],
+          "risk_flags" => [],
+          "freshness_ttl_seconds" => 30
+        })
       end)
 
       intent = Fixtures.agent_intent(chain: "base")
 
-      assert {:error, :not_yet_implemented} = LiveProvider.preview(intent)
-
-      refute_receive :live_provider_called, 50
+      assert {:ok, %Preview{source: :live, provider: "tenderly"}} = LiveProvider.preview(intent)
     end
   end
 

@@ -225,6 +225,39 @@ case config_env() do
     :ok
 end
 
+# Bank.Quotes.LiveProvider (#174): Tenderly-style live quote /
+# simulation provider.
+#
+# Two env vars wire the live provider, both optional at boot:
+#
+#   * TENDERLY_BASE_URL — base URL of the simulate endpoint, e.g.
+#     "https://api.tenderly.co/api". The provider POSTs to
+#     "{base_url}/v1/simulate" with a JSON body.
+#   * TENDERLY_API_KEY — API key sent on the `X-Access-Key` header.
+#
+# Reads are lenient on purpose: if either variable is unset, the
+# corresponding config key remains absent and any `:live`-mode
+# `Bank.Quotes.preview/2` call short-circuits with
+# `{:error, :provider_unavailable}`. Operators must set BOTH env
+# vars before flipping `config :bank, Bank.Quotes, provider: :live`.
+#
+# In :test, `config/test.exs` is authoritative — synthetic
+# base_url/api_key + Req.Test plug — and this block is a no-op.
+# In :dev / :prod, env vars override the (absent) defaults.
+case config_env() do
+  :test ->
+    :ok
+
+  _ ->
+    if base_url = System.get_env("TENDERLY_BASE_URL") do
+      config :bank, Bank.Quotes.LiveProvider, base_url: base_url
+    end
+
+    if api_key = System.get_env("TENDERLY_API_KEY") do
+      config :bank, Bank.Quotes.LiveProvider, api_key: api_key
+    end
+end
+
 # Bootstrap admin allowlist for the private-alpha approve / reject
 # flow (epic #153, issue #157). Comma-separated list of operator
 # emails — anyone in the list can hit `/admin/access` to approve or
