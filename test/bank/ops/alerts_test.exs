@@ -28,7 +28,8 @@ defmodule Bank.Ops.AlertsTest do
     {:ok, ws} =
       Bank.Workspaces.create_workspace(%{
         slug: "ops-alerts-#{System.unique_integer([:positive])}",
-        name: "Ops Alerts WS"
+        name: "Ops Alerts WS",
+        mainnet_enabled: true
       })
 
     %{workspace: ws}
@@ -198,7 +199,8 @@ defmodule Bank.Ops.AlertsTest do
       {:ok, ws_b} =
         Bank.Workspaces.create_workspace(%{
           slug: "ops-alerts-iso-#{System.unique_integer([:positive])}",
-          name: "Ops Alerts ISO B"
+          name: "Ops Alerts ISO B",
+          mainnet_enabled: true
         })
 
       attrs_for = fn ws ->

@@ -103,12 +103,30 @@ defmodule Bank.Runtime.Workers.RevokeDelegation do
   defp dispatch(smart_account_id, reason) do
     case Delegations.get(smart_account_id) do
       %Delegation{delegation_id: delegation_id} = delegation when is_binary(delegation_id) ->
-        call_adapter(
-          smart_account_id,
-          delegation_id,
-          reason,
-          Delegations.permission_dispatch_block(delegation)
-        )
+        # Defense-in-depth mainnet gate (#178). A revoke is itself
+        # a chain-broadcast operation, so the workspace mainnet
+        # eligibility gate applies here too: if the delegation's
+        # chain is mainnet-class and the workspace flag is off,
+        # we refuse to dispatch the revoke. The control-plane
+        # `Delegations.record_revoke_requested/2` projection write
+        # in `Bank.Security.revoke_delegation/2` already happened
+        # before this worker ran — that's a Phoenix-side state
+        # change, not a chain side effect, so it stands.
+        if Bank.Chains.mainnet_allowed_for?(delegation.chain, delegation.workspace_id) do
+          call_adapter(
+            smart_account_id,
+            delegation_id,
+            reason,
+            Delegations.permission_dispatch_block(delegation)
+          )
+        else
+          Logger.warning(
+            "RevokeDelegation: mainnet disabled for workspace #{inspect(delegation.workspace_id)} " <>
+              "(chain=#{delegation.chain}); cancelling revoke for smart_account #{smart_account_id}"
+          )
+
+          {:cancel, :mainnet_disabled}
+        end
 
       nil ->
         Logger.error(

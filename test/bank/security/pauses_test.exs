@@ -536,7 +536,8 @@ defmodule Bank.Security.PausesTest do
     {:ok, ws} =
       Workspaces.create_workspace(%{
         slug: "#{slug_suffix}-#{suffix}",
-        name: "WS #{slug_suffix} #{suffix}"
+        name: "WS #{slug_suffix} #{suffix}",
+        mainnet_enabled: true
       })
 
     ws

@@ -37,7 +37,19 @@ defmodule Bank.Intents do
   @default_limit 50
   @max_limit 200
 
-  @supported_chains ~w(base)
+  # Two supported chain strings as of #178:
+  #
+  #   * `"base"` — Base mainnet (`Bank.Chains.mainnet?/1`). Subject to
+  #     the workspace mainnet eligibility gate; rejected at submission
+  #     when the workspace has not opted in.
+  #   * `"base-sepolia"` — Base Sepolia testnet. Always allowed
+  #     regardless of the workspace mainnet flag.
+  #
+  # The mainnet eligibility check itself lives in
+  # `Bank.Chains.validate_mainnet_allowed/2`, called from `submit/2`
+  # right after `stamp_workspace_id/2` so the rejection happens
+  # before any DB row or audit event is written.
+  @supported_chains ~w(base base-sepolia)
   @supported_assets ~w(USDC)
 
   @doc """
@@ -544,21 +556,28 @@ defmodule Bank.Intents do
              {:idempotency_conflict, AgentIntent.t()}
              | {:unsupported_chain, String.t()}
              | {:unsupported_asset, String.t()}
+             | :mainnet_disabled
              | {:invalid, term()}}
   def submit(attrs, opts \\ []) when is_map(attrs) do
     with {:ok, normalized} <- normalize(attrs) do
       normalized = stamp_workspace_id(normalized, opts)
 
-      case lookup_existing(normalized.agent_id, normalized.idempotency_key) do
-        nil ->
-          do_insert(normalized, opts)
+      with :ok <-
+             Bank.Chains.validate_mainnet_allowed(
+               normalized.chain,
+               Map.get(normalized, :workspace_id)
+             ) do
+        case lookup_existing(normalized.agent_id, normalized.idempotency_key) do
+          nil ->
+            do_insert(normalized, opts)
 
-        %AgentIntent{payload_hash: hash} = existing
-        when hash == normalized.payload_hash ->
-          {:ok, %{intent: preload_target(existing), replay?: true}}
+          %AgentIntent{payload_hash: hash} = existing
+          when hash == normalized.payload_hash ->
+            {:ok, %{intent: preload_target(existing), replay?: true}}
 
-        %AgentIntent{} = existing ->
-          {:error, {:idempotency_conflict, existing}}
+          %AgentIntent{} = existing ->
+            {:error, {:idempotency_conflict, existing}}
+        end
       end
     end
   end

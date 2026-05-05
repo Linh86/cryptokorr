@@ -135,7 +135,8 @@ defmodule Bank.Runtime.Workers.SweepExpiredPausesTest do
     {:ok, ws} =
       Bank.Workspaces.create_workspace(%{
         slug: "#{slug_suffix}-#{suffix}",
-        name: "WS #{slug_suffix} #{suffix}"
+        name: "WS #{slug_suffix} #{suffix}",
+        mainnet_enabled: true
       })
 
     ws

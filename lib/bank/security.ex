@@ -233,6 +233,32 @@ defmodule Bank.Security do
     actor_id = Keyword.get(opts, :actor_id)
     correlation_id = Keyword.get(opts, :correlation_id)
 
+    with :ok <- validate_mainnet_allowed_for_revoke(smart_account_id) do
+      do_revoke_delegation(smart_account_id, reason, actor, actor_id, correlation_id)
+    end
+  end
+
+  # Mainnet eligibility gate (#178). The controller path
+  # (`SecurityController.revoke_delegation`) calls into here
+  # synchronously, so we surface `:mainnet_disabled` as an early
+  # error rather than letting the worker queue a job that the
+  # downstream `RevokeDelegation` worker would then cancel. The
+  # worker still re-checks defensively — race conditions where the
+  # workspace flag flips between this synchronous check and the
+  # job's eventual run are rare but real.
+  defp validate_mainnet_allowed_for_revoke(smart_account_id) do
+    case Delegations.get(smart_account_id) do
+      %{chain: chain, workspace_id: workspace_id} ->
+        Bank.Chains.validate_mainnet_allowed(chain, workspace_id)
+
+      nil ->
+        # No delegation row → no chain to gate. Let the worker
+        # surface its existing `:no_such_delegation` cancel.
+        :ok
+    end
+  end
+
+  defp do_revoke_delegation(smart_account_id, reason, actor, actor_id, correlation_id) do
     case Runtime.enqueue_delegation_revoke(smart_account_id, reason) do
       {:ok, job} = ok ->
         # Update the control-plane projection immediately so any

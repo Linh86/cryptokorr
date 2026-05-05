@@ -191,7 +191,8 @@ defmodule BankWeb.ActivityImportLiveTest do
       {:ok, ws_b} =
         Bank.Workspaces.create_workspace(%{
           slug: "csv-sib-#{System.unique_integer([:positive])}",
-          name: "Sibling"
+          name: "Sibling",
+          mainnet_enabled: true
         })
 
       {:ok, view, _html} = live(conn, "/activity/import")

@@ -82,6 +82,8 @@ defmodule BankWeb.API.V1.ConnectController do
   def request(conn, params) do
     with {:ok, payload} <- validate_payload(params),
          :ok <- ensure_workspace_unpaused(conn.assigns.current_scope),
+         :ok <-
+           ensure_mainnet_allowed(conn.assigns.current_scope, payload["chain_id"]),
          {:ok, :accepted} <- Delegations.request_connect(payload) do
       conn
       |> put_status(:accepted)
@@ -118,12 +120,39 @@ defmodule BankWeb.API.V1.ConnectController do
           }
         })
 
+      {:error, :mainnet_disabled} ->
+        conn
+        |> put_status(:unprocessable_entity)
+        |> json(%{
+          error: %{
+            code: "mainnet_disabled",
+            message:
+              "Base mainnet (chain_id 8453) is not enabled for this workspace; an admin must opt-in via the workspace mainnet eligibility flag (#178)"
+          }
+        })
+
       {:error, reason} ->
         conn
         |> put_status(:unprocessable_entity)
         |> json(%{error: %{code: "connect_failed", message: inspect(reason)}})
     end
   end
+
+  # Mainnet eligibility gate (#178). Base mainnet (`chain_id == 8453`)
+  # is rejected unless the calling workspace has opted in via
+  # `Bank.Workspaces.mainnet_enabled?/1`. Base Sepolia (84532) and
+  # any other chain_id pass through here — `Delegations.request_connect/1`
+  # already enforces the broader chain_id allowlist downstream and
+  # returns `{:error, :unsupported_chain}` for anything outside
+  # `{8453, 84532}`. Defense in depth: keep this gate even though the
+  # downstream worker also re-checks before adapter dispatch.
+  defp ensure_mainnet_allowed(%{workspace: %Workspace{id: ws_id}}, 8453) do
+    if Bank.Workspaces.mainnet_enabled?(ws_id),
+      do: :ok,
+      else: {:error, :mainnet_disabled}
+  end
+
+  defp ensure_mainnet_allowed(_scope, _chain_id), do: :ok
 
   # Reload the workspace from the DB so a pause that landed between
   # `VerifyAPIKey`'s preload and this controller is honored. Defense

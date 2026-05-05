@@ -527,7 +527,8 @@ defmodule BankWeb.API.V1.ApprovalControllerTest do
       {:ok, ws_b} =
         Bank.Workspaces.create_workspace(%{
           slug: "sibling-approve-ws-#{System.unique_integer([:positive])}",
-          name: "Sibling B"
+          name: "Sibling B",
+          mainnet_enabled: true
         })
 
       cp_b = counterparty(workspace_id: ws_b.id)

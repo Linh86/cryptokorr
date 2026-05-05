@@ -450,7 +450,8 @@ defmodule Bank.AccessAdminTest do
       {:ok, ws} =
         Workspaces.create_workspace(%{
           slug: "notif-ws-secret",
-          name: "Authorization: Bearer LEAKED_PROBE"
+          name: "Authorization: Bearer LEAKED_PROBE",
+          mainnet_enabled: true
         })
 
       assert {:ok, :membership_created, _} =

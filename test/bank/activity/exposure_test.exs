@@ -40,7 +40,8 @@ defmodule Bank.Activity.ExposureTest do
     {:ok, ws} =
       Bank.Workspaces.create_workspace(%{
         slug: "exposure-#{System.unique_integer([:positive])}",
-        name: "Exposure"
+        name: "Exposure",
+        mainnet_enabled: true
       })
 
     %{workspace: ws}
@@ -184,7 +185,8 @@ defmodule Bank.Activity.ExposureTest do
       {:ok, ws_b} =
         Bank.Workspaces.create_workspace(%{
           slug: "exposure-other-#{System.unique_integer([:positive])}",
-          name: "Exposure Other"
+          name: "Exposure Other",
+          mainnet_enabled: true
         })
 
       seed_confirmed_activity(ws_a.id, "USDC", :inbound, "10")

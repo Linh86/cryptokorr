@@ -42,7 +42,8 @@ defmodule Bank.WorkspaceScopingTest do
     {:ok, ws} =
       Workspaces.create_workspace(%{
         slug: "ws-scope-#{System.unique_integer([:positive])}",
-        name: "Scope test ws"
+        name: "Scope test ws",
+        mainnet_enabled: true
       })
 
     ws

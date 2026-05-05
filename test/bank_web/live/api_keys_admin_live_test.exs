@@ -71,7 +71,8 @@ defmodule BankWeb.APIKeysAdminLiveTest do
     {:ok, ws} =
       Workspaces.create_workspace(%{
         slug: "ui-non-admin-#{suffix}",
-        name: "UI Non Admin #{suffix}"
+        name: "UI Non Admin #{suffix}",
+        mainnet_enabled: true
       })
 
     {:ok, _} =
@@ -154,7 +155,7 @@ defmodule BankWeb.APIKeysAdminLiveTest do
       # `resolve_scope/1` would return `:ambiguous` and the
       # mount would redirect to /pending.
       {:ok, other_ws} =
-        Workspaces.create_workspace(%{slug: "ui-other", name: "UI Other"})
+        Workspaces.create_workspace(%{slug: "ui-other", name: "UI Other", mainnet_enabled: true})
 
       suffix = System.unique_integer([:positive])
 

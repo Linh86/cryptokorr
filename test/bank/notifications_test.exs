@@ -31,7 +31,8 @@ defmodule Bank.NotificationsTest do
     {:ok, ws} =
       Bank.Workspaces.create_workspace(%{
         slug: "notif-test-ws-#{suffix}",
-        name: "Notif Test WS #{suffix}"
+        name: "Notif Test WS #{suffix}",
+        mainnet_enabled: true
       })
 
     ws

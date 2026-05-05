@@ -139,18 +139,37 @@ defmodule Bank.Demo do
   # no-op against this row.
   defp ensure_demo_workspace! do
     case Workspaces.get_workspace_by_slug(@demo_workspace_slug) do
-      %Workspace{id: id} ->
+      %Workspace{id: id} = ws ->
+        # Idempotently flip mainnet_enabled=true on the demo
+        # workspace (#178). The seed's intent rows use `chain:
+        # "base"` (mainnet-class per `Bank.Chains.mainnet?/1`), so
+        # without the eligibility flag the decision pipeline would
+        # refuse to write execution plans for any of them and the
+        # `/sandbox` walkthrough would be unreachable on a fresh
+        # database. The demo workspace is local-only and never
+        # broadcasts: the adapter binding in dev is unset (or pinned
+        # to chain_id 84532 / Base Sepolia), so the in-DB flag has
+        # no on-chain consequence here.
+        ensure_mainnet_enabled!(ws)
         id
 
       nil ->
-        {:ok, %Workspace{id: id}} =
+        {:ok, %Workspace{} = ws} =
           Workspaces.create_workspace(%{
             slug: @demo_workspace_slug,
             name: "Sandbox Demo"
           })
 
-        id
+        ensure_mainnet_enabled!(ws)
+        ws.id
     end
+  end
+
+  defp ensure_mainnet_enabled!(%Workspace{mainnet_enabled: true}), do: :ok
+
+  defp ensure_mainnet_enabled!(%Workspace{} = ws) do
+    {:ok, _} = Workspaces.set_mainnet_enabled(ws, true)
+    :ok
   end
 
   @doc """

@@ -79,6 +79,7 @@ defmodule Bank.Runtime.Workers.RunExecution do
          {:ok, plan} <- load_active_plan(envelope),
          :ok <- verify_delegation(plan),
          :ok <- verify_not_paused(plan),
+         :ok <- verify_mainnet_allowed(plan),
          {:ok, claimed} <- claim_or_cancel(plan) do
       dispatch_and_progress(envelope, claimed)
     end
@@ -202,6 +203,23 @@ defmodule Bank.Runtime.Workers.RunExecution do
 
       true ->
         :ok
+    end
+  end
+
+  # Defense-in-depth mainnet gate (#178). The decision-pipeline gate
+  # in `Bank.Decisions.create_execution_plan/3` already refuses to
+  # write a plan for a mainnet chain when the workspace flag is off,
+  # so a plan that reaches this worker should never be on a
+  # disallowed mainnet chain. Re-checking here means a future code
+  # path that bypasses `create_execution_plan/3` (e.g. an admin
+  # override that flips a workspace's mainnet flag *off* between
+  # plan creation and dispatch) still fails closed without
+  # broadcasting.
+  defp verify_mainnet_allowed(%ExecutionPlan{} = plan) do
+    if Bank.Chains.mainnet_allowed_for?(plan.chain, plan.workspace_id) do
+      :ok
+    else
+      abort_for_pause(plan, "mainnet_disabled", :mainnet_disabled)
     end
   end
 

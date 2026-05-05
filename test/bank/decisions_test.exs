@@ -264,7 +264,11 @@ defmodule Bank.DecisionsTest do
 
     test "stamps the new plan with the parent intent's workspace_id (#158d)" do
       {:ok, ws} =
-        Bank.Workspaces.create_workspace(%{slug: "exec-stamp", name: "Exec stamp"})
+        Bank.Workspaces.create_workspace(%{
+          slug: "exec-stamp",
+          name: "Exec stamp",
+          mainnet_enabled: true
+        })
 
       intent = agent_intent(workspace_id: ws.id)
 
@@ -454,7 +458,11 @@ defmodule Bank.DecisionsTest do
 
     test "stamps the auto-dispatched plan with the parent intent's workspace_id (#158d)" do
       {:ok, ws} =
-        Bank.Workspaces.create_workspace(%{slug: "auto-stamp", name: "Auto stamp"})
+        Bank.Workspaces.create_workspace(%{
+          slug: "auto-stamp",
+          name: "Auto stamp",
+          mainnet_enabled: true
+        })
 
       intent = agent_intent(workspace_id: ws.id)
 
@@ -491,7 +499,11 @@ defmodule Bank.DecisionsTest do
 
     test "rejects with :chain_paused when the workspace's chain is paused (#228 phase 1)" do
       {:ok, ws} =
-        Bank.Workspaces.create_workspace(%{slug: "chain-pause-a", name: "Chain pause A"})
+        Bank.Workspaces.create_workspace(%{
+          slug: "chain-pause-a",
+          name: "Chain pause A",
+          mainnet_enabled: true
+        })
 
       intent = agent_intent(workspace_id: ws.id)
 
@@ -513,10 +525,18 @@ defmodule Bank.DecisionsTest do
 
     test "sibling workspace's chain pause does not block (#228 phase 1)" do
       {:ok, ws_a} =
-        Bank.Workspaces.create_workspace(%{slug: "chain-iso-a", name: "Chain iso A"})
+        Bank.Workspaces.create_workspace(%{
+          slug: "chain-iso-a",
+          name: "Chain iso A",
+          mainnet_enabled: true
+        })
 
       {:ok, ws_b} =
-        Bank.Workspaces.create_workspace(%{slug: "chain-iso-b", name: "Chain iso B"})
+        Bank.Workspaces.create_workspace(%{
+          slug: "chain-iso-b",
+          name: "Chain iso B",
+          mainnet_enabled: true
+        })
 
       intent_b = agent_intent(workspace_id: ws_b.id)
 
@@ -538,7 +558,11 @@ defmodule Bank.DecisionsTest do
 
     test "global pause still beats chain pause when both fire (preserves :runtime_paused)" do
       {:ok, ws} =
-        Bank.Workspaces.create_workspace(%{slug: "chain-global", name: "Chain global"})
+        Bank.Workspaces.create_workspace(%{
+          slug: "chain-global",
+          name: "Chain global",
+          mainnet_enabled: true
+        })
 
       intent = agent_intent(workspace_id: ws.id)
 
@@ -661,7 +685,8 @@ defmodule Bank.DecisionsTest do
       {:ok, ws} =
         Bank.Workspaces.create_workspace(%{
           slug: "abort-#{System.unique_integer([:positive])}",
-          name: "Abort"
+          name: "Abort",
+          mainnet_enabled: true
         })
 
       {:ok, user} =
@@ -768,7 +793,11 @@ defmodule Bank.DecisionsTest do
     test "rejects cross-workspace plan with :not_found (no existence leak)",
          %{workspace: ws, actor: user} do
       {:ok, other_ws} =
-        Bank.Workspaces.create_workspace(%{slug: "other-abort", name: "Other"})
+        Bank.Workspaces.create_workspace(%{
+          slug: "other-abort",
+          name: "Other",
+          mainnet_enabled: true
+        })
 
       # Plan belongs to other_ws, not the calling ws.
       Process.put(:bank_test_workspace_id, other_ws.id)
@@ -1020,7 +1049,8 @@ defmodule Bank.DecisionsTest do
       {:ok, ws} =
         Bank.Workspaces.create_workspace(%{
           slug: "term-#{System.unique_integer([:positive])}",
-          name: "Terminal guard"
+          name: "Terminal guard",
+          mainnet_enabled: true
         })
 
       {:ok, user} =
@@ -1179,7 +1209,8 @@ defmodule Bank.DecisionsTest do
       {:ok, workspace} =
         Bank.Workspaces.create_workspace(%{
           slug: "exec-notif-#{suffix}",
-          name: "Exec Notif #{suffix}"
+          name: "Exec Notif #{suffix}",
+          mainnet_enabled: true
         })
 
       %{workspace: workspace}

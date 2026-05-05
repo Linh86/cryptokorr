@@ -23,7 +23,13 @@ defmodule BankWeb.APIV1WorkspaceIsolationTest do
   defp setup_two_workspaces() do
     # Workspace A — caller's authenticated workspace.
     suffix_a = System.unique_integer([:positive])
-    {:ok, ws_a} = Workspaces.create_workspace(%{slug: "a-#{suffix_a}", name: "WS A #{suffix_a}"})
+
+    {:ok, ws_a} =
+      Workspaces.create_workspace(%{
+        slug: "a-#{suffix_a}",
+        name: "WS A #{suffix_a}",
+        mainnet_enabled: true
+      })
 
     {:ok, user_a} =
       Bank.Accounts.find_or_create_from_oauth(%{
@@ -40,7 +46,13 @@ defmodule BankWeb.APIV1WorkspaceIsolationTest do
 
     # Workspace B — has the resource the test will try (and fail) to reach.
     suffix_b = System.unique_integer([:positive])
-    {:ok, ws_b} = Workspaces.create_workspace(%{slug: "b-#{suffix_b}", name: "WS B #{suffix_b}"})
+
+    {:ok, ws_b} =
+      Workspaces.create_workspace(%{
+        slug: "b-#{suffix_b}",
+        name: "WS B #{suffix_b}",
+        mainnet_enabled: true
+      })
 
     {:ok, user_b} =
       Bank.Accounts.find_or_create_from_oauth(%{

@@ -61,6 +61,13 @@ defmodule Bank.Workspaces do
   @doc """
   Create a workspace from `attrs` (`%{slug:, name:}`). Slug is
   normalised to lowercase.
+
+  `mainnet_enabled` is intentionally NOT cast here — it's an
+  admin-only security flip that travels through
+  `set_mainnet_enabled/2` so a creation path cannot accidentally
+  grant mainnet eligibility. Default is `false` (the schema
+  default), enforced by the `:mainnet_enabled NOT NULL DEFAULT false`
+  column added in #178.
   """
   @spec create_workspace(map()) :: {:ok, Workspace.t()} | {:error, Ecto.Changeset.t()}
   def create_workspace(attrs) do
@@ -68,6 +75,55 @@ defmodule Bank.Workspaces do
     |> Workspace.changeset(attrs)
     |> Repo.insert()
   end
+
+  @doc """
+  Flip a workspace's Base mainnet eligibility flag (#178).
+
+  Returns `{:ok, workspace}` with the updated row, or
+  `{:error, changeset}` on validation failure. Audit emission
+  is the caller's responsibility — this context function is the
+  data-layer boundary.
+
+  Accepts a `%Workspace{}` struct or a workspace id.
+  """
+  @spec set_mainnet_enabled(Workspace.t() | uuid(), boolean()) ::
+          {:ok, Workspace.t()} | {:error, Ecto.Changeset.t() | :not_found}
+  def set_mainnet_enabled(%Workspace{} = workspace, enabled) when is_boolean(enabled) do
+    workspace
+    |> Workspace.mainnet_changeset(%{mainnet_enabled: enabled})
+    |> Repo.update()
+  end
+
+  def set_mainnet_enabled(workspace_id, enabled)
+      when is_binary(workspace_id) and is_boolean(enabled) do
+    case get_workspace(workspace_id) do
+      %Workspace{} = workspace -> set_mainnet_enabled(workspace, enabled)
+      nil -> {:error, :not_found}
+    end
+  end
+
+  @doc """
+  True iff `workspace_id` has Base mainnet eligibility explicitly
+  enabled (#178).
+
+  `nil` and unknown ids return `false` — the legacy-safe default
+  for any code path that has not been workspace-scoped yet.
+
+  Used by `Bank.Chains.mainnet_allowed_for?/2` (the canonical gate
+  every chain-touching boundary consults). Callers should prefer
+  the `Bank.Chains` helpers; reading `mainnet_enabled?/1` directly
+  is fine when only the workspace state matters and the chain is
+  already known to be mainnet.
+  """
+  @spec mainnet_enabled?(uuid() | nil) :: boolean()
+  def mainnet_enabled?(workspace_id) when is_binary(workspace_id) do
+    case get_workspace(workspace_id) do
+      %Workspace{mainnet_enabled: true} -> true
+      _ -> false
+    end
+  end
+
+  def mainnet_enabled?(_), do: false
 
   # --- Memberships ---
 

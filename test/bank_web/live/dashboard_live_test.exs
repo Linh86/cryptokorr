@@ -334,7 +334,8 @@ defmodule BankWeb.DashboardLiveTest do
       {:ok, other_ws} =
         Bank.Workspaces.create_workspace(%{
           slug: "sibling-stuck-#{System.unique_integer([:positive])}",
-          name: "Sibling"
+          name: "Sibling",
+          mainnet_enabled: true
         })
 
       _other = stuck_prepared_plan(other_ws.id)
@@ -381,7 +382,8 @@ defmodule BankWeb.DashboardLiveTest do
       {:ok, other_ws} =
         Bank.Workspaces.create_workspace(%{
           slug: "sibling-keys-paused-#{suffix}",
-          name: "Sibling"
+          name: "Sibling",
+          mainnet_enabled: true
         })
 
       {:ok, other_user} =

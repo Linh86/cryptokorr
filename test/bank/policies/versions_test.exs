@@ -31,7 +31,8 @@ defmodule Bank.Policies.VersionsTest do
     {:ok, ws} =
       Bank.Workspaces.create_workspace(%{
         slug: "policy-ver-#{System.unique_integer([:positive])}",
-        name: "Policy Versions"
+        name: "Policy Versions",
+        mainnet_enabled: true
       })
 
     %{workspace: ws, actor_id: Ecto.UUID.generate()}
@@ -405,7 +406,8 @@ defmodule Bank.Policies.VersionsTest do
       {:ok, ws_b} =
         Bank.Workspaces.create_workspace(%{
           slug: "policy-ver-other-#{System.unique_integer([:positive])}",
-          name: "Other"
+          name: "Other",
+          mainnet_enabled: true
         })
 
       {:ok, draft_a1} = Versions.create_draft(ws.id, created_by: :user, actor_id: actor_id)
@@ -438,7 +440,8 @@ defmodule Bank.Policies.VersionsTest do
       {:ok, ws_b} =
         Bank.Workspaces.create_workspace(%{
           slug: "policy-ver-iso-#{System.unique_integer([:positive])}",
-          name: "Iso"
+          name: "Iso",
+          mainnet_enabled: true
         })
 
       {:ok, draft_a} = Versions.create_draft(ws_a.id, created_by: :user, actor_id: actor_id)
@@ -468,7 +471,8 @@ defmodule Bank.Policies.VersionsTest do
       {:ok, ws_b} =
         Bank.Workspaces.create_workspace(%{
           slug: "policy-ver-seq-#{System.unique_integer([:positive])}",
-          name: "Seq"
+          name: "Seq",
+          mainnet_enabled: true
         })
 
       {:ok, da1} = Versions.create_draft(ws_a.id, created_by: :user, actor_id: actor_id)

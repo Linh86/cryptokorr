@@ -202,7 +202,8 @@ defmodule Bank.SecurityTest do
     {:ok, ws} =
       Bank.Workspaces.create_workspace(%{
         slug: "sec-test-#{suffix}",
-        name: "Security Test #{suffix}"
+        name: "Security Test #{suffix}",
+        mainnet_enabled: true
       })
 
     ws

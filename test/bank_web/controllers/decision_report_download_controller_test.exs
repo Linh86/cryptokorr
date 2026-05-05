@@ -66,7 +66,8 @@ defmodule BankWeb.DecisionReportDownloadControllerTest do
       {:ok, ws_b} =
         Bank.Workspaces.create_workspace(%{
           slug: "iso-rdl-#{System.unique_integer([:positive])}",
-          name: "RDL sibling"
+          name: "RDL sibling",
+          mainnet_enabled: true
         })
 
       cp_b = counterparty(workspace_id: ws_b.id)

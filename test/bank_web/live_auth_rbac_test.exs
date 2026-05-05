@@ -46,7 +46,8 @@ defmodule BankWeb.LiveAuthRBACTest do
     {:ok, ws} =
       Workspaces.create_workspace(%{
         slug: "rbac-#{suffix}",
-        name: "RBAC #{suffix}"
+        name: "RBAC #{suffix}",
+        mainnet_enabled: true
       })
 
     {:ok, _} =

@@ -328,7 +328,8 @@ defmodule Bank.AuditTest do
       {:ok, ws} =
         Bank.Workspaces.create_workspace(%{
           slug: "audit-recon-#{System.unique_integer([:positive])}",
-          name: "Audit Recon"
+          name: "Audit Recon",
+          mainnet_enabled: true
         })
 
       intent = Fixtures.agent_intent(workspace_id: ws.id)
@@ -377,7 +378,8 @@ defmodule Bank.AuditTest do
       {:ok, ws} =
         Bank.Workspaces.create_workspace(%{
           slug: "audit-recon-empty-#{System.unique_integer([:positive])}",
-          name: "Audit Recon Empty"
+          name: "Audit Recon Empty",
+          mainnet_enabled: true
         })
 
       intent = Fixtures.agent_intent(workspace_id: ws.id)

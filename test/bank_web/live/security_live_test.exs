@@ -244,7 +244,11 @@ defmodule BankWeb.SecurityLiveTest do
       # event against ITS subject_id. The current admin's view must
       # not show this row — pin the workspace boundary.
       {:ok, other_ws} =
-        Bank.Workspaces.create_workspace(%{slug: "other-ws-leak", name: "Other"})
+        Bank.Workspaces.create_workspace(%{
+          slug: "other-ws-leak",
+          name: "Other",
+          mainnet_enabled: true
+        })
 
       audit_event(
         event_type: "agent_keys.paused",
@@ -296,7 +300,11 @@ defmodule BankWeb.SecurityLiveTest do
       # `"security." <> _` rule), every workspace would see every
       # other workspace's scoped pauses.
       {:ok, other_ws} =
-        Bank.Workspaces.create_workspace(%{slug: "other-ws-scope-leak", name: "Other Scope"})
+        Bank.Workspaces.create_workspace(%{
+          slug: "other-ws-scope-leak",
+          name: "Other Scope",
+          mainnet_enabled: true
+        })
 
       audit_event(
         event_type: "security.scope_paused",
@@ -339,7 +347,11 @@ defmodule BankWeb.SecurityLiveTest do
     test "does NOT leak another workspace's security.scope_expired event (#228 phase 1.5)",
          %{conn: conn} do
       {:ok, other_ws} =
-        Bank.Workspaces.create_workspace(%{slug: "other-ws-expired-leak", name: "Other Expired"})
+        Bank.Workspaces.create_workspace(%{
+          slug: "other-ws-expired-leak",
+          name: "Other Expired",
+          mainnet_enabled: true
+        })
 
       audit_event(
         event_type: "security.scope_expired",
@@ -406,7 +418,11 @@ defmodule BankWeb.SecurityLiveTest do
     test "is workspace-scoped — another workspace's delegations don't bleed in",
          %{conn: conn} do
       {:ok, other_ws} =
-        Bank.Workspaces.create_workspace(%{slug: "other-ws-risk", name: "Other"})
+        Bank.Workspaces.create_workspace(%{
+          slug: "other-ws-risk",
+          name: "Other",
+          mainnet_enabled: true
+        })
 
       _ = delegation(state: :active, workspace_id: other_ws.id)
 
@@ -613,7 +629,11 @@ defmodule BankWeb.SecurityLiveTest do
     test "workspace isolation still holds with filters applied",
          %{conn: conn} do
       {:ok, other_ws} =
-        Bank.Workspaces.create_workspace(%{slug: "other-ws-filtered", name: "Other"})
+        Bank.Workspaces.create_workspace(%{
+          slug: "other-ws-filtered",
+          name: "Other",
+          mainnet_enabled: true
+        })
 
       audit_event(
         event_type: "agent_keys.paused",
@@ -855,7 +875,11 @@ defmodule BankWeb.SecurityLiveTest do
     test "cross-workspace stuck plan does NOT appear",
          %{conn: conn} do
       {:ok, other_ws} =
-        Bank.Workspaces.create_workspace(%{slug: "other-stuck", name: "Other"})
+        Bank.Workspaces.create_workspace(%{
+          slug: "other-stuck",
+          name: "Other",
+          mainnet_enabled: true
+        })
 
       _other = stuck_prepared_plan(other_ws.id)
 
@@ -872,7 +896,11 @@ defmodule BankWeb.SecurityLiveTest do
       # workspace's row. With the DB-side workspace filter, the
       # current row is rendered regardless of sibling volume.
       {:ok, sibling_ws} =
-        Bank.Workspaces.create_workspace(%{slug: "sibling-starve-test", name: "Sibling"})
+        Bank.Workspaces.create_workspace(%{
+          slug: "sibling-starve-test",
+          name: "Sibling",
+          mainnet_enabled: true
+        })
 
       for _ <- 1..12 do
         plan =
@@ -918,7 +946,11 @@ defmodule BankWeb.SecurityLiveTest do
     test "does NOT leak ops.stuck_plan_detected from another workspace",
          %{conn: conn} do
       {:ok, other_ws} =
-        Bank.Workspaces.create_workspace(%{slug: "other-stuck-detected", name: "Other"})
+        Bank.Workspaces.create_workspace(%{
+          slug: "other-stuck-detected",
+          name: "Other",
+          mainnet_enabled: true
+        })
 
       audit_event(
         event_type: "ops.stuck_plan_detected",
@@ -993,7 +1025,8 @@ defmodule BankWeb.SecurityLiveTest do
       {:ok, sibling_ws} =
         Bank.Workspaces.create_workspace(%{
           slug: "sibling-in-flight-#{System.unique_integer([:positive])}",
-          name: "Sibling"
+          name: "Sibling",
+          mainnet_enabled: true
         })
 
       _sibling = fresh_plan(:prepared, sibling_ws.id)
@@ -1168,7 +1201,8 @@ defmodule BankWeb.SecurityLiveTest do
       {:ok, sibling_ws} =
         Bank.Workspaces.create_workspace(%{
           slug: "sibling-pending-#{System.unique_integer([:positive])}",
-          name: "Sibling"
+          name: "Sibling",
+          mainnet_enabled: true
         })
 
       intent = agent_intent(workspace_id: sibling_ws.id)
@@ -1333,7 +1367,8 @@ defmodule BankWeb.SecurityLiveTest do
       {:ok, sibling_ws} =
         Bank.Workspaces.create_workspace(%{
           slug: "sibling-incident-#{System.unique_integer([:positive])}",
-          name: "Sibling"
+          name: "Sibling",
+          mainnet_enabled: true
         })
 
       # sibling stuck + in-flight plan
@@ -1442,7 +1477,8 @@ defmodule BankWeb.SecurityLiveTest do
       {:ok, sibling_ws} =
         Bank.Workspaces.create_workspace(%{
           slug: "sibling-pause-#{System.unique_integer([:positive])}",
-          name: "Sibling"
+          name: "Sibling",
+          mainnet_enabled: true
         })
 
       {:ok, sibling_user} =
@@ -1624,7 +1660,8 @@ defmodule BankWeb.SecurityLiveTest do
       {:ok, sibling_ws} =
         Bank.Workspaces.create_workspace(%{
           slug: "sibling-base-pause-#{System.unique_integer([:positive])}",
-          name: "Sibling"
+          name: "Sibling",
+          mainnet_enabled: true
         })
 
       {:ok, sibling_user} =
@@ -1942,7 +1979,8 @@ defmodule BankWeb.SecurityLiveTest do
       {:ok, sibling_ws} =
         Bank.Workspaces.create_workspace(%{
           slug: "sibling-readiness-#{System.unique_integer([:positive])}",
-          name: "Sibling"
+          name: "Sibling",
+          mainnet_enabled: true
         })
 
       {:ok, sibling_user} =

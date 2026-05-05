@@ -16,7 +16,8 @@ defmodule Bank.Activity.CsvImportTest do
     {:ok, ws} =
       Bank.Workspaces.create_workspace(%{
         slug: "csv-#{System.unique_integer([:positive])}",
-        name: "CSV"
+        name: "CSV",
+        mainnet_enabled: true
       })
 
     %{workspace: ws}
@@ -194,7 +195,8 @@ defmodule Bank.Activity.CsvImportTest do
       {:ok, ws_b} =
         Bank.Workspaces.create_workspace(%{
           slug: "csv-sib-#{System.unique_integer([:positive])}",
-          name: "Sibling"
+          name: "Sibling",
+          mainnet_enabled: true
         })
 
       csv = """
@@ -213,7 +215,8 @@ defmodule Bank.Activity.CsvImportTest do
       {:ok, ws_b} =
         Bank.Workspaces.create_workspace(%{
           slug: "csv-sib2-#{System.unique_integer([:positive])}",
-          name: "Sibling2"
+          name: "Sibling2",
+          mainnet_enabled: true
         })
 
       csv = """

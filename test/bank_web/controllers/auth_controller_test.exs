@@ -136,7 +136,9 @@ defmodule BankWeb.AuthControllerTest do
       # Operator-driven workspace + membership setup (the operator
       # console / invite flow is #156-#157; we simulate it).
       user = Accounts.get_user(get_session(conn1, :user_id))
-      {:ok, ws} = Workspaces.create_workspace(%{slug: "alpha", name: "Alpha"})
+
+      {:ok, ws} =
+        Workspaces.create_workspace(%{slug: "alpha", name: "Alpha", mainnet_enabled: true})
 
       {:ok, _} =
         Workspaces.create_membership(%{
@@ -164,8 +166,11 @@ defmodule BankWeb.AuthControllerTest do
       conn1 = get(conn1, ~p"/auth/google/callback?code=stub-code&state=#{state1}")
       user = Accounts.get_user(get_session(conn1, :user_id))
 
-      {:ok, ws1} = Workspaces.create_workspace(%{slug: "alpha", name: "Alpha"})
-      {:ok, ws2} = Workspaces.create_workspace(%{slug: "bravo", name: "Bravo"})
+      {:ok, ws1} =
+        Workspaces.create_workspace(%{slug: "alpha", name: "Alpha", mainnet_enabled: true})
+
+      {:ok, ws2} =
+        Workspaces.create_workspace(%{slug: "bravo", name: "Bravo", mainnet_enabled: true})
 
       {:ok, _} =
         Workspaces.create_membership(%{user_id: user.id, workspace_id: ws1.id, role: :operator})
@@ -291,7 +296,12 @@ defmodule BankWeb.AuthControllerTest do
 
   describe "invite-driven login (#156)" do
     setup do
-      {:ok, ws} = Workspaces.create_workspace(%{slug: "invite-ws", name: "Invite Workspace"})
+      {:ok, ws} =
+        Workspaces.create_workspace(%{
+          slug: "invite-ws",
+          name: "Invite Workspace",
+          mainnet_enabled: true
+        })
 
       {:ok, admin} =
         Accounts.find_or_create_from_oauth(%{

@@ -30,7 +30,8 @@ defmodule Bank.APIKeysTest do
     {:ok, workspace} =
       Workspaces.create_workspace(%{
         slug: "ak-#{System.unique_integer([:positive])}",
-        name: "API Key WS"
+        name: "API Key WS",
+        mainnet_enabled: true
       })
 
     {:ok, user} =
@@ -584,7 +585,7 @@ defmodule Bank.APIKeysTest do
     test "lists are workspace-scoped (no cross-workspace bleed)",
          %{workspace: ws_a, user: user} do
       {:ok, ws_b} =
-        Workspaces.create_workspace(%{slug: "ak-other", name: "Other"})
+        Workspaces.create_workspace(%{slug: "ak-other", name: "Other", mainnet_enabled: true})
 
       {:ok, _} =
         Workspaces.create_membership(%{user_id: user.id, workspace_id: ws_b.id, role: :admin})
@@ -966,7 +967,8 @@ defmodule Bank.APIKeysTest do
 
     test "pausing workspace A does not affect workspace B",
          %{workspace: ws_a, user: user} do
-      {:ok, ws_b} = Workspaces.create_workspace(%{slug: "ak-pause-b", name: "B"})
+      {:ok, ws_b} =
+        Workspaces.create_workspace(%{slug: "ak-pause-b", name: "B", mainnet_enabled: true})
 
       {:ok, _} =
         Workspaces.create_membership(%{user_id: user.id, workspace_id: ws_b.id, role: :admin})

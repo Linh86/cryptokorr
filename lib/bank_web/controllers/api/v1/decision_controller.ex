@@ -201,6 +201,16 @@ defmodule BankWeb.API.V1.DecisionController do
             }
           })
 
+        {:error, :mainnet_disabled} ->
+          conn
+          |> put_status(:unprocessable_entity)
+          |> json(%{
+            error: %{
+              code: "mainnet_disabled",
+              message: "mainnet is not enabled for this workspace"
+            }
+          })
+
         {:error, reason} ->
           conn
           |> put_status(:conflict)
