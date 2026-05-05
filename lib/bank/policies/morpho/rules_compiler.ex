@@ -70,14 +70,58 @@ defmodule Bank.Policies.Morpho.RulesCompiler do
       `:max_*_exposure`) → take the **minimum** of configured
       values;
     * allowlists (`:allowed_*`) → take the **intersection** of
-      configured allowlists when more than one rule applies; an
-      empty intersection is itself a conservative outcome —
-      every value triggers a not-allowlisted reason in the
-      engine.
+      configured allowlists when more than one rule applies. An
+      explicit empty / malformed configured allowlist
+      collapses the intersection to `[]` (fail-closed posture
+      from #202 P2): the engine reads the empty list as "no
+      vault / oracle / collateral / curator approved" and
+      blocks accordingly. The first rule with values *adopts*
+      its values (no upstream restriction yet); subsequent
+      rules narrow.
 
   Within the bounded #202 surface this conflict-resolution
   mirrors the v1 evaluator's posture (the most-restrictive
   amount cap wins; the strictest autonomy tier wins).
+
+  ## Configured-vs-default tracking (#202 P2)
+
+  An empty allowlist on the produced `PolicyInput` is
+  ambiguous on its own — it could mean *"no rule was ever
+  configured"* (the conservative default) or *"a rule was
+  configured with an empty list"* (the operator deliberately
+  cleared the allowlist). For #202's *"unknown/unconfigured
+  critical allowlists fail closed"* acceptance both must lead
+  to a block. The engine already treats `vault_allowlist: []`
+  as block-tier; for oracle / collateral / curator the engine
+  emits an `:approval` reason. Either way the **fold** has to
+  surface the empty list to the engine — not silently drop a
+  malformed second rule and revert to the prior valid set.
+
+  The fold therefore carries a private `MapSet` of
+  *configured allowlist fields*. Each `:allowed_*` rule:
+
+    * marks its target field as configured;
+    * adopts its values verbatim if no upstream rule had
+      configured that field yet;
+    * intersects with the upstream values otherwise — an empty
+      new list shrinks the intersection to `[]` (fail-closed).
+
+  After every rule has been folded the accumulator's
+  `policy_input` is returned and the configured-set is
+  discarded.
+
+  ## What `:allowed_defi_venue` does (and does not) do
+
+  The v0.1 risk engine ships **Morpho-only**: there is no
+  Aave / Compound / Pendle code path to gate against. The
+  `:allowed_defi_venue` rule type is therefore an
+  audit-trail-only no-op for v0.1 — its `params.venues` is
+  recorded in `policy_snapshot_ref` but does not change
+  runtime behavior. A future multi-venue extension will
+  activate this rule. The compiler explicitly recognizes the
+  rule (it is in `morpho_rule_types/0`) so a workspace can
+  configure it without producing an `unknown_rule_type`
+  violation; the documented limitation is pinned by a test.
 
   ## What this module does NOT do
 
@@ -148,75 +192,84 @@ defmodule Bank.Policies.Morpho.RulesCompiler do
         proposed_amount: opts |> Keyword.get(:proposed_amount) |> default_decimal()
     }
 
+    initial = %{policy_input: base, configured: MapSet.new()}
+
     rules
     |> Enum.filter(&morpho_rule?/1)
     |> Enum.filter(&scope_matches?(&1, vault_address, asset))
-    |> Enum.reduce(base, &fold_rule(&2, &1))
+    |> Enum.reduce(initial, &fold_rule(&2, &1))
+    |> Map.fetch!(:policy_input)
   end
 
   # --- per-rule fold -------------------------------------------------------
 
   defp fold_rule(acc, %PolicyRule{rule_type: :allowed_vault, params: params}) do
     list = read_vault_list(params, "vaults")
-    %{acc | vault_allowlist: intersect_allowlist(acc.vault_allowlist, list)}
+    fold_allowlist(acc, :vault_allowlist, list)
   end
 
   defp fold_rule(acc, %PolicyRule{rule_type: :allowed_oracle, params: params}) do
     list = read_address_list(params, "oracles")
-    %{acc | oracle_allowlist: intersect_allowlist(acc.oracle_allowlist, list)}
+    fold_allowlist(acc, :oracle_allowlist, list)
   end
 
   defp fold_rule(acc, %PolicyRule{rule_type: :allowed_collateral_asset, params: params}) do
     list = read_address_list(params, "assets")
-    %{acc | collateral_allowlist: intersect_allowlist(acc.collateral_allowlist, list)}
+    fold_allowlist(acc, :collateral_allowlist, list)
   end
 
-  defp fold_rule(acc, %PolicyRule{rule_type: :allowed_curator}) do
-    # Curator allowlist is not exposed on the v1 PolicyInput
-    # contract — the #201 risk engine consults the snapshot's
-    # allocators, but a workspace-level curator allowlist is a
-    # future extension. Acknowledge the rule by returning the
-    # accumulator untouched; the rule still reaches the audit
-    # trail via `policy_snapshot_ref`.
-    acc
+  defp fold_rule(acc, %PolicyRule{rule_type: :allowed_curator, params: params}) do
+    # #202 P2: workspace-level curator/allocator allowlist.
+    # Reuses the same fail-closed sentinel-based intersection
+    # as the other allowlists — an empty/malformed configured
+    # rule narrows the intersection to `[]`, which the engine's
+    # `curator_check` treats as "every allocator unknown" and
+    # surfaces an `unknown_curator` :approval reason.
+    list = read_address_list(params, "curators")
+    fold_allowlist(acc, :curator_allowlist, list)
   end
 
   defp fold_rule(acc, %PolicyRule{rule_type: :allowed_defi_venue}) do
-    # Same posture as :allowed_curator — venue-level allowlist is
-    # documented in the rule vocabulary so a future workspace can
-    # restrict to "morpho only", but the v0.1 engine ships
-    # Morpho-only and the venue check is implicit. Acknowledge.
+    # Documented v0.1 no-op (#202 P2). The engine ships
+    # Morpho-only — there is no Aave / Compound / Pendle code
+    # path to gate against — so the `params.venues` list is
+    # captured in `policy_snapshot_ref` for audit but does not
+    # change runtime behavior. A future multi-venue extension
+    # will wire this rule against a venue check at the engine
+    # boundary. Pinned by `documents_allowed_defi_venue_as_v0_1_noop`
+    # in the test suite.
     acc
   end
 
   defp fold_rule(acc, %PolicyRule{rule_type: :max_market_lltv, params: params}) do
-    block_pct =
-      case read_bps(params, "max_lltv_bps") do
-        {:ok, bps} -> bps_to_pct(bps)
-        :error -> acc.block_market_lltv_pct
-      end
+    update_policy_input(acc, fn pi ->
+      block_pct =
+        case read_bps(params, "max_lltv_bps") do
+          {:ok, bps} -> bps_to_pct(bps)
+          :error -> pi.block_market_lltv_pct
+        end
 
-    approval_pct =
-      case read_bps(params, "approval_over_bps") do
-        {:ok, bps} -> bps_to_pct(bps)
-        :error -> acc.approval_market_lltv_pct
-      end
+      approval_pct =
+        case read_bps(params, "approval_over_bps") do
+          {:ok, bps} -> bps_to_pct(bps)
+          :error -> pi.approval_market_lltv_pct
+        end
 
-    %{
-      acc
-      | block_market_lltv_pct: min(acc.block_market_lltv_pct, block_pct),
-        approval_market_lltv_pct: min(acc.approval_market_lltv_pct, approval_pct)
-    }
+      %{
+        pi
+        | block_market_lltv_pct: min(pi.block_market_lltv_pct, block_pct),
+          approval_market_lltv_pct: min(pi.approval_market_lltv_pct, approval_pct)
+      }
+    end)
   end
 
   defp fold_rule(acc, %PolicyRule{rule_type: :max_vault_exposure, params: params}) do
-    case read_decimal(params, "max_amount") do
-      {:ok, cap} ->
-        %{acc | exposure_cap: take_min_decimal(acc.exposure_cap, cap)}
-
-      :error ->
-        acc
-    end
+    update_policy_input(acc, fn pi ->
+      case read_decimal(params, "max_amount") do
+        {:ok, cap} -> %{pi | exposure_cap: take_min_decimal(pi.exposure_cap, cap)}
+        :error -> pi
+      end
+    end)
   end
 
   defp fold_rule(acc, %PolicyRule{rule_type: rt, params: params})
@@ -232,13 +285,12 @@ defmodule Bank.Policies.Morpho.RulesCompiler do
     # oracle) collapse to the vault cap. The rule itself is
     # captured in the snapshot ref for audit; finer-grained
     # exposure tracking is future work (#205).
-    case read_decimal(params, "max_amount") do
-      {:ok, cap} ->
-        %{acc | exposure_cap: take_min_decimal(acc.exposure_cap, cap)}
-
-      :error ->
-        acc
-    end
+    update_policy_input(acc, fn pi ->
+      case read_decimal(params, "max_amount") do
+        {:ok, cap} -> %{pi | exposure_cap: take_min_decimal(pi.exposure_cap, cap)}
+        :error -> pi
+      end
+    end)
   end
 
   defp fold_rule(acc, %PolicyRule{rule_type: :min_vault_liquidity}) do
@@ -263,23 +315,26 @@ defmodule Bank.Policies.Morpho.RulesCompiler do
 
   defp fold_rule(acc, %PolicyRule{rule_type: :incident_hold, params: params}) do
     active = truthy_param(params, "active")
-    %{acc | incident_active?: acc.incident_active? or active}
+
+    update_policy_input(acc, fn pi -> %{pi | incident_active?: pi.incident_active? or active} end)
   end
 
   defp fold_rule(acc, %PolicyRule{rule_type: :yield_anomaly_approval, params: params}) do
-    spike =
-      case read_integer(params, "spike_pct") do
-        {:ok, n} when n > 0 -> n
-        _ -> acc.apy_spike_pct
-      end
+    update_policy_input(acc, fn pi ->
+      spike =
+        case read_integer(params, "spike_pct") do
+          {:ok, n} when n > 0 -> n
+          _ -> pi.apy_spike_pct
+        end
 
-    baseline =
-      case read_decimal(params, "baseline") do
-        {:ok, dec} -> dec
-        :error -> acc.apy_baseline
-      end
+      baseline =
+        case read_decimal(params, "baseline") do
+          {:ok, dec} -> dec
+          :error -> pi.apy_baseline
+        end
 
-    %{acc | apy_spike_pct: min(acc.apy_spike_pct, spike), apy_baseline: baseline}
+      %{pi | apy_spike_pct: min(pi.apy_spike_pct, spike), apy_baseline: baseline}
+    end)
   end
 
   # Catch-all: any Morpho rule type we haven't actively folded
@@ -287,6 +342,57 @@ defmodule Bank.Policies.Morpho.RulesCompiler do
   # complete vocabulary even when finer-grained PolicyInput
   # fields land in a follow-up issue.
   defp fold_rule(acc, %PolicyRule{}), do: acc
+
+  # --- accumulator helpers (#202 P2) ---------------------------------------
+
+  defp update_policy_input(%{policy_input: pi} = acc, fun) when is_function(fun, 1) do
+    %{acc | policy_input: fun.(pi)}
+  end
+
+  # Allowlist fold with sentinel-based "configured" tracking
+  # (#202 P2 fail-closed posture). The first rule that touches
+  # a given allowlist field marks it as configured and adopts
+  # its values. Subsequent rules narrow via intersection — an
+  # empty / malformed new list collapses the intersection to
+  # `[]`, which the engine treats as "no values approved" and
+  # blocks accordingly.
+  defp fold_allowlist(%{policy_input: pi, configured: configured} = acc, field, new_list)
+       when field in [
+              :vault_allowlist,
+              :oracle_allowlist,
+              :collateral_allowlist,
+              :curator_allowlist
+            ] do
+    new_list_uniq = Enum.uniq(new_list)
+
+    if MapSet.member?(configured, field) do
+      current = Map.fetch!(pi, field)
+      merged = intersect_lists(current, new_list_uniq)
+      %{acc | policy_input: Map.put(pi, field, merged)}
+    else
+      %{
+        acc
+        | policy_input: Map.put(pi, field, new_list_uniq),
+          configured: MapSet.put(configured, field)
+      }
+    end
+  end
+
+  # An explicitly empty new list collapses the intersection to
+  # `[]` regardless of whether the prior list had values. This
+  # is the load-bearing #202 P2 fail-closed posture: a
+  # configured-but-malformed allowlist must not be silently
+  # ignored after a valid earlier allowlist.
+  defp intersect_lists(_acc, []), do: []
+  defp intersect_lists([], list), do: Enum.uniq(list)
+
+  defp intersect_lists(acc, list) do
+    acc
+    |> MapSet.new()
+    |> MapSet.intersection(MapSet.new(list))
+    |> MapSet.to_list()
+    |> Enum.sort()
+  end
 
   # --- scope matching ------------------------------------------------------
 
@@ -467,17 +573,6 @@ defmodule Bank.Policies.Morpho.RulesCompiler do
   defp default_decimal(n) when is_integer(n), do: Decimal.new(n)
   defp default_decimal(str) when is_binary(str), do: Decimal.new(str)
   defp default_decimal(_), do: Decimal.new(0)
-
-  # Allowlist intersection: empty acc means "no upstream
-  # restriction" → adopt the new list. Otherwise intersect.
-  defp intersect_allowlist([], list), do: Enum.uniq(list)
-  defp intersect_allowlist(acc, []), do: acc
-
-  defp intersect_allowlist(acc, list) do
-    acc_set = MapSet.new(acc)
-    list_set = MapSet.new(list)
-    acc_set |> MapSet.intersection(list_set) |> MapSet.to_list() |> Enum.sort()
-  end
 
   defp take_min_decimal(nil, %Decimal{} = candidate), do: candidate
 

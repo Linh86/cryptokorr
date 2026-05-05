@@ -73,6 +73,7 @@ defmodule Bank.DefiVenues.Morpho.RiskExplanationTest do
       vault_allowlist: Keyword.get(opts, :vault_allowlist, [{@chain_id, @vault}]),
       oracle_allowlist: Keyword.get(opts, :oracle_allowlist, [@oracle]),
       collateral_allowlist: Keyword.get(opts, :collateral_allowlist, [@collateral]),
+      curator_allowlist: Keyword.get(opts, :curator_allowlist, []),
       expected_loan_asset: Keyword.get(opts, :expected_loan_asset, "USDC"),
       current_exposure: Keyword.get(opts, :current_exposure, Decimal.new(0)),
       proposed_amount: Keyword.get(opts, :proposed_amount, Decimal.new("1000")),
@@ -489,5 +490,64 @@ defmodule Bank.DefiVenues.Morpho.RiskExplanationTest do
 
   defp reason_code?(result, code) do
     Enum.any?(result["primary_reasons"], &(&1["code"] == code))
+  end
+
+  defp check_status_for(result, code) do
+    case Enum.find(result["checks"], &(&1["code"] == code)) do
+      %{"status" => s} -> s
+      _ -> nil
+    end
+  end
+
+  describe "curator_allowlist (#202 P2)" do
+    @allocator "0xallocator1"
+
+    test "empty curator_allowlist + allocators on snapshot ⇒ :fail check + unknown_curator approval reason" do
+      result =
+        RiskExplanation.explain(
+          build_snapshot(),
+          policy(curator_allowlist: []),
+          @now
+        )
+
+      assert check_status_for(result, "curator_allowlist") == "fail"
+      assert reason_code?(result, "unknown_curator")
+    end
+
+    test "configured curator_allowlist that includes the allocator ⇒ :pass" do
+      result =
+        RiskExplanation.explain(
+          build_snapshot(),
+          policy(curator_allowlist: [@allocator]),
+          @now
+        )
+
+      assert check_status_for(result, "curator_allowlist") == "pass"
+      refute reason_code?(result, "unknown_curator")
+    end
+
+    test "configured curator_allowlist that EXCLUDES the allocator ⇒ :warn check + unknown_curator reason" do
+      result =
+        RiskExplanation.explain(
+          build_snapshot(),
+          policy(curator_allowlist: ["0xsomeoneelse"]),
+          @now
+        )
+
+      assert check_status_for(result, "curator_allowlist") == "warn"
+      assert reason_code?(result, "unknown_curator")
+    end
+
+    test "snapshot with no allocators ⇒ :pass even with empty allowlist" do
+      result =
+        RiskExplanation.explain(
+          build_snapshot(%{allocators: []}),
+          policy(curator_allowlist: []),
+          @now
+        )
+
+      assert check_status_for(result, "curator_allowlist") == "pass"
+      refute reason_code?(result, "unknown_curator")
+    end
   end
 end

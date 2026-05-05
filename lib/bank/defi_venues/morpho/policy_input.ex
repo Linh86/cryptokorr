@@ -25,6 +25,11 @@ defmodule Bank.DefiVenues.Morpho.PolicyInput do
     * `:collateral_allowlist`   — list of approved collateral
       asset addresses (lower-cased). Empty list ≡ same
       semantics as oracle.
+    * `:curator_allowlist`      — list of approved allocator /
+      curator addresses (lower-cased). Empty list ≡ same
+      semantics as oracle: every snapshot allocator outside
+      the allowlist triggers an `unknown_curator` approval
+      reason. Added by #202 P2.
     * `:expected_loan_asset`    — symbol the agent intent claims
       the deposit is in (e.g. `"USDC"`). The engine compares
       this against the snapshot's `deposit_asset.symbol`. A
@@ -84,6 +89,7 @@ defmodule Bank.DefiVenues.Morpho.PolicyInput do
           vault_allowlist: [{integer(), String.t()}],
           oracle_allowlist: [String.t()],
           collateral_allowlist: [String.t()],
+          curator_allowlist: [String.t()],
           expected_loan_asset: String.t() | nil,
           current_exposure: Decimal.t(),
           proposed_amount: Decimal.t(),
@@ -101,6 +107,7 @@ defmodule Bank.DefiVenues.Morpho.PolicyInput do
   defstruct vault_allowlist: [],
             oracle_allowlist: [],
             collateral_allowlist: [],
+            curator_allowlist: [],
             expected_loan_asset: nil,
             current_exposure: nil,
             proposed_amount: nil,
