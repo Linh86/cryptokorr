@@ -414,6 +414,142 @@ defmodule BankWeb.PolicyBuilderLiveTest do
     end
   end
 
+  # --- #224 P2-1: draft edits do not mutate the published policy --------
+
+  describe "draft isolation — editing a draft never disturbs published policy (#224 P2-1)" do
+    setup [:register_and_log_in_user, :upgrade_to_admin_role]
+
+    test "editing a draft rule cloned from the current published version does not supersede the published rule before publish",
+         %{conn: conn, workspace: ws, current_user: user} do
+      # Seed v1 published with one amount_limit rule.
+      v1_rule =
+        Bank.Fixtures.policy_rule(
+          rule_type: :amount_limit,
+          state: :active,
+          params: %{"max_per_tx" => "100"},
+          workspace_id: ws.id
+        )
+
+      {:ok, draft_v1} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: user.id,
+          rule_ids: %{"items" => [v1_rule.id]}
+        )
+
+      {:ok, _v1} =
+        Versions.publish_draft(draft_v1, published_by: :user, actor_id: user.id)
+
+      # Sanity: the published snapshot resolves the v1 rule.
+      assert %{rules: [%{id: published_rule_id}]} =
+               Versions.snapshot_for_workspace(ws.id)
+
+      assert published_rule_id == v1_rule.id
+
+      # Mount the builder, open a new draft (clones from v1), edit
+      # the cloned rule via the form.
+      {:ok, view, _html} = live(conn, "/policies/builder")
+      view |> element("#policy-builder-open-draft-btn") |> render_click()
+
+      view |> element("#policy-builder-edit-#{v1_rule.id}") |> render_click()
+
+      view
+      |> form("#policy-builder-rule-form", %{
+        "rule" => %{
+          "rule_type" => "amount_limit",
+          "priority" => "0",
+          "max_per_tx" => "999"
+        }
+      })
+      |> render_submit()
+
+      # P2-1 assertion: the v1 published snapshot is UNCHANGED
+      # before the admin clicks Publish. The snapshot must still
+      # resolve the original v1 rule (the prior row stays
+      # `:active` and stays in the published version's rule_ids).
+      snapshot = Versions.snapshot_for_workspace(ws.id)
+      assert [%{id: still_resolves}] = snapshot.rules
+      assert still_resolves == v1_rule.id
+
+      reloaded_v1_rule = Bank.Repo.get!(Bank.Policies.PolicyRule, v1_rule.id)
+      assert reloaded_v1_rule.state == :active
+
+      # Publish the draft and confirm the published snapshot now
+      # picks up the edited successor rule.
+      view |> element("#policy-builder-publish-btn") |> render_click()
+
+      published_snapshot = Versions.snapshot_for_workspace(ws.id)
+      published_ids = Enum.map(published_snapshot.rules, & &1.id)
+
+      refute v1_rule.id in published_ids
+      assert length(published_snapshot.rules) >= 1
+    end
+  end
+
+  # --- #224 P2-2: draft-only rules are not live before publish ----------
+
+  describe "draft isolation — new draft rules do not affect runtime decisions (#224 P2-2)" do
+    setup [:register_and_log_in_user, :upgrade_to_admin_role]
+
+    test "in a greenfield workspace, a draft-only rule is not loaded by Policies.load_active_ruleset/1 until publish",
+         %{conn: conn, workspace: ws} do
+      # Greenfield: no published version. The legacy
+      # `Policies.load_active_ruleset/1` (which the runtime falls
+      # back to when no published version exists) sees no rules
+      # from this workspace yet.
+      assert is_nil(Versions.current_published(ws.id))
+
+      ruleset_before =
+        Bank.Policies.load_active_ruleset(workspace_id: ws.id)
+
+      assert ruleset_before == []
+
+      # Operator adds a rule via the builder (without publishing).
+      {:ok, view, _html} = live(conn, "/policies/builder")
+      view |> element("#policy-builder-open-draft-btn") |> render_click()
+
+      view
+      |> form("#policy-builder-rule-form", %{
+        "rule" => %{
+          "rule_type" => "amount_limit",
+          "priority" => "0",
+          "max_per_tx" => "10"
+        }
+      })
+      |> render_submit()
+
+      # P2-2 assertion: the draft-added rule is NOT in the active
+      # workspace ruleset. It sits at `state: :draft` until publish.
+      ruleset_during_draft =
+        Bank.Policies.load_active_ruleset(workspace_id: ws.id)
+
+      assert ruleset_during_draft == []
+
+      # The draft holds exactly one rule and that rule is in
+      # `:draft` state.
+      [rule_id] =
+        ws.id
+        |> Versions.list_versions(status: :draft, limit: 1)
+        |> List.first()
+        |> Bank.Policies.PolicyVersion.rule_ids_list()
+
+      draft_rule = Bank.Repo.get!(Bank.Policies.PolicyRule, rule_id)
+      assert draft_rule.state == :draft
+
+      # Publish — the rule must be activated atomically by
+      # `Versions.publish_draft/2`.
+      view |> element("#policy-builder-publish-btn") |> render_click()
+
+      reloaded = Bank.Repo.get!(Bank.Policies.PolicyRule, rule_id)
+      assert reloaded.state == :active
+
+      # And the published snapshot now resolves the rule for
+      # runtime decisions.
+      snapshot = Versions.snapshot_for_workspace(ws.id)
+      assert Enum.map(snapshot.rules, & &1.id) == [rule_id]
+    end
+  end
+
   # --- helpers ---------------------------------------------------------
 
   defp current_draft(ws_id) do

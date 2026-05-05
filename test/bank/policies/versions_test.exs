@@ -263,6 +263,77 @@ defmodule Bank.Policies.VersionsTest do
 
       assert length(published) == 1
     end
+
+    test "atomically activates :draft rules in the published version's rule_ids list (#224 P2-2)",
+         %{workspace: ws, actor_id: actor_id} do
+      # Two rules in this workspace's catalog:
+      #
+      #   - `seed_active`: already :active (cloned from a hypothetical
+      #     prior published)
+      #   - `seed_draft`:  in :draft state (added inside the new draft)
+      #
+      # `publish_draft/2` must flip `seed_draft` to :active in the
+      # same transaction as the version transition. `seed_active`
+      # stays :active.
+      seed_active =
+        Bank.Fixtures.policy_rule(
+          rule_type: :amount_limit,
+          state: :active,
+          workspace_id: ws.id
+        )
+
+      seed_draft =
+        Bank.Fixtures.policy_rule(
+          rule_type: :amount_limit,
+          state: :draft,
+          workspace_id: ws.id
+        )
+
+      {:ok, draft} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [seed_active.id, seed_draft.id]}
+        )
+
+      {:ok, _} = Versions.publish_draft(draft, published_by: :user, actor_id: actor_id)
+
+      reloaded_active = Repo.get!(Bank.Policies.PolicyRule, seed_active.id)
+      reloaded_draft = Repo.get!(Bank.Policies.PolicyRule, seed_draft.id)
+
+      assert reloaded_active.state == :active
+      assert reloaded_draft.state == :active
+    end
+
+    test "does NOT activate :draft rules in a sibling workspace even if the draft cites them (#226 P2 defence-in-depth)",
+         %{workspace: ws, actor_id: actor_id} do
+      {:ok, ws_b} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "publish-activate-iso-#{System.unique_integer([:positive])}",
+          name: "Publish Iso B"
+        })
+
+      ws_b_draft_rule =
+        Bank.Fixtures.policy_rule(
+          rule_type: :amount_limit,
+          state: :draft,
+          workspace_id: ws_b.id
+        )
+
+      {:ok, draft_a} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [ws_b_draft_rule.id]}
+        )
+
+      {:ok, _} = Versions.publish_draft(draft_a, published_by: :user, actor_id: actor_id)
+
+      # Sibling workspace's draft rule MUST stay :draft — A's
+      # publish never touches B's catalog.
+      reloaded = Repo.get!(Bank.Policies.PolicyRule, ws_b_draft_rule.id)
+      assert reloaded.state == :draft
+    end
   end
 
   # --- published snapshot immutability ----------------------------------
