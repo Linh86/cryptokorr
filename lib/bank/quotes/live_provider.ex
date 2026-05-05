@@ -122,6 +122,28 @@ defmodule Bank.Quotes.LiveProvider do
     upstream_dry_run_rejected
   )
 
+  # Secret-pattern allowlist enforced at the upstream boundary. The
+  # provider-controlled `trace_id`, `route`, and `failure_conditions`
+  # ride straight into a `%Preview{}` and then into the persisted
+  # `simulation_reports` row; a malicious or buggy upstream that
+  # smuggles `Authorization: Bearer ...`, an `sk_live_...` key, a
+  # credentialed `https://user:pass@host` URL, or PEM private-key
+  # text into one of those fields would otherwise survive the #174
+  # log-redaction boundary on its way to operator surfaces and the
+  # decision audit trail. Any string matching one of these patterns
+  # is dropped (trace_id, failure_conditions) or replaced with
+  # `"[REDACTED]"` (nested route values).
+  @secret_patterns [
+    ~r/Authorization\s*:\s*Bearer/i,
+    ~r/Bearer\s+sk_/i,
+    ~r/\bsk_(live|test)_/,
+    ~r/\bpk_(live|test)_/,
+    ~r{://[^\s/@]+:[^\s/@]+@},
+    ~r/-----BEGIN [A-Z ]*PRIVATE KEY-----/
+  ]
+
+  @secret_redaction_marker "[REDACTED]"
+
   @impl Bank.Quotes.Provider
   def preview(%AgentIntent{} = intent, opts \\ []) do
     case Application.get_env(:bank, __MODULE__, []) do
@@ -374,13 +396,15 @@ defmodule Bank.Quotes.LiveProvider do
   defp parse_string_or_nil(_), do: :error
 
   defp parse_map_or_nil(nil), do: {:ok, nil}
-  defp parse_map_or_nil(map) when is_map(map), do: {:ok, map}
+  defp parse_map_or_nil(map) when is_map(map), do: {:ok, sanitize_value(map)}
   defp parse_map_or_nil(_), do: :error
 
   defp parse_string_list(nil), do: []
 
   defp parse_string_list(list) when is_list(list) do
-    Enum.filter(list, &is_binary/1)
+    list
+    |> Enum.filter(&is_binary/1)
+    |> Enum.reject(&contains_secret?/1)
   end
 
   defp parse_string_list(_), do: []
@@ -400,11 +424,17 @@ defmodule Bank.Quotes.LiveProvider do
   defp parse_ttl(_), do: @default_freshness_ttl_seconds
 
   # `provider_trace_ref` is forwarded only when the upstream
-  # surfaced a non-empty string. We additionally clamp the length
-  # to 128 chars so a maliciously long header-style payload smuggled
-  # into the trace field can never hit the operator UI verbatim.
+  # surfaced a non-empty string. We drop any value carrying a
+  # secret-shaped marker (Authorization header, sk_/pk_ key prefix,
+  # credentialed URL, PEM block) before clamping length to 128 chars
+  # so a maliciously long header-style payload smuggled into the
+  # trace field can never hit the operator UI or `simulation_reports`.
   defp parse_trace_ref(value) when is_binary(value) and value != "" do
-    String.slice(value, 0, 128)
+    if contains_secret?(value) do
+      nil
+    else
+      String.slice(value, 0, 128)
+    end
   end
 
   defp parse_trace_ref(_), do: nil
@@ -421,6 +451,36 @@ defmodule Bank.Quotes.LiveProvider do
   defp isoformat(nil), do: nil
   defp isoformat(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
   defp isoformat(other), do: to_string(other)
+
+  # --- upstream-payload secret hygiene ------------------------------------
+
+  # `true` when `value` carries one of the @secret_patterns markers.
+  # Used at the upstream boundary on `trace_id` and `failure_conditions`.
+  defp contains_secret?(value) when is_binary(value) do
+    Enum.any?(@secret_patterns, &Regex.match?(&1, value))
+  end
+
+  defp contains_secret?(_), do: false
+
+  # Recursively walks any JSON-decoded value (map / list / string /
+  # other) and replaces string leaves carrying a secret marker with
+  # `@secret_redaction_marker`. Used on the upstream `route` map,
+  # whose shape is provider-defined — we keep the structural skeleton
+  # so downstream consumers (operator UI, decision report) can still
+  # see the route's shape, but no marker survives to the persisted row.
+  defp sanitize_value(value) when is_binary(value) do
+    if contains_secret?(value), do: @secret_redaction_marker, else: value
+  end
+
+  defp sanitize_value(value) when is_map(value) do
+    Map.new(value, fn {k, v} -> {k, sanitize_value(v)} end)
+  end
+
+  defp sanitize_value(value) when is_list(value) do
+    Enum.map(value, &sanitize_value/1)
+  end
+
+  defp sanitize_value(value), do: value
 
   # --- log sanitization ---------------------------------------------------
 
