@@ -334,6 +334,233 @@ defmodule Bank.AccessAdminTest do
     end
   end
 
+  describe "reject_pending_user/3 — notification emission (#421)" do
+    alias Bank.Notifications
+    alias Bank.Notifications.Notification
+
+    test "emits a workspace-scoped :warning when an exact-email invite matches" do
+      put_admins(["admin@example.com"])
+      admin = create_user(email: "admin@example.com")
+      ws = create_workspace("reject-exact")
+
+      _invite =
+        create_invite!(admin,
+          workspace_id: ws.id,
+          invite_type: :exact_email,
+          email: "alice@example.com",
+          role: :operator
+        )
+
+      target = create_user(email: "alice@example.com")
+
+      assert {:ok, :rejected, disabled} = Access.reject_pending_user(admin, target)
+      assert disabled.status == :disabled
+
+      [n] = Notifications.list_for_workspace(ws.id)
+      assert %Notification{} = n
+      assert n.workspace_id == ws.id
+      assert n.role_target == :operator
+      assert n.user_id == nil
+      assert n.event_type == "access.rejected"
+      assert n.severity == :warning
+      assert n.subject_type == "user"
+      assert n.subject_id == target.id
+      assert n.correlation_id == target.id
+      assert n.action_link == "/admin/access"
+      assert n.dedupe_key == "access.rejected:#{target.id}"
+      assert n.title =~ "reject-exact"
+    end
+
+    test "emits a workspace-scoped :warning when only a domain invite matches" do
+      put_admins(["admin@example.com"])
+      admin = create_user(email: "admin@example.com")
+      ws = create_workspace("reject-domain")
+
+      _invite =
+        create_invite!(admin,
+          workspace_id: ws.id,
+          invite_type: :domain,
+          domain: "partner.io",
+          role: :viewer
+        )
+
+      target = create_user(email: "carol@partner.io")
+
+      assert {:ok, :rejected, _} = Access.reject_pending_user(admin, target)
+
+      [n] = Notifications.list_for_workspace(ws.id)
+      assert n.workspace_id == ws.id
+      assert n.event_type == "access.rejected"
+      assert n.severity == :warning
+      assert n.dedupe_key == "access.rejected:#{target.id}"
+    end
+
+    test "exact-email invite wins over domain invite when both match in the same workspace" do
+      put_admins(["admin@example.com"])
+      admin = create_user(email: "admin@example.com")
+      ws = create_workspace("reject-precedence")
+
+      _domain =
+        create_invite!(admin,
+          workspace_id: ws.id,
+          invite_type: :domain,
+          domain: "example.com",
+          role: :viewer
+        )
+
+      _exact =
+        create_invite!(admin,
+          workspace_id: ws.id,
+          invite_type: :exact_email,
+          email: "alice@example.com",
+          role: :operator
+        )
+
+      target = create_user(email: "alice@example.com")
+      assert {:ok, :rejected, _} = Access.reject_pending_user(admin, target)
+
+      # Only one inbox row; lands in the (single) workspace.
+      assert [%Notification{} = n] = Notifications.list_for_workspace(ws.id)
+      assert n.workspace_id == ws.id
+      assert n.dedupe_key == "access.rejected:#{target.id}"
+    end
+
+    test "exact-email invite in workspace A beats domain invite in workspace B" do
+      put_admins(["admin@example.com"])
+      admin = create_user(email: "admin@example.com")
+      ws_exact = create_workspace("reject-exact-ws")
+      ws_domain = create_workspace("reject-domain-ws")
+
+      _domain =
+        create_invite!(admin,
+          workspace_id: ws_domain.id,
+          invite_type: :domain,
+          domain: "example.com",
+          role: :viewer
+        )
+
+      _exact =
+        create_invite!(admin,
+          workspace_id: ws_exact.id,
+          invite_type: :exact_email,
+          email: "alice@example.com",
+          role: :operator
+        )
+
+      target = create_user(email: "alice@example.com")
+      assert {:ok, :rejected, _} = Access.reject_pending_user(admin, target)
+
+      assert [_] = Notifications.list_for_workspace(ws_exact.id)
+      assert Notifications.list_for_workspace(ws_domain.id) == []
+    end
+
+    test "no inbox row when no active invite matches the rejected user, but disable still happens" do
+      put_admins(["admin@example.com"])
+      admin = create_user(email: "admin@example.com")
+      ws = create_workspace("reject-no-invite")
+
+      target = create_user(email: "stranger@nowhere.org")
+      assert {:ok, :rejected, disabled} = Access.reject_pending_user(admin, target)
+      assert disabled.status == :disabled
+
+      assert Notifications.list_for_workspace(ws.id) == []
+    end
+
+    test ":already_disabled is a silent no-op (no notification row)" do
+      put_admins(["admin@example.com"])
+      admin = create_user(email: "admin@example.com")
+      ws = create_workspace("reject-already")
+
+      _invite =
+        create_invite!(admin,
+          workspace_id: ws.id,
+          invite_type: :exact_email,
+          email: "ex@example.com",
+          role: :operator
+        )
+
+      target = create_user(email: "ex@example.com", status: :disabled)
+
+      assert {:ok, :already_disabled, _} = Access.reject_pending_user(admin, target)
+      assert Notifications.list_for_workspace(ws.id) == []
+    end
+
+    test "unauthorized actor produces no notification and no disable" do
+      put_admins([])
+      actor = create_user()
+      target = create_user(email: "alice@example.com")
+      ws = create_workspace("reject-unauth")
+
+      _invite =
+        create_invite!(actor,
+          workspace_id: ws.id,
+          invite_type: :exact_email,
+          email: "alice@example.com",
+          role: :operator
+        )
+
+      assert {:error, :unauthorized} = Access.reject_pending_user(actor, target)
+      assert Accounts.get_user(target.id).status != :disabled
+      assert Notifications.list_for_workspace(ws.id) == []
+    end
+
+    test "cross-workspace isolation: rejection lands in the invite workspace, not siblings" do
+      put_admins(["admin@example.com"])
+      admin = create_user(email: "admin@example.com")
+      ws_match = create_workspace("reject-match")
+      ws_sibling = create_workspace("reject-sibling")
+
+      _invite =
+        create_invite!(admin,
+          workspace_id: ws_match.id,
+          invite_type: :exact_email,
+          email: "alice@example.com",
+          role: :operator
+        )
+
+      target = create_user(email: "alice@example.com")
+      assert {:ok, :rejected, _} = Access.reject_pending_user(admin, target)
+
+      assert [%Notification{workspace_id: match_id}] =
+               Notifications.list_for_workspace(ws_match.id)
+
+      assert match_id == ws_match.id
+      assert Notifications.list_for_workspace(ws_sibling.id) == []
+    end
+
+    test "secret-shaped email/name on the rejected user does not leak into the inbox" do
+      put_admins(["admin@example.com"])
+      admin = create_user(email: "admin@example.com")
+      ws = create_workspace("reject-secret")
+
+      _invite =
+        create_invite!(admin,
+          workspace_id: ws.id,
+          invite_type: :domain,
+          domain: "example.com",
+          role: :viewer
+        )
+
+      target =
+        create_user(
+          email: "alice@example.com",
+          name: "Authorization Bearer LEAKED_PROBE"
+        )
+
+      assert {:ok, :rejected, _} = Access.reject_pending_user(admin, target)
+
+      [n] = Notifications.list_for_workspace(ws.id)
+      refute n.title =~ "LEAKED_PROBE"
+      refute n.body =~ "LEAKED_PROBE"
+      refute (n.action_link || "") =~ "LEAKED_PROBE"
+      refute n.title =~ "Bearer"
+      refute n.body =~ "Bearer"
+      refute n.title =~ target.email
+      refute n.body =~ target.email
+      refute n.dedupe_key =~ "Bearer"
+    end
+  end
+
   defp classification_for(rows, user_id) do
     Enum.find(rows, fn row -> row.user.id == user_id end)
     |> Map.get(:classification)

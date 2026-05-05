@@ -741,6 +741,14 @@ defmodule Bank.Access do
   the invite flow stay intact. Domain invites are NOT auto-revoked;
   one rejected user does not revoke the cohort invite.
 
+  Best-effort notification (#421): when a fresh disable lands and
+  the rejected user matches an active invite (exact-email beats
+  domain), `Bank.Notifications.Emitter.emit_access_rejected/1`
+  records a workspace-scoped operator warning. Notification-side
+  failure never rolls back the disable; the matching invite is
+  resolved before the disable transition because
+  `find_matching_invite_for_user/1` ignores `:disabled` users.
+
   Refuses self-rejection (`{:error, :self_action}`).
   """
   @spec reject_pending_user(User.t(), User.t(), keyword()) :: reject_result()
@@ -765,10 +773,18 @@ defmodule Bank.Access do
 
           true ->
             prior_status = current.status
+            # Resolve the workspace boundary before flipping the
+            # user to `:disabled`, because
+            # `find_matching_invite_for_user/1` ignores disabled
+            # users (#421). We hold the matching invite and only
+            # use it after the disable transition is durable, so a
+            # notification-side failure cannot roll the disable back.
+            matching_invite = find_matching_invite_for_user(current)
 
             case Accounts.disable_user(current) do
               {:ok, disabled} ->
                 safe_emit(Events.access_admin_rejected(disabled, actor, prior_status))
+                _ = maybe_emit_rejection_notification(disabled, actor, matching_invite)
                 {:ok, :rejected, disabled}
 
               err ->
@@ -776,6 +792,27 @@ defmodule Bank.Access do
             end
         end
     end
+  end
+
+  # Best-effort: a notification-side failure (validation,
+  # workspace deleted, transient repo error) must never roll back
+  # the user disable. The emitter itself never raises, but we
+  # still ignore its return so a future change to the contract
+  # cannot leak back into this caller.
+  defp maybe_emit_rejection_notification(_user, _actor, nil), do: :ok
+
+  defp maybe_emit_rejection_notification(
+         %User{} = user,
+         %User{} = actor,
+         %AccessInvite{} = invite
+       ) do
+    Bank.Notifications.Emitter.emit_access_rejected(%{
+      workspace_id: invite.workspace_id,
+      user: user,
+      actor_user_id: actor.id
+    })
+
+    :ok
   end
 
   # --- Audit emission helper -----------------------------------------------
