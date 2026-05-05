@@ -332,6 +332,7 @@ defmodule BankWeb.Router do
       live "/audit", AuditLive
       live "/audit/replay/:intent_id", IntentReplayLive
       live "/sandbox", SandboxLive
+      live "/inbox", OperatorInboxLive
     end
 
     # Browser-session-authenticated decision report download

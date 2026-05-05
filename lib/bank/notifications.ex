@@ -299,6 +299,9 @@ defmodule Bank.Notifications do
       {:event_type, event_type}, q when is_binary(event_type) ->
         from(n in q, where: n.event_type == ^event_type)
 
+      {:severity, severity}, q when is_atom(severity) ->
+        from(n in q, where: n.severity == ^severity)
+
       _, q ->
         q
     end)
