@@ -62,7 +62,18 @@ defmodule Bank.CrossAccountIsolationTest do
   alias Bank.Intents
   alias Bank.Repo
   alias Bank.Runtime.Workers.RunExecution
+  alias Bank.Security.PauseState
   alias Bank.Workspaces
+
+  # Reset the global PauseState before each test so a leaked pause
+  # from a prior test file (e.g. `:global` pause set in a security
+  # / control-LiveView / swap-dispatch-safety test that finished
+  # without explicit cleanup) cannot turn the dispatch-refusal
+  # assertions in this file into a `:runtime_paused` flake.
+  setup do
+    PauseState.reset()
+    :ok
+  end
 
   defp workspace(slug_prefix) do
     suffix = System.unique_integer([:positive])
