@@ -229,6 +229,7 @@ defmodule Bank.Decisions do
 
     trust_attrs = TrustEngine.classify(intent, Keyword.put_new(opts, :now, now))
     preview_result = Keyword.get_lazy(opts, :preview, fn -> Quotes.preview(intent, opts) end)
+    attempted_provider = Quotes.attempted_provider_id(opts)
     policy = evaluate_policy(intent, opts, now)
     paused? = Keyword.get_lazy(opts, :paused?, fn -> Security.paused?(:global) end)
 
@@ -264,7 +265,13 @@ defmodule Bank.Decisions do
         :simulation,
         SimulationReport.changeset(
           %SimulationReport{},
-          build_simulation_attrs(intent, preview_result, prior_simulation, now)
+          build_simulation_attrs(
+            intent,
+            preview_result,
+            prior_simulation,
+            now,
+            attempted_provider
+          )
         )
       )
       |> maybe_demote(:demote_decision, prior_decision, &DecisionEnvelope.mark_not_current/1)
@@ -499,14 +506,20 @@ defmodule Bank.Decisions do
     * `:now` — clock for the failed-preview path (default
       `DateTime.utc_now/0`). For `{:ok, preview}`, `generated_at`
       comes from the preview struct itself.
+    * `:attempted_provider` — provider id (string) the caller asked
+      for. Used on the failed-preview path so an operator inspecting
+      a `:failed` row can tell whether the live or stub provider was
+      attempted (#175). Defaults to `@default_simulation_provider`
+      when the caller does not know.
   """
   @spec simulation_attrs_from_preview(AgentIntent.t(), Quotes.result(), keyword()) :: map()
   def simulation_attrs_from_preview(%AgentIntent{} = intent, preview_result, opts \\ []) do
     now = Keyword.get(opts, :now, DateTime.utc_now())
-    do_simulation_attrs(intent, preview_result, now)
+    attempted_provider = Keyword.get(opts, :attempted_provider) || @default_simulation_provider
+    do_simulation_attrs(intent, preview_result, now, attempted_provider)
   end
 
-  defp do_simulation_attrs(intent, {:ok, %Quotes.Preview{} = preview}, _now) do
+  defp do_simulation_attrs(intent, {:ok, %Quotes.Preview{} = preview}, _now, _attempted) do
     %{
       intent_id: intent.id,
       provider: preview.provider,
@@ -526,10 +539,10 @@ defmodule Bank.Decisions do
     }
   end
 
-  defp do_simulation_attrs(intent, {:error, reason}, now) do
+  defp do_simulation_attrs(intent, {:error, reason}, now, attempted_provider) do
     %{
       intent_id: intent.id,
-      provider: @default_simulation_provider,
+      provider: attempted_provider,
       provider_trace_ref: nil,
       chain: intent.chain,
       asset: intent.asset,
@@ -553,13 +566,16 @@ defmodule Bank.Decisions do
     }
   end
 
-  defp do_simulation_attrs(intent, _other, now) do
-    do_simulation_attrs(intent, {:error, :preview_missing}, now)
+  defp do_simulation_attrs(intent, _other, now, attempted_provider) do
+    do_simulation_attrs(intent, {:error, :preview_missing}, now, attempted_provider)
   end
 
-  defp build_simulation_attrs(intent, preview_result, prior, now) do
+  defp build_simulation_attrs(intent, preview_result, prior, now, attempted_provider) do
     intent
-    |> simulation_attrs_from_preview(preview_result, now: now)
+    |> simulation_attrs_from_preview(preview_result,
+      now: now,
+      attempted_provider: attempted_provider
+    )
     |> Map.put(:current, true)
     |> Map.put(:supersedes_id, prior && prior.id)
   end

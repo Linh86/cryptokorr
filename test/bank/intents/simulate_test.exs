@@ -162,6 +162,74 @@ defmodule Bank.Intents.SimulateTest do
     end
   end
 
+  describe "live provider attribution on failure (#175)" do
+    # Pre-#175, a failed `Bank.Quotes.preview/2` always persisted
+    # `provider: "stub"` on the resulting `:failed` SimulationReport
+    # because the failure path fell back to a system default. Post-#175,
+    # the attempted provider is recorded so an operator can tell
+    # which path failed — the live HTTP simulation, the stub, or a
+    # disabled deployment.
+
+    test "failed live preview persists provider: 'tenderly' on the report" do
+      Req.Test.stub(Bank.Quotes.LiveProvider, fn conn ->
+        Plug.Conn.send_resp(conn, 503, "")
+      end)
+
+      intent = agent_intent()
+
+      assert {:ok, result} = Intents.simulate(intent.id, "refresh", provider: :live)
+
+      assert result.report.status == :failed
+      assert result.report.provider == "tenderly"
+      assert result.report.current
+    end
+
+    test "successful live preview persists provider: 'tenderly' on the completed report" do
+      Req.Test.stub(Bank.Quotes.LiveProvider, fn conn ->
+        Req.Test.json(conn, %{
+          "success" => true,
+          "trace_id" => "tenderly-trace-#{System.unique_integer([:positive])}",
+          "estimated_gas" => 110_000,
+          "estimated_fee" => "0.00012",
+          "fee_asset" => "ETH",
+          "balance_changes" => %{"USDC" => "-1"},
+          "failure_conditions" => [],
+          "risk_flags" => [],
+          "freshness_ttl_seconds" => 30
+        })
+      end)
+
+      intent = agent_intent()
+
+      assert {:ok, result} = Intents.simulate(intent.id, "refresh", provider: :live)
+
+      assert result.report.status == :completed
+      assert result.report.provider == "tenderly"
+      assert is_binary(result.report.provider_trace_ref)
+    end
+
+    test "failed stub preview still persists provider: 'stub' (regression)" do
+      Application.put_env(:bank, Bank.Quotes.StubProvider, outcome: :unavailable)
+      on_exit(fn -> Application.put_env(:bank, Bank.Quotes.StubProvider, []) end)
+
+      intent = agent_intent()
+
+      assert {:ok, result} = Intents.simulate(intent.id, "refresh")
+
+      assert result.report.status == :failed
+      assert result.report.provider == "stub"
+    end
+
+    test "failed disabled-provider preview persists provider: 'disabled'" do
+      intent = agent_intent()
+
+      assert {:ok, result} = Intents.simulate(intent.id, "refresh", provider: :disabled)
+
+      assert result.report.status == :failed
+      assert result.report.provider == "disabled"
+    end
+  end
+
   describe "input validation" do
     test "rejects an unsupported reason with :invalid_reason" do
       intent = agent_intent()

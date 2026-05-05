@@ -258,6 +258,67 @@ defmodule Bank.QuotesTest do
     end
   end
 
+  describe "attempted_provider_id/1 (#175 — failed-preview attribution)" do
+    # The decision pipeline records this on a `:failed`
+    # `SimulationReport` so an operator can tell which provider was
+    # attempted when the preview failed (vs. the previous behaviour
+    # which always recorded `"stub"` regardless of which provider
+    # actually failed).
+
+    test "returns 'stub' for the :stub atom" do
+      assert Quotes.attempted_provider_id(provider: :stub) == "stub"
+    end
+
+    test "returns 'tenderly' for the :live atom" do
+      assert Quotes.attempted_provider_id(provider: :live) == "tenderly"
+    end
+
+    test "returns 'disabled' for the :disabled atom" do
+      assert Quotes.attempted_provider_id(provider: :disabled) == "disabled"
+    end
+
+    test "returns 'stub' for an explicit StubProvider module" do
+      assert Quotes.attempted_provider_id(provider: StubProvider) == "stub"
+    end
+
+    test "returns 'tenderly' for an explicit LiveProvider module" do
+      assert Quotes.attempted_provider_id(provider: LiveProvider) == "tenderly"
+    end
+
+    test "follows the application config when no opt is passed" do
+      original = Application.get_env(:bank, Bank.Quotes, [])
+
+      Application.put_env(:bank, Bank.Quotes, Keyword.put(original, :provider, :live))
+      on_exit(fn -> Application.put_env(:bank, Bank.Quotes, original) end)
+
+      assert Quotes.attempted_provider_id() == "tenderly"
+    end
+
+    test "default (no opt, no app env) is 'stub'" do
+      original = Application.get_env(:bank, Bank.Quotes, [])
+      Application.put_env(:bank, Bank.Quotes, Keyword.delete(original, :provider))
+      on_exit(fn -> Application.put_env(:bank, Bank.Quotes, original) end)
+
+      assert Quotes.attempted_provider_id() == "stub"
+    end
+  end
+
+  describe "Provider behaviour — provider_id/0 callback (#175)" do
+    test "StubProvider exposes 'stub'" do
+      assert StubProvider.provider_id() == "stub"
+    end
+
+    test "LiveProvider exposes 'tenderly' (matches @provider_id used on Preview.provider)" do
+      assert LiveProvider.provider_id() == "tenderly"
+    end
+
+    test "the value matches what the StubProvider sets on a successful Preview" do
+      intent = Fixtures.agent_intent(chain: "base")
+      {:ok, preview} = Quotes.preview(intent, provider: :stub)
+      assert preview.provider == StubProvider.provider_id()
+    end
+  end
+
   describe "secret hygiene on Preview (#173)" do
     test "stub preview's provider_trace_ref does not look like an Authorization header or URL" do
       intent = Fixtures.agent_intent(chain: "base")

@@ -428,7 +428,9 @@ defmodule Bank.Intents do
 
   defp do_simulate(intent, reason, preview_result, opts) do
     base_attrs =
-      Decisions.simulation_attrs_from_preview(intent, preview_result)
+      Decisions.simulation_attrs_from_preview(intent, preview_result,
+        attempted_provider: Quotes.attempted_provider_id(opts)
+      )
 
     refreshed? = reason == @refresh_reason
     prior = if refreshed?, do: current_simulation_for(intent.id), else: nil

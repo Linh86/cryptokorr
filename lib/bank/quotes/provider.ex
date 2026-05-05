@@ -69,4 +69,16 @@ defmodule Bank.Quotes.Provider do
 
   @callback preview(intent :: AgentIntent.t(), opts :: keyword()) ::
               {:ok, Preview.t()} | {:error, Bank.Quotes.error()}
+
+  @doc """
+  Stable, human-readable identifier for the provider implementation
+  (e.g. `"stub"`, `"tenderly"`). Matches the value the provider sets
+  on `Preview.provider` for successful previews; the decision pipeline
+  records it on failed `SimulationReport`s so the
+  attempted-provider-on-failure path is observable
+  (#175 — failed previews should not look like stub failures).
+  """
+  @callback provider_id() :: String.t()
+
+  @optional_callbacks provider_id: 0
 end
