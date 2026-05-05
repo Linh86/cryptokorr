@@ -22,9 +22,28 @@ defmodule Bank.Runtime.Workers.RunExecutionCanaryCapsTest do
   alias Bank.Delegations
   alias Bank.Repo
   alias Bank.Runtime.Workers.RunExecution
+  alias Bank.Security.PauseState
   alias Bank.Workspaces
 
   import Bank.Fixtures
+
+  setup do
+    # `Bank.Security.PauseState` is a process-global GenServer; a
+    # prior test in the suite ordering may have left the runtime
+    # paused, which would short-circuit this test's
+    # `Decisions.request_manual_execution/2` at `validate_not_paused/2`.
+    # Mirror `run_execution_test.exs`'s setup pattern.
+    PauseState.reset()
+
+    # Defensive verification: assert the GenServer actually came
+    # back unpaused. If a concurrent `async: true` test races a
+    # pause in between reset and the test body, surface it here as
+    # a clear setup failure instead of a confusing
+    # `:runtime_paused` cancel inside the worker.
+    refute Bank.Security.paused?(:global), "global pause leaked into setup"
+
+    :ok
+  end
 
   defp mainnet_workspace do
     suffix = System.unique_integer([:positive])
