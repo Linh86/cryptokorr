@@ -9,7 +9,7 @@ document is the human-readable companion.
 
 | Dimension     | v0.1 default            | Notes                                                                          |
 | ------------- | ----------------------- | ------------------------------------------------------------------------------ |
-| Swap type     | exact-input only        | Exact-output and cross-chain are out of scope. No `swap_type` field; implicit. |
+| Swap type     | exact-input only        | Exact-output and cross-chain are out of scope. The canonical route omits `swap_type`; an explicit marker is tolerated only when it agrees (`:exact_input` / `"exact_input"`, case-insensitive). Anything else (e.g. `:exact_output`, `"EXACT_OUTPUT"`) is rejected with `swap_type_not_supported`. |
 | Chain         | `base-sepolia`          | Testnet-first. Mainnet (`base`) not yet allowed at this layer.                 |
 | Assets        | `USDC`                  | Both source and destination must be in the allowlist.                          |
 | Slippage cap  | `100` bps (1.00%)       | `slippage_bps <= max_slippage_bps`. Stricter caps allowed via config.          |
@@ -65,6 +65,7 @@ across releases — operators see them in audit rows and runbooks.
 | `swap_amount_invalid`           | An amount is non-positive, negative, or `min > expected`.                              |
 | `swap_slippage_exceeded`        | `slippage_bps` is missing/negative or exceeds `max_slippage_bps`.                      |
 | `swap_deadline_expired`         | `deadline` is missing, malformed, or already past.                                     |
+| `swap_type_not_supported`       | An explicit `swap_type` / `"swap_type"` marker carries a non-exact-input value.        |
 
 ## What this contract does NOT cover
 
