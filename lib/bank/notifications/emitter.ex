@@ -27,6 +27,21 @@ defmodule Bank.Notifications.Emitter do
       requested and rejected access source paths are intentionally
       silent here because they have no clean workspace boundary in
       the current model — listed as remaining #234 blockers.
+    * `emit_pause_scope_paused/1` — every `Bank.Security.Pauses.create_pause/4`
+      transition that actually paused a scope (NOT the idempotent
+      `:already_paused` short-circuit). Surfaces a `:warning`
+      operator notification with the pause subject (chain id today,
+      future scope types per #228 design). Audit emission lives
+      inside the pause transaction; this emitter runs *after* the
+      transaction commits so a notification-side failure cannot
+      roll back the pause.
+    * `emit_pause_scope_resumed/1` — every
+      `Bank.Security.Pauses.resume/4` transition that actually
+      resumed a paused scope (NOT the idempotent
+      `:already_running` short-circuit). Surfaces an `:info`
+      operator notification — recovery is informational, not a
+      warning, mirroring the resolve-side severity convention from
+      #256's `Bank.Ops.Alerts`.
 
   ## Dedupe semantics
 
@@ -69,6 +84,7 @@ defmodule Bank.Notifications.Emitter do
   alias Bank.Decisions.ExecutionPlan
   alias Bank.Intents.AgentIntent
   alias Bank.Notifications
+  alias Bank.Security.Pause
   alias Bank.Workspaces.Membership
   alias Bank.Workspaces.Workspace
 
@@ -311,6 +327,134 @@ defmodule Bank.Notifications.Emitter do
       dedupe_key: "access:approved:#{membership.user_id}:#{membership.workspace_id}"
     }
   end
+
+  @doc """
+  Emit (or dedupe) an inbox notification for a successful
+  `Bank.Security.Pauses.create_pause/4` transition. The recipient
+  is the workspace's operator role; the body carries only the
+  scope_type / scope_value enum + the pause id, never the
+  free-text `reason` (the schema's `:unsafe_text` gate would
+  reject a leak anyway, but we don't even thread the field
+  through).
+  """
+  @spec emit_pause_scope_paused(Pause.t()) :: outcome_result()
+  def emit_pause_scope_paused(%Pause{} = pause) do
+    cond do
+      is_nil(pause.workspace_id) ->
+        {:skip, :no_workspace_id}
+
+      is_nil(pause.id) ->
+        {:skip, :pause_not_persisted}
+
+      true ->
+        attrs = build_pause_paused_attrs(pause)
+
+        case Notifications.create(attrs) do
+          {:ok, _} = ok ->
+            ok
+
+          {:duplicate, _} = dup ->
+            dup
+
+          {:error, changeset} = err ->
+            Logger.warning(
+              "Bank.Notifications.Emitter: pause-paused notification rejected " <>
+                "(pause=#{pause.id} errors=#{inspect(changeset.errors)})"
+            )
+
+            err
+        end
+    end
+  end
+
+  @doc """
+  Emit (or dedupe) an inbox notification for a successful
+  `Bank.Security.Pauses.resume/4` transition. The recipient is
+  the workspace's operator role. Recovery is `:info` — operators
+  may want to confirm a resume happened but it's not actionable
+  on its own.
+  """
+  @spec emit_pause_scope_resumed(Pause.t()) :: outcome_result()
+  def emit_pause_scope_resumed(%Pause{} = pause) do
+    cond do
+      is_nil(pause.workspace_id) ->
+        {:skip, :no_workspace_id}
+
+      is_nil(pause.id) ->
+        {:skip, :pause_not_persisted}
+
+      true ->
+        attrs = build_pause_resumed_attrs(pause)
+
+        case Notifications.create(attrs) do
+          {:ok, _} = ok ->
+            ok
+
+          {:duplicate, _} = dup ->
+            dup
+
+          {:error, changeset} = err ->
+            Logger.warning(
+              "Bank.Notifications.Emitter: pause-resumed notification rejected " <>
+                "(pause=#{pause.id} errors=#{inspect(changeset.errors)})"
+            )
+
+            err
+        end
+    end
+  end
+
+  defp build_pause_paused_attrs(%Pause{} = pause) do
+    scope_label = scope_label_for(pause)
+
+    %{
+      workspace_id: pause.workspace_id,
+      role_target: :operator,
+      event_type: "security.scope_paused",
+      severity: :warning,
+      subject_type: "pause",
+      subject_id: pause.id,
+      correlation_id: pause.id,
+      title: "Scope paused: #{scope_label}",
+      body: "Operator-initiated pause; new dispatches in this scope will be refused.",
+      action_link: "/security",
+      # Each persisted pause row is a single transition. A re-pause
+      # of an already-paused scope short-circuits in
+      # `Bank.Security.Pauses.create_pause/4` and never reaches the
+      # emitter.
+      dedupe_key: "pause:scope_paused:#{pause.id}"
+    }
+  end
+
+  defp build_pause_resumed_attrs(%Pause{} = pause) do
+    scope_label = scope_label_for(pause)
+
+    %{
+      workspace_id: pause.workspace_id,
+      role_target: :operator,
+      event_type: "security.scope_resumed",
+      severity: :info,
+      subject_type: "pause",
+      subject_id: pause.id,
+      correlation_id: pause.id,
+      title: "Scope resumed: #{scope_label}",
+      body: "Pause cleared; new dispatches in this scope are allowed again.",
+      action_link: "/security",
+      dedupe_key: "pause:scope_resumed:#{pause.id}"
+    }
+  end
+
+  # `scope_label_for/1` is intentionally narrow: only the
+  # controlled enum (`scope_type`) and the workspace-public
+  # `scope_value` (kebab-case chain id today, validated by the
+  # OpsDashboardLive `safe_scope_value/1` family) reach the
+  # notification title. Operator-typed `reason` is NOT threaded.
+  defp scope_label_for(%Pause{scope_type: type, scope_value: value})
+       when is_atom(type) and is_binary(value) do
+    "#{type}:#{value}"
+  end
+
+  defp scope_label_for(_), do: "scope"
 
   defp severity_for(:approval_required), do: :warning
   defp severity_for(:hold), do: :warning

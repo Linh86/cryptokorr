@@ -184,6 +184,10 @@ defmodule Bank.Security.Pauses do
     case txn_result do
       {:ok, {:paused, pause, audit_event}} ->
         broadcast_scope_paused(pause, audit_event, actor, actor_id)
+        # Operator inbox notification (#234). Best-effort: any
+        # error here is logged and swallowed by the emitter — a
+        # notification-side failure must NEVER roll back the pause.
+        emit_pause_paused_notification(pause)
         {:ok, :paused, pause}
 
       {:ok, {:already_paused, pause, _nil_audit}} ->
@@ -266,6 +270,8 @@ defmodule Bank.Security.Pauses do
     case txn_result do
       {:ok, {:resumed, resumed, audit_event}} ->
         broadcast_scope_resumed(resumed, audit_event, actor, actor_id)
+        # Operator inbox notification (#234). Best-effort.
+        emit_pause_resumed_notification(resumed)
         {:ok, :resumed, resumed}
 
       {:ok, {:already_running, _nil_pause, _nil_audit}} ->
@@ -550,5 +556,41 @@ defmodule Bank.Security.Pauses do
          workspace_id: ws_id
        }) do
     %{kind: scope_type, value: scope_value, workspace_id: ws_id}
+  end
+
+  # Operator inbox notifications (#234). Wrapped in a try/rescue
+  # so a notification-side failure (DB blip, schema-level
+  # `:unsafe_text` rejection, etc.) cannot roll back the safe
+  # pause/resume transition that already committed.
+  defp emit_pause_paused_notification(%Pause{} = pause) do
+    try do
+      Bank.Notifications.Emitter.emit_pause_scope_paused(pause)
+    rescue
+      err ->
+        require Logger
+
+        Logger.warning(
+          "Bank.Security.Pauses: pause-paused notification raised #{inspect(err.__struct__)}; " <>
+            "pause stands (id=#{pause.id})"
+        )
+
+        :ok
+    end
+  end
+
+  defp emit_pause_resumed_notification(%Pause{} = pause) do
+    try do
+      Bank.Notifications.Emitter.emit_pause_scope_resumed(pause)
+    rescue
+      err ->
+        require Logger
+
+        Logger.warning(
+          "Bank.Security.Pauses: pause-resumed notification raised #{inspect(err.__struct__)}; " <>
+            "resume stands (id=#{pause.id})"
+        )
+
+        :ok
+    end
   end
 end
