@@ -359,6 +359,11 @@ defmodule BankWeb.Router do
       live "/counterparties", CounterpartiesLive
       live "/counterparties/:id", CounterpartyDetailLive
       live "/policies", PoliciesLive
+      # #224 — admin policy builder UI on top of the
+      # `Bank.Policies.Versions` draft/publish foundation. Mounted
+      # operator+ for read; every mutating event re-checks `:admin`
+      # via `BankWeb.LiveAuth.authorize_action/2`.
+      live "/policies/builder", PolicyBuilderLive
       live "/security", SecurityLive
       live "/ops", OpsDashboardLive
       live "/activity/import", ActivityImportLive
