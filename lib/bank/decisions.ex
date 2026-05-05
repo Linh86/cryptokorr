@@ -65,9 +65,17 @@ defmodule Bank.Decisions do
   alias Bank.Audit
   alias Bank.Audit.Events
   alias Bank.Autonomy
-  alias Bank.Decisions.{DecisionEnvelope, ExecutionPlan, SimulationReport, TrustAssessment}
+
+  alias Bank.Decisions.{
+    DecisionEnvelope,
+    ExecutionPlan,
+    SimulationReport,
+    SwapRouteArtifacts,
+    TrustAssessment
+  }
+
   alias Bank.Delegations
-  alias Bank.Intents.AgentIntent
+  alias Bank.Intents.{AgentIntent, SwapRoute}
   alias Bank.Policies
   alias Bank.Quotes
   alias Bank.Repo
@@ -1183,6 +1191,26 @@ defmodule Bank.Decisions do
   On success, creates an execution plan in `:prepared` state and
   enqueues it for execution via `Bank.Runtime.enqueue_execution/1`.
 
+  ## Swap kind (#190)
+
+  When the parent intent's `kind` is `:swap`, callers must pass
+  `swap_route: route_map` in `opts`. The route is validated through
+  `Bank.Intents.SwapRoute.validate/2`; structural / cap / freshness
+  failures surface as the validator's atom vocabulary
+  (`:swap_chain_not_supported`, `:swap_asset_not_supported`,
+  `:swap_route_field_missing`, `:swap_amount_invalid`,
+  `:swap_slippage_exceeded`, `:swap_deadline_expired`,
+  `:swap_chain_id_mismatch`). A `:swap` envelope without a route
+  returns `{:error, :swap_route_missing}`.
+
+  On success the plan's `chain` / `asset` come from the route
+  (`route.chain` and `route.destination_asset`) and the normalised
+  route artifacts — including a deterministic `route_hash`,
+  `route_provider`, addresses, amounts, and freshness — are
+  persisted on the plan's `:steps` JSON map for dispatch and replay.
+  Tests can override the validator's caps and now-instant via
+  `swap_route_caps: caps` and `swap_route_now: dt`.
+
   Returns `{:ok, plan}` or `{:error, reason}`.
   """
   @spec request_manual_execution(String.t(), String.t(), keyword()) ::
@@ -1215,6 +1243,11 @@ defmodule Bank.Decisions do
   The manual path (`request_manual_execution/3`) intentionally does
   not enforce this gate so an operator can run a one-shot override
   after explicitly aborting a stuck plan.
+
+  Swap-kind intents are supported here on the same terms as on the
+  manual path: pass `swap_route: route_map` (and optionally
+  `swap_route_caps` / `swap_route_now` for tests). See
+  `request_manual_execution/3` for the route validation vocabulary.
 
   Returns `{:ok, plan}` on success, or the same `{:error, reason}`
   vocabulary the manual path returns.
@@ -1274,15 +1307,18 @@ defmodule Bank.Decisions do
 
   defp create_execution_plan(envelope, smart_account_id, source, opts)
        when source in [:manual, :auto] do
-    # Resolve the workspace_id up front so the chain-pause gate
-    # (#228 Phase 1) can consult `Bank.Security.paused?/2` with a
-    # workspace key. Legacy unscoped intents (#158 tail) leave
-    # `workspace_id` as `nil`; the chain-pause check tolerates that
-    # and falls through to the global-pause result.
-    workspace_id = lookup_intent_workspace_id(envelope.intent_id)
-    chain = "base"
+    # Resolve the workspace_id and intent kind up front so the
+    # chain/asset selection and the chain-pause gate (#228 Phase 1)
+    # can consult workspace and intent-shape context together.
+    # Legacy unscoped intents (#158 tail) leave `workspace_id` as
+    # `nil`; the chain-pause check tolerates that and falls through
+    # to the global-pause result.
+    %{workspace_id: workspace_id, kind: intent_kind} =
+      lookup_intent_workspace_and_kind(envelope.intent_id)
 
-    with :ok <- validate_executable_envelope(envelope),
+    with {:ok, swap_artifacts} <- maybe_build_swap_artifacts(intent_kind, opts),
+         {chain, asset} <- resolve_chain_and_asset(swap_artifacts),
+         :ok <- validate_executable_envelope(envelope),
          :ok <- validate_no_active_plan(envelope.id),
          :ok <- validate_stablecoin_adapter_ready(envelope),
          :ok <- validate_not_paused(workspace_id, chain),
@@ -1290,23 +1326,26 @@ defmodule Bank.Decisions do
          :ok <- validate_delegation_active(smart_account_id) do
       reason = Keyword.get(opts, :reason, default_reason_for(source))
 
-      plan_attrs = %{
-        decision_id: envelope.id,
-        intent_id: envelope.intent_id,
-        chain: chain,
-        asset: "USDC",
-        smart_account_id: smart_account_id,
-        execution_status: :prepared,
-        signing_requirements: build_signing_requirements(smart_account_id),
-        workspace_id: workspace_id
-      }
+      plan_attrs =
+        %{
+          decision_id: envelope.id,
+          intent_id: envelope.intent_id,
+          chain: chain,
+          asset: asset,
+          smart_account_id: smart_account_id,
+          execution_status: :prepared,
+          signing_requirements: build_signing_requirements(smart_account_id),
+          workspace_id: workspace_id
+        }
+        |> maybe_put_swap_steps(swap_artifacts)
 
       {:ok, plan} =
         %ExecutionPlan{}
         |> ExecutionPlan.changeset(plan_attrs)
         |> Repo.insert()
 
-      _ = Runtime.emit_audit(audit_attrs_for_source(plan, source, opts))
+      audit_opts = put_route_metadata(opts, swap_artifacts)
+      _ = Runtime.emit_audit(audit_attrs_for_source(plan, source, audit_opts))
 
       Runtime.broadcast_intent_lifecycle(envelope.intent_id, :execution_requested, %{
         decision_id: envelope.id,
@@ -1321,9 +1360,58 @@ defmodule Bank.Decisions do
     end
   end
 
-  defp lookup_intent_workspace_id(intent_id) when is_binary(intent_id) do
-    Repo.one(from(i in AgentIntent, where: i.id == ^intent_id, select: i.workspace_id))
+  defp lookup_intent_workspace_and_kind(intent_id) when is_binary(intent_id) do
+    Repo.one(
+      from(i in AgentIntent,
+        where: i.id == ^intent_id,
+        select: %{workspace_id: i.workspace_id, kind: i.kind}
+      )
+    ) || %{workspace_id: nil, kind: nil}
   end
+
+  # Build artifacts for swap kind from the operator-supplied route.
+  # Validation is delegated to `Bank.Intents.SwapRoute.validate/2`
+  # (#189) so the failure-atom vocabulary stays single-sourced and
+  # `:caps` / `:now` test injection works without persistence.
+  defp maybe_build_swap_artifacts(:swap, opts) do
+    case Keyword.get(opts, :swap_route) do
+      nil ->
+        {:error, :swap_route_missing}
+
+      route when is_map(route) ->
+        validate_opts = swap_route_validate_opts(opts)
+
+        case SwapRoute.validate(route, validate_opts) do
+          :ok -> {:ok, SwapRouteArtifacts.from_route(route)}
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  defp maybe_build_swap_artifacts(_kind, _opts), do: {:ok, nil}
+
+  defp swap_route_validate_opts(opts) do
+    Enum.flat_map(opts, fn
+      {:swap_route_caps, caps} -> [caps: caps]
+      {:swap_route_now, now} -> [now: now]
+      _ -> []
+    end)
+  end
+
+  # `:swap` intents carry chain/asset on the route. All other kinds
+  # remain on the v0.1 single-tenant default of base/USDC; that
+  # default is intentionally preserved here so the transfer path is
+  # unchanged.
+  defp resolve_chain_and_asset(%{chain: chain, asset: asset}), do: {chain, asset}
+  defp resolve_chain_and_asset(nil), do: {"base", "USDC"}
+
+  defp maybe_put_swap_steps(attrs, nil), do: attrs
+  defp maybe_put_swap_steps(attrs, %{steps: steps}), do: Map.put(attrs, :steps, steps)
+
+  defp put_route_metadata(opts, nil), do: opts
+
+  defp put_route_metadata(opts, %{audit_metadata: meta}),
+    do: Keyword.put(opts, :route_metadata, meta)
 
   defp default_reason_for(:manual), do: "manual_confirm"
   defp default_reason_for(:auto), do: "auto_exec_dispatch"
@@ -1331,14 +1419,16 @@ defmodule Bank.Decisions do
   defp audit_attrs_for_source(plan, :manual, opts) do
     Bank.Audit.Events.execution_manually_requested(plan,
       actor: Keyword.get(opts, :actor, :user),
-      actor_id: Keyword.get(opts, :actor_id)
+      actor_id: Keyword.get(opts, :actor_id),
+      route_metadata: Keyword.get(opts, :route_metadata)
     )
   end
 
   defp audit_attrs_for_source(plan, :auto, opts) do
     Bank.Audit.Events.execution_auto_dispatched(plan,
       actor: Keyword.get(opts, :actor, :runtime),
-      actor_id: Keyword.get(opts, :actor_id)
+      actor_id: Keyword.get(opts, :actor_id),
+      route_metadata: Keyword.get(opts, :route_metadata)
     )
   end
 

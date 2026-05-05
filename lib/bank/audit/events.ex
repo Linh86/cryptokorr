@@ -634,6 +634,11 @@ defmodule Bank.Audit.Events do
   @doc """
   `execution.manually_requested` — an operator triggered manual
   execution for a decision envelope.
+
+  When the plan is a swap dispatch, callers pass
+  `route_metadata: %{route_hash: ..., route_provider: ...}` and the
+  pair is merged into `after_ref` so replay can verify which route
+  the plan was built from without rehydrating the full route.
   """
   @spec execution_manually_requested(ExecutionPlan.t(), keyword()) :: attrs()
   def execution_manually_requested(%ExecutionPlan{} = plan, opts \\ []) do
@@ -644,12 +649,7 @@ defmodule Bank.Audit.Events do
       subject_type: "execution_plan",
       subject_id: plan.id,
       correlation_id: plan.intent_id,
-      after_ref: %{
-        id: plan.id,
-        decision_id: plan.decision_id,
-        execution_status: atom_or_nil(plan.execution_status),
-        smart_account_id: plan.smart_account_id
-      },
+      after_ref: execution_dispatch_after_ref(plan, opts),
       workspace_id: plan.workspace_id
     }
   end
@@ -661,7 +661,8 @@ defmodule Bank.Audit.Events do
 
   Distinct from `execution.manually_requested` so audit consumers
   can distinguish operator-triggered execution from runtime-driven
-  auto-exec dispatch.
+  auto-exec dispatch. Swap-dispatch metadata is surfaced the same
+  way (`route_metadata` opt → merged into `after_ref`).
   """
   @spec execution_auto_dispatched(ExecutionPlan.t(), keyword()) :: attrs()
   def execution_auto_dispatched(%ExecutionPlan{} = plan, opts \\ []) do
@@ -672,14 +673,26 @@ defmodule Bank.Audit.Events do
       subject_type: "execution_plan",
       subject_id: plan.id,
       correlation_id: plan.intent_id,
-      after_ref: %{
-        id: plan.id,
-        decision_id: plan.decision_id,
-        execution_status: atom_or_nil(plan.execution_status),
-        smart_account_id: plan.smart_account_id
-      },
+      after_ref: execution_dispatch_after_ref(plan, opts),
       workspace_id: plan.workspace_id
     }
+  end
+
+  defp execution_dispatch_after_ref(%ExecutionPlan{} = plan, opts) do
+    base = %{
+      id: plan.id,
+      decision_id: plan.decision_id,
+      execution_status: atom_or_nil(plan.execution_status),
+      smart_account_id: plan.smart_account_id
+    }
+
+    case Keyword.get(opts, :route_metadata) do
+      %{route_hash: hash, route_provider: provider} ->
+        Map.merge(base, %{route_hash: hash, route_provider: provider})
+
+      _ ->
+        base
+    end
   end
 
   @doc """
