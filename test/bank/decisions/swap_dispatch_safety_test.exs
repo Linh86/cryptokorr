@@ -21,6 +21,7 @@ defmodule Bank.Decisions.SwapDispatchSafetyTest do
 
   setup do
     PauseState.reset()
+    on_exit(fn -> PauseState.reset() end)
     :ok
   end
 
