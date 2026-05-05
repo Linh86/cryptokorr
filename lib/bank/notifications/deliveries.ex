@@ -275,44 +275,111 @@ defmodule Bank.Notifications.Deliveries do
   end
 
   @doc """
-  Run one delivery attempt. Looks up the channel module via
-  `Bank.Notifications.Channel.module_for/1`, renders the
-  redacted payload, calls `deliver/3`, and records the
-  outcome (delivered / failed / permanently_failed).
+  Run one delivery attempt under a row-level lock so a stale
+  `%Delivery{}` struct cannot regress a terminal row.
 
-  Returns the updated `%Delivery{}`.
+  Behaviour (#236 P2 terminal-guard contract):
+
+    * The function reloads the row inside a transaction with
+      `FOR UPDATE`. The reloaded row drives every state
+      decision; the caller-supplied stale struct is used only
+      to identify the row by id.
+    * Terminal rows (`:delivered`, `:permanently_failed`) are
+      a no-op: the function returns `{:ok, current_row}`
+      WITHOUT calling the channel module. A second concurrent
+      caller racing on the same row therefore cannot
+      regress a terminal state.
+    * For non-terminal rows (`:queued`, `:failed`,
+      `:delivering`) the function calls
+      `Bank.Notifications.Channel.deliver/3` and applies the
+      transition using the LOCKED row as the changeset base.
+
+  Returns:
+
+    * `{:ok, %Delivery{}}` — current row after the attempt,
+      OR the unchanged terminal row when no-op.
+    * `{:error, :not_found}` — the row id no longer exists.
+    * `{:error, %Ecto.Changeset{}}` — `Repo.update/1`
+      validation failure.
+    * `{:error, {:invalid_channel_result, term}}` — the
+      channel module returned a value outside the
+      `Bank.Notifications.Channel.result/0` enum.
   """
   @spec attempt_delivery(Delivery.t(), DateTime.t()) ::
-          {:ok, Delivery.t()} | {:error, Ecto.Changeset.t() | term()}
-  def attempt_delivery(%Delivery{} = d, %DateTime{} = now) do
-    notification = Repo.get!(Notification, d.notification_id)
+          {:ok, Delivery.t()}
+          | {:error, :not_found}
+          | {:error, Ecto.Changeset.t()}
+          | {:error, {:invalid_channel_result, term()}}
+  def attempt_delivery(%Delivery{id: id}, %DateTime{} = now) when is_binary(id) do
+    Repo.transaction(fn ->
+      case Repo.one(
+             from(d in Delivery,
+               where: d.id == ^id,
+               lock: "FOR UPDATE"
+             )
+           ) do
+        nil ->
+          Repo.rollback(:not_found)
+
+        %Delivery{status: status} = current when status in [:delivered, :permanently_failed] ->
+          # Terminal-state guard. A stale caller cannot regress
+          # this row; we also do NOT call the channel module
+          # for a terminal row — that would burn provider
+          # quota for a no-op.
+          current
+
+        %Delivery{} = current ->
+          do_attempt_locked(current, now)
+      end
+    end)
+    |> case do
+      {:ok, %Delivery{} = d} -> {:ok, d}
+      {:ok, {:error, _} = err} -> err
+      {:error, :not_found} -> {:error, :not_found}
+      {:error, other} -> {:error, other}
+    end
+  end
+
+  defp do_attempt_locked(%Delivery{} = current, %DateTime{} = now) do
+    notification = Repo.get!(Notification, current.notification_id)
     payload = Channel.payload_for(notification)
-    channel_mod = Channel.module_for(d)
+    channel_mod = Channel.module_for(current)
 
     case channel_mod.deliver(notification, payload, []) do
       {:ok, _info} ->
-        d
-        |> Delivery.mark_delivered_changeset(now)
-        |> Repo.update()
+        case current
+             |> Delivery.mark_delivered_changeset(now)
+             |> Repo.update() do
+          {:ok, updated} -> updated
+          {:error, _} = err -> Repo.rollback(err)
+        end
 
       {:error, code} when is_atom(code) ->
-        d
-        |> Delivery.mark_failed_changeset(code, now)
-        |> Repo.update()
+        case current
+             |> Delivery.mark_failed_changeset(code, now)
+             |> Repo.update() do
+          {:ok, updated} -> updated
+          {:error, _} = err -> Repo.rollback(err)
+        end
 
       {:permanent_error, code} when is_atom(code) ->
         # Permanent error — skip retry math and go straight
-        # to the terminal state.
-        d
-        |> Delivery.mark_failed_changeset(code, now)
-        # If the channel says permanent, force the status to
-        # :permanently_failed regardless of attempt count.
-        |> Ecto.Changeset.put_change(:status, :permanently_failed)
-        |> Ecto.Changeset.put_change(:next_attempt_at, nil)
-        |> Repo.update()
+        # to the terminal state. Override status / next_attempt_at
+        # regardless of attempt count.
+        result =
+          current
+          |> Delivery.mark_failed_changeset(code, now)
+          |> Ecto.Changeset.put_change(:status, :permanently_failed)
+          |> Ecto.Changeset.put_change(:next_attempt_at, nil)
+          |> Repo.update()
+
+        case result do
+          {:ok, updated} -> updated
+          {:error, _} = err -> Repo.rollback(err)
+        end
 
       other ->
-        {:error, {:invalid_channel_result, other}}
+        Repo.rollback({:error, {:invalid_channel_result, other}})
     end
   end
 
