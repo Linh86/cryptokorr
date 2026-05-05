@@ -109,6 +109,12 @@ defmodule BankWeb.Layouts do
             active={@active_page == :ops}
           />
           <.nav_item
+            href="/inbox"
+            icon="hero-inbox"
+            label="Inbox"
+            active={@active_page == :inbox}
+          />
+          <.nav_item
             :if={@admin_visible?}
             href="/admin/api_keys"
             icon="hero-key"
