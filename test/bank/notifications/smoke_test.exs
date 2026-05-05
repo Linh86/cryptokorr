@@ -100,8 +100,12 @@ defmodule Bank.Notifications.SmokeTest do
   # the emitter vocabulary on `main`. Pause/resume notifications
   # were shipped in #415 (`security.scope_paused` /
   # `security.scope_resumed`) but the runbook from #417 still
-  # listed them as #234 follow-ups. This test fails fast when
-  # the runbook drifts away from the emitter again.
+  # listed them as #234 follow-ups. The opt-in
+  # `execution.confirmed` surface shipped in #418
+  # (`Bank.Workspaces.Workspace.notify_execution_confirmed?/1`),
+  # but the runbook still described it as silent and as a #234
+  # follow-up. These tests fail fast when the runbook drifts
+  # away from the emitter again.
   describe "runbook docs/runbooks/notifications.md" do
     @runbook_path "docs/runbooks/notifications.md"
 
@@ -114,6 +118,7 @@ defmodule Bank.Notifications.SmokeTest do
             "decision.block",
             "execution.reverted",
             "execution.aborted",
+            "execution.confirmed",
             "access.approved",
             "security.scope_paused",
             "security.scope_resumed"
@@ -129,6 +134,29 @@ defmodule Bank.Notifications.SmokeTest do
       refute runbook =~ "incident pause/resume",
              "runbook still claims incident pause/resume are #234 follow-ups; " <>
                "pause/resume notifications shipped in #415"
+    end
+
+    test "does not describe execution.confirmed as silent or as a #234 follow-up" do
+      runbook = File.read!(@runbook_path)
+
+      refute runbook =~ "`execution.confirmed` is silent",
+             "runbook still claims `execution.confirmed` is silent; " <>
+               "the opt-in surface shipped in #418 (workspace " <>
+               "`notify_execution_confirmed` flag)"
+
+      refute runbook =~ "opt-in `execution.confirmed`",
+             "runbook still describes opt-in `execution.confirmed` as a " <>
+               "#234 follow-up; it is implemented on main behind the " <>
+               "workspace `notify_execution_confirmed` flag"
+    end
+
+    test "documents the notify_execution_confirmed opt-in flag" do
+      runbook = File.read!(@runbook_path)
+
+      assert runbook =~ "`notify_execution_confirmed`",
+             "runbook should mention the workspace " <>
+               "`notify_execution_confirmed` flag so operators know how " <>
+               "to opt in to success-side rows"
     end
   end
 end

@@ -27,11 +27,14 @@ The table below lists every event type the runtime emits **today**. New emitters
 | `decision.block` | `Bank.Decisions.evaluate_intent/3` outcome `:block` | `:critical` | role `:operator` | `/queue#held-actions-section` |
 | `execution.reverted` | `Bank.Decisions.apply_execution_callback/1` `:reverted` terminal | `:critical` | role `:operator` | `/audit/replay/<intent_id>` |
 | `execution.aborted` | `Bank.Decisions.apply_execution_callback/1` `:aborted` terminal | `:warning` | role `:operator` | `/audit/replay/<intent_id>` |
+| `execution.confirmed` | `Bank.Decisions.apply_execution_callback/1` `:confirmed` terminal | `:info` | role `:operator` | `/audit/replay/<intent_id>` |
 | `access.approved` | `Bank.Access.approve_pending_user/3` membership upsert | `:info` | user `user_id` (the newly admitted user) | `/dashboard` |
 | `security.scope_paused` | `Bank.Security.Pauses.create_pause/4` real `:paused` transition | `:warning` | role `:operator` | `/security` |
 | `security.scope_resumed` | `Bank.Security.Pauses.resume/4` real `:resumed` transition | `:info` | role `:operator` | `/security` |
 
-`decision.auto_exec` is intentionally **silent** — operators do not need an inbox row for the happy path. `execution.confirmed` is silent too; an opt-in surface for it is a documented #234 follow-up.
+`decision.auto_exec` is intentionally **silent** — operators do not need an inbox row for the happy path.
+
+`execution.confirmed` is **opt-in per workspace**. The emitter (`Bank.Notifications.Emitter.emit_execution_outcome/1`) only writes a row when the workspace's `notify_execution_confirmed` flag is `true`; the flag defaults to `false`, so a workspace that has not opted in keeps the silent-on-success posture. Admins flip the flag with `Bank.Workspaces.set_notify_execution_confirmed/2`. `:reverted` and `:aborted` are always emitted regardless of the flag.
 
 ## Severity vocabulary
 
@@ -133,7 +136,7 @@ If the demo workspace has not been seeded yet, the runner short-circuits with a 
 ### A notification did not land
 
 1. Confirm the underlying domain transaction committed. The emitter runs **post-commit** — if the transaction rolled back, no inbox row will exist.
-2. Confirm the source path is one of the implemented event types listed above. Other events (e.g. stale quote / provider failures, Morpho severe warnings, opt-in `execution.confirmed`) are explicit #234 follow-ups and do not write inbox rows yet.
+2. Confirm the source path is one of the implemented event types listed above. Other events (e.g. stale quote / provider failures, Morpho severe warnings) are explicit #234 follow-ups and do not write inbox rows yet. For `execution.confirmed` specifically, also confirm the workspace's `notify_execution_confirmed` opt-in is `true`; the default is `false`, so a workspace that has not opted in will not see success-side rows even though the emitter is implemented.
 3. The notification's `dedupe_key` is `"<source_path>:<deterministic_id>:<outcome>"` (e.g. `decision:<intent_id>:approval_required`). A second emit with the same key returns `{:duplicate, existing}` — that is correct dedupe, not a bug. Check `Bank.Notifications.list_for_workspace/2` for a row with the matching `correlation_id`.
 
 ### A delivery row stuck in `:queued`
