@@ -28,6 +28,8 @@ The table below lists every event type the runtime emits **today**. New emitters
 | `execution.reverted` | `Bank.Decisions.apply_execution_callback/1` `:reverted` terminal | `:critical` | role `:operator` | `/audit/replay/<intent_id>` |
 | `execution.aborted` | `Bank.Decisions.apply_execution_callback/1` `:aborted` terminal | `:warning` | role `:operator` | `/audit/replay/<intent_id>` |
 | `access.approved` | `Bank.Access.approve_pending_user/3` membership upsert | `:info` | user `user_id` (the newly admitted user) | `/dashboard` |
+| `security.scope_paused` | `Bank.Security.Pauses.create_pause/4` real `:paused` transition | `:warning` | role `:operator` | `/security` |
+| `security.scope_resumed` | `Bank.Security.Pauses.resume/4` real `:resumed` transition | `:info` | role `:operator` | `/security` |
 
 `decision.auto_exec` is intentionally **silent** — operators do not need an inbox row for the happy path. `execution.confirmed` is silent too; an opt-in surface for it is a documented #234 follow-up.
 
@@ -131,7 +133,7 @@ If the demo workspace has not been seeded yet, the runner short-circuits with a 
 ### A notification did not land
 
 1. Confirm the underlying domain transaction committed. The emitter runs **post-commit** — if the transaction rolled back, no inbox row will exist.
-2. Confirm the source path is one of the implemented event types listed above. Other events (e.g. quote provider failures, incident pause/resume) are explicit #234 follow-ups and do not write inbox rows yet.
+2. Confirm the source path is one of the implemented event types listed above. Other events (e.g. stale quote / provider failures, Morpho severe warnings, opt-in `execution.confirmed`) are explicit #234 follow-ups and do not write inbox rows yet.
 3. The notification's `dedupe_key` is `"<source_path>:<deterministic_id>:<outcome>"` (e.g. `decision:<intent_id>:approval_required`). A second emit with the same key returns `{:duplicate, existing}` — that is correct dedupe, not a bug. Check `Bank.Notifications.list_for_workspace/2` for a row with the matching `correlation_id`.
 
 ### A delivery row stuck in `:queued`

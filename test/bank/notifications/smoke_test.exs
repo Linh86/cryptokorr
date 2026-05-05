@@ -94,4 +94,41 @@ defmodule Bank.Notifications.SmokeTest do
       assert seed_check.detail =~ "mix bank.demo.seed"
     end
   end
+
+  # Pinned by #237 P2: the runbook's "Implemented event types"
+  # table and troubleshooting copy must stay in lock-step with
+  # the emitter vocabulary on `main`. Pause/resume notifications
+  # were shipped in #415 (`security.scope_paused` /
+  # `security.scope_resumed`) but the runbook from #417 still
+  # listed them as #234 follow-ups. This test fails fast when
+  # the runbook drifts away from the emitter again.
+  describe "runbook docs/runbooks/notifications.md" do
+    @runbook_path "docs/runbooks/notifications.md"
+
+    test "documents every emitter event type implemented on main" do
+      runbook = File.read!(@runbook_path)
+
+      for event_type <- [
+            "decision.approval_required",
+            "decision.hold",
+            "decision.block",
+            "execution.reverted",
+            "execution.aborted",
+            "access.approved",
+            "security.scope_paused",
+            "security.scope_resumed"
+          ] do
+        assert runbook =~ "`#{event_type}`",
+               "runbook is missing implemented event type `#{event_type}`"
+      end
+    end
+
+    test "does not describe pause/resume as an unimplemented #234 follow-up" do
+      runbook = File.read!(@runbook_path)
+
+      refute runbook =~ "incident pause/resume",
+             "runbook still claims incident pause/resume are #234 follow-ups; " <>
+               "pause/resume notifications shipped in #415"
+    end
+  end
 end
