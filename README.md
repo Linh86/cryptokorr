@@ -413,6 +413,19 @@ Then:
 Run the test suite with `mix test`. Tests use `Ecto.Adapters.SQL.Sandbox`; the
 test database auto-creates/migrates on first run.
 
+### Auth and access (private alpha)
+
+The control plane is **invite-only private alpha** — there is no public
+signup. Every browser route past the login screen and every `/v1/`
+request goes through the auth/workspace gate (Google OAuth → pending
+user → admin approval → workspace membership → role-gated routes). The
+end-to-end walkthrough — env vars, the Stub OAuth provider for local
+dev, bootstrap-admin allowlist (`BANK_ADMIN_EMAILS`), pending-user
+flow, approve / reject, workspace switcher, chain gating — is in
+[`docs/runbooks/auth-and-access.md`](docs/runbooks/auth-and-access.md).
+A fresh DB cannot reach `/dashboard` or `/v1/intents` until a
+bootstrap admin approves the first user into a workspace.
+
 ## Schema strategy
 
 The domain schema (issue #4) is deliberately explicit about a few
