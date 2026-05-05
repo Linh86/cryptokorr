@@ -103,6 +103,38 @@ defmodule Bank.Workspaces do
   end
 
   @doc """
+  Flip the `notify_execution_confirmed` opt-in flag (#234).
+
+  When `true`, `Bank.Notifications.Emitter.emit_execution_outcome/1`
+  surfaces an `:info` notification on every successful
+  `Bank.Decisions.apply_execution_callback/1` transition to
+  `:confirmed`. Default is `false` (the workspace stays
+  silent-on-success), matching today's posture for workspaces
+  that have not opted in.
+
+  Mirrors `set_mainnet_enabled/2`'s shape: this is an admin-only
+  setting flip, kept apart from the user-editable
+  `changeset/2`'s slug/name path. Accepts a `%Workspace{}` struct
+  or a workspace id.
+  """
+  @spec set_notify_execution_confirmed(Workspace.t() | uuid(), boolean()) ::
+          {:ok, Workspace.t()} | {:error, Ecto.Changeset.t() | :not_found}
+  def set_notify_execution_confirmed(%Workspace{} = workspace, enabled)
+      when is_boolean(enabled) do
+    workspace
+    |> Workspace.notification_changeset(%{notify_execution_confirmed: enabled})
+    |> Repo.update()
+  end
+
+  def set_notify_execution_confirmed(workspace_id, enabled)
+      when is_binary(workspace_id) and is_boolean(enabled) do
+    case get_workspace(workspace_id) do
+      %Workspace{} = workspace -> set_notify_execution_confirmed(workspace, enabled)
+      nil -> {:error, :not_found}
+    end
+  end
+
+  @doc """
   True iff `workspace_id` has Base mainnet eligibility explicitly
   enabled (#178).
 
