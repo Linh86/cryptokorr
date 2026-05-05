@@ -19,6 +19,11 @@ defmodule Bank.Quotes.StubProvider do
   alias Bank.Intents.AgentIntent
   alias Bank.Quotes.Preview
 
+  @provider_id "stub"
+
+  @impl Bank.Quotes.Provider
+  def provider_id, do: @provider_id
+
   @impl Bank.Quotes.Provider
   def preview(%AgentIntent{} = intent, opts \\ []) do
     case outcome(opts) do
@@ -64,7 +69,7 @@ defmodule Bank.Quotes.StubProvider do
       failure_reason: nil,
       risk_flags: [],
       source: :stub,
-      provider: "stub",
+      provider: @provider_id,
       provider_trace_ref: "stub-" <> Integer.to_string(System.unique_integer([:positive])),
       generated_at: DateTime.utc_now(),
       freshness_ttl_seconds: Keyword.get(opts, :freshness_ttl_seconds, 30)

@@ -145,6 +145,9 @@ defmodule Bank.Quotes.LiveProvider do
   @secret_redaction_marker "[REDACTED]"
 
   @impl Bank.Quotes.Provider
+  def provider_id, do: @provider_id
+
+  @impl Bank.Quotes.Provider
   def preview(%AgentIntent{} = intent, opts \\ []) do
     case Application.get_env(:bank, __MODULE__, []) do
       [] ->

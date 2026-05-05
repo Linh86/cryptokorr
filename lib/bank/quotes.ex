@@ -142,6 +142,38 @@ defmodule Bank.Quotes do
   def resolve_provider(:disabled), do: {:disabled, :disabled}
   def resolve_provider(module) when is_atom(module), do: {:ok, module}
 
+  @doc """
+  Stable, human-readable identifier for the provider that *would* be
+  attempted given the same opts as `preview/2`.
+
+  Returns the provider's `provider_id/0` (matches the `Preview.provider`
+  string for successful previews — `"stub"`, `"tenderly"`, …); falls
+  back to a downcased module-suffix for providers that don't implement
+  the optional callback; returns `"disabled"` when the deployment has
+  set `provider: :disabled`.
+
+  Used by `Bank.Decisions.simulation_attrs_from_preview/3` and
+  `Bank.Intents.simulate/3` to record the *attempted* provider on a
+  failed `SimulationReport` row, so an operator inspecting a failed
+  row can tell whether the live or stub path was attempted (#175).
+  """
+  @spec attempted_provider_id(keyword()) :: String.t()
+  def attempted_provider_id(opts \\ []) do
+    setting = Keyword.get(opts, :provider, configured_provider())
+
+    case resolve_provider(setting) do
+      {:ok, module} ->
+        if function_exported?(module, :provider_id, 0) do
+          module.provider_id()
+        else
+          module |> Module.split() |> List.last() |> String.downcase()
+        end
+
+      {:disabled, _tag} ->
+        "disabled"
+    end
+  end
+
   defp emit_preview_telemetry(provider, result) do
     provider_tag =
       cond do

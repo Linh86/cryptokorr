@@ -165,6 +165,56 @@ defmodule Bank.Decisions.EvaluateIntentTest do
       assert reloaded.state == :blocked
     end
 
+    test "failed preview records the attempted-stub provider on the SimulationReport (#175)" do
+      intent = small_trusted_intent()
+
+      assert {:ok, result} =
+               Decisions.evaluate_intent(intent,
+                 preview: {:error, :provider_unavailable},
+                 provider: :stub
+               )
+
+      assert result.simulation.status == :failed
+      assert result.simulation.provider == "stub"
+    end
+
+    test "failed live preview records 'tenderly' on the SimulationReport (#175)" do
+      # Pre-#175, a live-provider failure persisted `provider: \"stub\"`
+      # because the failure path used the system fallback regardless of
+      # which provider was attempted. Post-#175, the attempted provider
+      # is recorded so an operator inspecting the failed row can tell
+      # the live path was tried.
+      intent = small_trusted_intent()
+
+      assert {:ok, result} =
+               Decisions.evaluate_intent(intent,
+                 preview: {:error, :provider_unavailable},
+                 provider: :live
+               )
+
+      assert result.simulation.status == :failed
+      assert result.simulation.provider == "tenderly"
+
+      assert result.simulation.failure_conditions == %{
+               "items" => [
+                 %{"kind" => "preview_failed", "message" => "preview provider unavailable"}
+               ]
+             }
+    end
+
+    test "failed disabled-provider preview records 'disabled' on the SimulationReport (#175)" do
+      intent = small_trusted_intent()
+
+      assert {:ok, result} =
+               Decisions.evaluate_intent(intent,
+                 preview: {:error, :provider_disabled},
+                 provider: :disabled
+               )
+
+      assert result.simulation.status == :failed
+      assert result.simulation.provider == "disabled"
+    end
+
     test "paused runtime holds the intent and never auto-execs" do
       intent = small_trusted_intent()
 
