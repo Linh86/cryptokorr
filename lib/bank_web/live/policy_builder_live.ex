@@ -599,8 +599,15 @@ defmodule BankWeb.PolicyBuilderLive do
     |> assign(:rule_form, blank_rule_form())
   end
 
-  # Workspace-scoped fetch — defends in depth on top of the #226 P2
-  # fix that scopes snapshot resolution to workspace_id.
+  # Workspace-scoped fetch for the DRAFT view (#224 P2).
+  #
+  # The draft view shows BOTH `:active` rules (those cloned from the
+  # current published version when the draft was opened) and `:draft`
+  # rules (those added or revised inside this draft). `:active`
+  # cloned rules stay live for the published policy until the admin
+  # publishes the draft; `:draft` rules will be activated atomically
+  # by `Versions.publish_draft/2`. The workspace_id filter is the
+  # cross-workspace defence-in-depth from the #226 P2 fix.
   defp resolve_rules_in_workspace([], _ws_id), do: []
 
   defp resolve_rules_in_workspace(ids, ws_id) when is_list(ids) do
@@ -609,7 +616,7 @@ defmodule BankWeb.PolicyBuilderLive do
     Bank.Policies.PolicyRule
     |> where(
       [r],
-      r.id in ^ids and r.state == ^:active and r.workspace_id == ^ws_id
+      r.id in ^ids and r.state in ^[:active, :draft] and r.workspace_id == ^ws_id
     )
     |> Bank.Repo.all()
   end
@@ -717,6 +724,21 @@ defmodule BankWeb.PolicyBuilderLive do
     end
   end
 
+  # #224 P2-1: editing a rule inside a draft must NOT supersede the
+  # currently published rule. The previous implementation called
+  # `Policies.revise_rule/3`, which marked `prior` as `:superseded`
+  # — but `prior` is still referenced by the currently published
+  # `PolicyVersion`'s `rule_ids` list, so the published policy
+  # would suddenly resolve fewer/no active rules before the admin
+  # ever clicked Publish.
+  #
+  # Post-fix: create a NEW `:draft` rule with the new params (via
+  # the same `Policies.create_rule/2` path used for fresh draft
+  # rules) and swap the prior id for the new id in the draft's
+  # `rule_ids` list. The prior rule stays `:active` and stays in
+  # the published version's snapshot until publish. At publish,
+  # `Versions.publish_draft/2` activates the new draft rule
+  # atomically.
   defp do_revise_rule(socket, params) do
     ws_id = socket.assigns.current_scope.workspace.id
     rule_id = socket.assigns.editing_rule_id
@@ -727,25 +749,29 @@ defmodule BankWeb.PolicyBuilderLive do
         {:noreply, put_flash(socket, :error, "Rule not found in draft.")}
 
       %PolicyRule{} = prior ->
-        with {:ok, attrs} <- attrs_from_form_params(params, ws_id),
-             {:ok, successor} <- Policies.revise_rule(prior, attrs, actor: :user) do
-          new_ids =
-            draft
-            |> PolicyVersion.rule_ids_list()
-            |> Enum.map(fn id -> if id == prior.id, do: successor.id, else: id end)
+        case create_rule_from_params(params, ws_id) do
+          {:ok, successor} ->
+            new_ids =
+              draft
+              |> PolicyVersion.rule_ids_list()
+              |> Enum.map(fn id -> if id == prior.id, do: successor.id, else: id end)
 
-          case Versions.update_draft_rule_ids(draft, %{"items" => new_ids}) do
-            {:ok, _} ->
-              {:noreply,
-               socket
-               |> put_flash(:info, "Rule updated in draft.")
-               |> load_versions_and_rules()}
+            case Versions.update_draft_rule_ids(draft, %{"items" => new_ids}) do
+              {:ok, _} ->
+                {:noreply,
+                 socket
+                 |> put_flash(:info, "Rule updated in draft.")
+                 |> load_versions_and_rules()}
 
-            {:error, _} ->
-              {:noreply,
-               put_flash(socket, :error, "Successor created but draft pointer not updated.")}
-          end
-        else
+              {:error, _} ->
+                {:noreply,
+                 put_flash(
+                   socket,
+                   :error,
+                   "Successor created but draft pointer not updated."
+                 )}
+            end
+
           {:error, %Ecto.Changeset{} = cs} ->
             {:noreply,
              socket
@@ -759,9 +785,6 @@ defmodule BankWeb.PolicyBuilderLive do
                :rule_form,
                to_form(Map.put(form_cs, :action, :update), as: :rule)
              )}
-
-          {:error, :not_active} ->
-            {:noreply, put_flash(socket, :error, "Underlying rule is not active any more.")}
         end
     end
   end
@@ -781,12 +804,19 @@ defmodule BankWeb.PolicyBuilderLive do
     cs = build_form_changeset(params, types_str, :insert)
 
     if cs.valid? do
+      # #224 P2-2: rules added or revised inside a draft must be
+      # `:draft` state. They are NOT live for runtime decisions
+      # until `Versions.publish_draft/2` atomically activates them
+      # at publish time. Greenfield workspaces with no published
+      # version (where decisions fall back to
+      # `Policies.load_active_ruleset/0`) will therefore not see
+      # draft-only rules until publish.
       attrs = %{
         "rule_type" => params["rule_type"],
         "priority" => params["priority"] || "0",
         "scope" => %{},
         "params" => params_for_type(params),
-        "state" => "active",
+        "state" => "draft",
         "created_by" => "user",
         "workspace_id" => ws_id
       }

@@ -372,6 +372,15 @@ defmodule Bank.Policies.Versions do
             end
           end
 
+          # #224 P2: atomically promote any `:draft` rules in this
+          # version's `rule_ids` list to `:active` BEFORE the
+          # version flips to `:published`. The policy-builder UI
+          # creates draft-added and draft-revised rules with
+          # `state: :draft` (#224 P2-2 fix); this is the explicit
+          # activation step that makes them live for runtime
+          # decisions exactly when the version becomes published.
+          activate_draft_rules!(draft)
+
           case draft |> PolicyVersion.publish_changeset(opts) |> Repo.update() do
             {:ok, published} ->
               {:ok, _audit} =
@@ -394,6 +403,27 @@ defmodule Bank.Policies.Versions do
           Repo.rollback(:not_a_draft)
       end
     end)
+  end
+
+  # Promote every `:draft` `PolicyRule` referenced by the given
+  # version's `rule_ids` list to `:active`. Workspace-scoped per
+  # the #226 P2 contract — never touches a sibling workspace's
+  # rules even if the draft's `rule_ids` somehow cited one.
+  defp activate_draft_rules!(%PolicyVersion{} = draft) do
+    ids = PolicyVersion.rule_ids_list(draft)
+
+    if ids != [] do
+      now = DateTime.utc_now()
+
+      from(r in Bank.Policies.PolicyRule,
+        where:
+          r.id in ^ids and r.state == ^:draft and
+            r.workspace_id == ^draft.workspace_id
+      )
+      |> Repo.update_all(set: [state: :active, updated_at: now])
+    end
+
+    :ok
   end
 
   @doc """
