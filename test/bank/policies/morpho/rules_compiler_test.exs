@@ -310,6 +310,153 @@ defmodule Bank.Policies.Morpho.RulesCompilerTest do
     end
   end
 
+  describe ":allowed_curator (#202 P2)" do
+    test "fold loads addresses into curator_allowlist (lower-cased)" do
+      rules = [
+        rule(:allowed_curator, %{
+          "curators" => [
+            "0xCuRaToR000000000000000000000000000000aaa",
+            "0xCURATOR000000000000000000000000000000BBB"
+          ]
+        })
+      ]
+
+      result = RulesCompiler.compile(rules)
+      assert "0xcurator000000000000000000000000000000aaa" in result.curator_allowlist
+      assert "0xcurator000000000000000000000000000000bbb" in result.curator_allowlist
+    end
+
+    test "two :allowed_curator rules intersect" do
+      rules = [
+        rule(:allowed_curator, %{
+          "curators" => [
+            "0xcurator000000000000000000000000000000aaa",
+            "0xcurator000000000000000000000000000000bbb"
+          ]
+        }),
+        rule(:allowed_curator, %{
+          "curators" => ["0xcurator000000000000000000000000000000bbb"]
+        })
+      ]
+
+      result = RulesCompiler.compile(rules)
+      assert result.curator_allowlist == ["0xcurator000000000000000000000000000000bbb"]
+    end
+
+    test "empty/malformed second :allowed_curator rule fails closed (intersection → empty)" do
+      rules = [
+        rule(:allowed_curator, %{
+          "curators" => ["0xcurator000000000000000000000000000000aaa"]
+        }),
+        # Malformed: missing "curators" key entirely.
+        rule(:allowed_curator, %{})
+      ]
+
+      result = RulesCompiler.compile(rules)
+
+      assert result.curator_allowlist == [],
+             "second malformed rule must collapse the intersection to [] (#202 P2 fail-closed)"
+    end
+
+    test "single :allowed_curator with empty list collapses to empty allowlist" do
+      rules = [rule(:allowed_curator, %{"curators" => []})]
+      result = RulesCompiler.compile(rules)
+      assert result.curator_allowlist == []
+    end
+  end
+
+  describe ":allowed_defi_venue (#202 P2 — documented no-op)" do
+    # The v0.1 risk engine ships Morpho-only; the rule type is
+    # part of the policy vocabulary so a workspace can configure
+    # it for future multi-venue use, but it is intentionally a
+    # no-op for v0.1. The compiler accepts it without producing
+    # `unknown_rule_type`; it does NOT alter the produced
+    # PolicyInput. A future multi-venue extension will replace
+    # this branch with real enforcement.
+    test "rule with venues=[\"morpho\"] is a noop (engine is Morpho-only)" do
+      rules = [rule(:allowed_defi_venue, %{"venues" => ["morpho"]})]
+      result = RulesCompiler.compile(rules)
+      assert result == PolicyInput.default()
+    end
+
+    test "rule with venues that exclude morpho is also a noop in v0.1 (documented limitation)" do
+      rules = [rule(:allowed_defi_venue, %{"venues" => ["uniswap"]})]
+      result = RulesCompiler.compile(rules)
+      assert result == PolicyInput.default()
+    end
+  end
+
+  describe "fail-closed allowlist regression (#202 P2)" do
+    test "two :allowed_vault rules where the second is empty/malformed collapse to []" do
+      rules = [
+        rule(:allowed_vault, %{
+          "vaults" => [
+            %{"chain_id" => 8453, "address" => "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}
+          ]
+        }),
+        # Malformed: "vaults" key is missing entirely. Per #202 P2
+        # this MUST shrink the intersection to [] — not silently
+        # leave the prior valid list in place.
+        rule(:allowed_vault, %{})
+      ]
+
+      result = RulesCompiler.compile(rules)
+
+      assert result.vault_allowlist == [],
+             "second empty :allowed_vault rule must fail-close to [] (#202 P2)"
+    end
+
+    test "two :allowed_vault rules where the second has empty `vaults: []` collapse to []" do
+      rules = [
+        rule(:allowed_vault, %{
+          "vaults" => [
+            %{"chain_id" => 8453, "address" => "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}
+          ]
+        }),
+        rule(:allowed_vault, %{"vaults" => []})
+      ]
+
+      result = RulesCompiler.compile(rules)
+      assert result.vault_allowlist == []
+    end
+
+    test "two :allowed_oracle rules where the second is malformed collapse to []" do
+      rules = [
+        rule(:allowed_oracle, %{
+          "oracles" => ["0xoracle0000000000000000000000000000000aaa"]
+        }),
+        rule(:allowed_oracle, %{})
+      ]
+
+      result = RulesCompiler.compile(rules)
+      assert result.oracle_allowlist == []
+    end
+
+    test "two :allowed_collateral_asset rules where the second is malformed collapse to []" do
+      rules = [
+        rule(:allowed_collateral_asset, %{
+          "assets" => ["0xcollat0000000000000000000000000000000aaa"]
+        }),
+        rule(:allowed_collateral_asset, %{})
+      ]
+
+      result = RulesCompiler.compile(rules)
+      assert result.collateral_allowlist == []
+    end
+
+    test "two :allowed_curator rules where the second has empty `curators: []` collapse to []" do
+      rules = [
+        rule(:allowed_curator, %{
+          "curators" => ["0xcurator000000000000000000000000000000aaa"]
+        }),
+        rule(:allowed_curator, %{"curators" => []})
+      ]
+
+      result = RulesCompiler.compile(rules)
+      assert result.curator_allowlist == []
+    end
+  end
+
   describe "secret hygiene + read-only posture" do
     # No rule-fold path persists, broadcasts, or reads
     # `Application.get_env`. The compiler is a pure function on

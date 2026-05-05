@@ -132,6 +132,7 @@ defmodule Bank.DefiVenues.Morpho.RiskExplanation do
     pending_caps = ensure_list(snap_field(snapshot, :pending_caps))
     state = snap_field(snapshot, :state) || %{}
     listed = snap_field(snapshot, :listed)
+    allocators = ensure_list(snap_field(snapshot, :allocators))
 
     # Each `run_*` returns `{checks, reasons}` — a list of
     # check entries (always added to the output) and a list of
@@ -149,6 +150,7 @@ defmodule Bank.DefiVenues.Morpho.RiskExplanation do
       |> run(:lltv, fn -> lltv_check(allocations, policy) end)
       |> run(:oracle, fn -> oracle_check(allocations, policy) end)
       |> run(:collateral, fn -> collateral_check(allocations, policy) end)
+      |> run(:curator, fn -> curator_check(allocators, policy) end)
       |> run(:pending_caps, fn -> pending_caps_check(pending_caps) end)
       |> run(:exposure, fn -> exposure_check(policy) end)
       |> run(:apy, fn -> apy_check(state, policy) end)
@@ -557,6 +559,73 @@ defmodule Bank.DefiVenues.Morpho.RiskExplanation do
        ]}
     end
   end
+
+  # Curator / allocator allowlist check (#202 P2).
+  #
+  # Snapshot allocators are typed as `%{address: String.t() | nil}`
+  # in `Bank.DefiVenues.Morpho.VaultSnapshot`. The persisted form
+  # is a list of plain maps, so we read the address via the
+  # string key first and fall back to the atom key for the
+  # in-memory snapshot.
+  #
+  # Posture mirrors the oracle and collateral checks:
+  #
+  #   * No allocators on the snapshot → `:pass` (nothing to
+  #     evaluate; informational entry only).
+  #   * Empty allowlist + at least one allocator → `:fail` check
+  #     and an `unknown_curator` reason at `:approval`. The
+  #     workspace has not opted-in to any allocator, which
+  #     under the conservative #202 posture means every
+  #     allocator is unknown.
+  #   * Allowlist configured + every allocator on the list →
+  #     `:pass`.
+  #   * Allowlist configured + at least one unknown allocator →
+  #     `:warn` check and an `unknown_curator` `:approval`
+  #     reason. Block-tier escalation is deferred to a future
+  #     curator-LLTV combined gate (parallel to the existing
+  #     `unknown_oracle_high_lltv` rule); v0.1 holds the
+  #     intent for operator review.
+  defp curator_check([], _policy),
+    do: {[check("curator_allowlist", :pass, "No allocators to evaluate", "morpho_api")], []}
+
+  defp curator_check(_allocators, %PolicyInput{curator_allowlist: []}) do
+    {[check("curator_allowlist", :fail, "No internal curator allowlist configured", "internal")],
+     [
+       reason(
+         "unknown_curator",
+         :approval,
+         "Internal curator allowlist is empty; treating every allocator as unknown."
+       )
+     ]}
+  end
+
+  defp curator_check(allocators, %PolicyInput{} = policy) do
+    allowlist = Enum.map(policy.curator_allowlist, &lower/1)
+
+    unknowns =
+      allocators
+      |> Enum.map(&allocator_address/1)
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+      |> Enum.reject(fn addr -> lower(addr) in allowlist end)
+
+    if unknowns == [] do
+      {[check("curator_allowlist", :pass, "All allocators are allowlisted", "internal")], []}
+    else
+      {[check("curator_allowlist", :warn, "Unknown allocator(s)", "internal")],
+       [
+         reason(
+           "unknown_curator",
+           :approval,
+           "One or more allocators are not on the workspace's curator allowlist."
+         )
+       ]}
+    end
+  end
+
+  defp allocator_address(%{address: addr}) when is_binary(addr), do: addr
+  defp allocator_address(%{"address" => addr}) when is_binary(addr), do: addr
+  defp allocator_address(_), do: nil
 
   defp pending_caps_check([]),
     do: {[check("pending_caps", :pass, "No pending cap changes", "morpho_api")], []}
