@@ -27,10 +27,15 @@ defmodule Bank.Notifications.Emitter do
     * `emit_access_approved/1` — every `Bank.Access.approve_pending_user/3`
       call that creates or reactivates a membership. Surfaces an
       `:info` notification to the newly admitted user, scoped to
-      the workspace they were just admitted to. The pending /
-      requested and rejected access source paths are intentionally
-      silent here because they have no clean workspace boundary in
-      the current model — listed as remaining #234 blockers.
+      the workspace they were just admitted to.
+    * `emit_access_rejected/1` — every `Bank.Access.reject_pending_user/3`
+      call that disables a pending user when an active invite
+      matches that user's email. Surfaces a `:warning` operator
+      notification scoped to the matching invite's workspace
+      (exact-email beats domain; deterministic by `inserted_at`).
+      The `:allowlist_missed` corner case (no live invite) is
+      intentionally silent — the disable still happens, but there
+      is no clean workspace boundary to scope an inbox row to.
     * `emit_pause_scope_paused/1` — every `Bank.Security.Pauses.create_pause/4`
       transition that actually paused a scope (NOT the idempotent
       `:already_paused` short-circuit). Surfaces a `:warning`
@@ -84,6 +89,7 @@ defmodule Bank.Notifications.Emitter do
 
   require Logger
 
+  alias Bank.Accounts.User
   alias Bank.Decisions.DecisionEnvelope
   alias Bank.Decisions.ExecutionPlan
   alias Bank.Intents.AgentIntent
@@ -362,6 +368,117 @@ defmodule Bank.Notifications.Emitter do
       # keys on (user_id, workspace_id) so a hypothetical retry
       # of the emit does not double-write.
       dedupe_key: "access:approved:#{membership.user_id}:#{membership.workspace_id}"
+    }
+  end
+
+  @doc """
+  Emit (or dedupe) an inbox notification for a successful
+  `Bank.Access.reject_pending_user/3` transition (#421). The
+  recipient is the workspace's `:operator` role — the rejected
+  user is the disabled subject, not the audience. Always returns;
+  never raises.
+
+  Caller passes a map shaped at the `Bank.Access` boundary:
+
+    * `:workspace_id` — UUID of the workspace whose active invite
+      matched the rejected user's email. Exact-email invites win
+      over domain invites; ties break by `inserted_at` then `id`
+      (the same priority the apply / approve paths use). The
+      caller is responsible for resolving the invite *before*
+      calling the disable transition, because
+      `find_matching_invite_for_user/1` ignores `:disabled` users.
+    * `:user` — the `%User{}` that was just disabled.
+    * `:actor_user_id` (optional) — UUID of the admin who
+      initiated the rejection. Accepted to keep the call site
+      shape stable for forensic surfaces; not currently threaded
+      into the inbox payload.
+
+  Free-text fields (the admin's `reason`, the rejected user's
+  `email`, `name`, etc.) are intentionally NOT threaded into
+  title / body / action_link / dedupe_key — only the workspace
+  slug (validated regex `[a-z0-9_-]{1,63}`) and a UUID id
+  fragment reach the inbox. The schema's `:unsafe_text` gate
+  would reject a leak anyway, but we don't even compose with the
+  unsafe shape.
+
+  Skip cases (no `{:error, _}`, never raises):
+
+    * `{:skip, :no_workspace_id}` — caller didn't resolve a
+      matching invite (the `:allowlist_missed` corner case where
+      rejection happens via some channel other than the invite
+      flow). User is still disabled by the caller; we just don't
+      have a workspace boundary to scope an inbox row to.
+    * `{:skip, :no_user}` / `{:skip, :no_user_id}` — caller did
+      not pass a persisted `%User{}`.
+    * `{:skip, :workspace_not_found}` — the matching invite's
+      workspace was deleted out from under it.
+  """
+  @spec emit_access_rejected(map()) :: outcome_result() | {:skip, atom()}
+  def emit_access_rejected(attrs) when is_map(attrs) do
+    workspace_id = Map.get(attrs, :workspace_id)
+    user = Map.get(attrs, :user)
+
+    cond do
+      not is_binary(workspace_id) ->
+        {:skip, :no_workspace_id}
+
+      not match?(%User{}, user) ->
+        {:skip, :no_user}
+
+      is_nil(user.id) ->
+        {:skip, :no_user_id}
+
+      true ->
+        case Workspaces.get_workspace(workspace_id) do
+          %Workspace{} = workspace ->
+            do_emit_access_rejected(user, workspace)
+
+          nil ->
+            {:skip, :workspace_not_found}
+        end
+    end
+  end
+
+  def emit_access_rejected(_), do: {:skip, :invalid_args}
+
+  defp do_emit_access_rejected(%User{} = user, %Workspace{} = workspace) do
+    attrs = build_access_rejected_attrs(user, workspace)
+
+    case Notifications.create(attrs) do
+      {:ok, _} = ok ->
+        ok
+
+      {:duplicate, _} = dup ->
+        dup
+
+      {:error, changeset} = err ->
+        Logger.warning(
+          "Bank.Notifications.Emitter: access-rejected notification rejected " <>
+            "(user=#{user.id} errors=#{inspect(changeset.errors)})"
+        )
+
+        err
+    end
+  end
+
+  defp build_access_rejected_attrs(%User{} = user, %Workspace{} = workspace) do
+    %{
+      workspace_id: workspace.id,
+      role_target: :operator,
+      event_type: "access.rejected",
+      severity: :warning,
+      subject_type: "user",
+      subject_id: user.id,
+      correlation_id: user.id,
+      title: "Access rejected: workspace #{workspace.slug}",
+      body: "Pending user #{short_id(user.id)} was disabled.",
+      action_link: "/admin/access",
+      # Dedupe per (workspace, rejected user). A repeat rejection
+      # of an already-disabled user short-circuits in
+      # `reject_pending_user/3` and never reaches the emitter, but
+      # the dedupe key is the safety net for any retry path that
+      # bypasses the access context.
+      dedupe_key: "access.rejected:#{user.id}"
     }
   end
 

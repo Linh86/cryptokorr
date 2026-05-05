@@ -526,6 +526,118 @@ defmodule Bank.Notifications.EmitterTest do
     end
   end
 
+  describe "emit_access_rejected/1 — operator notification on rejection (#421)" do
+    setup do
+      suffix = System.unique_integer([:positive])
+
+      {:ok, user} =
+        Bank.Accounts.find_or_create_from_oauth(%{
+          provider: :google,
+          subject: "rejected-#{suffix}",
+          email: "rejected-#{suffix}@example.com",
+          name: "Rejected User"
+        })
+
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "access-reject-#{suffix}",
+          name: "Access Reject #{suffix}",
+          mainnet_enabled: true
+        })
+
+      %{user: user, workspace: ws}
+    end
+
+    test "creates a :warning operator notification scoped to the invite workspace",
+         %{user: user, workspace: ws} do
+      actor_id = Ecto.UUID.generate()
+
+      assert {:ok, %Notification{} = n} =
+               Emitter.emit_access_rejected(%{
+                 workspace_id: ws.id,
+                 user: user,
+                 actor_user_id: actor_id
+               })
+
+      assert n.workspace_id == ws.id
+      assert n.role_target == :operator
+      assert n.user_id == nil
+      assert n.event_type == "access.rejected"
+      assert n.severity == :warning
+      assert n.subject_type == "user"
+      assert n.subject_id == user.id
+      assert n.correlation_id == user.id
+      assert n.action_link == "/admin/access"
+      assert n.dedupe_key == "access.rejected:#{user.id}"
+      assert n.title =~ ws.slug
+      assert n.title =~ "rejected"
+    end
+
+    test "re-emitting for the same user dedupes to one inbox row",
+         %{user: user, workspace: ws} do
+      assert {:ok, %Notification{id: first_id}} =
+               Emitter.emit_access_rejected(%{workspace_id: ws.id, user: user})
+
+      assert {:duplicate, %Notification{id: ^first_id}} =
+               Emitter.emit_access_rejected(%{workspace_id: ws.id, user: user})
+
+      assert [%Notification{id: ^first_id}] = Notifications.list_for_workspace(ws.id)
+    end
+
+    test "skips when workspace_id is missing", %{user: user} do
+      assert {:skip, :no_workspace_id} = Emitter.emit_access_rejected(%{user: user})
+    end
+
+    test "skips when user is not a %User{} struct", %{workspace: ws} do
+      assert {:skip, :no_user} =
+               Emitter.emit_access_rejected(%{workspace_id: ws.id, user: nil})
+    end
+
+    test "skips when user has no id", %{workspace: ws} do
+      partial = %Bank.Accounts.User{id: nil, email: "x@example.com"}
+
+      assert {:skip, :no_user_id} =
+               Emitter.emit_access_rejected(%{workspace_id: ws.id, user: partial})
+    end
+
+    test "skips when the workspace was deleted out from under the invite", %{user: user} do
+      assert {:skip, :workspace_not_found} =
+               Emitter.emit_access_rejected(%{
+                 workspace_id: Ecto.UUID.generate(),
+                 user: user
+               })
+    end
+
+    test "skips on a non-map argument" do
+      assert {:skip, :invalid_args} = Emitter.emit_access_rejected(:nope)
+    end
+
+    test "the rejected user's free-text email does NOT leak into the inbox payload",
+         %{workspace: ws} do
+      # A user whose name / email carries a Bearer-marker shape —
+      # the emitter must never reflect that into the inbox.
+      {:ok, leaky_user} =
+        Bank.Accounts.find_or_create_from_oauth(%{
+          provider: :google,
+          subject: "leaky-#{System.unique_integer([:positive])}",
+          email: "alice+authorization-bearer-leaked_probe@example.com",
+          name: "Authorization Bearer LEAKED_PROBE"
+        })
+
+      assert {:ok, n} =
+               Emitter.emit_access_rejected(%{workspace_id: ws.id, user: leaky_user})
+
+      refute n.title =~ "LEAKED_PROBE"
+      refute n.body =~ "LEAKED_PROBE"
+      refute (n.action_link || "") =~ "LEAKED_PROBE"
+      refute n.title =~ "Bearer"
+      refute n.body =~ "Bearer"
+      refute n.title =~ leaky_user.email
+      refute n.body =~ leaky_user.email
+      refute n.dedupe_key =~ "Bearer"
+    end
+  end
+
   describe "emit_pause_scope_paused/1 (#234)" do
     setup do
       suffix = System.unique_integer([:positive])
