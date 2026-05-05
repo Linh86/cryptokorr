@@ -42,7 +42,7 @@ defmodule Bank.Intents.AgentIntent do
   alias Bank.Decisions.{DecisionEnvelope, TrustAssessment, ExecutionPlan, SimulationReport}
   alias Bank.Workspaces.Workspace
 
-  @kinds [:transfer, :swap, :scheduled_transfer]
+  @kinds [:transfer, :swap, :scheduled_transfer, :defi_yield_deposit]
   @states [
     :submitted,
     :evaluating,
