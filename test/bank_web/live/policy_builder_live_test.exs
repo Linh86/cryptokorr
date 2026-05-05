@@ -559,6 +559,197 @@ defmodule BankWeb.PolicyBuilderLiveTest do
     |> Repo.reload()
   end
 
+  # --- #225 simulator UI ----------------------------------------------
+
+  describe "policy simulator panel (#225)" do
+    setup [:register_and_log_in_user, :upgrade_to_admin_role]
+
+    test "renders the simulator panel and form for admins", %{conn: conn} do
+      {:ok, view, html} = live(conn, "/policies/builder")
+
+      assert html =~ ~s(id="policy-builder-simulator")
+      assert html =~ "Simulator"
+      assert has_element?(view, "#policy-builder-simulator-form")
+      assert has_element?(view, "#policy-builder-simulator-run-btn")
+    end
+
+    test "running a simulation against a published amount limit shows :block outcome",
+         %{conn: conn, workspace: ws, current_user: user} do
+      rule =
+        Bank.Fixtures.policy_rule(
+          rule_type: :amount_limit,
+          state: :active,
+          workspace_id: ws.id,
+          params: %{"max_per_tx" => "100"}
+        )
+
+      {:ok, draft} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: user.id,
+          rule_ids: %{"items" => [rule.id]}
+        )
+
+      {:ok, _} = Versions.publish_draft(draft, published_by: :user, actor_id: user.id)
+
+      {:ok, view, _html} = live(conn, "/policies/builder")
+
+      html =
+        view
+        |> form("#policy-builder-simulator-form", %{
+          "simulation" => %{
+            "kind" => "transfer",
+            "asset" => "USDC",
+            "chain" => "base",
+            "amount" => "150"
+          }
+        })
+        |> render_submit()
+
+      assert html =~ ~s(id="policy-builder-simulator-result")
+      assert has_element?(view, "#policy-builder-simulator-published-outcome")
+      assert html =~ "block"
+      # Matched-rule link points at the published rule's stable id.
+      assert has_element?(view, "#policy-builder-simulator-published-matched-#{rule.id}")
+    end
+
+    test "draft tightens the limit; the changed banner appears",
+         %{conn: conn, workspace: ws, current_user: user} do
+      published_rule =
+        Bank.Fixtures.policy_rule(
+          rule_type: :amount_limit,
+          state: :active,
+          workspace_id: ws.id,
+          params: %{"max_per_tx" => "100"}
+        )
+
+      {:ok, pub_draft} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: user.id,
+          rule_ids: %{"items" => [published_rule.id]}
+        )
+
+      {:ok, _} = Versions.publish_draft(pub_draft, published_by: :user, actor_id: user.id)
+
+      tighter =
+        Bank.Fixtures.policy_rule(
+          rule_type: :amount_limit,
+          state: :draft,
+          workspace_id: ws.id,
+          params: %{"max_per_tx" => "50"}
+        )
+
+      {:ok, _new_draft} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: user.id,
+          rule_ids: %{"items" => [tighter.id]}
+        )
+
+      {:ok, view, _html} = live(conn, "/policies/builder")
+
+      html =
+        view
+        |> form("#policy-builder-simulator-form", %{
+          "simulation" => %{
+            "kind" => "transfer",
+            "asset" => "USDC",
+            "chain" => "base",
+            "amount" => "75"
+          }
+        })
+        |> render_submit()
+
+      assert html =~ ~s(id="policy-builder-simulator-changed-banner")
+      assert has_element?(view, "#policy-builder-simulator-published-outcome")
+      assert has_element?(view, "#policy-builder-simulator-draft-outcome")
+    end
+
+    test "missing required fields surface in the errors panel", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/policies/builder")
+
+      html =
+        view
+        |> form("#policy-builder-simulator-form", %{
+          "simulation" => %{
+            "kind" => "transfer",
+            "asset" => "",
+            "chain" => "",
+            "amount" => ""
+          }
+        })
+        |> render_submit()
+
+      assert html =~ ~s(id="policy-builder-simulator-errors")
+      assert html =~ "is required"
+    end
+
+    test "running a simulation does not insert any AgentIntent / ExecutionPlan / DecisionEnvelope / audit row",
+         %{conn: conn, workspace: ws, current_user: user} do
+      _rule =
+        Bank.Fixtures.policy_rule(
+          rule_type: :amount_limit,
+          state: :active,
+          workspace_id: ws.id,
+          params: %{"max_per_tx" => "100"}
+        )
+
+      {:ok, _view, _} = live(conn, "/policies/builder")
+      view = elem(live(conn, "/policies/builder"), 1)
+
+      intents_before = Bank.Repo.aggregate(Bank.Intents.AgentIntent, :count)
+      plans_before = Bank.Repo.aggregate(Bank.Decisions.ExecutionPlan, :count)
+      decisions_before = Bank.Repo.aggregate(Bank.Decisions.DecisionEnvelope, :count)
+      audit_before = Bank.Repo.aggregate(Bank.Audit.AuditEvent, :count)
+      _ = user
+
+      view
+      |> form("#policy-builder-simulator-form", %{
+        "simulation" => %{
+          "kind" => "transfer",
+          "asset" => "USDC",
+          "chain" => "base",
+          "amount" => "10"
+        }
+      })
+      |> render_submit()
+
+      assert Bank.Repo.aggregate(Bank.Intents.AgentIntent, :count) == intents_before
+      assert Bank.Repo.aggregate(Bank.Decisions.ExecutionPlan, :count) == plans_before
+      assert Bank.Repo.aggregate(Bank.Decisions.DecisionEnvelope, :count) == decisions_before
+      assert Bank.Repo.aggregate(Bank.Audit.AuditEvent, :count) == audit_before
+    end
+  end
+
+  describe "policy simulator panel — non-admin (#225)" do
+    setup :register_and_log_in_user
+
+    test "operator sees a read-only placeholder (no form, no run button)", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/policies/builder")
+
+      refute has_element?(view, "#policy-builder-simulator-form")
+      refute has_element?(view, "#policy-builder-simulator-run-btn")
+      assert has_element?(view, "#policy-builder-simulator-readonly")
+    end
+
+    test "operator-attempted run_simulation shows admin-required flash", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/policies/builder")
+
+      html =
+        render_hook(view, "run_simulation", %{
+          "simulation" => %{
+            "kind" => "transfer",
+            "asset" => "USDC",
+            "chain" => "base",
+            "amount" => "10"
+          }
+        })
+
+      assert html =~ "Admin role required"
+    end
+  end
+
   # Avoid unused-alias warnings if `Policies` becomes unused after a
   # refactor to a context-only API.
   _ = {Policies}
