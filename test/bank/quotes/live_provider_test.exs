@@ -696,5 +696,128 @@ defmodule Bank.Quotes.LiveProviderTest do
       assert "router liquidity drops below threshold" in conds
       assert length(conds) == 2
     end
+
+    test "route map entries whose KEY carries a secret marker are dropped entirely" do
+      # PR #442 sanitised route values but left keys untouched, so
+      # `%{"Authorization: Bearer sk_live_x" => "ok"}` would persist
+      # the secret key through `inspect(route)` and into the
+      # `simulation_reports.routing_path` jsonb column.
+      Req.Test.stub(LiveProvider, fn conn ->
+        Req.Test.json(
+          conn,
+          success_body(%{
+            "route" => %{
+              "type" => "erc20_transfer",
+              "Authorization: Bearer sk_live_abc" => "ok",
+              "sk_test_smuggled" => %{"nested" => "value"},
+              "https://user:pass@evil/" => "credentialed",
+              "-----BEGIN RSA PRIVATE KEY-----" => "pem dump",
+              "asset" => "USDC"
+            }
+          })
+        )
+      end)
+
+      assert {:ok, %Preview{route: route}} = LiveProvider.preview(intent!())
+      assert route["type"] == "erc20_transfer"
+      assert route["asset"] == "USDC"
+      refute Map.has_key?(route, "Authorization: Bearer sk_live_abc")
+      refute Map.has_key?(route, "sk_test_smuggled")
+      refute Map.has_key?(route, "https://user:pass@evil/")
+      refute Map.has_key?(route, "-----BEGIN RSA PRIVATE KEY-----")
+
+      blob = inspect(route)
+      refute blob =~ ~r/authorization|bearer/i
+      refute blob =~ ~r/sk_(live|test)_/
+      refute blob =~ ~r{://[^\s/@]+:[^\s/@]+@}
+      refute blob =~ "PRIVATE KEY"
+    end
+
+    test "secret-bearing keys nested deep in the route map are dropped at every level" do
+      Req.Test.stub(LiveProvider, fn conn ->
+        Req.Test.json(
+          conn,
+          success_body(%{
+            "route" => %{
+              "type" => "v3_swap",
+              "hops" => [
+                %{"asset" => "USDC", "Bearer sk_live_x" => "leaked-1"},
+                %{"asset" => "WETH", "pk_live_y" => %{"deep" => "leaked-2"}}
+              ],
+              "meta" => %{
+                "Authorization: Bearer leaked-3" => "outer",
+                "ok" => %{"sk_test_z" => "inner-leak", "fine" => "kept"}
+              }
+            }
+          })
+        )
+      end)
+
+      assert {:ok, %Preview{route: route}} = LiveProvider.preview(intent!())
+      assert route["type"] == "v3_swap"
+      assert [%{"asset" => "USDC"}, %{"asset" => "WETH"}] = route["hops"]
+      assert route["meta"]["ok"]["fine"] == "kept"
+      refute Map.has_key?(route["meta"]["ok"], "sk_test_z")
+
+      blob = inspect(route)
+      refute blob =~ ~r/authorization|bearer/i
+      refute blob =~ ~r/sk_(live|test)_/
+      refute blob =~ ~r/pk_(live|test)_/
+      refute blob =~ "leaked-1"
+      refute blob =~ "leaked-2"
+      refute blob =~ "leaked-3"
+      refute blob =~ "inner-leak"
+    end
+
+    test "Persistence.to_simulation_attrs/3 backstop covers secret-bearing keys" do
+      Req.Test.stub(LiveProvider, fn conn ->
+        Req.Test.json(
+          conn,
+          success_body(%{
+            "route" => %{
+              "type" => "erc20_transfer",
+              "Authorization: Bearer sk_live_persisted" => "v",
+              "nested" => %{"pk_test_persisted" => "v"}
+            }
+          })
+        )
+      end)
+
+      assert {:ok, %Preview{} = preview} = LiveProvider.preview(intent!())
+      attrs = Persistence.to_simulation_attrs(preview, Ecto.UUID.generate(), :completed)
+      blob = inspect(attrs)
+
+      refute blob =~ ~r/authorization|bearer/i
+      refute blob =~ ~r/sk_(live|test)_/
+      refute blob =~ ~r/pk_(live|test)_/
+    end
+
+    test "benign route keys with mixed shapes survive unchanged" do
+      # The pattern guards must not over-match on plausibly named
+      # benign keys (e.g. "asset", "pool", "type", numeric strings).
+      Req.Test.stub(LiveProvider, fn conn ->
+        Req.Test.json(
+          conn,
+          success_body(%{
+            "route" => %{
+              "type" => "v3_swap",
+              "fee_bps" => 30,
+              "0xabc" => "pool-address",
+              "asset_in" => "USDC",
+              "asset_out" => "WETH",
+              "hops" => [%{"asset" => "USDC"}, %{"asset" => "WETH"}]
+            }
+          })
+        )
+      end)
+
+      assert {:ok, %Preview{route: route}} = LiveProvider.preview(intent!())
+      assert route["type"] == "v3_swap"
+      assert route["fee_bps"] == 30
+      assert route["0xabc"] == "pool-address"
+      assert route["asset_in"] == "USDC"
+      assert route["asset_out"] == "WETH"
+      assert route["hops"] == [%{"asset" => "USDC"}, %{"asset" => "WETH"}]
+    end
   end
 end

@@ -468,12 +468,24 @@ defmodule Bank.Quotes.LiveProvider do
   # whose shape is provider-defined — we keep the structural skeleton
   # so downstream consumers (operator UI, decision report) can still
   # see the route's shape, but no marker survives to the persisted row.
+  #
+  # Map keys are also untrusted: a malicious upstream could send
+  # `%{"Authorization: Bearer sk_live_x" => "ok"}` and survive a
+  # value-only sanitiser even after #442. Entries whose key is a
+  # binary matching one of the secret patterns are dropped entirely
+  # — the value attached to a secret-shaped key carries no operator-
+  # readable meaning once its key is gone, and dropping (rather than
+  # redacting the key to `"[REDACTED]"`) avoids key collisions when
+  # the upstream uses several distinct secret-bearing keys. Non-binary
+  # keys (atoms, integers) cannot carry our pattern and are kept.
   defp sanitize_value(value) when is_binary(value) do
     if contains_secret?(value), do: @secret_redaction_marker, else: value
   end
 
   defp sanitize_value(value) when is_map(value) do
-    Map.new(value, fn {k, v} -> {k, sanitize_value(v)} end)
+    value
+    |> Enum.reject(fn {k, _v} -> contains_secret?(k) end)
+    |> Map.new(fn {k, v} -> {k, sanitize_value(v)} end)
   end
 
   defp sanitize_value(value) when is_list(value) do
