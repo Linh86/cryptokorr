@@ -638,6 +638,233 @@ defmodule Bank.Notifications.EmitterTest do
     end
   end
 
+  describe "emit_provider_health_failing/1 / emit_provider_health_recovered/1 (#422)" do
+    alias Bank.Stablecoins.ProviderHealthEvent
+
+    setup do
+      suffix = System.unique_integer([:positive])
+
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "ph-emit-#{suffix}",
+          name: "Provider Health Emit #{suffix}",
+          mainnet_enabled: true
+        })
+
+      %{workspace: ws}
+    end
+
+    defp persist_event(ws, attrs) do
+      base = %{
+        workspace_id: ws.id,
+        provider: "zerox",
+        from_state: :degraded,
+        to_state: :failing,
+        route_session_id: Ecto.UUID.generate(),
+        evidence: %{"success_count" => 8, "failure_count" => 3},
+        observed_at: DateTime.utc_now()
+      }
+
+      {:ok, event} =
+        %ProviderHealthEvent{}
+        |> ProviderHealthEvent.changeset(Map.merge(base, attrs))
+        |> Bank.Repo.insert()
+
+      event
+    end
+
+    test "creates a :warning operator notification on :degraded → :failing", %{workspace: ws} do
+      event = persist_event(ws, %{from_state: :degraded, to_state: :failing})
+
+      assert {:ok, %Notification{} = n} = Emitter.emit_provider_health_failing(event)
+
+      assert n.workspace_id == ws.id
+      assert n.role_target == :operator
+      assert n.user_id == nil
+      assert n.event_type == "provider_health.failing"
+      assert n.severity == :warning
+      assert n.subject_type == "provider_health_event"
+      assert n.subject_id == event.id
+      assert n.correlation_id == event.id
+      assert n.action_link == "/ops"
+      assert n.dedupe_key == "provider_health.failing:zerox:#{event.route_session_id}"
+      assert n.title =~ "Provider failing"
+      assert n.title =~ "zerox"
+      assert n.body =~ "degraded"
+      assert n.body =~ "failing"
+    end
+
+    test "creates an :info operator notification on :failing → recovery", %{workspace: ws} do
+      event = persist_event(ws, %{from_state: :failing, to_state: :healthy})
+
+      assert {:ok, %Notification{} = n} = Emitter.emit_provider_health_recovered(event)
+
+      assert n.workspace_id == ws.id
+      assert n.role_target == :operator
+      assert n.event_type == "provider_health.recovered"
+      assert n.severity == :info
+      assert n.subject_id == event.id
+      assert n.action_link == "/ops"
+      assert n.dedupe_key == "provider_health.recovered:zerox:#{event.route_session_id}"
+      assert n.title =~ "recovered"
+      assert n.title =~ "zerox"
+    end
+
+    test "re-emit with the same event dedupes within the route_session_id", %{workspace: ws} do
+      event = persist_event(ws, %{from_state: :degraded, to_state: :failing})
+
+      assert {:ok, %Notification{id: first_id}} = Emitter.emit_provider_health_failing(event)
+
+      assert {:duplicate, %Notification{id: ^first_id}} =
+               Emitter.emit_provider_health_failing(event)
+
+      assert [%Notification{id: ^first_id}] =
+               Notifications.list_for_workspace(ws.id, event_type: "provider_health.failing")
+    end
+
+    test "different route_session_id under the same workspace+provider produces a fresh row",
+         %{workspace: ws} do
+      e1 = persist_event(ws, %{from_state: :degraded, to_state: :failing})
+      e2 = persist_event(ws, %{from_state: :degraded, to_state: :failing})
+
+      assert {:ok, %Notification{id: id1}} = Emitter.emit_provider_health_failing(e1)
+      assert {:ok, %Notification{id: id2}} = Emitter.emit_provider_health_failing(e2)
+      refute id1 == id2
+
+      assert length(
+               Notifications.list_for_workspace(ws.id, event_type: "provider_health.failing")
+             ) == 2
+    end
+
+    test "failing and recovered share the route_session_id but distinct event_types",
+         %{workspace: ws} do
+      session_id = Ecto.UUID.generate()
+      fail = persist_event(ws, %{route_session_id: session_id, to_state: :failing})
+
+      rec =
+        persist_event(ws, %{
+          route_session_id: session_id,
+          from_state: :failing,
+          to_state: :degraded
+        })
+
+      assert {:ok, _} = Emitter.emit_provider_health_failing(fail)
+      assert {:ok, _} = Emitter.emit_provider_health_recovered(rec)
+
+      events =
+        Notifications.list_for_workspace(ws.id, status: :all)
+        |> Enum.map(& &1.event_type)
+        |> Enum.sort()
+
+      assert events == ["provider_health.failing", "provider_health.recovered"]
+    end
+
+    test "skips on a non-event argument" do
+      assert {:skip, :invalid_args} = Emitter.emit_provider_health_failing(:nope)
+      assert {:skip, :invalid_args} = Emitter.emit_provider_health_recovered(%{not: "an event"})
+    end
+
+    test "skips when event has no id (not yet persisted)", %{workspace: ws} do
+      partial = %ProviderHealthEvent{
+        id: nil,
+        workspace_id: ws.id,
+        provider: "zerox",
+        from_state: :degraded,
+        to_state: :failing,
+        route_session_id: Ecto.UUID.generate()
+      }
+
+      assert {:skip, :event_not_persisted} = Emitter.emit_provider_health_failing(partial)
+    end
+
+    test "skips when workspace_id is missing on the event" do
+      partial = %ProviderHealthEvent{
+        id: Ecto.UUID.generate(),
+        workspace_id: nil,
+        provider: "zerox",
+        from_state: :degraded,
+        to_state: :failing,
+        route_session_id: Ecto.UUID.generate()
+      }
+
+      assert {:skip, :no_workspace_id} = Emitter.emit_provider_health_failing(partial)
+    end
+
+    test "skips when the workspace was deleted out from under the event" do
+      detached = %ProviderHealthEvent{
+        id: Ecto.UUID.generate(),
+        workspace_id: Ecto.UUID.generate(),
+        provider: "zerox",
+        from_state: :degraded,
+        to_state: :failing,
+        route_session_id: Ecto.UUID.generate()
+      }
+
+      assert {:skip, :workspace_not_found} = Emitter.emit_provider_health_failing(detached)
+    end
+
+    test "cross-workspace isolation: an event in workspace A never lands under workspace B",
+         %{workspace: ws_a} do
+      {:ok, ws_b} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "ph-iso-#{System.unique_integer([:positive])}",
+          name: "Provider Health Iso B"
+        })
+
+      e_a = persist_event(ws_a, %{from_state: :degraded, to_state: :failing})
+      e_b = persist_event(ws_b, %{from_state: :degraded, to_state: :failing})
+
+      assert {:ok, _} = Emitter.emit_provider_health_failing(e_a)
+      assert {:ok, _} = Emitter.emit_provider_health_failing(e_b)
+
+      [n_a] = Notifications.list_for_workspace(ws_a.id)
+      [n_b] = Notifications.list_for_workspace(ws_b.id)
+
+      assert n_a.workspace_id == ws_a.id
+      assert n_b.workspace_id == ws_b.id
+      refute n_a.workspace_id == n_b.workspace_id
+    end
+
+    test "secret-shaped provider id is sanitised so the marker patterns do not survive",
+         %{workspace: ws} do
+      # Realistic regression: a misregistered provider returns a
+      # provider_id with secret-marker shapes. The emitter must
+      # break the marker patterns the `:unsafe_text` gate scans
+      # for so the notification still inserts (i.e., we don't
+      # silently drop the inbox row) AND the colon/whitespace
+      # tokens the gate keys on do not survive to the row.
+      leaky =
+        persist_event(ws, %{
+          provider: "Authorization: Bearer LEAKED_PROBE on rpc.example/path",
+          from_state: :degraded,
+          to_state: :failing
+        })
+
+      assert {:ok, n} = Emitter.emit_provider_health_failing(leaky)
+
+      # The exact marker shapes the schema gate scans for must
+      # not survive the sanitiser:
+      refute n.title =~ ~r/Authorization\s*:/i
+      refute n.title =~ ~r/Bearer\s+\S+/i
+      refute n.body =~ ~r/Authorization\s*:/i
+      refute n.body =~ ~r/Bearer\s+\S+/i
+      refute n.dedupe_key =~ ~r/Authorization\s*:/i
+      refute n.dedupe_key =~ ~r/Bearer\s+\S+/i
+
+      # Non-alphanumerics collapsed to underscore; output capped
+      # at the sanitiser's 32-char ceiling so a misregistered id
+      # cannot bloat the title.
+      assert String.length(extract_provider_label(n.title)) <= 32
+    end
+
+    defp extract_provider_label(title) do
+      case Regex.run(~r/Provider failing:\s+(.*)$/, title) do
+        [_, label] -> label
+        _ -> ""
+      end
+    end
+  end
+
   describe "emit_pause_scope_paused/1 (#234)" do
     setup do
       suffix = System.unique_integer([:positive])

@@ -345,4 +345,91 @@ defmodule Bank.Stablecoins.IntentRoutingTest do
       assert route["fee_summary"]["total_fee"] == "0.6"
     end
   end
+
+  describe "workspace-scoped provider-health notifications (#422)" do
+    alias Bank.Notifications
+    alias Bank.Stablecoins.ProviderHealthEvent
+
+    setup do
+      ProviderHealth.reset()
+
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "ph-routing-#{System.unique_integer([:positive])}",
+          name: "PH Routing #{System.unique_integer([:positive])}",
+          mainnet_enabled: true
+        })
+
+      %{workspace: ws}
+    end
+
+    test "the result map carries the route_session_id so callers can correlate retries",
+         %{workspace: ws} do
+      assert {:ok, %{route_session_id: session_id}} =
+               IntentRouting.evaluate_for_intent(
+                 %{
+                   workspace_id: ws.id,
+                   source_chain: "ethereum",
+                   source_asset: "USDC",
+                   dest_chain: "ethereum",
+                   dest_asset: "USDT",
+                   amount: Decimal.new("100"),
+                   metadata: %{taker_address: "0x0000000000000000000000000000000000000abc"}
+                 },
+                 providers: [FakeProvider]
+               )
+
+      assert is_binary(session_id)
+      assert {:ok, _} = Ecto.UUID.cast(session_id)
+    end
+
+    test "without :workspace_id, no provider_health_event row is written", %{workspace: ws} do
+      # Drive the provider into :degraded directly via record_failure
+      # so the next failure crosses the threshold.
+      for _ <- 1..8, do: ProviderHealth.record_success("fake")
+      for _ <- 1..2, do: ProviderHealth.record_failure("fake", :provider_unavailable)
+
+      pre = Bank.Repo.aggregate(ProviderHealthEvent, :count)
+
+      # No workspace_id in params → success/failure record but no event row.
+      {:ok, _} =
+        IntentRouting.evaluate_for_intent(
+          %{
+            source_chain: "ethereum",
+            source_asset: "USDC",
+            dest_chain: "ethereum",
+            dest_asset: "USDT",
+            amount: Decimal.new("100"),
+            metadata: %{taker_address: "0x0000000000000000000000000000000000000abc"}
+          },
+          providers: [FakeProvider]
+        )
+
+      assert Bank.Repo.aggregate(ProviderHealthEvent, :count) == pre
+      assert Notifications.list_for_workspace(ws.id) == []
+    end
+
+    test "providing :workspace_id threads it into ProviderHealth opts (verified via direct call)",
+         %{workspace: ws} do
+      # The integration test surface here is narrow: ProviderHealth
+      # is the only call site that interprets opts, and the unit
+      # tests in provider_health_test.exs already pin the
+      # transition / event-write rules. This test just confirms
+      # the threading itself — given a workspace_id+session_id
+      # opt set on a record_failure that crosses the threshold,
+      # an event row lands in the workspace.
+      session_id = Ecto.UUID.generate()
+      opts = [workspace_id: ws.id, route_session_id: session_id]
+
+      for _ <- 1..8, do: ProviderHealth.record_success("threaded", opts)
+      for _ <- 1..2, do: ProviderHealth.record_failure("threaded", :provider_unavailable, opts)
+
+      assert {:ok, %{event: %ProviderHealthEvent{} = event}} =
+               ProviderHealth.record_failure("threaded", :provider_unavailable, opts)
+
+      assert event.workspace_id == ws.id
+      assert event.route_session_id == session_id
+      assert event.provider == "threaded"
+    end
+  end
 end

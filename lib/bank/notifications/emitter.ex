@@ -51,6 +51,19 @@ defmodule Bank.Notifications.Emitter do
       operator notification — recovery is informational, not a
       warning, mirroring the resolve-side severity convention from
       #256's `Bank.Ops.Alerts`.
+    * `emit_provider_health_failing/1` / `emit_provider_health_recovered/1`
+      (#422) — every `Bank.Stablecoins.IntentRouting.evaluate_for_intent/1`
+      call that observes a stablecoin provider transitioning into
+      `:failing` (warning) or out of it (info). The caller resolves
+      the workspace boundary by threading `:workspace_id` (and a
+      `:route_session_id`) through the params map; on the
+      notification-relevant transition the runtime persists a
+      `Bank.Stablecoins.ProviderHealthEvent` and the emitter
+      surfaces that event as a workspace-scoped operator inbox
+      row. Free-text provider failure reasons are NEVER threaded
+      into the inbox payload — only the controlled state enum +
+      provider id reach the title / body / action_link / dedupe
+      key.
 
   ## Dedupe semantics
 
@@ -95,6 +108,7 @@ defmodule Bank.Notifications.Emitter do
   alias Bank.Intents.AgentIntent
   alias Bank.Notifications
   alias Bank.Security.Pause
+  alias Bank.Stablecoins.ProviderHealthEvent
   alias Bank.Workspaces
   alias Bank.Workspaces.Membership
   alias Bank.Workspaces.Workspace
@@ -597,6 +611,168 @@ defmodule Bank.Notifications.Emitter do
       dedupe_key: "pause:scope_resumed:#{pause.id}"
     }
   end
+
+  @doc """
+  Emit (or dedupe) an inbox notification for a successful
+  `:degraded → :failing` transition observed by
+  `Bank.Stablecoins.IntentRouting.evaluate_for_intent/1` (#422).
+  The recipient is the workspace's `:operator` role.
+
+  Caller passes the `%ProviderHealthEvent{}` returned by
+  `Bank.Stablecoins.ProviderHealth.record_failure/3` (or
+  `record_success/2`). The event row carries the workspace
+  boundary, provider id, route session id, and counter
+  evidence — the emitter composes the inbox row strictly from
+  the controlled enum (`from_state`/`to_state`) and the provider
+  id. Free-text provider failure reasons are not threaded; the
+  schema's `:unsafe_text` gate is the second line of defence.
+
+  Always returns; never raises.
+
+  Skip cases:
+
+    * `{:skip, :no_workspace_id}` — the event row carries no
+      workspace boundary (defensive — the migration enforces
+      `null: false`, so this is unreachable in production).
+    * `{:skip, :event_not_persisted}` — the upstream insert
+      failed and the event id is `nil`.
+    * `{:skip, :workspace_not_found}` — the workspace was
+      deleted between the event insert and the emit (the FK
+      `on_delete: :restrict` makes this race vanishingly
+      narrow, but we still skip rather than error).
+  """
+  @spec emit_provider_health_failing(ProviderHealthEvent.t()) ::
+          outcome_result() | {:skip, atom()}
+  def emit_provider_health_failing(%ProviderHealthEvent{} = event) do
+    emit_provider_health_event(event, :failing)
+  end
+
+  def emit_provider_health_failing(_), do: {:skip, :invalid_args}
+
+  @doc """
+  Emit (or dedupe) an inbox notification for a successful
+  `:failing → :healthy/:degraded` recovery transition observed
+  by `Bank.Stablecoins.IntentRouting.evaluate_for_intent/1`
+  (#422). The recipient is the workspace's `:operator` role;
+  recovery is `:info` — operators may want to confirm a
+  recovery happened but it's not actionable on its own
+  (mirrors the resolve-side severity convention from
+  `emit_pause_scope_resumed/1`).
+
+  Same skip-case shape as `emit_provider_health_failing/1`.
+  Always returns; never raises.
+  """
+  @spec emit_provider_health_recovered(ProviderHealthEvent.t()) ::
+          outcome_result() | {:skip, atom()}
+  def emit_provider_health_recovered(%ProviderHealthEvent{} = event) do
+    emit_provider_health_event(event, :recovered)
+  end
+
+  def emit_provider_health_recovered(_), do: {:skip, :invalid_args}
+
+  defp emit_provider_health_event(%ProviderHealthEvent{} = event, kind)
+       when kind in [:failing, :recovered] do
+    cond do
+      not is_binary(event.workspace_id) ->
+        {:skip, :no_workspace_id}
+
+      not is_binary(event.id) ->
+        {:skip, :event_not_persisted}
+
+      not is_binary(event.route_session_id) ->
+        {:skip, :no_route_session_id}
+
+      true ->
+        case Workspaces.get_workspace(event.workspace_id) do
+          %Workspace{} ->
+            do_emit_provider_health_event(event, kind)
+
+          nil ->
+            {:skip, :workspace_not_found}
+        end
+    end
+  end
+
+  defp do_emit_provider_health_event(%ProviderHealthEvent{} = event, kind) do
+    attrs = build_provider_health_attrs(event, kind)
+
+    case Notifications.create(attrs) do
+      {:ok, _} = ok ->
+        ok
+
+      {:duplicate, _} = dup ->
+        dup
+
+      {:error, changeset} = err ->
+        Logger.warning(
+          "Bank.Notifications.Emitter: provider-health (#{kind}) notification rejected " <>
+            "(event=#{event.id} provider=#{event.provider} errors=#{inspect(changeset.errors)})"
+        )
+
+        err
+    end
+  end
+
+  defp build_provider_health_attrs(%ProviderHealthEvent{} = event, :failing) do
+    provider = safe_provider_label(event.provider)
+
+    %{
+      workspace_id: event.workspace_id,
+      role_target: :operator,
+      event_type: "provider_health.failing",
+      severity: :warning,
+      subject_type: "provider_health_event",
+      subject_id: event.id,
+      correlation_id: event.id,
+      title: "Provider failing: #{provider}",
+      body: "Provider transitioned #{event.from_state} → #{event.to_state}.",
+      action_link: "/ops",
+      # Per-routing-attempt dedupe (#422): retries within the
+      # same `evaluate_for_intent/1` call collapse to one inbox
+      # row. The next routing attempt generates a fresh
+      # `route_session_id`, which gives a fresh dedupe key, and
+      # therefore a fresh row if the provider is still failing.
+      dedupe_key: "provider_health.failing:#{provider}:#{event.route_session_id}"
+    }
+  end
+
+  defp build_provider_health_attrs(%ProviderHealthEvent{} = event, :recovered) do
+    provider = safe_provider_label(event.provider)
+
+    %{
+      workspace_id: event.workspace_id,
+      role_target: :operator,
+      event_type: "provider_health.recovered",
+      severity: :info,
+      subject_type: "provider_health_event",
+      subject_id: event.id,
+      correlation_id: event.id,
+      title: "Provider recovered: #{provider}",
+      body: "Provider transitioned #{event.from_state} → #{event.to_state}.",
+      action_link: "/ops",
+      # Distinct dedupe namespace from the failing emit so a
+      # `failing` row and the matching `recovered` row coexist
+      # in the inbox under the same `route_session_id`.
+      dedupe_key: "provider_health.recovered:#{provider}:#{event.route_session_id}"
+    }
+  end
+
+  # Provider id is taken from `Bank.Stablecoins.ProviderHealth`
+  # (sourced from the registry at `provider_id_for/1`); the
+  # registry yields kebab-case strings like `"zerox"` /
+  # `"oneinch"`. We still cap and sanitise here as a
+  # belt-and-suspenders check: anything outside `[a-zA-Z0-9_-]`
+  # is replaced with `_`, and the label is truncated to 32
+  # chars so a misregistered provider can't bloat the title or
+  # land secret-looking shapes in the dedupe key. The schema's
+  # `:unsafe_text` gate is the third line of defence.
+  defp safe_provider_label(provider) when is_binary(provider) do
+    provider
+    |> String.replace(~r/[^A-Za-z0-9_\-]/, "_")
+    |> String.slice(0, 32)
+  end
+
+  defp safe_provider_label(_), do: "unknown"
 
   # `scope_label_for/1` is intentionally narrow: only the
   # controlled enum (`scope_type`) and the workspace-public

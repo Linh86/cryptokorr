@@ -27,6 +27,7 @@ defmodule Bank.Stablecoins.IntentRouting do
   for stablecoin swap/bridge routes.
   """
 
+  alias Bank.Notifications.Emitter
   alias Bank.Stablecoins.{ProviderHealth, QuoteRequest, RoutePolicy}
 
   @type route_result :: %{
@@ -34,7 +35,8 @@ defmodule Bank.Stablecoins.IntentRouting do
           reason_code: atom(),
           reason: String.t(),
           evaluation: RoutePolicy.evaluation() | nil,
-          execution_state: :planned | :blocked | :requires_adapter
+          execution_state: :planned | :blocked | :requires_adapter,
+          route_session_id: String.t()
         }
 
   @doc """
@@ -44,17 +46,45 @@ defmodule Bank.Stablecoins.IntentRouting do
   `RoutePolicy.evaluate/2`, maps the decision to an autonomy outcome,
   records audit evidence, and updates provider health.
 
+  ## Workspace + session context (#422)
+
+  Two new keys on the params map are recognised:
+
+    * `:workspace_id` — UUID. When present, threaded into
+      `Bank.Stablecoins.ProviderHealth.record_*` so a provider
+      health transition observed inside this routing attempt can
+      land a workspace-scoped operator notification.
+    * `:route_session_id` — UUID. Identifies one routing attempt
+      so retries within the same attempt collapse on the
+      notification dedupe key. Generated here when absent, so
+      callers do not have to thread it themselves.
+
+  Both are optional — calls without `:workspace_id` keep today's
+  silent provider-health observation behaviour. The generated
+  `:route_session_id` is included in the returned `route_result`
+  so callers can correlate retries / replays.
+
   Returns a `route_result` map compatible with autonomy routing inputs.
   """
   @spec evaluate_for_intent(map(), keyword()) ::
           {:ok, route_result()} | {:error, term()}
   def evaluate_for_intent(params, opts \\ []) when is_map(params) do
+    workspace_id = workspace_id(params)
+    route_session_id = route_session_id(params) || Ecto.UUID.generate()
+
     with {:ok, quote_req} <- build_quote_request(params),
          {:ok, evaluation} <- RoutePolicy.evaluate(quote_req, opts) do
-      observe_health(evaluation)
+      observe_health(evaluation,
+        workspace_id: workspace_id,
+        route_session_id: route_session_id
+      )
+
       emit_telemetry(evaluation)
 
-      result = build_result(evaluation)
+      result =
+        evaluation
+        |> build_result()
+        |> Map.put(:route_session_id, route_session_id)
 
       with :ok <- maybe_emit_audit(params, result) do
         {:ok, result}
@@ -161,22 +191,26 @@ defmodule Bank.Stablecoins.IntentRouting do
     }
   end
 
-  defp observe_health(evaluation) do
+  defp observe_health(evaluation, opts) do
     if GenServer.whereis(ProviderHealth) do
       meta = evaluation.selector_metadata
 
       Enum.each(meta[:errors] || [], fn %{provider: mod, error: reason} ->
         provider_id = provider_id_for(mod)
-        ProviderHealth.record_failure(provider_id, reason)
+
+        case ProviderHealth.record_failure(provider_id, reason, opts) do
+          {:ok, transition} -> maybe_emit_health_transition(transition, opts)
+          _ -> :ok
+        end
       end)
 
-      record_successes(evaluation)
+      record_successes(evaluation, opts)
     end
 
     :ok
   end
 
-  defp record_successes(%{quote: %{provider: "composite"}, selector_metadata: meta}) do
+  defp record_successes(%{quote: %{provider: "composite"}, selector_metadata: meta}, opts) do
     meta
     |> Map.take([:swap_meta, :bridge_meta])
     |> Map.values()
@@ -184,12 +218,49 @@ defmodule Bank.Stablecoins.IntentRouting do
       %{all_quotes: quotes} -> quotes
       _ -> []
     end)
-    |> Enum.each(&ProviderHealth.record_success(&1.provider))
+    |> Enum.each(fn q ->
+      case ProviderHealth.record_success(q.provider, opts) do
+        {:ok, transition} -> maybe_emit_health_transition(transition, opts)
+        _ -> :ok
+      end
+    end)
   end
 
-  defp record_successes(evaluation) do
-    ProviderHealth.record_success(evaluation.quote.provider)
+  defp record_successes(evaluation, opts) do
+    case ProviderHealth.record_success(evaluation.quote.provider, opts) do
+      {:ok, transition} -> maybe_emit_health_transition(transition, opts)
+      _ -> :ok
+    end
   end
+
+  # Best-effort: a notification-side failure (validation,
+  # workspace deleted, transient repo error) must never break
+  # the routing decision. The emitter itself never raises, but
+  # we ignore its return so a future change to the contract
+  # cannot leak back into this caller.
+  defp maybe_emit_health_transition(%{event: nil}, _opts), do: :ok
+
+  defp maybe_emit_health_transition(
+         %{from_state: :degraded, to_state: :failing, event: event},
+         _opts
+       ) do
+    _ = Emitter.emit_provider_health_failing(event)
+    :ok
+  end
+
+  defp maybe_emit_health_transition(
+         %{from_state: :failing, to_state: to, event: event},
+         _opts
+       )
+       when to in [:healthy, :degraded] do
+    _ = Emitter.emit_provider_health_recovered(event)
+    :ok
+  end
+
+  defp maybe_emit_health_transition(_, _opts), do: :ok
+
+  defp workspace_id(params), do: params[:workspace_id] || params["workspace_id"]
+  defp route_session_id(params), do: params[:route_session_id] || params["route_session_id"]
 
   defp maybe_emit_audit(params, result) do
     case intent_id(params) do
