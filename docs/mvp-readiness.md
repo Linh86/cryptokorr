@@ -132,12 +132,19 @@ traceability.
 These are intentional v0.1 simplifications, not bugs. Each has a
 documented escape hatch.
 
-- **Mainnet not proven.** Only Base Sepolia is exercised end-to-end.
-  Mainnet would need a separate readiness pass (paymaster, gas
-  budget, key custody, mainnet bundler). `docs/base-sepolia-execution-day.md`
-  pins the rule: "Do NOT promote to Base mainnet until Sepolia is
-  green end-to-end AND the cryptographic revoke has shipped against
-  Sepolia. Mainnet re-rolls burn real ETH."
+- **Mainnet readiness is reviewed; broadcast is gated by canary caps.**
+  Epic [#166](https://github.com/Linh86/cryptobank/issues/166) shipped
+  the workspace `mainnet_enabled` flag (#178), the read-only preflight
+  (#179), the no-broadcast rehearsal runbook (#180), the in-code
+  capped canary (#181), and the formal go / no-go review (#182). The
+  current verdict is **GO for the capped canary path** (Base / USDC /
+  $10 per UserOp via `Bank.Chains.CanaryCaps`) and **NO-GO for broad
+  mainnet usage** until #185 (account-aware routing) lands. See
+  [`docs/runbooks/base-mainnet-go-no-go.md`](runbooks/base-mainnet-go-no-go.md)
+  for the signed checklist + sign-off block, and
+  [`docs/runbooks/base-mainnet-rehearsal.md`](runbooks/base-mainnet-rehearsal.md) /
+  [`docs/runbooks/base-mainnet-canary.md`](runbooks/base-mainnet-canary.md)
+  for the rehearsal and first-broadcast operator runbooks.
 - **Single-active-delegation fallback.** `resolve_executable_account/0`
   dispatches when exactly one delegation is currently executable;
   zero / two-or-more / all-revoked deployments hold dispatch with
