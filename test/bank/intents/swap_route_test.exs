@@ -114,6 +114,80 @@ defmodule Bank.Intents.SwapRouteTest do
     test "passes when value (native amount) is positive" do
       assert :ok = SwapRoute.validate(valid_route(%{value: Decimal.new("0.001")}), v01())
     end
+
+    test "tolerates an explicit atom-keyed `:exact_input` swap_type marker" do
+      assert :ok = SwapRoute.validate(valid_route(%{swap_type: :exact_input}), v01())
+    end
+
+    test "tolerates an explicit string-keyed `\"exact_input\"` swap_type marker" do
+      route = Map.put(valid_route(), "swap_type", "exact_input")
+
+      assert :ok = SwapRoute.validate(route, v01())
+    end
+
+    test "tolerates a case-insensitive `EXACT_INPUT` string marker" do
+      route = Map.put(valid_route(), "swap_type", "EXACT_INPUT")
+
+      assert :ok = SwapRoute.validate(route, v01())
+    end
+  end
+
+  describe "validate/2 — :swap_type_not_supported" do
+    test "rejects atom-keyed swap_type: :exact_output" do
+      assert {:error, :swap_type_not_supported} =
+               SwapRoute.validate(valid_route(%{swap_type: :exact_output}), v01())
+    end
+
+    test "rejects string-keyed \"swap_type\" => \"exact_output\"" do
+      route = Map.put(valid_route(), "swap_type", "exact_output")
+
+      assert {:error, :swap_type_not_supported} = SwapRoute.validate(route, v01())
+    end
+
+    test "rejects uppercase \"EXACT_OUTPUT\" string marker" do
+      route = Map.put(valid_route(), "swap_type", "EXACT_OUTPUT")
+
+      assert {:error, :swap_type_not_supported} = SwapRoute.validate(route, v01())
+    end
+
+    test "rejects an unknown atom marker" do
+      assert {:error, :swap_type_not_supported} =
+               SwapRoute.validate(valid_route(%{swap_type: :exact_output_v2}), v01())
+    end
+
+    test "rejects an unknown string marker" do
+      route = Map.put(valid_route(), "swap_type", "limit")
+
+      assert {:error, :swap_type_not_supported} = SwapRoute.validate(route, v01())
+    end
+
+    test "rejects an empty-string marker" do
+      route = Map.put(valid_route(), "swap_type", "")
+
+      assert {:error, :swap_type_not_supported} = SwapRoute.validate(route, v01())
+    end
+
+    test "rejects a non-binary, non-atom marker (integer)" do
+      assert {:error, :swap_type_not_supported} =
+               SwapRoute.validate(valid_route(%{swap_type: 1}), v01())
+    end
+
+    test "rejects when atom-keyed says exact_input but string-keyed says exact_output" do
+      # Both keys are inspected; either disagreement fails the route.
+      route =
+        valid_route(%{swap_type: :exact_input})
+        |> Map.put("swap_type", "exact_output")
+
+      assert {:error, :swap_type_not_supported} = SwapRoute.validate(route, v01())
+    end
+
+    test "fires after structural-shape check (missing field shadows it)" do
+      bad =
+        valid_route(%{swap_type: :exact_output})
+        |> Map.delete(:calldata)
+
+      assert {:error, :swap_route_field_missing} = SwapRoute.validate(bad, v01())
+    end
   end
 
   describe "validate/2 — :swap_route_field_missing" do
@@ -404,7 +478,9 @@ defmodule Bank.Intents.SwapRouteTest do
         # min > expected
         valid_route(%{minimum_output_amount: Decimal.new("99")}),
         # deadline expired
-        valid_route(%{deadline: ~U[2024-01-01 00:00:00Z]})
+        valid_route(%{deadline: ~U[2024-01-01 00:00:00Z]}),
+        # explicit exact-output marker
+        valid_route(%{swap_type: :exact_output})
       ]
 
       reasons =
@@ -420,7 +496,8 @@ defmodule Bank.Intents.SwapRouteTest do
         :swap_route_field_missing,
         :swap_amount_invalid,
         :swap_slippage_exceeded,
-        :swap_deadline_expired
+        :swap_deadline_expired,
+        :swap_type_not_supported
       ]
 
       for reason <- reasons do
@@ -499,7 +576,8 @@ defmodule Bank.Intents.SwapRouteTest do
             "swap_route_field_missing",
             "swap_amount_invalid",
             "swap_slippage_exceeded",
-            "swap_deadline_expired"
+            "swap_deadline_expired",
+            "swap_type_not_supported"
           ] do
         assert contents =~ atom,
                "doc missing failure-mode atom #{inspect(atom)}"

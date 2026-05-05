@@ -12,9 +12,17 @@ defmodule Bank.Intents.SwapRoute do
 
   ## What is validated (v0.1)
 
-    * **Swap type.** Exact-input only. Exact-output and cross-chain
-      routes are rejected at this layer; the route map carries no
-      explicit `swap_type` — it is exact-input by construction. Future
+    * **Swap type.** Exact-input only. The canonical route map carries
+      no explicit `swap_type` field — exact-input is the construction.
+      As a defensive belt, the validator still inspects `swap_type`
+      (atom key) and `"swap_type"` (string key) when present and
+      tolerates them only when they *agree* with the contract:
+      `:exact_input` or `"exact_input"` (case-insensitive). Any other
+      value — `:exact_output`, `"exact_output"`, `"EXACT_OUTPUT"`,
+      unknown atoms, integers, etc. — is rejected with
+      `:swap_type_not_supported`, so a future quote provider that
+      grew an exact-output mode cannot slip past this layer.
+      Cross-chain routes remain rejected by the chain check. Future
       types are an explicit product decision, not a config flag.
     * **Chain.** Testnet-first. Default `allowed_chains: ["base-sepolia"]`.
       The route's `:chain` (canonical string) and `:chain_id` (EIP-155)
@@ -79,6 +87,11 @@ defmodule Bank.Intents.SwapRoute do
       cap, or is `nil` / negative.
     * `:swap_deadline_expired` — `deadline` is `nil`, malformed, or
       already past at the validation moment.
+    * `:swap_type_not_supported` — the route carries an explicit
+      `:swap_type` (or `"swap_type"`) marker whose value is not the
+      exact-input shape this contract permits. Triggers on
+      `:exact_output`, `"exact_output"`, `"EXACT_OUTPUT"`, unknown
+      atoms, integers, and any other non-exact-input value.
 
   Passing those atoms through `Atom.to_string/1` yields the matching
   `final_reason` string suitable for an `execution.aborted` audit
@@ -168,6 +181,7 @@ defmodule Bank.Intents.SwapRoute do
           | :swap_amount_invalid
           | :swap_slippage_exceeded
           | :swap_deadline_expired
+          | :swap_type_not_supported
 
   @type caps :: %{
           required(:allowed_chains) => [String.t()],
@@ -255,9 +269,10 @@ defmodule Bank.Intents.SwapRoute do
       so deadline assertions don't race the wall clock.
 
   The check order is intentional: structural shape first
-  (presence/type), then chain, then asset, then slippage, then
-  amount sanity, then deadline. Earlier failures shadow later
-  ones so the operator sees the actionable reason first.
+  (presence/type), then swap-type marker, then chain, then asset,
+  then slippage, then amount sanity, then deadline. Earlier
+  failures shadow later ones so the operator sees the actionable
+  reason first.
   """
   @spec validate(map(), keyword()) :: :ok | {:error, failure()}
   def validate(route, opts \\ [])
@@ -267,6 +282,7 @@ defmodule Bank.Intents.SwapRoute do
     now = Keyword.get(opts, :now, DateTime.utc_now())
 
     with :ok <- validate_required_fields(route),
+         :ok <- validate_swap_type(route),
          :ok <- validate_chain(route, caps),
          :ok <- validate_chain_id(route),
          :ok <- validate_assets(route, caps),
@@ -278,6 +294,33 @@ defmodule Bank.Intents.SwapRoute do
   end
 
   def validate(_not_a_map, _opts), do: {:error, :swap_route_field_missing}
+
+  # -- swap_type marker -----------------------------------------------------
+
+  # The canonical route map has no `swap_type` field — exact-input is
+  # the construction. We still inspect both atom-keyed `:swap_type` and
+  # string-keyed `"swap_type"` because a future quote provider could
+  # grow an exact-output mode and silently extend the route map.
+  # Tolerate explicit `:exact_input` / `"exact_input"` (case-insensitive
+  # on string) as a no-op since they agree with the contract; reject
+  # everything else with a structured reason rather than ignoring it.
+  defp validate_swap_type(route) do
+    with :ok <- check_swap_type_value(Map.get(route, :swap_type)),
+         :ok <- check_swap_type_value(Map.get(route, "swap_type")) do
+      :ok
+    end
+  end
+
+  defp check_swap_type_value(nil), do: :ok
+  defp check_swap_type_value(:exact_input), do: :ok
+
+  defp check_swap_type_value(value) when is_binary(value) do
+    if String.downcase(value) == "exact_input",
+      do: :ok,
+      else: {:error, :swap_type_not_supported}
+  end
+
+  defp check_swap_type_value(_), do: {:error, :swap_type_not_supported}
 
   # -- field presence/shape -------------------------------------------------
 
