@@ -21,6 +21,7 @@ defmodule Bank.Audit.Events do
   alias Bank.APIKeys.APIKey
   alias Bank.Counterparties.{AddressLabel, Counterparty, EvidenceArtifact, TrustAssertion}
   alias Bank.Decisions.{DecisionEnvelope, TrustAssessment, ExecutionPlan, SimulationReport}
+  alias Bank.DefiVenues.Morpho.PersistedVaultSnapshot
   alias Bank.Delegations.Delegation
   alias Bank.Intents.AgentIntent
   alias Bank.Policies.PolicyRule
@@ -213,6 +214,150 @@ defmodule Bank.Audit.Events do
       before_ref: decision_snapshot(prior),
       after_ref: decision_snapshot(successor),
       workspace_id: Keyword.get(opts, :workspace_id)
+    }
+  end
+
+  @doc """
+  `morpho.risk_explained` — Morpho deposit decision pipeline (#203)
+  produced a `Bank.DefiVenues.Morpho.RiskExplanation` for an intent.
+  Fired on every Morpho decision (approval / hold / block alike) so
+  the audit log carries the full structured evidence inline with the
+  decision row, not just the envelope's `reasons` jsonb.
+
+  `after_ref` carries:
+
+    * `morpho_risk_explanation` — full explanation map produced by
+      `Bank.DefiVenues.Morpho.RiskExplanation.explain/3` (the
+      vocabulary is fixed and already-redacted per #201);
+    * `snapshot` — small reference to the persisted vault snapshot
+      (`id`, `chain_id`, `vault_address`, `payload_hash`,
+      `fetched_at`, source name + schema version) — never the raw
+      GraphQL body or any provider secret;
+    * `policy_rule_ids` — the workspace's matched Morpho rule ids,
+      mirroring the envelope's `policy_snapshot_ref.rule_ids`;
+    * `proposed_amount` — the deposit amount the agent requested,
+      in the asset's canonical decimal string form.
+
+  The constructor accepts a `nil` snapshot — the missing-snapshot
+  `:hold` path still emits the event so replay can reconstruct what
+  the engine actually saw.
+  """
+  @spec morpho_risk_explained(
+          AgentIntent.t(),
+          PersistedVaultSnapshot.t() | nil,
+          map(),
+          [String.t()],
+          keyword()
+        ) :: attrs()
+  def morpho_risk_explained(
+        %AgentIntent{} = intent,
+        snapshot,
+        explanation,
+        rule_ids,
+        opts \\ []
+      )
+      when is_map(explanation) and is_list(rule_ids) do
+    %{
+      actor: Keyword.get(opts, :actor, :runtime),
+      event_type: "morpho.risk_explained",
+      subject_type: "agent_intent",
+      subject_id: intent.id,
+      correlation_id: intent.id,
+      after_ref: %{
+        morpho_risk_explanation: explanation,
+        snapshot: morpho_snapshot_ref(snapshot),
+        policy_rule_ids: rule_ids,
+        proposed_amount: decimal_to_string(intent.amount)
+      },
+      workspace_id: intent.workspace_id
+    }
+  end
+
+  @doc """
+  `morpho.policy_blocked` — Morpho deposit decision pipeline routed
+  the intent to `:block`. Subset of `morpho.risk_explained` pinned
+  to the block path so auditors can filter blocked Morpho actions
+  by `event_type` without reading every explanation.
+
+  `after_ref` carries the vault identity, the block-severity reason
+  codes from the explanation's `primary_reasons`, the explanation
+  summary, and the matched policy rule ids. Full explanation lives
+  in the sibling `morpho.risk_explained` event for the same intent.
+  """
+  @spec morpho_policy_blocked(AgentIntent.t(), map(), [String.t()], keyword()) :: attrs()
+  def morpho_policy_blocked(%AgentIntent{} = intent, explanation, rule_ids, opts \\ [])
+      when is_map(explanation) and is_list(rule_ids) do
+    block_codes =
+      explanation
+      |> Map.get("primary_reasons", [])
+      |> Enum.filter(&(Map.get(&1, "severity") == "block"))
+      |> Enum.map(&Map.get(&1, "code"))
+      |> Enum.reject(&is_nil/1)
+
+    %{
+      actor: Keyword.get(opts, :actor, :runtime),
+      event_type: "morpho.policy_blocked",
+      subject_type: "agent_intent",
+      subject_id: intent.id,
+      correlation_id: intent.id,
+      after_ref: %{
+        vault_address: Map.get(explanation, "vault_address"),
+        chain_id: Map.get(explanation, "chain_id"),
+        block_reason_codes: block_codes,
+        summary: Map.get(explanation, "summary"),
+        policy_rule_ids: rule_ids
+      },
+      workspace_id: intent.workspace_id
+    }
+  end
+
+  @doc """
+  `morpho.snapshot_stale` — Morpho deposit decision pipeline saw a
+  persisted vault snapshot whose freshness summary contains at
+  least one `:stale` or `:expired` field. Fired alongside
+  `morpho.risk_explained` whenever the underlying snapshot was not
+  fully fresh, so operators can correlate stale-data warnings to
+  the decisions they shaped.
+
+  Subject is the `morpho_vault_snapshots` row id; `correlation_id`
+  is the intent id so the replay bundle groups the event with the
+  decision it influenced. `after_ref` lists every non-fresh field
+  with its observed state (`stale` or `expired`).
+  """
+  @spec morpho_snapshot_stale(
+          AgentIntent.t(),
+          PersistedVaultSnapshot.t(),
+          %{atom() => atom()},
+          keyword()
+        ) :: attrs()
+  def morpho_snapshot_stale(
+        %AgentIntent{} = intent,
+        %PersistedVaultSnapshot{} = snapshot,
+        freshness,
+        opts \\ []
+      )
+      when is_map(freshness) do
+    stale_fields =
+      freshness
+      |> Enum.filter(fn {_field, state} -> state in [:stale, :expired] end)
+      |> Enum.map(fn {field, state} ->
+        %{field: Atom.to_string(field), state: Atom.to_string(state)}
+      end)
+      |> Enum.sort_by(& &1.field)
+
+    %{
+      actor: Keyword.get(opts, :actor, :runtime),
+      event_type: "morpho.snapshot_stale",
+      subject_type: "morpho_vault_snapshot",
+      subject_id: snapshot.id,
+      correlation_id: intent.id,
+      after_ref: %{
+        vault_address: snapshot.vault_address,
+        chain_id: snapshot.chain_id,
+        fetched_at: DateTime.to_iso8601(snapshot.fetched_at),
+        stale_fields: stale_fields
+      },
+      workspace_id: intent.workspace_id
     }
   end
 
@@ -1761,6 +1906,30 @@ defmodule Bank.Audit.Events do
       state: atom_or_nil(envelope.state),
       approval_expires_at: envelope.approval_expires_at,
       policy_snapshot_ref: envelope.policy_snapshot_ref
+    }
+  end
+
+  # Small reference to a persisted Morpho vault snapshot — id +
+  # public identity + the source-block metadata. Never embeds the
+  # raw GraphQL payload, the upstream URL, the source warnings list,
+  # or any provider secret. The snapshot's `:source` map is
+  # already-redacted at ingestion time (#198/#199); we still take
+  # only the two public fields (`source_name`, `source_schema_version`)
+  # to keep the audit row small and to make the no-secret-leakage
+  # contract obvious to readers.
+  defp morpho_snapshot_ref(nil), do: nil
+
+  defp morpho_snapshot_ref(%PersistedVaultSnapshot{} = s) do
+    source = s.source || %{}
+
+    %{
+      id: s.id,
+      chain_id: s.chain_id,
+      vault_address: s.vault_address,
+      payload_hash: s.payload_hash,
+      fetched_at: s.fetched_at && DateTime.to_iso8601(s.fetched_at),
+      source_name: Map.get(source, "source_name"),
+      source_schema_version: Map.get(source, "source_schema_version")
     }
   end
 

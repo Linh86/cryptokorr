@@ -324,6 +324,7 @@ defmodule Bank.Audit do
       audit: audit,
       screening_evidence: Bank.WalletScreening.Evidence.for_intent(intent),
       stablecoin_route_evidence: stablecoin_route_evidence(audit),
+      morpho_evidence: morpho_evidence(audit),
       matched_activities: Bank.Activity.Reconciliation.match_for_plans(plans)
     }
   end
@@ -337,6 +338,31 @@ defmodule Bank.Audit do
         event.after_ref
     end)
   end
+
+  # Filtered, ordered slice of Morpho-specific audit rows for the
+  # intent (#208). Carries `event_type`, `subject_*`, `ts`, and the
+  # event's `after_ref` so replay readers can render a Morpho
+  # narrative (risk_explained → snapshot_stale → policy_blocked) in
+  # `(ts, id)` order without re-walking the full audit list.
+  # Execution-side events (`morpho.deposit_*`, `morpho.withdraw_*`)
+  # are gated on #206/#207 and will land here automatically once
+  # those issues emit them under the same `morpho.` prefix.
+  defp morpho_evidence(events) do
+    events
+    |> Enum.filter(&morpho_event?/1)
+    |> Enum.map(fn event ->
+      %{
+        event_type: event.event_type,
+        subject_type: event.subject_type,
+        subject_id: event.subject_id,
+        ts: event.ts,
+        after_ref: event.after_ref
+      }
+    end)
+  end
+
+  defp morpho_event?(%{event_type: "morpho." <> _}), do: true
+  defp morpho_event?(_), do: false
 
   # Union of every rule uuid captured in every decision's policy
   # snapshot, resolved to full PolicyRule rows. Order is by insertion
