@@ -437,4 +437,152 @@ defmodule Bank.Notifications.DeliveriesTest do
       assert length(Deliveries.list_preferences(ws_a.id)) == 1
     end
   end
+
+  describe "attempt_delivery/2 — terminal-state guard (#236 P2)" do
+    setup %{workspace: ws} do
+      {:ok, _pref} =
+        Deliveries.set_preference(%{
+          workspace_id: ws.id,
+          role_target: :operator,
+          channel: :email
+        })
+
+      n = build_notification(ws, {:role, :operator})
+      [delivery] = Deliveries.list_deliveries_for(n)
+
+      %{notification: n, delivery: delivery}
+    end
+
+    test "a stale queued struct cannot regress an already-delivered DB row",
+         %{delivery: stale} do
+      now = ~U[2026-05-05 12:00:00.000000Z]
+
+      # Step 1: another caller delivers the row using a fresh
+      # struct loaded from the DB. The DB row transitions to
+      # `:delivered`.
+      fresh = Repo.get!(Delivery, stale.id)
+      assert {:ok, %Delivery{status: :delivered}} = Deliveries.attempt_delivery(fresh, now)
+
+      # Step 2: configure the stub to FAIL on the next call.
+      # If the guard is missing, the stale-struct call would
+      # write `:failed` over the `:delivered` row.
+      Application.put_env(:bank, Bank.Notifications.Channel.Stub,
+        result: {:error, :transport_error}
+      )
+
+      # Step 3: call attempt_delivery/2 with the STALE struct
+      # (still showing `status: :queued`). The guard must
+      # short-circuit and return the current row unchanged.
+      assert stale.status == :queued
+      later = ~U[2026-05-05 12:01:00.000000Z]
+      assert {:ok, returned} = Deliveries.attempt_delivery(stale, later)
+
+      # The returned row reflects the DB, not the stale struct.
+      assert returned.status == :delivered
+      assert returned.id == stale.id
+
+      # And the DB row is still `:delivered`.
+      reloaded = Repo.get!(Delivery, stale.id)
+      assert reloaded.status == :delivered
+      assert reloaded.last_error == nil
+    end
+
+    test "a stale queued/failed struct cannot regress a permanently_failed DB row",
+         %{delivery: stale} do
+      now = ~U[2026-05-05 12:00:00.000000Z]
+
+      # Step 1: drive the row to `:permanently_failed` via a
+      # `:permanent_error` short-circuit on a fresh struct.
+      Application.put_env(:bank, Bank.Notifications.Channel.Stub,
+        result: {:permanent_error, :provider_4xx}
+      )
+
+      fresh = Repo.get!(Delivery, stale.id)
+
+      assert {:ok, %Delivery{status: :permanently_failed}} =
+               Deliveries.attempt_delivery(fresh, now)
+
+      # Step 2: switch the stub to a transient error so a
+      # missing guard would write `:failed` and reset
+      # `attempts`.
+      Application.put_env(:bank, Bank.Notifications.Channel.Stub,
+        result: {:error, :transport_error}
+      )
+
+      # Step 3: stale struct (still `:queued`) — the guard
+      # short-circuits.
+      assert stale.status == :queued
+      later = ~U[2026-05-05 12:01:00.000000Z]
+      assert {:ok, returned} = Deliveries.attempt_delivery(stale, later)
+
+      assert returned.status == :permanently_failed
+      assert returned.id == stale.id
+
+      reloaded = Repo.get!(Delivery, stale.id)
+      assert reloaded.status == :permanently_failed
+      assert reloaded.last_error == :provider_4xx
+    end
+
+    test "calling attempt_delivery/2 directly on an already-terminal struct does not change it",
+         %{delivery: original} do
+      now = ~U[2026-05-05 12:00:00.000000Z]
+
+      # First call: deliver successfully.
+      assert {:ok, %Delivery{status: :delivered} = delivered} =
+               Deliveries.attempt_delivery(original, now)
+
+      # Second call with the terminal struct itself, AND the
+      # stub configured to fail. No-op required.
+      Application.put_env(:bank, Bank.Notifications.Channel.Stub,
+        result: {:error, :transport_error}
+      )
+
+      later = ~U[2026-05-05 12:05:00.000000Z]
+      assert {:ok, returned} = Deliveries.attempt_delivery(delivered, later)
+
+      assert returned.status == :delivered
+      assert returned.id == delivered.id
+      # Idempotent shape: the timestamp from the original
+      # delivery is preserved (no new write).
+      assert returned.delivered_at == delivered.delivered_at
+
+      reloaded = Repo.get!(Delivery, delivered.id)
+      assert reloaded.status == :delivered
+    end
+
+    test "the channel module is NOT called for a terminal row", %{delivery: original} do
+      now = ~U[2026-05-05 12:00:00.000000Z]
+
+      # Drive to `:delivered`.
+      assert {:ok, %Delivery{status: :delivered} = delivered} =
+               Deliveries.attempt_delivery(original, now)
+
+      # Sentinel stub raises if called. The guard must
+      # short-circuit BEFORE the channel module is invoked.
+      Application.put_env(:bank, Bank.Notifications.Channel.Stub,
+        result: {:permanent_error, :raise_if_called}
+      )
+
+      # If the guard correctly skips the channel call, this
+      # `:permanent_error` never lands on the row.
+      later = ~U[2026-05-05 12:05:00.000000Z]
+      assert {:ok, returned} = Deliveries.attempt_delivery(delivered, later)
+
+      assert returned.status == :delivered
+      reloaded = Repo.get!(Delivery, delivered.id)
+      assert reloaded.status == :delivered
+      # `:raise_if_called` would have landed in `last_error`
+      # if the channel had been called.
+      assert reloaded.last_error == nil
+    end
+
+    test "a row that was deleted out from under the caller returns {:error, :not_found}",
+         %{delivery: stale} do
+      now = ~U[2026-05-05 12:00:00.000000Z]
+
+      Repo.delete!(stale)
+
+      assert {:error, :not_found} = Deliveries.attempt_delivery(stale, now)
+    end
+  end
 end
