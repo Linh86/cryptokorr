@@ -476,6 +476,176 @@ defmodule Bank.Notifications.EmitterTest do
     end
   end
 
+  describe "emit_pause_scope_paused/1 (#234)" do
+    setup do
+      suffix = System.unique_integer([:positive])
+
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "pause-emit-#{suffix}",
+          name: "Pause Emit #{suffix}"
+        })
+
+      {:ok, :paused, pause} =
+        Bank.Security.Pauses.create_pause(ws.id, :chain, "base-sepolia",
+          actor: :user,
+          reason: "test pause"
+        )
+
+      %{workspace: ws, pause: pause}
+    end
+
+    test "the pause path itself emits the notification (integration)",
+         %{workspace: ws, pause: pause} do
+      [n] =
+        Notifications.list_for_workspace(ws.id, event_type: "security.scope_paused")
+
+      assert n.workspace_id == ws.id
+      assert n.role_target == :operator
+      assert n.severity == :warning
+      assert n.subject_type == "pause"
+      assert n.subject_id == pause.id
+      assert n.correlation_id == pause.id
+      assert n.action_link == "/security"
+      assert n.dedupe_key == "pause:scope_paused:#{pause.id}"
+      assert n.title =~ "chain:base-sepolia"
+    end
+
+    test "calling the emitter directly is idempotent on the same pause id",
+         %{pause: pause} do
+      # The integration path already inserted one row; re-emitting
+      # collapses to {:duplicate, _} on the dedupe key.
+      assert {:duplicate, _} = Emitter.emit_pause_scope_paused(pause)
+    end
+
+    test "skip when pause has no workspace_id" do
+      partial = %Bank.Security.Pause{
+        id: Ecto.UUID.generate(),
+        workspace_id: nil,
+        scope_type: :chain,
+        scope_value: "base-sepolia"
+      }
+
+      assert {:skip, :no_workspace_id} = Emitter.emit_pause_scope_paused(partial)
+    end
+
+    test "skip when pause is not persisted (id is nil)" do
+      partial = %Bank.Security.Pause{
+        id: nil,
+        workspace_id: Ecto.UUID.generate(),
+        scope_type: :chain,
+        scope_value: "base-sepolia"
+      }
+
+      assert {:skip, :pause_not_persisted} = Emitter.emit_pause_scope_paused(partial)
+    end
+
+    test "free-text reason is NOT threaded into the notification body",
+         %{workspace: ws} do
+      # A second workspace's pause carries a Bearer-marker reason —
+      # the emitter must never reflect that into the inbox payload.
+      {:ok, ws_b} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "pause-leak-#{System.unique_integer([:positive])}",
+          name: "Pause Leak"
+        })
+
+      {:ok, :paused, _pause} =
+        Bank.Security.Pauses.create_pause(ws_b.id, :chain, "base-sepolia",
+          actor: :user,
+          reason: "Authorization: Bearer LEAKED_PROBE"
+        )
+
+      [n] =
+        Notifications.list_for_workspace(ws_b.id, event_type: "security.scope_paused")
+
+      refute n.title =~ "LEAKED_PROBE"
+      refute n.body =~ "LEAKED_PROBE"
+      refute n.body =~ "Bearer"
+      refute n.body =~ "Authorization"
+      # Other workspace untouched.
+      assert length(Notifications.list_for_workspace(ws.id, event_type: "security.scope_paused")) ==
+               1
+    end
+  end
+
+  describe "emit_pause_scope_resumed/1 (#234)" do
+    setup do
+      suffix = System.unique_integer([:positive])
+
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "resume-emit-#{suffix}",
+          name: "Resume Emit #{suffix}"
+        })
+
+      {:ok, :paused, _pause} =
+        Bank.Security.Pauses.create_pause(ws.id, :chain, "base-sepolia", actor: :user)
+
+      {:ok, :resumed, resumed} =
+        Bank.Security.Pauses.resume(ws.id, :chain, "base-sepolia", actor: :user)
+
+      %{workspace: ws, pause: resumed}
+    end
+
+    test "the resume path itself emits an :info notification (integration)",
+         %{workspace: ws, pause: pause} do
+      [n] =
+        Notifications.list_for_workspace(ws.id, event_type: "security.scope_resumed")
+
+      assert n.workspace_id == ws.id
+      assert n.role_target == :operator
+      assert n.severity == :info
+      assert n.subject_type == "pause"
+      assert n.subject_id == pause.id
+      assert n.action_link == "/security"
+      assert n.dedupe_key == "pause:scope_resumed:#{pause.id}"
+      assert n.title =~ "chain:base-sepolia"
+    end
+
+    test "scope_paused and scope_resumed have distinct dedupe keys",
+         %{workspace: ws} do
+      events =
+        Notifications.list_for_workspace(ws.id, status: :all)
+        |> Enum.map(& &1.event_type)
+        |> Enum.sort()
+
+      assert events == ["security.scope_paused", "security.scope_resumed"]
+    end
+
+    test "re-emit collapses to :duplicate on the same pause id",
+         %{pause: pause} do
+      assert {:duplicate, _} = Emitter.emit_pause_scope_resumed(pause)
+    end
+
+    test "skip when pause has no workspace_id" do
+      partial = %Bank.Security.Pause{
+        id: Ecto.UUID.generate(),
+        workspace_id: nil,
+        scope_type: :chain,
+        scope_value: "base-sepolia"
+      }
+
+      assert {:skip, :no_workspace_id} = Emitter.emit_pause_scope_resumed(partial)
+    end
+
+    test "idempotent resume short-circuits BEFORE the emitter runs" do
+      {:ok, ws_b} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "resume-noop-#{System.unique_integer([:positive])}",
+          name: "Resume No-op"
+        })
+
+      # No pause to resume — the Pauses module returns
+      # {:ok, :already_running} without emitting any audit event,
+      # so the emitter must not run either (no inbox row).
+      assert {:ok, :already_running} =
+               Bank.Security.Pauses.resume(ws_b.id, :chain, "base-sepolia", actor: :user)
+
+      assert Notifications.list_for_workspace(ws_b.id) == []
+    end
+  end
+
   describe "emit_decision_outcome/2 — secret hygiene" do
     test "no notification field reflects the intent's free-text fields" do
       # Realistic regression: operators paste secret-shaped values
