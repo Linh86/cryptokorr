@@ -54,7 +54,7 @@ defmodule BankWeb.PolicyBuilderLive do
   use BankWeb, :live_view
 
   alias Bank.Policies
-  alias Bank.Policies.{PolicyRule, PolicyVersion, Versions}
+  alias Bank.Policies.{PolicyRule, PolicyVersion, Simulator, Versions}
   alias BankWeb.LiveAuth
 
   @rule_types ~w(amount_limit rolling_spend_cap allowed_asset allowed_chain autonomy_tier)a
@@ -66,6 +66,9 @@ defmodule BankWeb.PolicyBuilderLive do
      |> assign(:active_page, :policies)
      |> assign(:editing_rule_id, nil)
      |> assign(:rule_form, blank_rule_form())
+     |> assign(:simulator_form, blank_simulator_form())
+     |> assign(:simulator_result, nil)
+     |> assign(:simulator_errors, %{})
      |> load_versions_and_rules()}
   end
 
@@ -92,6 +95,13 @@ defmodule BankWeb.PolicyBuilderLive do
           rules={@draft_rules}
           rule_form={@rule_form}
           editing_rule_id={@editing_rule_id}
+          can_edit?={admin?(@current_scope)}
+        />
+
+        <.simulator_section
+          form={@simulator_form}
+          errors={@simulator_errors}
+          result={@simulator_result}
           can_edit?={admin?(@current_scope)}
         />
       </div>
@@ -564,6 +574,45 @@ defmodule BankWeb.PolicyBuilderLive do
     end)
   end
 
+  # --- handle_event: simulator (#225) ----------------------------------
+
+  def handle_event("validate_simulation", %{"simulation" => params}, socket) do
+    {:noreply,
+     assign(
+       socket,
+       :simulator_form,
+       to_form(simulator_changeset(params), as: :simulation)
+     )}
+  end
+
+  def handle_event("run_simulation", %{"simulation" => params}, socket) do
+    with_admin(socket, fn socket ->
+      ws_id = socket.assigns.current_scope.workspace.id
+
+      case Simulator.simulate(ws_id, params) do
+        {:ok, result} ->
+          {:noreply,
+           socket
+           |> assign(:simulator_result, result)
+           |> assign(:simulator_errors, %{})
+           |> assign(
+             :simulator_form,
+             to_form(simulator_changeset(params), as: :simulation)
+           )}
+
+        {:error, errors} ->
+          {:noreply,
+           socket
+           |> assign(:simulator_result, nil)
+           |> assign(:simulator_errors, errors)
+           |> assign(
+             :simulator_form,
+             to_form(simulator_changeset(params), as: :simulation)
+           )}
+      end
+    end)
+  end
+
   # --- internals: load + build ------------------------------------------
 
   defp load_versions_and_rules(socket) do
@@ -955,5 +1004,215 @@ defmodule BankWeb.PolicyBuilderLive do
       {:error, {:insufficient_role, _}} ->
         {:noreply, put_flash(socket, :error, "Admin role required to modify the policy builder.")}
     end
+  end
+
+  # --- simulator (#225) ----------------------------------------------
+
+  attr :form, :any, required: true
+  attr :errors, :map, required: true
+  attr :result, :any, required: true
+  attr :can_edit?, :boolean, required: true
+
+  defp simulator_section(assigns) do
+    ~H"""
+    <section
+      id="policy-builder-simulator"
+      class="card bg-base-100 shadow-sm border border-base-300"
+    >
+      <div class="card-body space-y-3">
+        <div>
+          <h2 class="card-title">Simulator</h2>
+          <p class="text-sm text-base-content/70">
+            Run a hypothetical intent through the workspace's
+            current draft and current published policy. Pure
+            simulation — nothing is persisted.
+          </p>
+        </div>
+
+        <%= if @can_edit? do %>
+          <.form
+            :let={f}
+            for={@form}
+            id="policy-builder-simulator-form"
+            phx-change="validate_simulation"
+            phx-submit="run_simulation"
+            class="space-y-2"
+          >
+            <.input field={f[:kind]} type="text" label="Intent kind" placeholder="transfer" />
+            <.input field={f[:asset]} type="text" label="Asset" placeholder="USDC" />
+            <.input field={f[:chain]} type="text" label="Chain" placeholder="base" />
+            <.input field={f[:amount]} type="text" label="Amount" placeholder="100" />
+            <.input
+              field={f[:target_counterparty_id]}
+              type="text"
+              label="Counterparty id (optional)"
+            />
+            <.input
+              field={f[:target_raw_address]}
+              type="text"
+              label="Raw target address (optional)"
+            />
+
+            <button
+              id="policy-builder-simulator-run-btn"
+              type="submit"
+              class="btn btn-primary btn-sm"
+            >
+              Run simulation
+            </button>
+          </.form>
+
+          <%= if map_size(@errors) > 0 do %>
+            <div id="policy-builder-simulator-errors" class="alert alert-error text-sm">
+              <ul class="list-disc list-inside">
+                <%= for {field, [msg | _]} <- Enum.sort_by(@errors, &elem(&1, 0)) do %>
+                  <li>{field}: {msg}</li>
+                <% end %>
+              </ul>
+            </div>
+          <% end %>
+        <% else %>
+          <p
+            id="policy-builder-simulator-readonly"
+            class="text-sm italic text-base-content/60"
+          >
+            Admin role required to run the simulator.
+          </p>
+        <% end %>
+
+        <%= if @result do %>
+          <.simulator_result result={@result} />
+        <% end %>
+      </div>
+    </section>
+    """
+  end
+
+  attr :result, :any, required: true
+
+  defp simulator_result(assigns) do
+    ~H"""
+    <div id="policy-builder-simulator-result" class="space-y-3 mt-3">
+      <%= if @result.changed? do %>
+        <div
+          id="policy-builder-simulator-changed-banner"
+          class="alert alert-warning text-sm"
+        >
+          Draft policy would change the outcome compared to the currently published policy.
+        </div>
+      <% else %>
+        <div
+          id="policy-builder-simulator-unchanged-banner"
+          class="alert alert-info text-sm"
+        >
+          Draft and published policies produce the same outcome for this intent.
+        </div>
+      <% end %>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <.simulator_side
+          dom_prefix="policy-builder-simulator-published"
+          label="Published"
+          side={@result.published}
+        />
+        <.simulator_side
+          dom_prefix="policy-builder-simulator-draft"
+          label="Draft"
+          side={@result.draft}
+        />
+      </div>
+    </div>
+    """
+  end
+
+  attr :dom_prefix, :string, required: true
+  attr :label, :string, required: true
+  attr :side, :map, required: true
+
+  defp simulator_side(assigns) do
+    ~H"""
+    <div
+      id={@dom_prefix}
+      class={"card bg-base-200 border #{outcome_border(@side.outcome)}"}
+    >
+      <div class="card-body space-y-2">
+        <h3 class="text-sm font-semibold">{@label}</h3>
+
+        <%= if @side.available? do %>
+          <p id={"#{@dom_prefix}-version"} class="text-xs">
+            <span class="font-mono">v{@side.version.version_number}</span> ({@side.version.status})
+          </p>
+        <% else %>
+          <p id={"#{@dom_prefix}-empty"} class="text-xs italic text-base-content/60">
+            (no version)
+          </p>
+        <% end %>
+
+        <p id={"#{@dom_prefix}-outcome"} class="text-sm font-semibold">
+          Outcome: <span class={"badge #{outcome_badge(@side.outcome)}"}>{@side.outcome}</span>
+        </p>
+
+        <p class="text-xs">
+          Autonomy tier: <span class="font-mono">{@side.autonomy_tier}</span>
+        </p>
+
+        <%= if @side.violations != [] do %>
+          <div id={"#{@dom_prefix}-violations"} class="text-xs">
+            <p class="font-semibold">Violations:</p>
+            <ul class="list-disc list-inside space-y-0.5">
+              <%= for v <- @side.violations do %>
+                <li>
+                  <span class="font-mono">{v.rule_type}</span> — <span>{v.message}</span>
+                </li>
+              <% end %>
+            </ul>
+          </div>
+        <% end %>
+
+        <%= if @side.matched_rule_ids != [] do %>
+          <div id={"#{@dom_prefix}-matched-rules"} class="text-xs">
+            <p class="font-semibold">Matched rules:</p>
+            <ul class="space-y-0.5">
+              <%= for rule_id <- @side.matched_rule_ids do %>
+                <li id={"#{@dom_prefix}-matched-#{rule_id}"}>
+                  <a href={"#policy-builder-published-rule-#{rule_id}"} class="link link-hover">
+                    {rule_id}
+                  </a>
+                </li>
+              <% end %>
+            </ul>
+          </div>
+        <% end %>
+      </div>
+    </div>
+    """
+  end
+
+  defp outcome_badge(:auto_exec), do: "badge-success"
+  defp outcome_badge(:approval_required), do: "badge-warning"
+  defp outcome_badge(:block), do: "badge-error"
+  defp outcome_badge(_), do: "badge-ghost"
+
+  defp outcome_border(:auto_exec), do: "border-success/40"
+  defp outcome_border(:approval_required), do: "border-warning/40"
+  defp outcome_border(:block), do: "border-error/40"
+  defp outcome_border(_), do: "border-base-300"
+
+  defp blank_simulator_form do
+    to_form(simulator_changeset(%{}), as: :simulation)
+  end
+
+  defp simulator_changeset(params) do
+    types = %{
+      kind: :string,
+      asset: :string,
+      chain: :string,
+      amount: :string,
+      target_counterparty_id: :string,
+      target_raw_address: :string
+    }
+
+    {%{}, types}
+    |> Ecto.Changeset.cast(params, Map.keys(types))
   end
 end
