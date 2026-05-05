@@ -50,7 +50,9 @@ defmodule Bank.Runtime.Workers.RunExecution do
     * `{:cancel, reason}` — deterministic terminal:
       `:not_found`, `:not_current`, `{:wrong_outcome, outcome}`,
       `:no_active_plan`, `{:already_dispatched, status}`,
-      `:delegation_not_active`, `:runtime_paused`,
+      `:delegation_not_active`, `:runtime_paused`, `:chain_paused`,
+      `:mainnet_disabled`, `:canary_chain_not_allowed`,
+      `:canary_asset_not_allowed`, `:canary_amount_exceeded`,
       `:target_not_resolvable`, `:adapter_rejected`, `:malformed_args`.
   """
 
@@ -80,6 +82,7 @@ defmodule Bank.Runtime.Workers.RunExecution do
          :ok <- verify_delegation(plan),
          :ok <- verify_not_paused(plan),
          :ok <- verify_mainnet_allowed(plan),
+         :ok <- verify_canary_caps(plan),
          {:ok, claimed} <- claim_or_cancel(plan) do
       dispatch_and_progress(envelope, claimed)
     end
@@ -221,6 +224,39 @@ defmodule Bank.Runtime.Workers.RunExecution do
     else
       abort_for_pause(plan, "mainnet_disabled", :mainnet_disabled)
     end
+  end
+
+  # Capped Base mainnet canary gate (#181). Layered on top of
+  # `verify_mainnet_allowed/1`: a plan that reaches this point has
+  # already cleared the workspace eligibility flag and is on a
+  # mainnet chain (or testnet, in which case the cap module
+  # short-circuits with `:ok`). The cap bounds the first mainnet
+  # broadcast to a documented (chain, asset, amount) tuple — see
+  # `Bank.Chains.CanaryCaps` for the v0.1 defaults and the failure
+  # allowlist (`:canary_chain_not_allowed`,
+  # `:canary_asset_not_allowed`, `:canary_amount_exceeded`).
+  #
+  # On failure: plan is aborted with `final_reason: "canary_<reason>"`,
+  # the worker returns `{:cancel, :canary_<reason>}`, and
+  # `Bank.AdapterClient` is never called. The runbook
+  # `docs/runbooks/base-mainnet-canary.md` documents the operator
+  # response for each failure mode.
+  defp verify_canary_caps(%ExecutionPlan{intent: %AgentIntent{amount: amount}} = plan) do
+    case Bank.Chains.CanaryCaps.validate(plan.chain, plan.asset, amount) do
+      :ok ->
+        :ok
+
+      {:error, reason_atom} ->
+        abort_for_pause(plan, Atom.to_string(reason_atom), reason_atom)
+    end
+  end
+
+  defp verify_canary_caps(%ExecutionPlan{} = plan) do
+    # Defensive fallback — `load_active_plan/1` always preloads
+    # `:intent`, so this clause should be unreachable in production.
+    # If it ever fires (e.g. a future code path that bypasses
+    # `load_active_plan/1`), fail closed.
+    abort_for_pause(plan, "canary_amount_exceeded", :canary_amount_exceeded)
   end
 
   defp abort_for_pause(%ExecutionPlan{} = plan, reason, cancel_tag) do

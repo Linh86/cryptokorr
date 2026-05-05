@@ -137,3 +137,14 @@ config :bank, Bank.RateLimit,
   auth_failure_enabled?: true,
   chain_action_per_window: 10_000,
   chain_action_window_seconds: 60
+
+# Canary caps (#181) — high default in test env so existing
+# `mainnet_enabled: true` fixtures with default $25 USDC plans don't
+# accidentally trip the canary cap at every dispatch worker
+# assertion. Production v0.1 default caps at $10 USDC on `"base"`;
+# tests that exercise the canary-cap behaviour override these via
+# `Application.put_env/3` per case (or pass `:caps` opts to
+# `Bank.Chains.CanaryCaps.validate/4` directly). The cap value is
+# a string here because `Decimal` is not available at config
+# compile time; `Bank.Chains.CanaryCaps.caps/0` normalizes it.
+config :bank, Bank.Chains.CanaryCaps, amount_caps: %{"USDC" => "1000000"}
