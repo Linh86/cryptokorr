@@ -112,6 +112,17 @@ config :bank, Bank.DefiVenues.Morpho.Client,
   base_url: "http://morpho.test",
   req_options: [plug: {Req.Test, Bank.DefiVenues.Morpho.Client}]
 
+# Live quote/simulation provider (#174): Tenderly-style simulate
+# endpoint. The `api_key` and `base_url` are synthetic test values;
+# tests stub per-process via `Req.Test.stub(Bank.Quotes.LiveProvider,
+# fn conn -> ... end)` so no live network call leaks from the test
+# pool. Tests that exercise the missing-config branch override these
+# via `Application.put_env/3`.
+config :bank, Bank.Quotes.LiveProvider,
+  base_url: "http://tenderly.test",
+  api_key: "test-tenderly-api-key",
+  req_options: [plug: {Req.Test, Bank.Quotes.LiveProvider}]
+
 # Auth foundation (epic #153, issue #154): use the deterministic
 # in-process stub instead of calling Google.
 config :bank, Bank.Accounts.OAuthProvider, provider: Bank.Accounts.OAuthProvider.Stub
