@@ -117,6 +117,16 @@ defmodule BankWeb.API.V1.IntentController do
           hint: ~s|the runtime currently accepts only `"base"`|
         )
 
+      {:error, :mainnet_disabled} ->
+        render_error(
+          conn,
+          :unprocessable_entity,
+          "mainnet_disabled",
+          "Base mainnet is not enabled for this workspace",
+          hint:
+            "an admin must opt this workspace into Base mainnet (#178) before submitting mainnet intents"
+        )
+
       {:error, {:unsupported_asset, asset}} ->
         render_error(
           conn,

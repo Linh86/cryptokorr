@@ -255,7 +255,8 @@ defmodule BankWeb.SandboxLiveTest do
       {:ok, sibling_ws} =
         Bank.Workspaces.create_workspace(%{
           slug: "sibling-sandbox-#{System.unique_integer([:positive])}",
-          name: "Sibling"
+          name: "Sibling",
+          mainnet_enabled: true
         })
 
       _rule = policy_rule(workspace_id: sibling_ws.id, state: :active)

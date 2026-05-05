@@ -447,7 +447,8 @@ defmodule Bank.Decisions.EvaluateIntentTest do
       {:ok, workspace} =
         Bank.Workspaces.create_workspace(%{
           slug: "notif-emit-#{suffix}",
-          name: "Notif Emit #{suffix}"
+          name: "Notif Emit #{suffix}",
+          mainnet_enabled: true
         })
 
       %{workspace: workspace}

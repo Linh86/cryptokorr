@@ -76,10 +76,18 @@ defmodule BankWeb.ConnCase do
         name: "Test User #{suffix}"
       })
 
+    # Default the test workspace to mainnet-enabled so existing tests
+    # that use the canonical `chain: "base"` fixture (which is a
+    # mainnet-class chain per `Bank.Chains.mainnet_chains/0`, #178)
+    # keep passing without per-test setup. Tests that exercise the
+    # mainnet gate explicitly create a workspace with
+    # `mainnet_enabled: false` (or call
+    # `Bank.Workspaces.set_mainnet_enabled/2`) to verify rejection.
     {:ok, workspace} =
       Bank.Workspaces.create_workspace(%{
         slug: "test-ws-#{suffix}",
-        name: "Test workspace #{suffix}"
+        name: "Test workspace #{suffix}",
+        mainnet_enabled: true
       })
 
     {:ok, _} =
@@ -170,7 +178,8 @@ defmodule BankWeb.ConnCase do
     {:ok, workspace} =
       Bank.Workspaces.create_workspace(%{
         slug: "ak-test-ws-#{suffix}",
-        name: "API Key Test WS #{suffix}"
+        name: "API Key Test WS #{suffix}",
+        mainnet_enabled: true
       })
 
     # Always grant the user :admin in their workspace so the test

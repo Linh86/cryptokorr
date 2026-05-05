@@ -29,7 +29,8 @@ defmodule Bank.Activity.ReconciliationTest do
     {:ok, ws} =
       Bank.Workspaces.create_workspace(%{
         slug: "recon-#{System.unique_integer([:positive])}",
-        name: "Recon"
+        name: "Recon",
+        mainnet_enabled: true
       })
 
     %{workspace: ws}
@@ -66,7 +67,8 @@ defmodule Bank.Activity.ReconciliationTest do
       {:ok, ws_b} =
         Bank.Workspaces.create_workspace(%{
           slug: "recon-other-#{System.unique_integer([:positive])}",
-          name: "Recon Other"
+          name: "Recon Other",
+          mainnet_enabled: true
         })
 
       plan_a = build_plan(ws_a, tx_refs: [tx_hash], chain: "base")
@@ -213,7 +215,8 @@ defmodule Bank.Activity.ReconciliationTest do
       {:ok, ws_b} =
         Bank.Workspaces.create_workspace(%{
           slug: "recon-sibling-#{System.unique_integer([:positive])}",
-          name: "Recon Sibling"
+          name: "Recon Sibling",
+          mainnet_enabled: true
         })
 
       # Plan is in workspace B; activity is in workspace A.

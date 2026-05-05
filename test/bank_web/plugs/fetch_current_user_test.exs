@@ -84,7 +84,9 @@ defmodule BankWeb.Plugs.FetchCurrentUserTest do
 
   test "valid session with a single active membership auto-selects the workspace", %{conn: conn} do
     user = create_user()
-    {:ok, ws} = Workspaces.create_workspace(%{slug: "alpha", name: "Alpha"})
+
+    {:ok, ws} =
+      Workspaces.create_workspace(%{slug: "alpha", name: "Alpha", mainnet_enabled: true})
 
     {:ok, membership} =
       Workspaces.create_membership(%{
@@ -110,8 +112,12 @@ defmodule BankWeb.Plugs.FetchCurrentUserTest do
     conn: conn
   } do
     user = create_user()
-    {:ok, ws1} = Workspaces.create_workspace(%{slug: "alpha", name: "Alpha"})
-    {:ok, ws2} = Workspaces.create_workspace(%{slug: "bravo", name: "Bravo"})
+
+    {:ok, ws1} =
+      Workspaces.create_workspace(%{slug: "alpha", name: "Alpha", mainnet_enabled: true})
+
+    {:ok, ws2} =
+      Workspaces.create_workspace(%{slug: "bravo", name: "Bravo", mainnet_enabled: true})
 
     {:ok, _} =
       Workspaces.create_membership(%{user_id: user.id, workspace_id: ws1.id, role: :operator})
@@ -134,7 +140,9 @@ defmodule BankWeb.Plugs.FetchCurrentUserTest do
 
   test "inactive memberships do not contribute to the scope", %{conn: conn} do
     user = create_user()
-    {:ok, ws} = Workspaces.create_workspace(%{slug: "alpha", name: "Alpha"})
+
+    {:ok, ws} =
+      Workspaces.create_workspace(%{slug: "alpha", name: "Alpha", mainnet_enabled: true})
 
     {:ok, m} =
       Workspaces.create_membership(%{

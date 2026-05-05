@@ -226,7 +226,12 @@ defmodule BankWeb.API.V1.SecurityControllerTest do
     test "request body workspace_id is silently ignored — current_scope wins",
          %{conn: conn, workspace: ws, current_user: user, raw_api_key: _raw} do
       # Forge another workspace and try to pass it in the body.
-      {:ok, other_ws} = Bank.Workspaces.create_workspace(%{slug: "ws-forge", name: "Forge"})
+      {:ok, other_ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "ws-forge",
+          name: "Forge",
+          mainnet_enabled: true
+        })
 
       conn =
         post(conn, ~p"/v1/security/pause_agent_keys", %{
@@ -390,7 +395,11 @@ defmodule BankWeb.API.V1.SecurityControllerTest do
     test "cross-workspace plan returns 404 not_found",
          %{conn: conn} do
       {:ok, other_ws} =
-        Bank.Workspaces.create_workspace(%{slug: "other-abort-controller", name: "Other"})
+        Bank.Workspaces.create_workspace(%{
+          slug: "other-abort-controller",
+          name: "Other",
+          mainnet_enabled: true
+        })
 
       Process.put(:bank_test_workspace_id, other_ws.id)
       intent = agent_intent(state: :decided, workspace_id: other_ws.id)
@@ -773,7 +782,11 @@ defmodule BankWeb.API.V1.SecurityControllerTest do
     test "sibling workspace's paused chain does not affect this workspace",
          %{conn: conn, workspace: ws} do
       {:ok, sibling} =
-        Bank.Workspaces.create_workspace(%{slug: "sibling-iso", name: "Sibling iso"})
+        Bank.Workspaces.create_workspace(%{
+          slug: "sibling-iso",
+          name: "Sibling iso",
+          mainnet_enabled: true
+        })
 
       {:ok, sibling_user} =
         Bank.Accounts.find_or_create_from_oauth(%{

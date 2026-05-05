@@ -116,6 +116,7 @@ defmodule BankWeb.OpsDashboardLive do
       recent_audit_events(workspace_id, @callback_failure_event_types)
     )
     |> assign(:recent_incidents, recent_audit_events(workspace_id, @incident_event_types))
+    |> assign(:mainnet_enabled?, Bank.Workspaces.mainnet_enabled?(workspace_id))
   end
 
   defp current_workspace_id(socket) do
@@ -209,6 +210,33 @@ defmodule BankWeb.OpsDashboardLive do
             note="Reported via the chain adapter."
           />
           <.quote_provider_card id="ops-health-quotes" providers={@provider_health} />
+        </section>
+
+        <section
+          id="ops-mainnet-eligibility"
+          data-mainnet-enabled={to_string(@mainnet_enabled?)}
+          class="rounded-lg border border-base-300 bg-base-100 p-4"
+        >
+          <h2 class="text-sm font-semibold mb-1">Base mainnet eligibility</h2>
+          <p class="text-xs text-base-content/60 mb-2">
+            Workspace-level gate (#178). When disabled, intents on a mainnet chain
+            (<code>base</code>, <code>ethereum</code>) are rejected before any
+            execution plan or adapter dispatch is created.
+          </p>
+          <p
+            :if={@mainnet_enabled?}
+            id="ops-mainnet-eligibility-status"
+            class="badge badge-warning badge-sm font-mono"
+          >
+            Mainnet enabled
+          </p>
+          <p
+            :if={not @mainnet_enabled?}
+            id="ops-mainnet-eligibility-status"
+            class="badge badge-success badge-sm font-mono"
+          >
+            Mainnet disabled
+          </p>
         </section>
 
         <section class="grid gap-4 lg:grid-cols-2">

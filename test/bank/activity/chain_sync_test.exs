@@ -27,7 +27,8 @@ defmodule Bank.Activity.ChainSyncTest do
     {:ok, ws} =
       Bank.Workspaces.create_workspace(%{
         slug: "chainsync-#{System.unique_integer([:positive])}",
-        name: "ChainSync"
+        name: "ChainSync",
+        mainnet_enabled: true
       })
 
     %{workspace: ws}
@@ -277,7 +278,8 @@ defmodule Bank.Activity.ChainSyncTest do
       {:ok, ws_b} =
         Bank.Workspaces.create_workspace(%{
           slug: "chainsync-iso-#{System.unique_integer([:positive])}",
-          name: "ChainSync ISO B"
+          name: "ChainSync ISO B",
+          mainnet_enabled: true
         })
 
       transfer =
@@ -826,7 +828,8 @@ defmodule Bank.Activity.ChainSyncTest do
       {:ok, ws_b} =
         Bank.Workspaces.create_workspace(%{
           slug: "chainsync-sa-iso-#{System.unique_integer([:positive])}",
-          name: "ChainSync SA ISO"
+          name: "ChainSync SA ISO",
+          mainnet_enabled: true
         })
 
       sa = "sa-iso-#{System.unique_integer([:positive])}"

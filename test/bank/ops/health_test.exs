@@ -344,13 +344,15 @@ defmodule Bank.Ops.HealthTest do
       {:ok, sibling_ws} =
         Bank.Workspaces.create_workspace(%{
           slug: "sibling-starve-#{System.unique_integer([:positive])}",
-          name: "Sibling"
+          name: "Sibling",
+          mainnet_enabled: true
         })
 
       {:ok, current_ws} =
         Bank.Workspaces.create_workspace(%{
           slug: "current-#{System.unique_integer([:positive])}",
-          name: "Current"
+          name: "Current",
+          mainnet_enabled: true
         })
 
       # 12 OLDER sibling-workspace rows that pre-fix would have
@@ -380,7 +382,8 @@ defmodule Bank.Ops.HealthTest do
       {:ok, sibling_ws} =
         Bank.Workspaces.create_workspace(%{
           slug: "sibling-#{System.unique_integer([:positive])}",
-          name: "Sibling"
+          name: "Sibling",
+          mainnet_enabled: true
         })
 
       sibling = stale_plan(:prepared, twenty_min_ago, workspace_id: sibling_ws.id)

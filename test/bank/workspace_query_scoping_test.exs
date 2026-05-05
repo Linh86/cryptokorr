@@ -28,7 +28,9 @@ defmodule Bank.WorkspaceQueryScopingTest do
   alias Bank.Workspaces
 
   defp create_workspace(slug) do
-    {:ok, ws} = Workspaces.create_workspace(%{slug: slug, name: "WS #{slug}"})
+    {:ok, ws} =
+      Workspaces.create_workspace(%{slug: slug, name: "WS #{slug}", mainnet_enabled: true})
+
     ws
   end
 

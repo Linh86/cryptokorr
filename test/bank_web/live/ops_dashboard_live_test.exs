@@ -60,6 +60,31 @@ defmodule BankWeb.OpsDashboardLiveTest do
       assert html =~ ~s(id="ops-stuck-plans")
       assert html =~ ~s(id="ops-callback-failures")
       assert html =~ ~s(id="ops-incidents")
+      assert html =~ ~s(id="ops-mainnet-eligibility")
+    end
+
+    # #178 acceptance: "Admin/operator can see mainnet disabled
+    # status." The dashboard surfaces a per-workspace badge with
+    # `data-mainnet-enabled="true|false"` so an operator can
+    # confirm the gate posture at a glance.
+    test "renders the mainnet eligibility section reflecting the workspace flag",
+         %{conn: conn, workspace: ws} do
+      # `register_and_log_in_user` flips mainnet_enabled=true on
+      # the test workspace fixture (#178). Confirm the badge
+      # reflects that state.
+      {:ok, _view, html_on} = live(conn, "/ops")
+
+      assert html_on =~ ~s(id="ops-mainnet-eligibility")
+      assert html_on =~ ~s(data-mainnet-enabled="true")
+      assert html_on =~ "Mainnet enabled"
+
+      # Flip the workspace flag off and confirm the badge updates
+      # on the next mount.
+      {:ok, _ws} = Bank.Workspaces.set_mainnet_enabled(ws, false)
+
+      {:ok, _view, html_off} = live(conn, "/ops")
+      assert html_off =~ ~s(data-mainnet-enabled="false")
+      assert html_off =~ "Mainnet disabled"
     end
 
     test "discarded job fixture is visible in the failed-jobs section", %{conn: conn} do

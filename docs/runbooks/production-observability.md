@@ -322,6 +322,85 @@ leaked notification row.
 | Alert delivery | Inbox rows only — no Slack / paging webhook is wired in CI | A Slack channel (`#bank-alerts`) and an Alertmanager → Slack webhook are the alpha targets. Paging integration (PagerDuty / OpsGenie) is deferred until a formal on-call rotation exists. See `monitoring.md` |
 | Stuck-plan thresholds | Same defaults as staging (`:prepared` 600 s, `:signing` 300 s, `:broadcasting` 600 s, `:pending_confirmation` 1800 s); tunable per-env via `config :bank, Bank.Ops.Health, stuck_plan_thresholds: [...]` | Same defaults; tune up if a bundler legitimately takes longer |
 | Chain broadcast | Never in CI | Real chain. Pause/revoke gates apply |
+| Mainnet eligibility (#178) | `mainnet_enabled` defaults `false` on every fresh workspace; the seeded `sandbox-demo` workspace and the `register_and_log_in_user` test fixture flip it to `true` for ergonomics | Defaults `false` in production. An admin must explicitly call `Bank.Workspaces.set_mainnet_enabled/2` to opt a workspace into Base mainnet (chain `"base"`). Testnet (`"base-sepolia"`) is unaffected by the flag |
+
+## Base mainnet feature gate (#178)
+
+The runtime ships an explicit, fail-closed gate against accidental
+Base mainnet operation. The gate is anchored on a single workspace
+boolean — `Bank.Workspaces.Workspace.mainnet_enabled` — and
+consulted from every chain-touching boundary in the request /
+worker pipeline.
+
+### Classification
+
+`Bank.Chains` is the single source of truth for which chain
+strings are mainnet-class:
+
+- `mainnet_chains/0` → `["base", "ethereum"]`
+- `testnet_chains/0` → `["base-sepolia", "sepolia", "goerli"]`
+- `classify/1` returns `:mainnet | :testnet | :unknown`
+- `mainnet_allowed_for?(chain, workspace_id)` is the canonical
+  predicate every gate calls; testnet and unknown chains pass
+  through, mainnet chains require `mainnet_enabled: true`.
+
+### Where the gate fires
+
+The gate is layered defensively. Any single layer is sufficient to
+fail closed; together they ensure no mainnet broadcast can leak
+through a code path that bypasses the others.
+
+| Layer | Boundary | Failure shape |
+| --- | --- | --- |
+| `Bank.Intents.submit/2` | Intent submission (controller calls in) | `{:error, :mainnet_disabled}` — controller renders 422 with code `mainnet_disabled` (no DB row written) |
+| `Bank.Decisions.create_execution_plan/3` | Decision pipeline (auto / manual execute) | `{:error, :mainnet_disabled}` propagated by `request_manual_execution/3` and `dispatch_auto_exec/3`; held-reason atom surfaces as `dispatch held (mainnet_disabled)` in the queue (no execution plan row written) |
+| `Bank.Runtime.Workers.RunExecution` | Dispatch worker — defense in depth before adapter call | `{:cancel, :mainnet_disabled}` — plan moves to `:aborted` with `final_reason: "mainnet_disabled"`; adapter is never called |
+| `Bank.Security.revoke_delegation/2` | Synchronous revoke entrypoint | `{:error, :mainnet_disabled}` returned to controller; renders 422 with code `mainnet_disabled` |
+| `Bank.Runtime.Workers.RevokeDelegation` | Revoke worker — defense in depth | `{:cancel, :mainnet_disabled}` — adapter is never called; the projection write that already landed in `Security.revoke_delegation/2` stands |
+| `BankWeb.API.V1.ConnectController.request/2` | Browser smart-account connect (`chain_id == 8453`) | 422 with code `mainnet_disabled`; no audit row, no grant worker enqueued |
+| `BankWeb.API.V1.DecisionController.execute/2` | Manual execute endpoint | 422 with code `mainnet_disabled` |
+
+A `nil` workspace_id is treated as a legacy unscoped path and
+passes through every gate — mirrors the precedent set by
+`Bank.Decisions.validate_not_paused/2`. Every production
+chain-touching boundary carries a workspace_id, so this fallback
+exists only for transitional and admin-bootstrap callers.
+
+### Operator visibility
+
+The `/ops` operator dashboard renders a per-workspace mainnet
+eligibility badge (`#ops-mainnet-eligibility`) with a
+`data-mainnet-enabled="true|false"` attribute. The badge is
+green when the flag is **disabled** (the safe default) and amber
+when it has been flipped on, so a paged operator can confirm
+the gate posture in one glance. A workspace operator with
+membership at role `:operator`+ can read the status; flipping
+the flag is admin-only and goes through
+`Bank.Workspaces.set_mainnet_enabled/2`.
+
+### Held-reason vocabulary
+
+`:mainnet_disabled` joins the existing decision-pipeline held
+reasons (`:no_executable_account`, `:ambiguous_executable_account`,
+`:runtime_paused`, `:active_plan_exists`, `:delegation_not_active`,
+`:stablecoin_adapter_not_wired`, `:chain_paused`). Operator UI
+surfaces it generically via the queue page's
+`Approval recorded; dispatch held (mainnet_disabled)` flash and the
+controllers' explicit `mainnet_disabled` error code.
+
+### What the gate does NOT do
+
+- It does **not** restrict chain identifiers beyond Base mainnet
+  vs Base Sepolia. A future "Ethereum mainnet" addition needs to
+  appear in `Bank.Chains.mainnet_chains/0` and may also need
+  product-level review.
+- It does **not** enforce the on-chain `chain_id`
+  (8453 vs 84532) — that's the adapter's responsibility, gated
+  separately in `Bank.Delegations.Provisioning`.
+- It does **not** retroactively re-evaluate already-broadcast
+  plans. A plan that successfully dispatched on a workspace with
+  `mainnet_enabled: true` continues to live-cycle through
+  callbacks even if the flag is later flipped off.
 
 ## Local smoke
 

@@ -545,7 +545,8 @@ defmodule Bank.Decisions.ReportTest do
       {:ok, ws_b} =
         Bank.Workspaces.create_workspace(%{
           slug: "report-iso-#{System.unique_integer([:positive])}",
-          name: "Report iso B"
+          name: "Report iso B",
+          mainnet_enabled: true
         })
 
       cp_b = counterparty(workspace_id: ws_b.id)
@@ -606,7 +607,8 @@ defmodule Bank.Decisions.ReportTest do
       {:ok, ws} =
         Bank.Workspaces.create_workspace(%{
           slug: "report-recon-#{System.unique_integer([:positive])}",
-          name: "Report Recon"
+          name: "Report Recon",
+          mainnet_enabled: true
         })
 
       tx_hash = "0xreport-match-" <> String.duplicate("a", 30)
@@ -666,7 +668,8 @@ defmodule Bank.Decisions.ReportTest do
       {:ok, ws} =
         Bank.Workspaces.create_workspace(%{
           slug: "report-recon-json-#{System.unique_integer([:positive])}",
-          name: "Report Recon JSON"
+          name: "Report Recon JSON",
+          mainnet_enabled: true
         })
 
       tx_hash = "0xjson-match-" <> String.duplicate("b", 32)
@@ -724,7 +727,8 @@ defmodule Bank.Decisions.ReportTest do
       {:ok, ws} =
         Bank.Workspaces.create_workspace(%{
           slug: "report-history-#{System.unique_integer([:positive])}",
-          name: "Report History"
+          name: "Report History",
+          mainnet_enabled: true
         })
 
       intent = agent_intent(workspace_id: ws.id)
@@ -831,7 +835,8 @@ defmodule Bank.Decisions.ReportTest do
       {:ok, ws} =
         Bank.Workspaces.create_workspace(%{
           slug: "report-history-single-#{System.unique_integer([:positive])}",
-          name: "Report History Single"
+          name: "Report History Single",
+          mainnet_enabled: true
         })
 
       intent = agent_intent(workspace_id: ws.id)
@@ -860,7 +865,8 @@ defmodule Bank.Decisions.ReportTest do
       {:ok, ws} =
         Bank.Workspaces.create_workspace(%{
           slug: "report-history-safe-#{System.unique_integer([:positive])}",
-          name: "Report History Safe"
+          name: "Report History Safe",
+          mainnet_enabled: true
         })
 
       intent = agent_intent(workspace_id: ws.id)

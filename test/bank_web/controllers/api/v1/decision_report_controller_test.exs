@@ -353,7 +353,8 @@ defmodule BankWeb.API.V1.DecisionReportControllerTest do
     {:ok, ws_b} =
       Bank.Workspaces.create_workspace(%{
         slug: "ak-other-ws-#{suffix}",
-        name: "API Key Test Other WS #{suffix}"
+        name: "API Key Test Other WS #{suffix}",
+        mainnet_enabled: true
       })
 
     {:ok, _} =

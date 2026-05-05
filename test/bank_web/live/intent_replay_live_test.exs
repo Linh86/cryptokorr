@@ -38,7 +38,8 @@ defmodule BankWeb.IntentReplayLiveTest do
       {:ok, ws_b} =
         Bank.Workspaces.create_workspace(%{
           slug: "iso-replay-b-#{System.unique_integer([:positive])}",
-          name: "Replay sibling"
+          name: "Replay sibling",
+          mainnet_enabled: true
         })
 
       cp_b = counterparty(workspace_id: ws_b.id)
@@ -275,7 +276,8 @@ defmodule BankWeb.IntentReplayLiveTest do
       {:ok, ws_b} =
         Bank.Workspaces.create_workspace(%{
           slug: "iso-report-b-#{System.unique_integer([:positive])}",
-          name: "Report sibling"
+          name: "Report sibling",
+          mainnet_enabled: true
         })
 
       cp_b = counterparty(workspace_id: ws_b.id)

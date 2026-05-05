@@ -1216,6 +1216,7 @@ defmodule Bank.Decisions do
          :ok <- validate_no_active_plan(envelope.id),
          :ok <- validate_stablecoin_adapter_ready(envelope),
          :ok <- validate_not_paused(workspace_id, chain),
+         :ok <- Bank.Chains.validate_mainnet_allowed(chain, workspace_id),
          :ok <- validate_delegation_active(smart_account_id) do
       reason = Keyword.get(opts, :reason, default_reason_for(source))
 

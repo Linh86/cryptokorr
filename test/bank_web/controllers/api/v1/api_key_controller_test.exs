@@ -47,7 +47,7 @@ defmodule BankWeb.API.V1.APIKeyControllerTest do
          %{conn: conn, workspace: ws_a, current_user: user_a} do
       # Other workspace + user, NOT visible from the conn-attached one.
       {:ok, ws_b} =
-        Workspaces.create_workspace(%{slug: "isolate", name: "Other"})
+        Workspaces.create_workspace(%{slug: "isolate", name: "Other", mainnet_enabled: true})
 
       {:ok, _} =
         Workspaces.create_membership(%{user_id: user_a.id, workspace_id: ws_b.id, role: :admin})
@@ -80,7 +80,8 @@ defmodule BankWeb.API.V1.APIKeyControllerTest do
     end
 
     test "200 for an owner key (role hierarchy admits owner above admin)" do
-      {:ok, ws} = Workspaces.create_workspace(%{slug: "owner-ws", name: "Owner WS"})
+      {:ok, ws} =
+        Workspaces.create_workspace(%{slug: "owner-ws", name: "Owner WS", mainnet_enabled: true})
 
       {:ok, owner} =
         Bank.Accounts.find_or_create_from_oauth(%{
@@ -160,7 +161,12 @@ defmodule BankWeb.API.V1.APIKeyControllerTest do
       # A regression that switched to `current_scope.user.id`
       # (always nil for API auth) or to a request-body field would
       # surface as a wrong actor here.
-      {:ok, ws} = Workspaces.create_workspace(%{slug: "actor-pin", name: "Actor Pin"})
+      {:ok, ws} =
+        Workspaces.create_workspace(%{
+          slug: "actor-pin",
+          name: "Actor Pin",
+          mainnet_enabled: true
+        })
 
       {:ok, alice} =
         Bank.Accounts.find_or_create_from_oauth(%{
@@ -214,7 +220,12 @@ defmodule BankWeb.API.V1.APIKeyControllerTest do
     end
 
     test "owner CAN mint an owner key" do
-      {:ok, ws} = Workspaces.create_workspace(%{slug: "owner-mint", name: "Owner Mint"})
+      {:ok, ws} =
+        Workspaces.create_workspace(%{
+          slug: "owner-mint",
+          name: "Owner Mint",
+          mainnet_enabled: true
+        })
 
       {:ok, owner} =
         Bank.Accounts.find_or_create_from_oauth(%{
@@ -301,7 +312,8 @@ defmodule BankWeb.API.V1.APIKeyControllerTest do
 
     test "404 (NOT 403) when admin in WS-A targets a key in WS-B (workspace isolation)",
          %{conn: conn, current_user: user_a} do
-      {:ok, ws_b} = Workspaces.create_workspace(%{slug: "del-iso", name: "Other"})
+      {:ok, ws_b} =
+        Workspaces.create_workspace(%{slug: "del-iso", name: "Other", mainnet_enabled: true})
 
       {:ok, _} =
         Workspaces.create_membership(%{user_id: user_a.id, workspace_id: ws_b.id, role: :admin})
@@ -438,7 +450,8 @@ defmodule BankWeb.API.V1.APIKeyControllerTest do
 
     test "404 (NOT 403) for cross-workspace rotation",
          %{conn: conn, current_user: user_a} do
-      {:ok, ws_b} = Workspaces.create_workspace(%{slug: "rot-iso", name: "Other"})
+      {:ok, ws_b} =
+        Workspaces.create_workspace(%{slug: "rot-iso", name: "Other", mainnet_enabled: true})
 
       {:ok, _} =
         Workspaces.create_membership(%{user_id: user_a.id, workspace_id: ws_b.id, role: :admin})

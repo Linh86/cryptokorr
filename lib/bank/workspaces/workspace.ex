@@ -29,6 +29,23 @@ defmodule Bank.Workspaces.Workspace do
   can still resume a paused workspace from `/security` even when
   every API key is paused. Pure-API-key bootstraps lose access — see
   the limitation note in `Bank.APIKeys`.
+
+  ## Base mainnet eligibility (#178)
+
+  One boolean column on `workspaces`:
+
+    * `mainnet_enabled :boolean default false not null` — `false`
+      means the workspace cannot run intents on a mainnet chain
+      (`Bank.Chains.mainnet_chains/0`). The runtime, dispatch
+      worker, and intent controller all consult
+      `Bank.Workspaces.mainnet_enabled?/1` and fail closed with a
+      `:mainnet_disabled` held reason when the chain is mainnet
+      and the flag is not set. Default `false` makes "mainnet
+      disabled" the always-on safety posture.
+
+  The flag is set via `mainnet_changeset/2`, kept apart from the
+  user-editable `changeset/2` (slug/name) the same way
+  `pause_changeset/2` is separated from generic edits.
   """
 
   use Bank.Schema
@@ -49,15 +66,27 @@ defmodule Bank.Workspaces.Workspace do
       foreign_key: :agent_keys_paused_by_user_id,
       type: :binary_id
 
+    field :mainnet_enabled, :boolean, default: false
+
     has_many :memberships, Membership
 
     timestamps()
   end
 
-  @doc "Changeset for creating or renaming a workspace."
+  @doc """
+  Changeset for creating or renaming a workspace.
+
+  `:mainnet_enabled` is intentionally castable here so test fixtures
+  and admin bootstraps can stamp the flag at creation time. The
+  schema default is `false` (#178), so production code that does not
+  pass the field gets the safe default. Any change to this field
+  during the lifetime of an existing workspace must go through
+  `mainnet_changeset/2` instead — that path emits a separate audit
+  trail for the security-relevant flip.
+  """
   def changeset(workspace, attrs) do
     workspace
-    |> cast(attrs, [:slug, :name])
+    |> cast(attrs, [:slug, :name, :mainnet_enabled])
     |> validate_required([:slug, :name])
     |> update_change(:slug, &normalise_slug/1)
     |> validate_format(:slug, ~r/^[a-z0-9][a-z0-9_-]{0,62}$/,
@@ -88,6 +117,28 @@ defmodule Bank.Workspaces.Workspace do
   @spec agent_keys_paused?(t()) :: boolean()
   def agent_keys_paused?(%__MODULE__{agent_keys_paused_at: %DateTime{}}), do: true
   def agent_keys_paused?(%__MODULE__{}), do: false
+
+  @doc """
+  Changeset for the Base mainnet eligibility flip (#178).
+
+  Separate from `changeset/2` because mainnet enablement is an
+  admin-only security decision, not a user-editable workspace
+  attribute. The slug/name `validate_required` from `changeset/2`
+  would reject a pure mainnet-flag update and the audit posture
+  is also different (mainnet flips warrant their own audit
+  events, slug renames don't).
+  """
+  @spec mainnet_changeset(t(), map()) :: Ecto.Changeset.t()
+  def mainnet_changeset(workspace, attrs) do
+    workspace
+    |> cast(attrs, [:mainnet_enabled])
+    |> validate_required([:mainnet_enabled])
+  end
+
+  @doc "True iff this workspace has mainnet eligibility explicitly enabled."
+  @spec mainnet_enabled?(t()) :: boolean()
+  def mainnet_enabled?(%__MODULE__{mainnet_enabled: true}), do: true
+  def mainnet_enabled?(%__MODULE__{}), do: false
 
   defp normalise_slug(slug) when is_binary(slug),
     do: slug |> String.trim() |> String.downcase()

@@ -43,7 +43,11 @@ defmodule Bank.DelegationsTest do
 
     test "stamps workspace_id from attrs when supplied (#158d-c)" do
       {:ok, ws} =
-        Bank.Workspaces.create_workspace(%{slug: "grant-stamp", name: "Grant stamp"})
+        Bank.Workspaces.create_workspace(%{
+          slug: "grant-stamp",
+          name: "Grant stamp",
+          mainnet_enabled: true
+        })
 
       assert {:ok, record} =
                Delegations.grant("sa_grant_ws", "del_grant_ws", %{workspace_id: ws.id})
@@ -58,7 +62,11 @@ defmodule Bank.DelegationsTest do
 
     test "subsequent delegation.state_changed audit event inherits workspace_id from the row" do
       {:ok, ws} =
-        Bank.Workspaces.create_workspace(%{slug: "grant-audit", name: "Grant audit"})
+        Bank.Workspaces.create_workspace(%{
+          slug: "grant-audit",
+          name: "Grant audit",
+          mainnet_enabled: true
+        })
 
       {:ok, granted} =
         Delegations.grant("sa_grant_audit", "del_grant_audit", %{workspace_id: ws.id})
@@ -567,7 +575,11 @@ defmodule Bank.DelegationsTest do
       # the construction here: even if the HTTP body carries a
       # `workspace_id`, the resulting row stays unscoped.
       {:ok, ws} =
-        Bank.Workspaces.create_workspace(%{slug: "forge-guard", name: "Forge guard"})
+        Bank.Workspaces.create_workspace(%{
+          slug: "forge-guard",
+          name: "Forge guard",
+          mainnet_enabled: true
+        })
 
       assert {:ok, delegation} =
                Delegations.apply_callback(%{

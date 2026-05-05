@@ -16,7 +16,8 @@ defmodule Bank.ActivityTest do
     {:ok, ws} =
       Bank.Workspaces.create_workspace(%{
         slug: "activity-#{System.unique_integer([:positive])}",
-        name: "Activity"
+        name: "Activity",
+        mainnet_enabled: true
       })
 
     %{workspace: ws}
@@ -193,7 +194,8 @@ defmodule Bank.ActivityTest do
       {:ok, ws_b} =
         Bank.Workspaces.create_workspace(%{
           slug: "activity-sib-#{System.unique_integer([:positive])}",
-          name: "Sibling"
+          name: "Sibling",
+          mainnet_enabled: true
         })
 
       _b_row =
@@ -210,7 +212,8 @@ defmodule Bank.ActivityTest do
       {:ok, ws_b} =
         Bank.Workspaces.create_workspace(%{
           slug: "activity-sib-dup-#{System.unique_integer([:positive])}",
-          name: "Sibling"
+          name: "Sibling",
+          mainnet_enabled: true
         })
 
       # Pin `occurred_at` so both attrs maps hash to the same
@@ -237,7 +240,8 @@ defmodule Bank.ActivityTest do
       {:ok, ws_b} =
         Bank.Workspaces.create_workspace(%{
           slug: "activity-sib-get-#{System.unique_integer([:positive])}",
-          name: "Sibling"
+          name: "Sibling",
+          mainnet_enabled: true
         })
 
       {:ok, :inserted, row_a} =

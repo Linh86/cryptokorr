@@ -423,7 +423,11 @@ defmodule Bank.Runtime.Workers.RunExecutionTest do
 
     test "chain pause aborts before adapter dispatch with reason chain_paused (#228 phase 1)" do
       {:ok, ws} =
-        Bank.Workspaces.create_workspace(%{slug: "rx-chain-a", name: "RX chain A"})
+        Bank.Workspaces.create_workspace(%{
+          slug: "rx-chain-a",
+          name: "RX chain A",
+          mainnet_enabled: true
+        })
 
       %{decision: decision, plan: plan, intent: intent} = scenario_for_workspace(ws.id)
 
@@ -447,10 +451,18 @@ defmodule Bank.Runtime.Workers.RunExecutionTest do
 
     test "sibling workspace's chain pause does not abort this plan (#228 phase 1)" do
       {:ok, ws_a} =
-        Bank.Workspaces.create_workspace(%{slug: "rx-iso-a", name: "RX iso A"})
+        Bank.Workspaces.create_workspace(%{
+          slug: "rx-iso-a",
+          name: "RX iso A",
+          mainnet_enabled: true
+        })
 
       {:ok, ws_b} =
-        Bank.Workspaces.create_workspace(%{slug: "rx-iso-b", name: "RX iso B"})
+        Bank.Workspaces.create_workspace(%{
+          slug: "rx-iso-b",
+          name: "RX iso B",
+          mainnet_enabled: true
+        })
 
       %{decision: decision, plan: plan} = scenario_for_workspace(ws_b.id)
 
@@ -466,7 +478,11 @@ defmodule Bank.Runtime.Workers.RunExecutionTest do
 
     test "global pause precedence preserved (still aborts with runtime_paused)" do
       {:ok, ws} =
-        Bank.Workspaces.create_workspace(%{slug: "rx-precedence", name: "RX precedence"})
+        Bank.Workspaces.create_workspace(%{
+          slug: "rx-precedence",
+          name: "RX precedence",
+          mainnet_enabled: true
+        })
 
       %{decision: decision, plan: plan} = scenario_for_workspace(ws.id)
 
@@ -566,7 +582,8 @@ defmodule Bank.Runtime.Workers.RunExecutionTest do
       {:ok, ws} =
         Bank.Workspaces.create_workspace(%{
           slug: "abort-race-#{System.unique_integer([:positive])}",
-          name: "Abort Race"
+          name: "Abort Race",
+          mainnet_enabled: true
         })
 
       Process.put(:bank_test_workspace_id, ws.id)

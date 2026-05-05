@@ -20,7 +20,8 @@ defmodule Bank.Runtime.Workers.ScanStuckPlansTest do
     {:ok, ws} =
       Bank.Workspaces.create_workspace(%{
         slug: "scan-stuck-#{System.unique_integer([:positive])}",
-        name: "Scan Stuck"
+        name: "Scan Stuck",
+        mainnet_enabled: true
       })
 
     Process.put(:bank_test_workspace_id, ws.id)

@@ -37,21 +37,35 @@ defmodule Bank.WorkspacesTest do
 
   describe "create_workspace/1" do
     test "creates a workspace and lower-cases the slug" do
-      assert {:ok, ws} = Workspaces.create_workspace(%{slug: "Treasury-A", name: "Treasury A"})
+      assert {:ok, ws} =
+               Workspaces.create_workspace(%{
+                 slug: "Treasury-A",
+                 name: "Treasury A",
+                 mainnet_enabled: true
+               })
+
       assert ws.slug == "treasury-a"
       assert ws.name == "Treasury A"
     end
 
     test "rejects slugs with spaces or upper-case mid-word" do
       assert {:error, changeset} =
-               Workspaces.create_workspace(%{slug: "treasury A", name: "Treasury A"})
+               Workspaces.create_workspace(%{
+                 slug: "treasury A",
+                 name: "Treasury A",
+                 mainnet_enabled: true
+               })
 
       assert errors_on(changeset)[:slug]
     end
 
     test "rejects duplicate slugs case-insensitively" do
-      assert {:ok, _} = Workspaces.create_workspace(%{slug: "ops", name: "Ops"})
-      assert {:error, changeset} = Workspaces.create_workspace(%{slug: "OPS", name: "Ops 2"})
+      assert {:ok, _} =
+               Workspaces.create_workspace(%{slug: "ops", name: "Ops", mainnet_enabled: true})
+
+      assert {:error, changeset} =
+               Workspaces.create_workspace(%{slug: "OPS", name: "Ops 2", mainnet_enabled: true})
+
       assert errors_on(changeset)[:slug]
     end
   end

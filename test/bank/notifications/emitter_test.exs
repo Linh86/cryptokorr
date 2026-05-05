@@ -23,7 +23,8 @@ defmodule Bank.Notifications.EmitterTest do
     {:ok, workspace} =
       Bank.Workspaces.create_workspace(%{
         slug: "emitter-test-#{suffix}",
-        name: "Emitter Test #{suffix}"
+        name: "Emitter Test #{suffix}",
+        mainnet_enabled: true
       })
 
     # Bank.Fixtures.agent_intent/1 reads :bank_test_workspace_id
@@ -151,7 +152,8 @@ defmodule Bank.Notifications.EmitterTest do
       {:ok, ws_b} =
         Bank.Workspaces.create_workspace(%{
           slug: "sibling-#{System.unique_integer([:positive])}",
-          name: "Sibling"
+          name: "Sibling",
+          mainnet_enabled: true
         })
 
       intent_b = agent_intent(workspace_id: ws_b.id)
@@ -323,7 +325,8 @@ defmodule Bank.Notifications.EmitterTest do
       {:ok, ws_b} =
         Bank.Workspaces.create_workspace(%{
           slug: "exec-iso-#{System.unique_integer([:positive])}",
-          name: "Sibling exec"
+          name: "Sibling exec",
+          mainnet_enabled: true
         })
 
       intent_b = agent_intent(workspace_id: ws_b.id)
@@ -399,7 +402,8 @@ defmodule Bank.Notifications.EmitterTest do
       {:ok, ws} =
         Bank.Workspaces.create_workspace(%{
           slug: "access-approve-#{suffix}",
-          name: "Access Approve #{suffix}"
+          name: "Access Approve #{suffix}",
+          mainnet_enabled: true
         })
 
       {:ok, membership} =
