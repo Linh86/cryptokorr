@@ -9,7 +9,7 @@ defmodule Bank.Quotes.LiveProviderTest do
   import ExUnit.CaptureLog
 
   alias Bank.Fixtures
-  alias Bank.Quotes.{LiveProvider, Preview}
+  alias Bank.Quotes.{LiveProvider, Persistence, Preview}
 
   @api_key_under_test "test-tenderly-api-key"
   @base_url_under_test "http://tenderly.test"
@@ -478,6 +478,223 @@ defmodule Bank.Quotes.LiveProviderTest do
       refute blob =~ @api_key_under_test
       refute blob =~ @base_url_under_test
       refute blob =~ ~r/authorization|bearer/i
+    end
+  end
+
+  describe "secret hygiene — upstream-supplied trace_id / route / failure_conditions are sanitized (#174 P2)" do
+    # Backstop for #174 P2: the upstream provider response is
+    # untrusted. Even though log redaction (above) already prevents
+    # secret leakage to stderr, a malicious or buggy upstream can
+    # still smuggle markers through `trace_id` / `route` /
+    # `failure_conditions` into the `%Preview{}` and onto the
+    # persisted `simulation_reports` row. These cases prove the
+    # provider drops or redacts each marker before it reaches the
+    # Preview struct or the persistence attrs.
+
+    test "trace_id carrying Authorization: Bearer is dropped (provider_trace_ref nil)" do
+      Req.Test.stub(LiveProvider, fn conn ->
+        Req.Test.json(
+          conn,
+          success_body(%{"trace_id" => "Authorization: Bearer sk_live_abcdef"})
+        )
+      end)
+
+      assert {:ok, %Preview{provider_trace_ref: nil}} = LiveProvider.preview(intent!())
+    end
+
+    test "trace_id carrying sk_live_ key marker is dropped" do
+      Req.Test.stub(LiveProvider, fn conn ->
+        Req.Test.json(conn, success_body(%{"trace_id" => "trace-sk_live_abc"}))
+      end)
+
+      assert {:ok, %Preview{provider_trace_ref: nil}} = LiveProvider.preview(intent!())
+    end
+
+    test "trace_id carrying sk_test_ / pk_live_ / pk_test_ markers is dropped" do
+      for marker <- ["sk_test_abc", "pk_live_abc", "pk_test_abc"] do
+        Req.Test.stub(LiveProvider, fn conn ->
+          Req.Test.json(conn, success_body(%{"trace_id" => "trace-#{marker}"}))
+        end)
+
+        assert {:ok, %Preview{provider_trace_ref: nil}} = LiveProvider.preview(intent!()),
+               "expected trace_id carrying #{marker} to be dropped"
+      end
+    end
+
+    test "trace_id carrying credentialed URL is dropped" do
+      Req.Test.stub(LiveProvider, fn conn ->
+        Req.Test.json(
+          conn,
+          success_body(%{"trace_id" => "trace-https://user:pass@example.com"})
+        )
+      end)
+
+      assert {:ok, %Preview{provider_trace_ref: nil}} = LiveProvider.preview(intent!())
+    end
+
+    test "trace_id carrying PEM private-key marker is dropped" do
+      Req.Test.stub(LiveProvider, fn conn ->
+        Req.Test.json(
+          conn,
+          success_body(%{"trace_id" => "-----BEGIN RSA PRIVATE KEY-----abc"})
+        )
+      end)
+
+      assert {:ok, %Preview{provider_trace_ref: nil}} = LiveProvider.preview(intent!())
+    end
+
+    test "route map's nested string values matching secret patterns are redacted in place" do
+      Req.Test.stub(LiveProvider, fn conn ->
+        Req.Test.json(
+          conn,
+          success_body(%{
+            "route" => %{
+              "type" => "erc20_transfer",
+              "asset" => "USDC",
+              "leaked_header" => "Authorization: Bearer sk_live_abc",
+              "nested" => %{
+                "deep_url" => "https://user:pass@host/path",
+                "ok_field" => "fine"
+              },
+              "items" => ["sk_test_xyz", "harmless"]
+            }
+          })
+        )
+      end)
+
+      assert {:ok, %Preview{route: route}} = LiveProvider.preview(intent!())
+      assert route["type"] == "erc20_transfer"
+      assert route["asset"] == "USDC"
+      assert route["leaked_header"] == "[REDACTED]"
+      assert route["nested"]["deep_url"] == "[REDACTED]"
+      assert route["nested"]["ok_field"] == "fine"
+      assert "[REDACTED]" in route["items"]
+      assert "harmless" in route["items"]
+
+      blob = inspect(route)
+      refute blob =~ ~r/sk_live_|sk_test_|pk_live_|pk_test_/
+      refute blob =~ ~r/authorization|bearer/i
+      refute blob =~ ~r{://[^\s/@]+:[^\s/@]+@}
+    end
+
+    test "route carrying PEM private-key text in a nested field is redacted" do
+      Req.Test.stub(LiveProvider, fn conn ->
+        Req.Test.json(
+          conn,
+          success_body(%{
+            "route" => %{
+              "type" => "v3_swap",
+              "key_dump" =>
+                "-----BEGIN RSA PRIVATE KEY-----\nMIIEv...etc\n-----END RSA PRIVATE KEY-----"
+            }
+          })
+        )
+      end)
+
+      assert {:ok, %Preview{route: route}} = LiveProvider.preview(intent!())
+      assert route["type"] == "v3_swap"
+      assert route["key_dump"] == "[REDACTED]"
+      refute inspect(route) =~ "PRIVATE KEY"
+    end
+
+    test "failure_conditions entries matching secret patterns are dropped" do
+      Req.Test.stub(LiveProvider, fn conn ->
+        Req.Test.json(
+          conn,
+          success_body(%{
+            "failure_conditions" => [
+              "wallet balance falls below requested amount",
+              "Authorization: Bearer leaked",
+              "see -----BEGIN RSA PRIVATE KEY----- in upstream",
+              "https://user:pass@host failure",
+              "use pk_live_xyz to bypass",
+              "router liquidity drops below threshold"
+            ]
+          })
+        )
+      end)
+
+      assert {:ok, %Preview{failure_conditions: conds}} = LiveProvider.preview(intent!())
+      assert "wallet balance falls below requested amount" in conds
+      assert "router liquidity drops below threshold" in conds
+      assert length(conds) == 2
+      refute Enum.any?(conds, &String.contains?(&1, "Bearer"))
+      refute Enum.any?(conds, &String.contains?(&1, "PRIVATE KEY"))
+      refute Enum.any?(conds, &String.contains?(&1, "pk_live_"))
+    end
+
+    test "Bank.Quotes.Persistence.to_simulation_attrs/3 carries no secret markers when upstream injects them" do
+      # End-to-end backstop: even if a future regression skipped one
+      # of the per-field redactions above, the persisted attrs (which
+      # become a `simulation_reports` row) must not carry the markers.
+      Req.Test.stub(LiveProvider, fn conn ->
+        Req.Test.json(
+          conn,
+          success_body(%{
+            "trace_id" => "Authorization: Bearer sk_live_leaked",
+            "route" => %{
+              "type" => "erc20_transfer",
+              "leaked" => "sk_test_secret",
+              "url" => "https://user:pass@host"
+            },
+            "failure_conditions" => [
+              "Authorization: Bearer leaked",
+              "real condition"
+            ]
+          })
+        )
+      end)
+
+      assert {:ok, %Preview{} = preview} = LiveProvider.preview(intent!())
+      attrs = Persistence.to_simulation_attrs(preview, Ecto.UUID.generate(), :completed)
+
+      blob = inspect(attrs)
+      refute blob =~ ~r/sk_(live|test)_/
+      refute blob =~ ~r/pk_(live|test)_/
+      refute blob =~ ~r/authorization|bearer/i
+      refute blob =~ ~r{://[^\s/@]+:[^\s/@]+@}
+      refute blob =~ "PRIVATE KEY"
+    end
+
+    test "benign route map passes through unchanged" do
+      Req.Test.stub(LiveProvider, fn conn ->
+        Req.Test.json(
+          conn,
+          success_body(%{
+            "route" => %{
+              "type" => "v3_swap",
+              "pool" => "0xabc",
+              "fee_bps" => 30,
+              "hops" => [%{"asset" => "USDC"}, %{"asset" => "WETH"}]
+            }
+          })
+        )
+      end)
+
+      assert {:ok, %Preview{route: route}} = LiveProvider.preview(intent!())
+      assert route["type"] == "v3_swap"
+      assert route["pool"] == "0xabc"
+      assert route["fee_bps"] == 30
+      assert route["hops"] == [%{"asset" => "USDC"}, %{"asset" => "WETH"}]
+    end
+
+    test "benign failure_conditions pass through unchanged" do
+      Req.Test.stub(LiveProvider, fn conn ->
+        Req.Test.json(
+          conn,
+          success_body(%{
+            "failure_conditions" => [
+              "wallet balance falls below requested amount",
+              "router liquidity drops below threshold"
+            ]
+          })
+        )
+      end)
+
+      assert {:ok, %Preview{failure_conditions: conds}} = LiveProvider.preview(intent!())
+      assert "wallet balance falls below requested amount" in conds
+      assert "router liquidity drops below threshold" in conds
+      assert length(conds) == 2
     end
   end
 end
