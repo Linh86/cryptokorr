@@ -106,6 +106,14 @@ defmodule Bank.Notifications do
 
     case Repo.insert(changeset) do
       {:ok, notification} ->
+        # Best-effort external-channel enqueue (#236). Reads
+        # the workspace's `notification_delivery_preferences`
+        # rows and writes one `notification_deliveries` row
+        # per enabled channel. Returns `:ok` even on a
+        # preference-side failure so a delivery problem
+        # cannot break the inbox-row insert.
+        :ok = Bank.Notifications.Deliveries.dispatch_after_create(notification)
+
         {:ok, notification}
 
       {:error, %Ecto.Changeset{} = cs} ->
