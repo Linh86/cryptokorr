@@ -465,13 +465,21 @@ defmodule Bank.DefiVenues.Morpho.RiskExplanation do
   defp oracle_check([], _policy),
     do: {[check("oracle_allowlist", :pass, "No allocations to evaluate", "morpho_api")], []}
 
+  # Empty / unconfigured oracle allowlist → fail closed at
+  # `:block` severity (#202 P2). Mirrors `vault_not_allowlisted`
+  # `:block` for the equivalent empty-list scenario: a workspace
+  # that has not opted in to any oracle has by construction not
+  # approved the vault's allocations. The narrower
+  # "allowlist-configured-but-some-unknown" branch below stays
+  # at `:approval` — that's an operator-review case, not a
+  # fail-closed case.
   defp oracle_check(_allocations, %PolicyInput{oracle_allowlist: []}) do
     {[check("oracle_allowlist", :fail, "No internal oracle allowlist configured", "internal")],
      [
        reason(
          "unknown_oracle",
-         :approval,
-         "Internal oracle allowlist is empty; treating every allocation oracle as unknown."
+         :block,
+         "Internal oracle allowlist is empty; no allocation oracle is approved."
        )
      ]}
   end
@@ -529,9 +537,29 @@ defmodule Bank.DefiVenues.Morpho.RiskExplanation do
 
   defp collateral_check([], _policy), do: {[], []}
 
+  # Empty / unconfigured collateral allowlist → fail closed at
+  # `:block` severity (#202 P2). The previous v0.1 posture
+  # emitted `:warn` + `:approval`; aligned now with vault and
+  # oracle so the three sibling allowlists share the same
+  # fail-closed semantics. The narrower
+  # "allowlist-configured-but-some-unknown" branch below stays
+  # at `:approval`.
   defp collateral_check(_allocations, %PolicyInput{collateral_allowlist: []}) do
-    {[check("collateral_allowlist", :warn, "No internal collateral allowlist", "internal")],
-     [reason("unknown_collateral", :approval, "Internal collateral allowlist is empty.")]}
+    {[
+       check(
+         "collateral_allowlist",
+         :fail,
+         "No internal collateral allowlist configured",
+         "internal"
+       )
+     ],
+     [
+       reason(
+         "unknown_collateral",
+         :block,
+         "Internal collateral allowlist is empty; no allocation collateral asset is approved."
+       )
+     ]}
   end
 
   defp collateral_check(allocations, %PolicyInput{} = policy) do
@@ -568,23 +596,25 @@ defmodule Bank.DefiVenues.Morpho.RiskExplanation do
   # string key first and fall back to the atom key for the
   # in-memory snapshot.
   #
-  # Posture mirrors the oracle and collateral checks:
+  # Posture mirrors the vault, oracle, and collateral checks
+  # after the #202 P2 fail-closed alignment:
   #
   #   * No allocators on the snapshot → `:pass` (nothing to
   #     evaluate; informational entry only).
   #   * Empty allowlist + at least one allocator → `:fail` check
-  #     and an `unknown_curator` reason at `:approval`. The
-  #     workspace has not opted-in to any allocator, which
-  #     under the conservative #202 posture means every
-  #     allocator is unknown.
+  #     and an `unknown_curator` reason at `:block` (fail
+  #     closed). The workspace has not opted in to any
+  #     allocator; the conservative #202 posture is to refuse
+  #     the vault, not merely require approval.
   #   * Allowlist configured + every allocator on the list →
   #     `:pass`.
   #   * Allowlist configured + at least one unknown allocator →
   #     `:warn` check and an `unknown_curator` `:approval`
-  #     reason. Block-tier escalation is deferred to a future
-  #     curator-LLTV combined gate (parallel to the existing
-  #     `unknown_oracle_high_lltv` rule); v0.1 holds the
-  #     intent for operator review.
+  #     reason. This is the operator-review branch; block-tier
+  #     escalation for the configured-but-unknown case is
+  #     deferred to a future curator-LLTV combined gate
+  #     (parallel to the existing `unknown_oracle_high_lltv`
+  #     rule).
   defp curator_check([], _policy),
     do: {[check("curator_allowlist", :pass, "No allocators to evaluate", "morpho_api")], []}
 
@@ -593,8 +623,8 @@ defmodule Bank.DefiVenues.Morpho.RiskExplanation do
      [
        reason(
          "unknown_curator",
-         :approval,
-         "Internal curator allowlist is empty; treating every allocator as unknown."
+         :block,
+         "Internal curator allowlist is empty; no allocator is approved."
        )
      ]}
   end

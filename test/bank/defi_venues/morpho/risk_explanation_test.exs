@@ -18,6 +18,12 @@ defmodule Bank.DefiVenues.Morpho.RiskExplanationTest do
   @vault "0xbeef000000000000000000000000000000000099"
   @oracle "0xchainlinkoracle"
   @collateral "0xwsteth"
+  # Default snapshot allocator — pinned here so the `policy/1`
+  # helper can default `curator_allowlist` to a pre-allowlisted
+  # value, mirroring the oracle / collateral / vault helpers.
+  # Tests that exercise the empty-allowlist fail-closed path
+  # explicitly pass `curator_allowlist: []`.
+  @default_allocator "0xallocator1"
   @now ~U[2026-05-05 12:00:00.000000Z]
 
   defp build_snapshot(overrides \\ %{}) do
@@ -73,7 +79,7 @@ defmodule Bank.DefiVenues.Morpho.RiskExplanationTest do
       vault_allowlist: Keyword.get(opts, :vault_allowlist, [{@chain_id, @vault}]),
       oracle_allowlist: Keyword.get(opts, :oracle_allowlist, [@oracle]),
       collateral_allowlist: Keyword.get(opts, :collateral_allowlist, [@collateral]),
-      curator_allowlist: Keyword.get(opts, :curator_allowlist, []),
+      curator_allowlist: Keyword.get(opts, :curator_allowlist, [@default_allocator]),
       expected_loan_asset: Keyword.get(opts, :expected_loan_asset, "USDC"),
       current_exposure: Keyword.get(opts, :current_exposure, Decimal.new(0)),
       proposed_amount: Keyword.get(opts, :proposed_amount, Decimal.new("1000")),
@@ -502,7 +508,7 @@ defmodule Bank.DefiVenues.Morpho.RiskExplanationTest do
   describe "curator_allowlist (#202 P2)" do
     @allocator "0xallocator1"
 
-    test "empty curator_allowlist + allocators on snapshot ⇒ :fail check + unknown_curator approval reason" do
+    test "empty curator_allowlist + allocators on snapshot ⇒ :fail check + unknown_curator block reason" do
       result =
         RiskExplanation.explain(
           build_snapshot(),
@@ -512,6 +518,10 @@ defmodule Bank.DefiVenues.Morpho.RiskExplanationTest do
 
       assert check_status_for(result, "curator_allowlist") == "fail"
       assert reason_code?(result, "unknown_curator")
+
+      # #202 P2 (third repair): empty critical allowlist must
+      # fail closed at `:block`, not `:approval`.
+      assert reason_severity_for(result, "unknown_curator") == "block"
     end
 
     test "configured curator_allowlist that includes the allocator ⇒ :pass" do
@@ -526,7 +536,7 @@ defmodule Bank.DefiVenues.Morpho.RiskExplanationTest do
       refute reason_code?(result, "unknown_curator")
     end
 
-    test "configured curator_allowlist that EXCLUDES the allocator ⇒ :warn check + unknown_curator reason" do
+    test "configured curator_allowlist that EXCLUDES the allocator ⇒ :warn check + unknown_curator approval reason" do
       result =
         RiskExplanation.explain(
           build_snapshot(),
@@ -536,6 +546,11 @@ defmodule Bank.DefiVenues.Morpho.RiskExplanationTest do
 
       assert check_status_for(result, "curator_allowlist") == "warn"
       assert reason_code?(result, "unknown_curator")
+
+      # The configured-but-unknown case stays at `:approval` —
+      # operator review, not fail-closed. Only the empty/
+      # unconfigured allowlist case escalates to `:block`.
+      assert reason_severity_for(result, "unknown_curator") == "approval"
     end
 
     test "snapshot with no allocators ⇒ :pass even with empty allowlist" do
@@ -548,6 +563,98 @@ defmodule Bank.DefiVenues.Morpho.RiskExplanationTest do
 
       assert check_status_for(result, "curator_allowlist") == "pass"
       refute reason_code?(result, "unknown_curator")
+    end
+  end
+
+  # #202 P2 (third repair) — empty/unconfigured critical
+  # allowlists must fail closed at `:block`, producing a
+  # top-level `block` decision rather than `approval_required`.
+  # Vault already does this; this describe block pins the
+  # equivalent posture for oracle, collateral, and curator.
+  describe "empty critical allowlist fails closed at :block (#202 P2)" do
+    test "empty oracle_allowlist + allocations ⇒ block decision + unknown_oracle :block reason" do
+      result =
+        RiskExplanation.explain(
+          build_snapshot(),
+          policy(oracle_allowlist: []),
+          @now
+        )
+
+      assert result["decision"] == "block",
+             "expected fail-closed `block`, got `#{result["decision"]}`"
+
+      assert check_status_for(result, "oracle_allowlist") == "fail"
+      assert reason_code?(result, "unknown_oracle")
+      assert reason_severity_for(result, "unknown_oracle") == "block"
+    end
+
+    test "empty collateral_allowlist + allocations ⇒ block decision + unknown_collateral :block reason" do
+      result =
+        RiskExplanation.explain(
+          build_snapshot(),
+          policy(collateral_allowlist: []),
+          @now
+        )
+
+      assert result["decision"] == "block",
+             "expected fail-closed `block`, got `#{result["decision"]}`"
+
+      assert check_status_for(result, "collateral_allowlist") == "fail"
+      assert reason_code?(result, "unknown_collateral")
+      assert reason_severity_for(result, "unknown_collateral") == "block"
+    end
+
+    test "empty curator_allowlist + allocators ⇒ block decision + unknown_curator :block reason" do
+      result =
+        RiskExplanation.explain(
+          build_snapshot(),
+          policy(curator_allowlist: []),
+          @now
+        )
+
+      assert result["decision"] == "block",
+             "expected fail-closed `block`, got `#{result["decision"]}`"
+
+      assert check_status_for(result, "curator_allowlist") == "fail"
+      assert reason_code?(result, "unknown_curator")
+      assert reason_severity_for(result, "unknown_curator") == "block"
+    end
+
+    # Cross-check: the configured-but-unknown case is NOT
+    # fail-closed. It stays at `:approval` so an operator can
+    # review the unknown allocator/oracle/collateral without
+    # blocking the deposit outright. This pin guards against an
+    # accidental over-block regression of the looser
+    # operator-review path.
+    test "configured oracle allowlist with unknown oracle ⇒ approval_required, not block" do
+      snap =
+        build_snapshot(%{
+          allocations: [
+            %{
+              "market_unique_key" => "0xrisky",
+              "loan_asset" => "0xusdc",
+              "collateral_asset" => @collateral,
+              "oracle" => "0xsurprise",
+              "lltv" => 700_000_000_000_000_000
+            }
+          ]
+        })
+
+      result = RiskExplanation.explain(snap, policy(), @now)
+
+      # The configured oracle allowlist excludes the snapshot's
+      # oracle but the LLTV is below the approval threshold so
+      # this is NOT the high-LLTV escalation — it's the plain
+      # operator-review path. Decision must be approval_required.
+      assert result["decision"] == "approval_required"
+      assert reason_severity_for(result, "unknown_oracle") == "approval"
+    end
+  end
+
+  defp reason_severity_for(result, code) do
+    case Enum.find(result["primary_reasons"], &(&1["code"] == code)) do
+      %{"severity" => s} -> s
+      _ -> nil
     end
   end
 end
