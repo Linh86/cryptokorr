@@ -22,6 +22,7 @@ defmodule Bank.Audit.Events do
   alias Bank.Counterparties.{AddressLabel, Counterparty, EvidenceArtifact, TrustAssertion}
   alias Bank.Decisions.{DecisionEnvelope, TrustAssessment, ExecutionPlan, SimulationReport}
   alias Bank.DefiVenues.Morpho.PersistedVaultSnapshot
+  alias Bank.DefiVenues.Morpho.VaultSnapshot
   alias Bank.Delegations.Delegation
   alias Bank.Intents.AgentIntent
   alias Bank.Policies.PolicyRule
@@ -244,7 +245,7 @@ defmodule Bank.Audit.Events do
   """
   @spec morpho_risk_explained(
           AgentIntent.t(),
-          PersistedVaultSnapshot.t() | nil,
+          PersistedVaultSnapshot.t() | VaultSnapshot.t() | nil,
           map(),
           [String.t()],
           keyword()
@@ -1896,14 +1897,21 @@ defmodule Bank.Audit.Events do
     }
   end
 
-  # Small reference to a persisted Morpho vault snapshot — id +
-  # public identity + the source-block metadata. Never embeds the
-  # raw GraphQL payload, the upstream URL, the source warnings list,
-  # or any provider secret. The snapshot's `:source` map is
-  # already-redacted at ingestion time (#198/#199); we still take
-  # only the two public fields (`source_name`, `source_schema_version`)
-  # to keep the audit row small and to make the no-secret-leakage
-  # contract obvious to readers.
+  # Small reference to a Morpho vault snapshot — id (when
+  # persisted) + public identity + the source-block metadata.
+  # Never embeds the raw GraphQL payload, the upstream URL, the
+  # source warnings list, or any provider secret. The snapshot's
+  # `:source` map is already-redacted at ingestion time
+  # (#198/#199); we still take only the two public fields
+  # (`source_name`, `source_schema_version`) to keep the audit
+  # row small and to make the no-secret-leakage contract obvious
+  # to readers.
+  #
+  # Accepts both the persisted row (decision-pipeline default
+  # path via `Snapshots.get_current/2`) and the in-memory struct
+  # (test injection via the `:morpho_snapshot` opt). The
+  # in-memory case carries no `:id` because the row was never
+  # written.
   defp morpho_snapshot_ref(nil), do: nil
 
   defp morpho_snapshot_ref(%PersistedVaultSnapshot{} = s) do
@@ -1919,6 +1927,26 @@ defmodule Bank.Audit.Events do
       source_schema_version: Map.get(source, "source_schema_version")
     }
   end
+
+  defp morpho_snapshot_ref(%VaultSnapshot{} = s) do
+    source = s.source || %{}
+    fetched_at = Map.get(source, :fetched_at) || Map.get(source, "fetched_at")
+
+    %{
+      id: nil,
+      chain_id: s.chain_id,
+      vault_address: s.vault_address,
+      payload_hash: Map.get(source, :payload_hash) || Map.get(source, "payload_hash"),
+      fetched_at: format_fetched_at(fetched_at),
+      source_name: Map.get(source, :source_name) || Map.get(source, "source_name"),
+      source_schema_version:
+        Map.get(source, :source_schema_version) || Map.get(source, "source_schema_version")
+    }
+  end
+
+  defp format_fetched_at(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+  defp format_fetched_at(value) when is_binary(value), do: value
+  defp format_fetched_at(_), do: nil
 
   defp delegation_snapshot(%Delegation{} = d) do
     %{
