@@ -237,11 +237,33 @@ defmodule BankWeb.OperatorInboxLive do
     end
   end
 
+  # Same-workspace lookup for `mark_read` / `archive`. Tightened
+  # for #235 P2: workspace-scoped fetch alone is not enough — a
+  # user could smuggle the id of a same-workspace notification
+  # they cannot see (e.g. a `user_id` row addressed to another
+  # user, or a `role_target: :admin` row viewed by an operator)
+  # and mutate it. We therefore re-apply the same recipient
+  # predicate the list query uses
+  # (`n.user_id == current_user.id OR n.role_target in role_targets`)
+  # and collapse a "row exists but not visible" outcome to the
+  # same `nil` shape as a not-found row, so the caller cannot
+  # distinguish the two.
   defp fetch_in_scope(socket, id) when is_binary(id) do
-    Notifications.get_in_workspace(id, socket.assigns.workspace_id)
+    case Notifications.get_in_workspace(id, socket.assigns.workspace_id) do
+      %Notification{} = n -> if visible_to_principal?(n, socket), do: n, else: nil
+      _ -> nil
+    end
   end
 
   defp fetch_in_scope(_socket, _), do: nil
+
+  defp visible_to_principal?(%Notification{} = n, socket) do
+    cond do
+      is_binary(n.user_id) and n.user_id == socket.assigns.user_id -> true
+      not is_nil(n.role_target) and n.role_target in socket.assigns.role_targets -> true
+      true -> false
+    end
+  end
 
   defp sanitize_filters(filters) when is_map(filters) do
     %{
