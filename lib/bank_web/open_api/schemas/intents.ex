@@ -98,7 +98,20 @@ defmodule BankWeb.OpenApi.Schemas.IntentSubmissionRequest do
       chain: %Reference{"$ref": "#/components/schemas/Chain"},
       amount: %Reference{"$ref": "#/components/schemas/AmountString"},
       target: %Reference{"$ref": "#/components/schemas/IntentTarget"},
-      notes: %Schema{type: :string, nullable: true}
+      notes: %Schema{type: :string, nullable: true},
+      smart_account_id: %Schema{
+        type: :string,
+        format: :uuid,
+        nullable: true,
+        description:
+          "Optional explicit smart-account selector (#184). Required when the " <>
+            "submitting workspace has two-or-more non-revoked smart accounts; " <>
+            "may be omitted in compatibility mode (workspaces with at most one " <>
+            "non-revoked smart account). The id must belong to the current " <>
+            "workspace and the smart account's `chain` must equal the intent's " <>
+            "`chain`. Foreign-workspace ids are rejected with `404` so existence " <>
+            "is not leaked across tenants."
+      }
     }
   })
 end
@@ -163,6 +176,15 @@ defmodule BankWeb.OpenApi.Schemas.IntentEntity do
       notes: %Schema{type: :string, nullable: true},
       state: %Reference{"$ref": "#/components/schemas/IntentState"},
       submitted_at: %Reference{"$ref": "#/components/schemas/Timestamp"},
+      smart_account_id: %Schema{
+        type: :string,
+        format: :uuid,
+        nullable: true,
+        description:
+          "Explicit smart-account selector recorded with the intent (#184). " <>
+            "`null` for legacy intents and intents submitted in single-account " <>
+            "compatibility mode."
+      },
       current_decision_id: %Schema{
         type: :string,
         format: :uuid,

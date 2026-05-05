@@ -79,6 +79,7 @@ defmodule BankWeb.API.V1.IntentController do
         {"Intent accepted", "application/json", BankWeb.OpenApi.Schemas.IntentSubmitResponse},
       401 => @unauthorized_ref,
       403 => @forbidden_ref,
+      404 => @not_found_ref,
       429 => @too_many_requests_ref,
       409 => @conflict_ref,
       422 => @unprocessable_ref
@@ -134,6 +135,39 @@ defmodule BankWeb.API.V1.IntentController do
           "unsupported_asset",
           "asset `#{asset}` is not supported",
           hint: ~s|the runtime currently accepts only `"USDC"`|
+        )
+
+      {:error, :smart_account_not_found} ->
+        render_error(
+          conn,
+          :not_found,
+          "smart_account_not_found",
+          "smart_account_id does not belong to this workspace",
+          hint:
+            "verify the id is one returned by the workspace's smart-account list; " <>
+              "ids from another workspace are rejected with the same status to " <>
+              "avoid leaking existence across tenants"
+        )
+
+      {:error, :smart_account_chain_mismatch} ->
+        render_error(
+          conn,
+          :unprocessable_entity,
+          "smart_account_chain_mismatch",
+          "smart_account_id is provisioned on a different chain than the intent",
+          hint: "the intent's `chain` must equal the smart account's `chain`"
+        )
+
+      {:error, :smart_account_required} ->
+        render_error(
+          conn,
+          :unprocessable_entity,
+          "smart_account_required",
+          "workspace has multiple smart accounts; an explicit `smart_account_id` is required",
+          hint:
+            "list the workspace's smart accounts and pass one of their ids in " <>
+              "`smart_account_id`; auto-resolution is only available when the " <>
+              "workspace has at most one non-revoked smart account"
         )
 
       {:error, {:invalid, %Ecto.Changeset{} = changeset}} ->

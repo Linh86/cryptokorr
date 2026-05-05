@@ -478,6 +478,181 @@ defmodule Bank.IntentsTest do
     end
   end
 
+  # #184 / epic #167 — explicit smart_account_id selector contract.
+  # `valid_body/1` defaults `chain: "base"` and a raw-address target,
+  # so each test focuses on the smart-account axis only. The workspace
+  # is the one stamped into the process dictionary by `setup_workspace`
+  # below (mirrors how `BankWeb.ConnCase.register_and_log_in_user/1`
+  # populates it for HTTP tests).
+  describe "submit/2 — smart_account_id contract" do
+    setup :setup_workspace
+
+    test "accepts an explicit smart_account_id that belongs to the workspace and matches the chain",
+         %{workspace_id: ws_id} do
+      sa = smart_account(%{chain: "base-sepolia"})
+
+      body =
+        valid_body(%{
+          "agent_id" => "agent-sa-explicit",
+          "idempotency_key" => "k-sa-explicit",
+          "chain" => "base-sepolia",
+          "smart_account_id" => sa.id
+        })
+
+      assert {:ok, %{intent: intent, replay?: false}} =
+               Intents.submit(body, workspace_id: ws_id)
+
+      assert intent.smart_account_id == sa.id
+    end
+
+    test "auto-resolves (compat mode) when the workspace has zero smart accounts",
+         %{workspace_id: ws_id} do
+      body = testnet_body("agent-sa-zero", "k-sa-zero")
+
+      assert {:ok, %{intent: intent}} = Intents.submit(body, workspace_id: ws_id)
+      assert intent.smart_account_id == nil
+    end
+
+    test "auto-resolves (compat mode) when the workspace has exactly one non-revoked smart account",
+         %{workspace_id: ws_id} do
+      _solo = smart_account(%{chain: "base-sepolia"})
+
+      body = testnet_body("agent-sa-single", "k-sa-single")
+
+      assert {:ok, %{intent: intent}} = Intents.submit(body, workspace_id: ws_id)
+      assert intent.smart_account_id == nil
+    end
+
+    test "rejects an absent smart_account_id when the workspace has two non-revoked accounts",
+         %{workspace_id: ws_id} do
+      _a = smart_account(%{chain: "base-sepolia"})
+      _b = smart_account(%{chain: "base-sepolia"})
+
+      body = testnet_body("agent-sa-multi", "k-sa-multi")
+
+      assert {:error, :smart_account_required} =
+               Intents.submit(body, workspace_id: ws_id)
+    end
+
+    test "ignores revoked smart accounts when counting workspace ambiguity",
+         %{workspace_id: ws_id} do
+      _live = smart_account(%{chain: "base-sepolia"})
+      revoked = smart_account(%{chain: "base-sepolia"})
+      {:ok, :changed, _} = Bank.SmartAccounts.revoke(revoked)
+
+      body = testnet_body("agent-sa-revoked-ignored", "k-sa-revoked-ignored")
+
+      assert {:ok, %{intent: intent}} = Intents.submit(body, workspace_id: ws_id)
+      assert intent.smart_account_id == nil
+    end
+
+    test "rejects a smart_account_id that belongs to a different workspace as :smart_account_not_found",
+         %{workspace_id: ws_id} do
+      {:ok, foreign_ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "foreign-#{System.unique_integer([:positive])}",
+          name: "Foreign workspace"
+        })
+
+      foreign_sa = smart_account(%{workspace_id: foreign_ws.id, chain: "base-sepolia"})
+
+      body =
+        testnet_body("agent-sa-foreign", "k-sa-foreign", %{
+          "smart_account_id" => foreign_sa.id
+        })
+
+      assert {:error, :smart_account_not_found} =
+               Intents.submit(body, workspace_id: ws_id)
+    end
+
+    test "rejects an unknown UUID smart_account_id as :smart_account_not_found",
+         %{workspace_id: ws_id} do
+      body =
+        testnet_body("agent-sa-unknown", "k-sa-unknown", %{
+          "smart_account_id" => Ecto.UUID.generate()
+        })
+
+      assert {:error, :smart_account_not_found} =
+               Intents.submit(body, workspace_id: ws_id)
+    end
+
+    test "rejects a smart_account on a different chain as :smart_account_chain_mismatch",
+         %{workspace_id: ws_id} do
+      # Intent on base-sepolia (testnet — bypasses mainnet gating);
+      # account on a non-matching testnet alias.
+      sa = smart_account(%{chain: "sepolia"})
+
+      body =
+        testnet_body("agent-sa-chain-mismatch", "k-sa-chain-mismatch", %{
+          "smart_account_id" => sa.id
+        })
+
+      assert {:error, :smart_account_chain_mismatch} =
+               Intents.submit(body, workspace_id: ws_id)
+    end
+
+    test "rejects a malformed smart_account_id at normalize-time", %{workspace_id: ws_id} do
+      body =
+        testnet_body("agent-sa-malformed", "k-sa-malformed", %{
+          "smart_account_id" => "not-a-uuid"
+        })
+
+      assert {:error, {:invalid, :smart_account_id}} =
+               Intents.submit(body, workspace_id: ws_id)
+    end
+
+    test "treats blank / whitespace smart_account_id as absent",
+         %{workspace_id: ws_id} do
+      body =
+        testnet_body("agent-sa-blank", "k-sa-blank", %{
+          "smart_account_id" => ""
+        })
+
+      assert {:ok, %{intent: intent}} = Intents.submit(body, workspace_id: ws_id)
+      assert intent.smart_account_id == nil
+    end
+
+    test "smart_account_id participates in the idempotency hash",
+         %{workspace_id: ws_id} do
+      sa_a = smart_account(%{chain: "base-sepolia"})
+      sa_b = smart_account(%{chain: "base-sepolia"})
+
+      base = testnet_body("agent-sa-idem", "k-sa-idem")
+
+      assert {:ok, %{intent: first, replay?: false}} =
+               Intents.submit(Map.put(base, "smart_account_id", sa_a.id), workspace_id: ws_id)
+
+      assert {:error, {:idempotency_conflict, prior}} =
+               Intents.submit(Map.put(base, "smart_account_id", sa_b.id), workspace_id: ws_id)
+
+      assert prior.id == first.id
+    end
+  end
+
+  defp setup_workspace(_ctx) do
+    {:ok, workspace} =
+      Bank.Workspaces.create_workspace(%{
+        slug: "ws-#{System.unique_integer([:positive])}",
+        name: "Workspace fixture"
+      })
+
+    Process.put(:bank_test_workspace_id, workspace.id)
+
+    on_exit(fn -> Process.delete(:bank_test_workspace_id) end)
+
+    {:ok, workspace_id: workspace.id, workspace: workspace}
+  end
+
+  defp testnet_body(agent_id, idem_key, extras \\ %{}) do
+    %{
+      "agent_id" => agent_id,
+      "idempotency_key" => idem_key,
+      "chain" => "base-sepolia"
+    }
+    |> Map.merge(extras)
+    |> valid_body()
+  end
+
   defp valid_body(overrides) when is_map(overrides) do
     %{
       "idempotency_key" => "k-#{System.unique_integer([:positive])}",

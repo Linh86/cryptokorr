@@ -22,6 +22,8 @@ defmodule Bank.Fixtures do
   alias Bank.Intents.AgentIntent
   alias Bank.Policies.PolicyRule
   alias Bank.Repo
+  alias Bank.SmartAccounts
+  alias Bank.SmartAccounts.SmartAccount
 
   # Defaulted from `Process.get(:bank_test_workspace_id)`, which
   # `BankWeb.ConnCase.register_and_log_in_user/1` sets per test (#158c).
@@ -170,6 +172,30 @@ defmodule Bank.Fixtures do
       |> Repo.insert()
 
     intent
+  end
+
+  @doc """
+  Insert a `Bank.SmartAccounts.SmartAccount` row (#183) for the
+  current process workspace by default. Pass `workspace_id` to
+  override; pass `:status` to land in a non-default lifecycle
+  state. The address is fully unique per call so the
+  `(workspace_id, chain, address)` index never collides between
+  back-to-back fixtures.
+  """
+  def smart_account(attrs \\ %{}) do
+    attrs = to_map(attrs)
+
+    workspace_id = Map.get(attrs, :workspace_id) || default_workspace_id()
+
+    attrs =
+      attrs
+      |> Map.put_new(:workspace_id, workspace_id)
+      |> Map.put_new(:chain, "base")
+      |> Map.put_new(:address, "0x" <> random_hex(40))
+
+    {:ok, %SmartAccount{} = sa} = SmartAccounts.create_smart_account(attrs)
+
+    sa
   end
 
   def trust_assessment(attrs \\ %{}) do

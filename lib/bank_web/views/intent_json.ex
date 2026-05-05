@@ -120,6 +120,7 @@ defmodule BankWeb.API.V1.IntentJSON do
       notes: intent.notes,
       state: intent.state,
       submitted_at: intent.submitted_at,
+      smart_account_id: intent.smart_account_id,
       current_decision_id: intent.current_decision_id,
       current_simulation_id: intent.current_simulation_id,
       current_trust_assessment_id: intent.current_trust_assessment_id,

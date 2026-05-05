@@ -215,6 +215,7 @@ All endpoints live under `/v1/`. Auth is not specified here — assume session +
     "address_label_id": "...",   // optional; inferred if omitted and cp has one label
     "raw_address": "0x..."       // used only when no counterparty is known
   },
+  "smart_account_id": "...",     // optional in single-account workspaces; required when 2+ non-revoked accounts exist
   "notes": "..."
 }
 ```
@@ -227,12 +228,13 @@ All endpoints live under `/v1/`. Auth is not specified here — assume session +
 }
 ```
 **Validation / idempotency.**
-- `idempotency_key` required. A duplicate key with a matching payload returns the existing intent; a duplicate key with a mismatched payload returns `409`.
+- `idempotency_key` required. A duplicate key with a matching payload returns the existing intent; a duplicate key with a mismatched payload returns `409`. The hash includes `smart_account_id` so the same key with a different account is a hash mismatch.
 - `chain` must be `base` in v1; other values rejected at the boundary.
 - `asset` must be whitelisted by an active policy.
 - Exactly one of `counterparty_id` (optionally with `address_label_id`) or `raw_address` must be present. Raw addresses are always evaluated at trust `unknown`.
+- `smart_account_id` (#184): optional. When supplied, the id MUST belong to the caller's workspace AND the smart account's `chain` MUST equal the intent's `chain`. Foreign-workspace ids return `404` with no existence leakage. When omitted, the runtime allows submission only if the workspace has at most one non-revoked smart account (compatibility mode); workspaces with two-or-more non-revoked accounts must select explicitly and otherwise get `422 smart_account_required`.
 
-**Failure modes.** `400` schema errors. `409` idempotency conflict. `422` unsupported kind / chain / asset. `503` when the runtime is paused and configured to reject at the door (default configuration still accepts and queues).
+**Failure modes.** `400` schema errors. `404` foreign-workspace `smart_account_id`. `409` idempotency conflict. `422` unsupported kind / chain / asset, `smart_account_chain_mismatch`, `smart_account_required`. `503` when the runtime is paused and configured to reject at the door (default configuration still accepts and queues).
 
 ---
 

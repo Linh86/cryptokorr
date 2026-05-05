@@ -40,6 +40,7 @@ defmodule Bank.Intents.AgentIntent do
 
   alias Bank.Counterparties.{AddressLabel, Counterparty}
   alias Bank.Decisions.{DecisionEnvelope, TrustAssessment, ExecutionPlan, SimulationReport}
+  alias Bank.SmartAccounts.SmartAccount
   alias Bank.Workspaces.Workspace
 
   @kinds [:transfer, :swap, :scheduled_transfer]
@@ -92,6 +93,14 @@ defmodule Bank.Intents.AgentIntent do
     # workspace_id through.
     belongs_to :workspace, Workspace
 
+    # Explicit smart-account selector (#184, epic #167). Nullable so
+    # that legacy intents and single-account workspaces in
+    # compatibility mode keep working. The runtime-side rules
+    # (workspace boundary, chain match, multi-account ambiguity) are
+    # enforced in `Bank.Intents.submit/2`; the schema only carries
+    # the FK. `on_delete: :restrict` is set at the migration level.
+    belongs_to :smart_account, SmartAccount
+
     has_many :trust_assessments, TrustAssessment, foreign_key: :intent_id
     has_many :simulation_reports, SimulationReport, foreign_key: :intent_id
     has_many :decision_envelopes, DecisionEnvelope, foreign_key: :intent_id
@@ -123,7 +132,8 @@ defmodule Bank.Intents.AgentIntent do
       :schema_version,
       :state,
       :submitted_at,
-      :workspace_id
+      :workspace_id,
+      :smart_account_id
     ])
     |> validate_required([
       :agent_id,
@@ -141,6 +151,7 @@ defmodule Bank.Intents.AgentIntent do
     |> foreign_key_constraint(:target_counterparty_id)
     |> foreign_key_constraint(:target_address_label_id)
     |> foreign_key_constraint(:workspace_id)
+    |> foreign_key_constraint(:smart_account_id)
     |> unique_constraint([:agent_id, :idempotency_key])
     |> check_constraint(:target_counterparty_id,
       name: :target_shape_valid,

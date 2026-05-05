@@ -32,6 +32,8 @@ defmodule Bank.Intents do
   alias Bank.Quotes
   alias Bank.Repo
   alias Bank.Runtime
+  alias Bank.SmartAccounts
+  alias Bank.SmartAccounts.SmartAccount
   alias Ecto.Multi
 
   @default_limit 50
@@ -557,6 +559,9 @@ defmodule Bank.Intents do
              | {:unsupported_chain, String.t()}
              | {:unsupported_asset, String.t()}
              | :mainnet_disabled
+             | :smart_account_not_found
+             | :smart_account_chain_mismatch
+             | :smart_account_required
              | {:invalid, term()}}
   def submit(attrs, opts \\ []) when is_map(attrs) do
     with {:ok, normalized} <- normalize(attrs) do
@@ -566,7 +571,8 @@ defmodule Bank.Intents do
              Bank.Chains.validate_mainnet_allowed(
                normalized.chain,
                Map.get(normalized, :workspace_id)
-             ) do
+             ),
+           :ok <- validate_smart_account(normalized) do
         case lookup_existing(normalized.agent_id, normalized.idempotency_key) do
           nil ->
             do_insert(normalized, opts)
@@ -580,6 +586,71 @@ defmodule Bank.Intents do
         end
       end
     end
+  end
+
+  # #184 / epic #167: enforce the explicit smart-account selector
+  # contract.
+  #
+  #   * If `smart_account_id` is set, the row must belong to the
+  #     intent's workspace AND its `chain` must match the intent's
+  #     `chain`. A foreign-workspace id is indistinguishable from a
+  #     non-existent one (404 semantics) so the runtime never leaks
+  #     existence across workspaces.
+  #   * If `smart_account_id` is nil, count the workspace's
+  #     non-revoked smart accounts. Two-or-more is "ambiguous
+  #     multi-account" and rejected; zero or one is the
+  #     compatibility-mode auto-resolution path and allowed (the
+  #     downstream executor still owns address selection from the
+  #     single-account workspace's only row).
+  #
+  # Skipped entirely when `workspace_id` is nil — legacy un-scoped
+  # callers cannot resolve the workspace row and predate this
+  # contract; the schema FK still prevents inserting an unknown
+  # smart_account_id.
+  defp validate_smart_account(normalized) do
+    case Map.get(normalized, :workspace_id) do
+      nil ->
+        :ok
+
+      workspace_id ->
+        case Map.get(normalized, :smart_account_id) do
+          nil ->
+            validate_no_ambiguous_account(workspace_id)
+
+          smart_account_id when is_binary(smart_account_id) ->
+            validate_explicit_account(smart_account_id, workspace_id, normalized.chain)
+        end
+    end
+  end
+
+  defp validate_explicit_account(smart_account_id, workspace_id, chain) do
+    case SmartAccounts.get_in_workspace(smart_account_id, workspace_id) do
+      {:ok, %SmartAccount{chain: ^chain}} ->
+        :ok
+
+      {:ok, %SmartAccount{}} ->
+        {:error, :smart_account_chain_mismatch}
+
+      {:error, :not_found} ->
+        {:error, :smart_account_not_found}
+    end
+  end
+
+  # `:revoked` is terminal for `smart_accounts.status`; everything
+  # else (`:provisioning`, `:active`, `:inactive`) is a still-live
+  # row the operator could legitimately target. Two-or-more such
+  # rows means the runtime cannot guess an unambiguous default.
+  @non_revoked_statuses [:provisioning, :active, :inactive]
+
+  defp validate_no_ambiguous_account(workspace_id) do
+    count =
+      workspace_id
+      |> SmartAccounts.list_for_workspace(status: @non_revoked_statuses, limit: 2)
+      |> length()
+
+    if count >= 2,
+      do: {:error, :smart_account_required},
+      else: :ok
   end
 
   # Caller-supplied `opts[:workspace_id]` is the only sanctioned
@@ -690,7 +761,8 @@ defmodule Bank.Intents do
          {:ok, chain} <- require_chain(attrs),
          {:ok, asset} <- require_asset(attrs),
          {:ok, amount} <- require_amount(attrs),
-         {:ok, target} <- normalise_target(Map.get(attrs, "target")) do
+         {:ok, target} <- normalise_target(Map.get(attrs, "target")),
+         {:ok, smart_account_id} <- normalise_smart_account_id(attrs) do
       base = %{
         agent_id: agent_id,
         source: source,
@@ -706,16 +778,38 @@ defmodule Bank.Intents do
       attrs_for_changeset =
         base
         |> Map.merge(target)
-        |> Map.put(:payload_hash, payload_hash(base, target))
+        |> maybe_put(:smart_account_id, smart_account_id)
+        |> Map.put(:payload_hash, payload_hash(base, target, smart_account_id))
 
       {:ok, attrs_for_changeset}
+    end
+  end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  # Body keys are conventionally string-keyed at this layer (`require_*`
+  # helpers all read string keys), but accept the atom key too so
+  # tests and internal callers that hand-roll the attrs map don't have
+  # to stringify just for one optional field.
+  defp normalise_smart_account_id(attrs) do
+    raw = Map.get(attrs, "smart_account_id") || Map.get(attrs, :smart_account_id)
+
+    case string_or_nil(raw) do
+      nil ->
+        {:ok, nil}
+
+      value ->
+        if valid_uuid?(value),
+          do: {:ok, value},
+          else: {:error, {:invalid, :smart_account_id}}
     end
   end
 
   # Deterministic SHA-256 of the canonical body fields. Excludes
   # `submitted_at` and any header-derived value so retries hash
   # identically when the request body matches.
-  defp payload_hash(base, target) do
+  defp payload_hash(base, target, smart_account_id) do
     canonical = %{
       "agent_id" => base.agent_id,
       "source" => Atom.to_string(base.source),
@@ -725,7 +819,8 @@ defmodule Bank.Intents do
       "chain" => base.chain,
       "amount" => Decimal.to_string(base.amount, :normal),
       "notes" => base.notes,
-      "target" => target_for_hash(target)
+      "target" => target_for_hash(target),
+      "smart_account_id" => smart_account_id
     }
 
     :sha256

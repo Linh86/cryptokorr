@@ -1823,6 +1823,12 @@
             "example": "1",
             "type": "string"
           },
+          "smart_account_id": {
+            "description": "Explicit smart-account selector recorded with the intent (#184). `null` for legacy intents and intents submitted in single-account compatibility mode.",
+            "format": "uuid",
+            "nullable": true,
+            "type": "string"
+          },
           "source": {
             "enum": [
               "agent",
@@ -2046,6 +2052,12 @@
             "type": "string"
           },
           "notes": {
+            "nullable": true,
+            "type": "string"
+          },
+          "smart_account_id": {
+            "description": "Optional explicit smart-account selector (#184). Required when the submitting workspace has two-or-more non-revoked smart accounts; may be omitted in compatibility mode (workspaces with at most one non-revoked smart account). The id must belong to the current workspace and the smart account's `chain` must equal the intent's `chain`. Foreign-workspace ids are rejected with `404` so existence is not leaked across tenants.",
+            "format": "uuid",
             "nullable": true,
             "type": "string"
           },
@@ -3921,6 +3933,9 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
           },
           "409": {
             "$ref": "#/components/responses/Conflict"

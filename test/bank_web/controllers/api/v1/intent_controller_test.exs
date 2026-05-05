@@ -210,6 +210,108 @@ defmodule BankWeb.API.V1.IntentControllerTest do
     end
   end
 
+  describe "POST /v1/intents — smart_account_id contract (#184)" do
+    # Use base-sepolia testnet across this describe so the
+    # mainnet-eligibility gate (#178) doesn't shadow the
+    # smart-account contract under test.
+    test "persists and echoes smart_account_id when it belongs to the workspace + chain",
+         %{conn: conn} do
+      sa = Fixtures.smart_account(%{chain: "base-sepolia"})
+      raw = "0x000000000000000000000000000000000000a184"
+
+      payload =
+        valid_payload(%{
+          "agent_id" => "agent-sa-explicit",
+          "idempotency_key" => "k-sa-explicit",
+          "chain" => "base-sepolia",
+          "target" => %{"raw_address" => raw},
+          "smart_account_id" => sa.id
+        })
+
+      conn = post(conn, ~p"/v1/intents", payload)
+      body = json_response(conn, 202)
+
+      assert body["intent"]["smart_account_id"] == sa.id
+
+      intent = Repo.get!(AgentIntent, body["intent_id"])
+      assert intent.smart_account_id == sa.id
+    end
+
+    test "rejects an intent in a multi-account workspace without smart_account_id (422)",
+         %{conn: conn} do
+      _a = Fixtures.smart_account(%{chain: "base-sepolia"})
+      _b = Fixtures.smart_account(%{chain: "base-sepolia"})
+
+      payload =
+        valid_payload(%{
+          "agent_id" => "agent-sa-required",
+          "idempotency_key" => "k-sa-required",
+          "chain" => "base-sepolia"
+        })
+
+      conn = post(conn, ~p"/v1/intents", payload)
+      body = json_response(conn, 422)
+
+      assert body["error"]["code"] == "smart_account_required"
+    end
+
+    test "rejects a foreign-workspace smart_account_id with 404",
+         %{conn: conn} do
+      {:ok, foreign_ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "foreign-#{System.unique_integer([:positive])}",
+          name: "Foreign workspace"
+        })
+
+      foreign_sa = Fixtures.smart_account(%{workspace_id: foreign_ws.id, chain: "base-sepolia"})
+
+      payload =
+        valid_payload(%{
+          "agent_id" => "agent-sa-foreign",
+          "idempotency_key" => "k-sa-foreign",
+          "chain" => "base-sepolia",
+          "smart_account_id" => foreign_sa.id
+        })
+
+      conn = post(conn, ~p"/v1/intents", payload)
+      body = json_response(conn, 404)
+
+      assert body["error"]["code"] == "smart_account_not_found"
+    end
+
+    test "rejects a chain mismatch with 422", %{conn: conn} do
+      sa = Fixtures.smart_account(%{chain: "sepolia"})
+
+      payload =
+        valid_payload(%{
+          "agent_id" => "agent-sa-chain",
+          "idempotency_key" => "k-sa-chain",
+          "chain" => "base-sepolia",
+          "smart_account_id" => sa.id
+        })
+
+      conn = post(conn, ~p"/v1/intents", payload)
+      body = json_response(conn, 422)
+
+      assert body["error"]["code"] == "smart_account_chain_mismatch"
+    end
+
+    test "rejects a malformed smart_account_id at the boundary (422)", %{conn: conn} do
+      payload =
+        valid_payload(%{
+          "agent_id" => "agent-sa-malformed",
+          "idempotency_key" => "k-sa-malformed",
+          "chain" => "base-sepolia",
+          "smart_account_id" => "not-a-uuid"
+        })
+
+      conn = post(conn, ~p"/v1/intents", payload)
+      body = json_response(conn, 422)
+
+      assert body["error"]["code"] == "invalid_body"
+    end
+  end
+
   describe "GET /v1/intents/:id" do
     test "returns the submitted intent", %{conn: conn} do
       intent = Fixtures.agent_intent()
@@ -222,6 +324,26 @@ defmodule BankWeb.API.V1.IntentControllerTest do
       assert body["links"]["self"] == "/v1/intents/#{intent.id}"
       assert body["links"]["replay"] == "/v1/intents/#{intent.id}/replay"
       assert body["intent"]["id"] == intent.id
+    end
+
+    test "show response includes smart_account_id (null for legacy intents)", %{conn: conn} do
+      intent = Fixtures.agent_intent()
+
+      conn = get(conn, ~p"/v1/intents/#{intent.id}")
+      body = json_response(conn, 200)
+
+      assert Map.has_key?(body["intent"], "smart_account_id")
+      assert body["intent"]["smart_account_id"] == nil
+    end
+
+    test "show response echoes a persisted smart_account_id", %{conn: conn} do
+      sa = Fixtures.smart_account()
+      intent = Fixtures.agent_intent(%{smart_account_id: sa.id})
+
+      conn = get(conn, ~p"/v1/intents/#{intent.id}")
+      body = json_response(conn, 200)
+
+      assert body["intent"]["smart_account_id"] == sa.id
     end
 
     test "returns 404 for an unknown id", %{conn: conn} do
