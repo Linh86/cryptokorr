@@ -681,6 +681,60 @@ defmodule Bank.PoliciesTest do
     end
   end
 
+  # #202: every Morpho rule type must be inert for v1 intent kinds
+  # — folding into `Bank.DefiVenues.Morpho.PolicyInput` happens via
+  # `Bank.Policies.Morpho.RulesCompiler`. The main evaluator should
+  # NOT flag these rules as `unknown_rule_type` and NOT contribute
+  # any violation or constraint to v1 intents.
+  describe "Morpho rule types — non-DeFi evaluator skip (#202)" do
+    test "every Morpho rule type is a no-op for a transfer intent" do
+      morpho_types = Bank.Policies.PolicyRule.morpho_rule_types()
+
+      assert length(morpho_types) == 16
+
+      for rule_type <- morpho_types do
+        # Insert one of each Morpho rule type into the workspace.
+        _rule = Fixtures.policy_rule(rule_type: rule_type, params: %{})
+
+        eval = Policies.evaluate(input_for(:transfer, "USDC", "base", "100"))
+
+        # Existing non-DeFi behaviour is not regressed: no
+        # violations from the new rule types, no
+        # `unknown_rule_type` flag, no constraint contribution.
+        codes = Enum.map(eval.violations, & &1.code)
+
+        refute "unknown_rule_type" in codes,
+               "#{rule_type} should not be flagged as unknown_rule_type"
+
+        refute Atom.to_string(rule_type) in codes,
+               "#{rule_type} should not produce a violation against a v1 transfer intent"
+      end
+    end
+
+    test "Morpho rules coexist with v1 rules without contaminating evaluation" do
+      _amount =
+        Fixtures.policy_rule(
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "1000", "currency" => "USDC"}
+        )
+
+      _morpho_lltv =
+        Fixtures.policy_rule(
+          rule_type: :max_market_lltv,
+          params: %{"max_lltv_bps" => 8600}
+        )
+
+      _morpho_incident =
+        Fixtures.policy_rule(rule_type: :incident_hold, params: %{"active" => true})
+
+      eval = Policies.evaluate(input_for(:transfer, "USDC", "base", "100"))
+
+      assert eval.pass?
+      assert Decimal.equal?(eval.constraints.amount_ceiling, Decimal.new("1000"))
+      assert Enum.empty?(eval.violations)
+    end
+  end
+
   # ---------------------------------------------------------------------
   # helpers
   # ---------------------------------------------------------------------

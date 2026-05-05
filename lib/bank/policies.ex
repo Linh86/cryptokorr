@@ -544,10 +544,42 @@ defmodule Bank.Policies do
     evaluate_time_window(rule, input.now)
   end
 
+  # DeFi/Morpho rule types (#202). The non-DeFi evaluator skips
+  # them cleanly for v1 intent kinds (`:transfer`, `:swap`,
+  # `:scheduled_transfer`) — the actual evaluation lives in
+  # `Bank.Policies.Morpho.RulesCompiler`, which folds active
+  # Morpho rules into a `Bank.DefiVenues.Morpho.PolicyInput` for
+  # the risk-explanation engine (#201). Returning `:ok` (rather
+  # than a violation) preserves "existing non-DeFi policy
+  # behavior is not regressed" — the rule is correctly inert when
+  # the intent is not Morpho-flavored.
+  defp evaluate_rule(%PolicyRule{rule_type: rt} = _rule, _input, _so_far)
+       when rt in [
+              :allowed_defi_venue,
+              :allowed_vault,
+              :allowed_curator,
+              :allowed_collateral_asset,
+              :allowed_oracle,
+              :max_vault_exposure,
+              :max_curator_exposure,
+              :max_market_exposure,
+              :max_collateral_exposure,
+              :max_oracle_exposure,
+              :max_market_lltv,
+              :min_vault_liquidity,
+              :min_timelock_seconds,
+              :deny_morpho_warning,
+              :incident_hold,
+              :yield_anomaly_approval
+            ] do
+    :ok
+  end
+
   # Defensive fallback: an active rule with a type we don't know how
   # to evaluate is flagged explicitly rather than silently passed.
-  # The `rule_type` column is CHECK-constrained to the v1 set, so this
-  # branch only triggers during future upgrades.
+  # The `rule_type` column is CHECK-constrained, so this branch
+  # only triggers during future upgrades that ship a new rule type
+  # without an evaluator clause.
   defp evaluate_rule(%PolicyRule{} = rule, _input, _so_far) do
     {:violation,
      Evaluation.violation(
