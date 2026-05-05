@@ -15,11 +15,15 @@ defmodule Bank.Notifications.Emitter do
       envelopes; `:auto_exec` is intentionally silent (no operator
       action required).
     * `emit_execution_outcome/1` — every `Bank.Decisions.apply_execution_callback/1`
-      call that transitions an `%ExecutionPlan{}` to a *failure-side*
-      terminal status. Surfaces `:reverted` (critical) and
-      `:aborted` (warning). `:confirmed` is intentionally silent
-      until #234 ships an opt-in workspace setting (the issue
-      body's "execution confirmed if configured" item).
+      call that transitions an `%ExecutionPlan{}` to a terminal
+      status. Surfaces `:reverted` (critical) and `:aborted`
+      (warning) on every call. `:confirmed` is gated on a
+      workspace opt-in flag — `Bank.Workspaces.Workspace.notify_execution_confirmed?/1`
+      — so success-side rows only land when an admin has
+      explicitly opted in. Default is `false` (#234 acceptance:
+      "execution confirmed if configured"); a workspace that
+      hasn't flipped the flag keeps today's silent-on-success
+      posture.
     * `emit_access_approved/1` — every `Bank.Access.approve_pending_user/3`
       call that creates or reactivates a membership. Surfaces an
       `:info` notification to the newly admitted user, scoped to
@@ -85,6 +89,7 @@ defmodule Bank.Notifications.Emitter do
   alias Bank.Intents.AgentIntent
   alias Bank.Notifications
   alias Bank.Security.Pause
+  alias Bank.Workspaces
   alias Bank.Workspaces.Membership
   alias Bank.Workspaces.Workspace
 
@@ -173,11 +178,10 @@ defmodule Bank.Notifications.Emitter do
   @spec emit_execution_outcome(ExecutionPlan.t()) :: outcome_result()
   def emit_execution_outcome(%ExecutionPlan{} = plan) do
     cond do
-      plan.execution_status not in [:reverted, :aborted] ->
-        # `:confirmed` lands here too — silent until a workspace
-        # opt-in setting exists. `:broadcasting` / `:signing` /
-        # `:prepared` are interim and never produce inbox rows.
-        {:skip, {:not_failure_terminal, plan.execution_status}}
+      plan.execution_status not in [:reverted, :aborted, :confirmed] ->
+        # `:broadcasting` / `:signing` / `:prepared` are interim
+        # and never produce inbox rows.
+        {:skip, {:not_terminal, plan.execution_status}}
 
       not match?(%AgentIntent{}, plan.intent) ->
         {:skip, :intent_not_loaded}
@@ -185,26 +189,55 @@ defmodule Bank.Notifications.Emitter do
       is_nil(plan.intent.workspace_id) ->
         {:skip, :no_workspace_id}
 
-      true ->
-        intent = plan.intent
-        outcome = plan.execution_status
-        attrs = build_execution_outcome_attrs(intent, plan, outcome)
-
-        case Notifications.create(attrs) do
-          {:ok, _} = ok ->
-            ok
-
-          {:duplicate, _} = dup ->
-            dup
-
-          {:error, changeset} = err ->
-            Logger.warning(
-              "Bank.Notifications.Emitter: execution-outcome notification rejected " <>
-                "(plan=#{plan.id} outcome=#{outcome} errors=#{inspect(changeset.errors)})"
-            )
-
-            err
+      plan.execution_status == :confirmed ->
+        # Success-side notification is gated on the workspace's
+        # `notify_execution_confirmed` opt-in flag (#234). A
+        # workspace that has not opted in keeps today's
+        # silent-on-success posture.
+        case maybe_emit_confirmed(plan) do
+          {:ok, _} = ok -> ok
+          {:duplicate, _} = dup -> dup
+          {:skip, _} = skip -> skip
+          {:error, _} = err -> err
         end
+
+      true ->
+        do_emit_execution_outcome(plan)
+    end
+  end
+
+  defp maybe_emit_confirmed(%ExecutionPlan{intent: %AgentIntent{} = intent} = plan) do
+    case Workspaces.get_workspace(intent.workspace_id) do
+      %Workspace{} = workspace ->
+        if Workspace.notify_execution_confirmed?(workspace) do
+          do_emit_execution_outcome(plan)
+        else
+          {:skip, :confirmed_not_opted_in}
+        end
+
+      nil ->
+        {:skip, :workspace_not_found}
+    end
+  end
+
+  defp do_emit_execution_outcome(%ExecutionPlan{intent: %AgentIntent{} = intent} = plan) do
+    outcome = plan.execution_status
+    attrs = build_execution_outcome_attrs(intent, plan, outcome)
+
+    case Notifications.create(attrs) do
+      {:ok, _} = ok ->
+        ok
+
+      {:duplicate, _} = dup ->
+        dup
+
+      {:error, changeset} = err ->
+        Logger.warning(
+          "Bank.Notifications.Emitter: execution-outcome notification rejected " <>
+            "(plan=#{plan.id} outcome=#{outcome} errors=#{inspect(changeset.errors)})"
+        )
+
+        err
     end
   end
 
@@ -232,12 +265,16 @@ defmodule Bank.Notifications.Emitter do
 
   defp execution_severity_for(:reverted), do: :critical
   defp execution_severity_for(:aborted), do: :warning
+  defp execution_severity_for(:confirmed), do: :info
 
   defp execution_title_for(:reverted, %AgentIntent{} = intent),
     do: "Execution reverted on #{intent.kind} intent #{short_id(intent.id)}"
 
   defp execution_title_for(:aborted, %AgentIntent{} = intent),
     do: "Execution aborted on #{intent.kind} intent #{short_id(intent.id)}"
+
+  defp execution_title_for(:confirmed, %AgentIntent{} = intent),
+    do: "Execution confirmed on #{intent.kind} intent #{short_id(intent.id)}"
 
   # Body is composed strictly from controlled fields. We
   # deliberately do NOT include `plan.final_reason` (operator-

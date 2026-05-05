@@ -246,7 +246,7 @@ defmodule Bank.Notifications.EmitterTest do
       refute n.body =~ "incident-1234"
     end
 
-    test "skips :confirmed — opt-in setting is a remaining #234 blocker" do
+    test "skips :confirmed by default (opt-in flag is false on a fresh workspace)" do
       intent = agent_intent()
       envelope = decision_envelope(intent: intent, outcome: :auto_exec, current: true)
 
@@ -259,10 +259,60 @@ defmodule Bank.Notifications.EmitterTest do
         )
         |> Bank.Repo.preload(:intent)
 
-      assert {:skip, {:not_failure_terminal, :confirmed}} =
+      assert {:skip, :confirmed_not_opted_in} =
                Emitter.emit_execution_outcome(plan)
 
       assert Notifications.list_for_workspace(intent.workspace_id) == []
+    end
+
+    test "emits an :info :confirmed notification when the workspace opts in (#234)",
+         %{workspace: ws} do
+      # Flip the opt-in flag for this test workspace.
+      {:ok, _} = Bank.Workspaces.set_notify_execution_confirmed(ws, true)
+
+      intent = agent_intent()
+      envelope = decision_envelope(intent: intent, outcome: :auto_exec, current: true)
+
+      plan =
+        execution_plan(
+          decision: envelope,
+          execution_status: :confirmed,
+          final_outcome: :confirmed,
+          active: false
+        )
+        |> Bank.Repo.preload(:intent)
+
+      assert {:ok, %Notification{} = n} = Emitter.emit_execution_outcome(plan)
+
+      assert n.workspace_id == intent.workspace_id
+      assert n.role_target == :operator
+      assert n.event_type == "execution.confirmed"
+      assert n.severity == :info
+      assert n.subject_type == "execution_plan"
+      assert n.subject_id == plan.id
+      assert n.dedupe_key == "execution:#{plan.id}:confirmed"
+      assert n.title =~ "confirmed"
+      assert n.title =~ to_string(intent.kind)
+    end
+
+    test "re-emitting :confirmed for an opted-in workspace dedupes",
+         %{workspace: ws} do
+      {:ok, _} = Bank.Workspaces.set_notify_execution_confirmed(ws, true)
+
+      intent = agent_intent()
+      envelope = decision_envelope(intent: intent, outcome: :auto_exec, current: true)
+
+      plan =
+        execution_plan(
+          decision: envelope,
+          execution_status: :confirmed,
+          final_outcome: :confirmed,
+          active: false
+        )
+        |> Bank.Repo.preload(:intent)
+
+      assert {:ok, %Notification{id: id}} = Emitter.emit_execution_outcome(plan)
+      assert {:duplicate, %Notification{id: ^id}} = Emitter.emit_execution_outcome(plan)
     end
 
     test "skips non-terminal interim statuses (e.g. :broadcasting)" do
@@ -277,7 +327,7 @@ defmodule Bank.Notifications.EmitterTest do
         )
         |> Bank.Repo.preload(:intent)
 
-      assert {:skip, {:not_failure_terminal, :broadcasting}} =
+      assert {:skip, {:not_terminal, :broadcasting}} =
                Emitter.emit_execution_outcome(plan)
     end
   end

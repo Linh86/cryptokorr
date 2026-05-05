@@ -68,6 +68,8 @@ defmodule Bank.Workspaces.Workspace do
 
     field :mainnet_enabled, :boolean, default: false
 
+    field :notify_execution_confirmed, :boolean, default: false
+
     has_many :memberships, Membership
 
     timestamps()
@@ -86,7 +88,7 @@ defmodule Bank.Workspaces.Workspace do
   """
   def changeset(workspace, attrs) do
     workspace
-    |> cast(attrs, [:slug, :name, :mainnet_enabled])
+    |> cast(attrs, [:slug, :name, :mainnet_enabled, :notify_execution_confirmed])
     |> validate_required([:slug, :name])
     |> update_change(:slug, &normalise_slug/1)
     |> validate_format(:slug, ~r/^[a-z0-9][a-z0-9_-]{0,62}$/,
@@ -139,6 +141,24 @@ defmodule Bank.Workspaces.Workspace do
   @spec mainnet_enabled?(t()) :: boolean()
   def mainnet_enabled?(%__MODULE__{mainnet_enabled: true}), do: true
   def mainnet_enabled?(%__MODULE__{}), do: false
+
+  @doc """
+  Changeset for the `notify_execution_confirmed` opt-in flip
+  (#234). Separate from `changeset/2` because notification
+  preferences are an admin-only setting flip, not a generic
+  workspace edit.
+  """
+  @spec notification_changeset(t(), map()) :: Ecto.Changeset.t()
+  def notification_changeset(workspace, attrs) do
+    workspace
+    |> cast(attrs, [:notify_execution_confirmed])
+    |> validate_required([:notify_execution_confirmed])
+  end
+
+  @doc "True iff this workspace opts into success-side execution.confirmed notifications."
+  @spec notify_execution_confirmed?(t()) :: boolean()
+  def notify_execution_confirmed?(%__MODULE__{notify_execution_confirmed: true}), do: true
+  def notify_execution_confirmed?(%__MODULE__{}), do: false
 
   defp normalise_slug(slug) when is_binary(slug),
     do: slug |> String.trim() |> String.downcase()
