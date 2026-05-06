@@ -34,3 +34,23 @@ export type SupportedChain = "base" | "base-sepolia";
 export function isSupportedChain(chain: string): chain is SupportedChain {
   return chain === "base" || chain === "base-sepolia";
 }
+
+/**
+ * Swap-specific chain allowlist (#192 P2).
+ *
+ * The MVP plan keeps live swap execution on Base Sepolia ONLY —
+ * mainnet swap dispatch is post-MVP. The generic `isSupportedChain`
+ * still admits both `"base"` and `"base-sepolia"` for the legacy
+ * transfer path; swap dispatch must NOT silently fall through to
+ * mainnet broadcast.
+ *
+ * The dispatch swap handler calls this helper before delegating to
+ * `executeSwap`. A `chain: "base"` envelope fails closed with
+ * `UnsupportedError` so Phoenix sees a 422 + `unsupported` error
+ * code, not a successful broadcast.
+ */
+export type SupportedSwapChain = "base-sepolia";
+
+export function isSupportedSwapChain(chain: string): chain is SupportedSwapChain {
+  return chain === "base-sepolia";
+}

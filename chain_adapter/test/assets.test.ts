@@ -4,7 +4,10 @@
 
 import { describe, it, expect } from "vitest";
 import { parseAmount, isSupportedAsset } from "../src/config/assets.js";
-import { isSupportedChain } from "../src/config/chains.js";
+import {
+  isSupportedChain,
+  isSupportedSwapChain,
+} from "../src/config/chains.js";
 
 describe("parseAmount", () => {
   it("parses whole numbers", () => {
@@ -54,9 +57,35 @@ describe("isSupportedChain", () => {
     expect(isSupportedChain("base")).toBe(true);
   });
 
+  it("accepts base-sepolia", () => {
+    expect(isSupportedChain("base-sepolia")).toBe(true);
+  });
+
   it("rejects unsupported chains", () => {
     expect(isSupportedChain("ethereum")).toBe(false);
     expect(isSupportedChain("arbitrum")).toBe(false);
     expect(isSupportedChain("")).toBe(false);
+  });
+});
+
+describe("isSupportedSwapChain (#192 P2)", () => {
+  // The swap MVP is Base Sepolia ONLY — mainnet swap is post-MVP.
+  // This is a narrower allowlist than the generic `isSupportedChain`
+  // (which still admits both for the legacy transfer path) so a
+  // `chain: "base"` swap dispatch fails closed at the adapter
+  // boundary instead of broadcasting a mainnet UserOperation.
+
+  it("accepts base-sepolia", () => {
+    expect(isSupportedSwapChain("base-sepolia")).toBe(true);
+  });
+
+  it("rejects base mainnet for swap dispatch", () => {
+    expect(isSupportedSwapChain("base")).toBe(false);
+  });
+
+  it("rejects unsupported chains", () => {
+    expect(isSupportedSwapChain("ethereum")).toBe(false);
+    expect(isSupportedSwapChain("arbitrum")).toBe(false);
+    expect(isSupportedSwapChain("")).toBe(false);
   });
 });

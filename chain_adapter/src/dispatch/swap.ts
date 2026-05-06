@@ -23,7 +23,7 @@ import {
   DispatchSwapSchema,
   type DispatchSwap,
 } from "../contracts/schemas.js";
-import { isSupportedChain } from "../config/chains.js";
+import { isSupportedChain, isSupportedSwapChain } from "../config/chains.js";
 import { ValidationError, UnsupportedError } from "../lib/errors.js";
 import { logger } from "../lib/logger.js";
 import type { CallbackClient } from "../callbacks/client.js";
@@ -62,9 +62,21 @@ export async function handleSwapDispatch(
 
   const dispatch: DispatchSwap = parsed.data;
 
-  // 2. Check chain support.
+  // 2. Check chain support. The generic guard rejects truly unknown
+  //    chains (e.g. `"ethereum"`) at the adapter boundary; the
+  //    swap-specific guard then narrows the allowlist to Base
+  //    Sepolia only — the MVP plan keeps live swap dispatch on
+  //    testnet, mainnet swap is post-MVP. A `chain: "base"` envelope
+  //    therefore fails closed with `unsupported_swap_chain` rather
+  //    than silently broadcasting a mainnet swap UserOperation.
   if (!isSupportedChain(dispatch.chain)) {
     throw new UnsupportedError(`Chain "${dispatch.chain}" is not supported`);
+  }
+
+  if (!isSupportedSwapChain(dispatch.chain)) {
+    throw new UnsupportedError(
+      `Chain "${dispatch.chain}" is not supported for swap dispatch (MVP is Base Sepolia only)`,
+    );
   }
 
   logger.info("Swap dispatch accepted, executing via 0x batch", {

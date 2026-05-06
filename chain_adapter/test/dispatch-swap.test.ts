@@ -99,23 +99,37 @@ describe("POST /dispatch/swap", () => {
     expect(callbackClient.payloads).toHaveLength(0);
   });
 
-  it("accepts both 'base' and 'base-sepolia' chain labels", async () => {
-    for (const chain of ["base", "base-sepolia"]) {
-      callbackClient.payloads.length = 0;
+  it("accepts 'base-sepolia' but rejects 'base' (mainnet) for swap dispatch (#192 P2)", async () => {
+    // The MVP plan keeps live swap execution on Base Sepolia ONLY.
+    // Mainnet swap dispatch is post-MVP; admitting `chain: "base"`
+    // here would silently broadcast a mainnet swap UserOperation if
+    // the deployment had `BASE_CHAIN_ID=8453`. The swap-specific
+    // chain guard fails closed.
+    const sepolia = await app.inject({
+      method: "POST",
+      url: "/dispatch/swap",
+      headers: dispatchAuthHeaders,
+      payload: { ...dispatchSwap, chain: "base-sepolia" },
+    });
+    expect(sepolia.statusCode).toBe(202);
+    expect(sepolia.json().status).toBe("aborted");
+    expect(sepolia.json().reason).toBe("chain_clients_unavailable");
 
-      const response = await app.inject({
-        method: "POST",
-        url: "/dispatch/swap",
-        headers: dispatchAuthHeaders,
-        payload: { ...dispatchSwap, chain },
-      });
+    callbackClient.payloads.length = 0;
 
-      expect(response.statusCode, `chain=${chain}`).toBe(202);
-      // baseClients is null in this test, so executor short-circuits
-      // — both chain labels reach the same `chain_clients_unavailable`
-      // abort.
-      expect(response.json().status).toBe("aborted");
-    }
+    const mainnet = await app.inject({
+      method: "POST",
+      url: "/dispatch/swap",
+      headers: dispatchAuthHeaders,
+      payload: { ...dispatchSwap, chain: "base" },
+    });
+    expect(mainnet.statusCode).toBe(422);
+    expect(mainnet.json().error.code).toBe("unsupported");
+    expect(mainnet.json().error.message).toContain("base");
+    expect(mainnet.json().error.message).toContain("Base Sepolia");
+    // No callback emitted — swap dispatch was refused before the
+    // executor got a chance to broadcast.
+    expect(callbackClient.payloads).toHaveLength(0);
   });
 
   it("rejects invalid slippage_bps", async () => {
