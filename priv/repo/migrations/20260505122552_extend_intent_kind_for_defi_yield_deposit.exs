@@ -26,17 +26,13 @@ defmodule Bank.Repo.Migrations.ExtendIntentKindForDefiYieldDeposit do
   def up do
     drop constraint(:agent_intents, :kind_valid)
 
-    create constraint(:agent_intents, :kind_valid,
-             check: "kind IN (#{quoted_list(@all_kinds)})"
-           )
+    create constraint(:agent_intents, :kind_valid, check: "kind IN (#{quoted_list(@all_kinds)})")
   end
 
   def down do
     drop constraint(:agent_intents, :kind_valid)
 
-    create constraint(:agent_intents, :kind_valid,
-             check: "kind IN (#{quoted_list(@v01_kinds)})"
-           )
+    create constraint(:agent_intents, :kind_valid, check: "kind IN (#{quoted_list(@v01_kinds)})")
   end
 
   defp quoted_list(values) do
