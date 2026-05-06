@@ -123,7 +123,7 @@ describe("buildCryptobankTools", () => {
     assert.deepEqual(wire["target"], { raw_address: "0xdead" });
   });
 
-  it("submitAllocateIdleCapital.execute sends defi_yield_deposit kind on the wire", async () => {
+  it("submitAllocateIdleCapital.execute sends the public wire kind", async () => {
     const { client, calls } = mockClient([
       {
         status: 202,
@@ -143,10 +143,10 @@ describe("buildCryptobankTools", () => {
       vaultAddress: "0xVault",
     });
     const wire = JSON.parse(calls[0]!.init.body as string) as Record<string, unknown>;
-    // The TS SDK currently sends defi_yield_deposit; the response
-    // returns the public name allocate_idle_capital. The example
-    // test pins the wire shape only.
-    assert.equal(wire["kind"], "defi_yield_deposit");
+    // Phoenix's wire enum is `allocate_idle_capital`. The persisted
+    // Elixir atom is `:defi_yield_deposit`, but the SDK and example
+    // pin the public wire kind only.
+    assert.equal(wire["kind"], "allocate_idle_capital");
     assert.equal(wire["chain"], "base-sepolia");
     assert.equal(wire["vault_address"], "0xVault");
   });
