@@ -18,6 +18,7 @@ defmodule Bank.Fixtures do
   alias Bank.Audit.AuditEvent
   alias Bank.Counterparties.{AddressLabel, Counterparty, EvidenceArtifact, TrustAssertion}
   alias Bank.Decisions.{DecisionEnvelope, TrustAssessment, ExecutionPlan, SimulationReport}
+  alias Bank.DefiVenues.Morpho.PersistedVaultSnapshot
   alias Bank.Delegations.Delegation
   alias Bank.Intents.AgentIntent
   alias Bank.Policies.PolicyRule
@@ -171,6 +172,116 @@ defmodule Bank.Fixtures do
 
     intent
   end
+
+  @doc """
+  Build a `kind: :defi_yield_deposit` `%AgentIntent{}` whose
+  `target_raw_address` carries the Morpho vault address. Defaults
+  to `chain: "base-sepolia"`, `asset: "USDC"`, vault address
+  matching `morpho_vault_snapshot/1`'s default; a test that wants
+  the matching snapshot can pass both fixtures with no extra
+  wiring.
+  """
+  def morpho_deposit_intent(attrs \\ %{}) do
+    attrs = to_map(attrs)
+
+    attrs =
+      attrs
+      |> Map.put_new(:agent_id, "agent-#{unique_int()}")
+      |> Map.put_new(:source, :agent)
+      |> Map.put_new(:idempotency_key, "idem-#{unique_int()}")
+      |> Map.put_new(:payload_hash, random_hex(64))
+      |> Map.put_new(:kind, :defi_yield_deposit)
+      |> Map.put_new(:asset, "USDC")
+      |> Map.put_new(:chain, "base-sepolia")
+      |> Map.put_new(:amount, Decimal.new("1000"))
+      |> Map.put_new(:target_raw_address, default_morpho_vault_address())
+      |> Map.put_new(:target_counterparty_id, nil)
+      |> Map.put_new(:target_address_label_id, nil)
+      |> Map.put_new(:submitted_at, monotonic_now())
+      |> Map.put_new(:workspace_id, default_workspace_id())
+
+    {:ok, intent} =
+      %AgentIntent{}
+      |> AgentIntent.changeset(attrs)
+      |> Repo.insert()
+
+    intent
+  end
+
+  @doc """
+  Insert a `current: true` Morpho vault snapshot row. Defaults to
+  the `base-sepolia` chain id (`84532`) and a USDC vault with one
+  whitelisted-style allocation. Test overrides target only the
+  fields they need.
+  """
+  def morpho_vault_snapshot(attrs \\ %{}) do
+    attrs = to_map(attrs)
+    fetched_at = Map.get(attrs, :fetched_at, monotonic_now())
+
+    attrs =
+      attrs
+      |> Map.put_new(:chain_id, 84_532)
+      |> Map.put_new(:vault_address, default_morpho_vault_address())
+      |> Map.put_new(:network, "base-sepolia")
+      |> Map.put_new(:name, "Demo USDC Vault")
+      |> Map.put_new(:symbol, "demoUSDC")
+      |> Map.put_new(:listed, true)
+      |> Map.put_new(:deposit_asset, %{
+        "address" => "0xusdc",
+        "symbol" => "USDC",
+        "decimals" => 6
+      })
+      |> Map.put_new(:state, %{
+        "apy" => "0.045",
+        "net_apy" => "0.041",
+        "total_assets" => "10000000000000"
+      })
+      |> Map.put_new(:allocations, [
+        %{
+          "market_unique_key" => "0xmarket1",
+          "loan_asset" => "0xusdc",
+          "collateral_asset" => "0xwsteth",
+          "oracle" => "0xchainlinkoracle",
+          "irm" => "0xirm",
+          "lltv" => 750_000_000_000_000_000,
+          "supply_cap" => "1000000000000",
+          "supplied_assets" => "100000000000",
+          "supplied_assets_usd" => "100000.00"
+        }
+      ])
+      |> Map.put_new(:warnings, [])
+      |> Map.put_new(:pending_caps, [])
+      |> Map.put_new(:allocators, [%{"address" => "0xallocator1"}])
+      |> Map.put_new(:source, %{
+        "fetched_at" => DateTime.to_iso8601(fetched_at),
+        "source_name" => "morpho_blue_graphql",
+        "source_schema_version" => "1",
+        "source_warnings" => [],
+        "payload_hash" => "demo-hash"
+      })
+      |> Map.put_new(:fetched_at, fetched_at)
+      |> Map.put_new(:payload_hash, "demo-hash")
+      |> Map.put_new(:freshness_seconds_identity, 86_400)
+      |> Map.put_new(:freshness_seconds_allocation, 300)
+      |> Map.put_new(:freshness_seconds_warnings, 300)
+      |> Map.put_new(:freshness_seconds_apy, 3600)
+      |> Map.put_new(:current, true)
+
+    {:ok, row} =
+      attrs
+      |> PersistedVaultSnapshot.create_changeset()
+      |> Repo.insert()
+
+    row
+  end
+
+  @doc """
+  Default Morpho vault address used by `morpho_deposit_intent/1`
+  and `morpho_vault_snapshot/1` so a "happy path" test can build
+  both fixtures without manually keeping addresses in sync.
+  """
+  def default_morpho_vault_address,
+    do: "0xbeef000000000000000000000000000000000099"
 
   def trust_assessment(attrs \\ %{}) do
     attrs = to_map(attrs)
