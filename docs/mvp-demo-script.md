@@ -116,9 +116,12 @@ end-to-end smokes.
   `docs/wallet-connect.md`.)
 - Wallet-risk intelligence (sanctions, scam feeds, attribution).
   Counterparties are hand-curated; epic #55 is the future track.
-- Swap. `/dispatch/swap` validates the request, then sends a
-  deterministic `execution.aborted` callback with reason
-  `swap_not_implemented` (`chain_adapter/src/dispatch/swap.ts`).
+- Swap on mainnet. Live 0x swap dispatch on Base Sepolia ships
+  via epic #188 (`mix bank.swap.smoke`,
+  `docs/runbooks/swap-dispatch.md`); mainnet swap dispatch is
+  rejected closed at the safety gate AND the adapter
+  (#192 P2) and stays post-MVP. 1inch / CCTP / Jupiter remain
+  quote/planning only.
 - Multi-operator / multi-tenant. Single-operator alpha. SSO and
   per-tenant isolation are deferred (per `docs/security.md`).
 - HSM/KMS for `OPERATOR_PRIVATE_KEY`. Today the operator key is an

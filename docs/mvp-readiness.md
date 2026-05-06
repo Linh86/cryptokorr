@@ -102,6 +102,31 @@ traceability.
   TTL expiry via `Bank.Runtime.Workers.ExpireApproval` was already
   live; #136 wired the enqueue. Live since PR #148 (commit `7f12c4a`).
 
+### MVP 0x swap dispatch on Base Sepolia (epic #188)
+
+- **Live execution wired end-to-end on Base Sepolia.** A swap
+  intent flows through the same evaluation pipeline as a transfer
+  (#189 route contract → #190 plan-side route artifacts +
+  `route_hash` → #191 centralised dispatch safety gate). The
+  `RunExecution` worker re-runs the safety gate before calling
+  `Bank.AdapterClient.dispatch_swap/2`; the TS adapter
+  (`chain_adapter/src/chains/base/swap.ts`, #192) builds an
+  `executeBatch([token, router], [0, 0], [approve(spender,
+  inputAmount), routerCalldata])` UserOperation with bounded
+  approval (never `MaxUint256`). Phoenix worker + callback
+  persistence is in #193; replay evidence under
+  `swap_route_evidence` is in #194; operator UI swap detail
+  block + queue badges + slippage/deadline/min-out visibility
+  are in #195; `mix bank.swap.smoke` Phoenix-side dry-run smoke
+  + `docs/runbooks/swap-dispatch.md` runbook are in #196.
+- **Hard MVP boundaries** (each rejected closed at multiple
+  layers): Base Sepolia only — `chain: "base"` (mainnet) is
+  refused at `Bank.Decisions.SwapDispatchSafety` AND the
+  adapter's `isSupportedSwapChain/1` (#192 P2). 0x router only.
+  Exact-input only. USDC ↔ USDT and USDC ↔ ETH MVP pairs.
+  ERC20→ERC20 (`route.value == 0`). 1inch / CCTP / Jupiter are
+  quote/planning only.
+
 ### OpenAPI
 
 - `priv/openapi/openapi.json` is regenerated through every PR via
@@ -191,12 +216,6 @@ documented escape hatch.
 
 ## Deferred — post-MVP (acceptable to ship without)
 
-- **Swap dispatch is scaffolded.** `chain_adapter/src/dispatch/swap.ts`
-  validates the request and immediately emits
-  `execution.aborted{reason: "swap_not_implemented"}`. Routing
-  layer (`route_selector.ex`) is built; the execution leg is not.
-  Fail-closed today — not a footgun. Onboarding doc tells users
-  "Transfers only — no swaps".
 - **Operator UI gaps.** No intent submission page (operator
   manually `mix bank.demo.seed`s or curl-submits), no
   multi-account selector, audit pagination lacks date-range filter,
@@ -206,13 +225,15 @@ documented escape hatch.
   dispatch state.
 - **Telegram bot is alerting + signed-button approval; no command
   dispatch beyond pause/resume.**
-- **Quote provider stub.** `lib/bank/quotes/stub_provider.ex` is a
-  test/dev provider returning provider id `"stub"` — deterministic
-  and side-effect free. It's what evaluation and simulate use in
-  tests and local dev. Real providers exist under
-  `lib/bank/stablecoins/providers/` for production routing
-  decisions; the simulator-as-provider integration for live
-  preview is a follow-up.
+- **Quote provider stub is the test/dev default.**
+  `lib/bank/quotes/stub_provider.ex` returns provider id `"stub"`
+  — deterministic and side-effect-free; what evaluation and the
+  simulate endpoint use in tests and local dev. The live
+  `Bank.Quotes.LiveProvider` (Tenderly-style) is opt-in via
+  `config :bank, Bank.Quotes, provider: :live`. See
+  [`docs/runbooks/quote-provider-degraded-mode.md`](runbooks/quote-provider-degraded-mode.md)
+  for the live-mode recipe and the `/v1/health/deep`
+  `quotes_provider` rollup.
 - **Paymaster / sponsored gas not wired.** `priv/adapter/contract.md`:
   "Paymaster support itself is not yet wired in v0.1; reserved for
   when sponsored flow ships." Smart account funds its own gas today.
