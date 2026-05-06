@@ -133,6 +133,7 @@ defmodule BankWeb.IntentReplayLive do
         <.intent_card intent={@bundle.intent} />
         <.decision_report_card intent_id={@intent_id} report={@report} />
         <.audit_timeline_card events={@bundle.audit} />
+        <.morpho_evidence_card events={@bundle[:morpho_evidence] || []} />
         <.stablecoin_route_card routes={@bundle[:stablecoin_route_evidence] || []} />
         <.trust_history_card trust_assessments={@bundle.trust_assessments} />
         <.simulation_history_card simulations={@bundle.simulations} />
@@ -324,6 +325,128 @@ defmodule BankWeb.IntentReplayLive do
               <div class="mt-1 text-xs text-base-content/50 font-mono">
                 {event.subject_type} &middot; {short_id(event.subject_id)}
               </div>
+            </div>
+            <span class="text-xs text-base-content/40 font-mono shrink-0">
+              {format_datetime(event.ts)}
+            </span>
+          </div>
+        </li>
+      </ol>
+    </section>
+    """
+  end
+
+  # --- Section: Morpho deposit evidence (#204) -----------------------------
+
+  attr :events, :list, required: true
+
+  defp morpho_evidence_card(assigns) do
+    ~H"""
+    <section
+      id="replay-morpho-evidence"
+      class="rounded-xl border border-base-300 bg-base-100 shadow-sm overflow-hidden"
+    >
+      <header class="px-6 py-4 border-b border-base-300 flex items-center justify-between">
+        <h2 class="text-sm font-semibold flex items-center gap-1.5">
+          <.icon name="hero-banknotes" class="size-4" /> Morpho deposit evidence
+        </h2>
+        <span class="badge badge-sm badge-ghost">{length(@events)}</span>
+      </header>
+      <div :if={@events == []} class="px-6 py-6 text-sm text-base-content/50 text-center">
+        No Morpho evidence captured for this intent.
+      </div>
+      <ol :if={@events != []} class="divide-y divide-base-300">
+        <li
+          :for={{event, idx} <- Enum.with_index(@events, 1)}
+          id={morpho_event_dom_id(event, idx)}
+          class="px-6 py-4"
+        >
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0 space-y-1">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="text-[0.65rem] text-base-content/30 font-mono">v{idx}</span>
+                <span class={["badge badge-sm", morpho_event_class(event.event_type)]}>
+                  {short_morpho_event(event.event_type)}
+                </span>
+                <span
+                  :if={morpho_event_decision(event)}
+                  class="badge badge-sm badge-outline"
+                >
+                  {morpho_event_decision(event)}
+                </span>
+                <span
+                  :if={morpho_event_risk_tier(event)}
+                  class={["badge badge-sm", morpho_risk_tier_class(morpho_event_risk_tier(event))]}
+                >
+                  risk: {morpho_event_risk_tier(event)}
+                </span>
+              </div>
+              <p
+                :if={morpho_event_summary(event)}
+                id={"morpho-event-summary-" <> Integer.to_string(idx)}
+                class="text-xs text-base-content/70"
+              >
+                {morpho_event_summary(event)}
+              </p>
+              <dl class="grid grid-cols-2 gap-x-4 gap-y-0.5 text-xs sm:grid-cols-3">
+                <div :if={morpho_event_vault(event)}>
+                  <dt class="text-base-content/40">Vault</dt>
+                  <dd class="font-mono break-all">{morpho_event_vault(event)}</dd>
+                </div>
+                <div :if={morpho_event_chain_id(event)}>
+                  <dt class="text-base-content/40">Chain</dt>
+                  <dd class="font-mono">{morpho_event_chain_id(event)}</dd>
+                </div>
+                <div :if={morpho_event_snapshot_id(event)}>
+                  <dt class="text-base-content/40">Snapshot id</dt>
+                  <dd class="font-mono">{short_id(morpho_event_snapshot_id(event))}</dd>
+                </div>
+                <div :if={morpho_event_snapshot_hash(event)}>
+                  <dt class="text-base-content/40">Snapshot hash</dt>
+                  <dd class="font-mono">{short_hash(morpho_event_snapshot_hash(event))}</dd>
+                </div>
+                <div :if={morpho_event_snapshot_fetched_at(event)}>
+                  <dt class="text-base-content/40">Fetched at</dt>
+                  <dd class="font-mono">{morpho_event_snapshot_fetched_at(event)}</dd>
+                </div>
+                <div :if={morpho_event_amount(event)}>
+                  <dt class="text-base-content/40">Amount</dt>
+                  <dd>{morpho_event_amount(event)} {morpho_event_asset(event) || "USDC"}</dd>
+                </div>
+              </dl>
+              <ul
+                :if={morpho_event_primary_reasons(event) != []}
+                id={"morpho-event-reasons-" <> Integer.to_string(idx)}
+                class="mt-1 space-y-0.5 text-xs text-base-content/60"
+              >
+                <li
+                  :for={reason <- morpho_event_primary_reasons(event)}
+                  class="flex items-start gap-1.5"
+                >
+                  <span class={[
+                    "badge badge-xs",
+                    morpho_severity_class(reason["severity"] || reason[:severity])
+                  ]}>
+                    {reason["severity"] || reason[:severity]}
+                  </span>
+                  <span class="font-mono text-base-content/40">
+                    {reason["code"] || reason[:code]}:
+                  </span>
+                  <span>{reason["message"] || reason[:message]}</span>
+                </li>
+              </ul>
+              <ul
+                :if={morpho_event_stale_fields(event) != []}
+                class="mt-1 space-y-0.5 text-xs text-warning"
+              >
+                <li :for={field <- morpho_event_stale_fields(event)} class="flex items-center gap-1">
+                  <.icon name="hero-clock" class="size-3" />
+                  <span class="font-mono">{stale_field_label(field)}</span>
+                </li>
+              </ul>
+              <p :if={morpho_event_reason(event)} class="text-xs text-base-content/50 italic">
+                {morpho_event_reason(event)}
+              </p>
             </div>
             <span class="text-xs text-base-content/40 font-mono shrink-0">
               {format_datetime(event.ts)}
@@ -892,6 +1015,147 @@ defmodule BankWeb.IntentReplayLive do
     do: d |> Decimal.normalize() |> Decimal.to_string(:normal)
 
   defp decimal_string(other), do: other
+
+  # --- Morpho-evidence rendering helpers (#204) ----------------------------
+
+  defp morpho_event_dom_id(%{event_type: type}, idx) when is_binary(type),
+    do: "morpho-evt-#{idx}-" <> String.replace(type, ".", "-")
+
+  defp morpho_event_dom_id(_event, idx), do: "morpho-evt-#{idx}"
+
+  defp short_morpho_event("morpho." <> rest), do: rest
+  defp short_morpho_event(other), do: other
+
+  defp morpho_event_class("morpho.deposit_dispatched"), do: "badge-success"
+  defp morpho_event_class("morpho.deposit_aborted"), do: "badge-error"
+  defp morpho_event_class("morpho.policy_blocked"), do: "badge-error"
+  defp morpho_event_class("morpho.snapshot_stale"), do: "badge-warning"
+  defp morpho_event_class("morpho.risk_explained"), do: "badge-info"
+  defp morpho_event_class(_), do: "badge-ghost"
+
+  defp morpho_risk_tier_class("severe"), do: "badge-error"
+  defp morpho_risk_tier_class("elevated"), do: "badge-warning"
+  defp morpho_risk_tier_class("moderate"), do: "badge-info"
+  defp morpho_risk_tier_class("low"), do: "badge-success"
+  defp morpho_risk_tier_class(_), do: "badge-ghost"
+
+  defp morpho_severity_class("block"), do: "badge-error"
+  defp morpho_severity_class("hold"), do: "badge-warning"
+  defp morpho_severity_class("approval"), do: "badge-info"
+  defp morpho_severity_class("warn"), do: "badge-warning"
+  defp morpho_severity_class("info"), do: "badge-ghost"
+  defp morpho_severity_class(_), do: "badge-ghost"
+
+  # The `morpho.risk_explained` event embeds the full
+  # `morpho_risk_explanation` map in `after_ref`. The other events
+  # carry per-event scalar fields. Helpers below extract the safe
+  # fields without ever rendering the raw embedded map.
+  defp morpho_explanation(%{after_ref: %{"morpho_risk_explanation" => exp}}) when is_map(exp),
+    do: exp
+
+  defp morpho_explanation(_), do: nil
+
+  defp morpho_event_vault(%{after_ref: %{"vault_address" => v}}) when is_binary(v), do: v
+
+  defp morpho_event_vault(event) do
+    case morpho_explanation(event) do
+      %{"vault_address" => v} when is_binary(v) -> v
+      _ -> nil
+    end
+  end
+
+  defp morpho_event_chain_id(%{after_ref: %{"chain_id" => v}}), do: v
+
+  defp morpho_event_chain_id(event) do
+    case morpho_explanation(event) do
+      %{"chain_id" => v} -> v
+      _ -> nil
+    end
+  end
+
+  defp morpho_event_decision(event) do
+    case morpho_explanation(event) do
+      %{"decision" => v} when is_binary(v) -> v
+      _ -> nil
+    end
+  end
+
+  defp morpho_event_risk_tier(event) do
+    case morpho_explanation(event) do
+      %{"risk_tier" => v} when is_binary(v) -> v
+      _ -> nil
+    end
+  end
+
+  defp morpho_event_summary(event) do
+    case morpho_explanation(event) do
+      %{"summary" => v} when is_binary(v) and v != "" ->
+        v
+
+      _ ->
+        case event.after_ref do
+          %{"summary" => v} when is_binary(v) and v != "" -> v
+          _ -> nil
+        end
+    end
+  end
+
+  defp morpho_event_primary_reasons(event) do
+    case morpho_explanation(event) do
+      %{"primary_reasons" => list} when is_list(list) -> list
+      _ -> []
+    end
+  end
+
+  defp morpho_event_snapshot_id(%{after_ref: %{"snapshot_id" => v}}) when is_binary(v), do: v
+
+  defp morpho_event_snapshot_id(%{after_ref: %{"snapshot" => %{"id" => v}}}) when is_binary(v),
+    do: v
+
+  defp morpho_event_snapshot_id(_), do: nil
+
+  defp morpho_event_snapshot_hash(%{after_ref: %{"snapshot_payload_hash" => v}})
+       when is_binary(v),
+       do: v
+
+  defp morpho_event_snapshot_hash(%{after_ref: %{"snapshot" => %{"payload_hash" => v}}})
+       when is_binary(v),
+       do: v
+
+  defp morpho_event_snapshot_hash(_), do: nil
+
+  defp morpho_event_snapshot_fetched_at(%{after_ref: %{"fetched_at" => v}}) when is_binary(v),
+    do: v
+
+  defp morpho_event_snapshot_fetched_at(%{after_ref: %{"snapshot" => %{"fetched_at" => v}}})
+       when is_binary(v),
+       do: v
+
+  defp morpho_event_snapshot_fetched_at(_), do: nil
+
+  defp morpho_event_amount(%{after_ref: %{"amount" => v}}) when is_binary(v), do: v
+  defp morpho_event_amount(%{after_ref: %{"proposed_amount" => v}}) when is_binary(v), do: v
+  defp morpho_event_amount(_), do: nil
+
+  defp morpho_event_asset(%{after_ref: %{"asset" => v}}) when is_binary(v), do: v
+  defp morpho_event_asset(_), do: nil
+
+  defp morpho_event_stale_fields(%{after_ref: %{"stale_fields" => list}}) when is_list(list),
+    do: list
+
+  defp morpho_event_stale_fields(_), do: []
+
+  defp morpho_event_reason(%{after_ref: %{"reason" => v}}) when is_binary(v), do: v
+  defp morpho_event_reason(_), do: nil
+
+  defp stale_field_label(%{"field" => f, "state" => s}) when is_binary(f) and is_binary(s),
+    do: "#{f} (#{s})"
+
+  defp stale_field_label(%{field: f, state: s}) when is_binary(f) and is_atom(s),
+    do: "#{f} (#{s})"
+
+  defp stale_field_label(value) when is_binary(value), do: value
+  defp stale_field_label(_), do: "stale"
 
   defp format_datetime(nil), do: "-"
 
