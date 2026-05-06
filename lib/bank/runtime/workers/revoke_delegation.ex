@@ -12,15 +12,32 @@ defmodule Bank.Runtime.Workers.RevokeDelegation do
 
   Sequence:
 
-    1. Log the request with the smart-account id and reason.
+    1. Load the delegation row and decide the revoke path
+       (`:cryptographic` or `:sentinel`) up front so the audit /
+       broadcast / log carry the chosen posture from the very first
+       message.
     2. Broadcast `{:delegation_revoke_requested, ...}` on
-       `security:events` so the control tower sees the request even
-       before the adapter acknowledges.
+       `security:events` with the path + root validator owner so the
+       control tower sees the operator's intent before the adapter
+       acknowledges.
     3. Write a runtime-scoped audit event (`security.revoke_requested`)
        so the event chain survives process restart and fans out on
        `audit:stream`.
     4. Call `Bank.AdapterClient.dispatch_revoke_delegation/1`.
     5. Map the adapter outcome onto Oban retry semantics.
+
+  Revoke path selection (#475):
+
+    * `root_validator_owner = "operator"` (legacy / server-signed
+      install) — adapter receives the cryptographic permission block
+      and runs `Kernel.uninstallValidation(...)` UserOp signed by the
+      operator EOA.
+    * `root_validator_owner = "user"` (browser-signed install, #474)
+      — adapter receives no permission block. Operator EOA cannot
+      cryptographically uninstall a user-rooted kernel, so the
+      adapter emits the sentinel `execute(self, 0, 0x)` audit
+      anchor. Browser-signed cryptographic revoke is a v0.2
+      follow-up — see `docs/design/browser-signed-install.md` § 6.
 
   ## Retry posture
 
@@ -51,13 +68,25 @@ defmodule Bank.Runtime.Workers.RevokeDelegation do
   def perform(%Oban.Job{args: %{"smart_account_id" => smart_account_id} = args}) do
     reason = Map.get(args, "reason", "unspecified")
 
+    # Resolve the delegation up front so audit/broadcast/log carry
+    # the chosen revoke path and root_validator_owner, even if the
+    # row is missing (path falls back to `:unknown` /
+    # owner to `nil` and the worker cancels with
+    # `:no_such_delegation`).
+    delegation = Delegations.get(smart_account_id)
+    revoke_path = revoke_path_for(delegation)
+    owner = root_validator_owner_for(delegation)
+
     Logger.info(
-      "RevokeDelegation: requested for smart_account #{smart_account_id} (reason=#{reason})"
+      "RevokeDelegation: requested for smart_account #{smart_account_id} " <>
+        "(reason=#{reason}, revoke_path=#{revoke_path}, root_validator_owner=#{inspect(owner)})"
     )
 
     Notifier.security_event(:delegation_revoke_requested, %{
       smart_account_id: smart_account_id,
-      reason: reason
+      reason: reason,
+      revoke_path: revoke_path,
+      root_validator_owner: owner
     })
 
     with {:ok, _event} <-
@@ -67,9 +96,13 @@ defmodule Bank.Runtime.Workers.RevokeDelegation do
              subject_type: "smart_account",
              subject_id: smart_account_id,
              correlation_id: nil,
-             after_ref: %{reason: reason}
+             after_ref: %{
+               reason: reason,
+               revoke_path: Atom.to_string(revoke_path),
+               root_validator_owner: owner
+             }
            }) do
-      dispatch(smart_account_id, reason)
+      dispatch(delegation, smart_account_id, reason)
     else
       {:error, reason} ->
         Logger.error("RevokeDelegation: audit emit failed: #{inspect(reason)}")
@@ -94,46 +127,46 @@ defmodule Bank.Runtime.Workers.RevokeDelegation do
   # adapter can encode.
   #
   # When the row is `cryptographically_revocable?/1` (issue #58 has
-  # populated the permission artifact columns) the worker also
+  # populated the permission artifact columns AND
+  # `root_validator_owner` is `"operator"` per #475) the worker also
   # threads the wire-shaped `permission` block through to the
   # adapter so the `Kernel.uninstallValidation(...)` UserOp can
-  # reconstruct the plugin without a Phoenix round-trip. Legacy
-  # rows have nil artifacts and the adapter takes the sentinel
-  # path.
-  defp dispatch(smart_account_id, reason) do
-    case Delegations.get(smart_account_id) do
-      %Delegation{delegation_id: delegation_id} = delegation when is_binary(delegation_id) ->
-        # Defense-in-depth mainnet gate (#178). A revoke is itself
-        # a chain-broadcast operation, so the workspace mainnet
-        # eligibility gate applies here too: if the delegation's
-        # chain is mainnet-class and the workspace flag is off,
-        # we refuse to dispatch the revoke. The control-plane
-        # `Delegations.record_revoke_requested/2` projection write
-        # in `Bank.Security.revoke_delegation/2` already happened
-        # before this worker ran — that's a Phoenix-side state
-        # change, not a chain side effect, so it stands.
-        if Bank.Chains.mainnet_allowed_for?(delegation.chain, delegation.workspace_id) do
-          call_adapter(
-            smart_account_id,
-            delegation_id,
-            reason,
-            Delegations.permission_dispatch_block(delegation)
-          )
-        else
-          Logger.warning(
-            "RevokeDelegation: mainnet disabled for workspace #{inspect(delegation.workspace_id)} " <>
-              "(chain=#{delegation.chain}); cancelling revoke for smart_account #{smart_account_id}"
-          )
+  # reconstruct the plugin without a Phoenix round-trip. Browser-
+  # signed (`root_validator_owner: "user"`) and legacy artifact-less
+  # rows take the sentinel path with no permission block.
+  defp dispatch(nil, smart_account_id, _reason) do
+    Logger.error(
+      "RevokeDelegation: no non-terminal delegation found for smart_account #{smart_account_id}; cancelling"
+    )
 
-          {:cancel, :mainnet_disabled}
-        end
+    {:cancel, :no_such_delegation}
+  end
 
-      nil ->
-        Logger.error(
-          "RevokeDelegation: no non-terminal delegation found for smart_account #{smart_account_id}; cancelling"
-        )
+  defp dispatch(%Delegation{delegation_id: delegation_id} = delegation, smart_account_id, reason)
+       when is_binary(delegation_id) do
+    # Defense-in-depth mainnet gate (#178). A revoke is itself a
+    # chain-broadcast operation, so the workspace mainnet
+    # eligibility gate applies here too: if the delegation's chain
+    # is mainnet-class and the workspace flag is off, we refuse to
+    # dispatch the revoke. The control-plane
+    # `Delegations.record_revoke_requested/2` projection write in
+    # `Bank.Security.revoke_delegation/2` already happened before
+    # this worker ran — that's a Phoenix-side state change, not a
+    # chain side effect, so it stands.
+    if Bank.Chains.mainnet_allowed_for?(delegation.chain, delegation.workspace_id) do
+      call_adapter(
+        smart_account_id,
+        delegation_id,
+        reason,
+        Delegations.permission_dispatch_block(delegation)
+      )
+    else
+      Logger.warning(
+        "RevokeDelegation: mainnet disabled for workspace #{inspect(delegation.workspace_id)} " <>
+          "(chain=#{delegation.chain}); cancelling revoke for smart_account #{smart_account_id}"
+      )
 
-        {:cancel, :no_such_delegation}
+      {:cancel, :mainnet_disabled}
     end
   end
 
@@ -182,4 +215,10 @@ defmodule Bank.Runtime.Workers.RevokeDelegation do
 
   defp maybe_put_permission(args, nil), do: args
   defp maybe_put_permission(args, %{} = block), do: Map.put(args, :permission, block)
+
+  defp revoke_path_for(nil), do: :unknown
+  defp revoke_path_for(%Delegation{} = delegation), do: Delegation.revoke_method(delegation)
+
+  defp root_validator_owner_for(nil), do: nil
+  defp root_validator_owner_for(%Delegation{root_validator_owner: owner}), do: owner
 end

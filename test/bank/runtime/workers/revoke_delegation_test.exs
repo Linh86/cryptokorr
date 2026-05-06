@@ -197,6 +197,151 @@ defmodule Bank.Runtime.Workers.RevokeDelegationTest do
       assert_received {:dispatch_body, body}
       refute Map.has_key?(body, "permission")
     end
+
+    test "user-rooted row with full artifacts STILL takes sentinel path (no permission key) (#475)" do
+      # Browser-signed installs (#474) populate the artifact columns
+      # but the user EOA is the kernel's root validator — the
+      # operator key cannot sign `Kernel.uninstallValidation(...)`.
+      # The worker MUST omit the permission block so the adapter
+      # takes the sentinel audit anchor path; otherwise the adapter
+      # would build a UserOp the kernel will revert.
+      perm_id = <<0xC0, 0xDE, 0xCA, 0xFE>>
+      validation_id = <<0x02>> <> perm_id <> :binary.copy(<<0x00>>, 16)
+      blob = "eyJ1c2VyIjp0cnVlfQ=="
+      session_signer = "0x" <> String.duplicate("22", 20)
+
+      {:ok, _} =
+        Delegations.grant("sa-user", "0xc0decafe", %{
+          permission_blob: blob,
+          permission_id: perm_id,
+          validation_id: validation_id,
+          kernel_version: "0.3.1",
+          permission_package_version: "5.6.3",
+          session_signer_address: session_signer,
+          root_validator_owner: "user"
+        })
+
+      test_pid = self()
+
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:dispatch_body, Jason.decode!(body)})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(
+          202,
+          Jason.encode!(%{"accepted" => true, "smart_account_id" => "sa-user"})
+        )
+      end)
+
+      assert :ok =
+               perform_job(RevokeDelegation, %{
+                 "smart_account_id" => "sa-user",
+                 "reason" => "operator_requested"
+               })
+
+      assert_received {:dispatch_body, body}
+      refute Map.has_key?(body, "permission")
+    end
+  end
+
+  describe "audit + broadcast metadata (#475)" do
+    test "operator-rooted artifact row records revoke_path :cryptographic + owner operator" do
+      :ok = PubSub.subscribe(PubSub.security_events())
+
+      perm_id = <<0xA1, 0xB2, 0xC3, 0xD4>>
+      validation_id = <<0x02>> <> perm_id <> :binary.copy(<<0x00>>, 16)
+      blob = "eyJzZXJpYWxpemVkUGVybWlzc2lvbkFjY291bnQiOiJ0ZXN0In0="
+      session_signer = "0x" <> String.duplicate("11", 20)
+
+      {:ok, _} =
+        Delegations.grant("sa-op-meta", "0xa1b2c3d4", %{
+          permission_blob: blob,
+          permission_id: perm_id,
+          validation_id: validation_id,
+          kernel_version: "0.3.1",
+          permission_package_version: "5.6.3",
+          session_signer_address: session_signer
+        })
+
+      stub_adapter(202, %{"accepted" => true, "smart_account_id" => "sa-op-meta"})
+
+      assert :ok =
+               perform_job(RevokeDelegation, %{
+                 "smart_account_id" => "sa-op-meta",
+                 "reason" => "operator_requested"
+               })
+
+      assert_receive %{
+        topic: :security_events,
+        event: :delegation_revoke_requested,
+        payload: %{
+          smart_account_id: "sa-op-meta",
+          revoke_path: :cryptographic,
+          root_validator_owner: "operator"
+        }
+      }
+
+      assert [%AuditEvent{after_ref: after_ref}] = Repo.all(AuditEvent)
+      assert after_ref["revoke_path"] == "cryptographic"
+      assert after_ref["root_validator_owner"] == "operator"
+    end
+
+    test "user-rooted row records revoke_path :sentinel + owner user" do
+      :ok = PubSub.subscribe(PubSub.security_events())
+
+      {:ok, _} =
+        Delegations.grant("sa-user-meta", "del_user_meta", %{
+          root_validator_owner: "user"
+        })
+
+      stub_adapter(202, %{"accepted" => true, "smart_account_id" => "sa-user-meta"})
+
+      assert :ok =
+               perform_job(RevokeDelegation, %{
+                 "smart_account_id" => "sa-user-meta",
+                 "reason" => "operator_requested"
+               })
+
+      assert_receive %{
+        topic: :security_events,
+        event: :delegation_revoke_requested,
+        payload: %{
+          smart_account_id: "sa-user-meta",
+          revoke_path: :sentinel,
+          root_validator_owner: "user"
+        }
+      }
+
+      assert [%AuditEvent{after_ref: after_ref}] = Repo.all(AuditEvent)
+      assert after_ref["revoke_path"] == "sentinel"
+      assert after_ref["root_validator_owner"] == "user"
+    end
+
+    test "missing delegation row records revoke_path :unknown + owner nil" do
+      :ok = PubSub.subscribe(PubSub.security_events())
+
+      assert {:cancel, :no_such_delegation} =
+               perform_job(RevokeDelegation, %{
+                 "smart_account_id" => "sa-no-row",
+                 "reason" => "operator_requested"
+               })
+
+      assert_receive %{
+        topic: :security_events,
+        event: :delegation_revoke_requested,
+        payload: %{
+          smart_account_id: "sa-no-row",
+          revoke_path: :unknown,
+          root_validator_owner: nil
+        }
+      }
+
+      assert [%AuditEvent{after_ref: after_ref}] = Repo.all(AuditEvent)
+      assert after_ref["revoke_path"] == "unknown"
+      assert after_ref["root_validator_owner"] == nil
+    end
   end
 
   describe "transient adapter failures" do

@@ -1263,6 +1263,72 @@ defmodule Bank.DelegationsTest do
       assert is_nil(Delegations.permission_dispatch_block(d))
     end
 
+    test "cryptographically_revocable?/1 returns false for user-rooted rows even with full artifacts (#475)" do
+      # Browser-signed installs (#474) populate the artifact columns
+      # the same way operator-signed installs do, but the kernel's
+      # root validator is the user EOA — `OPERATOR_PRIVATE_KEY`
+      # cannot sign `Kernel.uninstallValidation(...)` against it.
+      # The predicate MUST refuse so the worker takes the sentinel
+      # audit anchor path until the v0.2 browser-signed revoke
+      # ships.
+      {:ok, d} =
+        Delegations.grant("sa_user_owner", "0xa1b2c3d4", %{
+          permission_blob: @blob_b64,
+          permission_id: @perm_id,
+          validation_id: @validation_id,
+          kernel_version: "0.3.1",
+          permission_package_version: "5.6.3",
+          session_signer_address: @session_signer,
+          root_validator_owner: "user"
+        })
+
+      refute Bank.Delegations.Delegation.cryptographically_revocable?(d)
+      assert is_nil(Delegations.permission_dispatch_block(d))
+    end
+
+    test "Delegations.grant/3 defaults root_validator_owner to operator (#475)" do
+      # `grant/3` is the legacy server-signed install entry point.
+      # Defaulting to `"operator"` matches the migration's one-shot
+      # backfill so the cryptographic-revoke path stays available
+      # for these rows.
+      {:ok, d} = Delegations.grant("sa_default_owner", "del_default")
+      assert d.root_validator_owner == "operator"
+    end
+
+    test "revoke_method/1 returns :cryptographic for operator-rooted artifact rows (#475)" do
+      {:ok, d} =
+        Delegations.grant("sa_method_crypto", "0xa1b2c3d4", %{
+          permission_blob: @blob_b64,
+          permission_id: @perm_id,
+          validation_id: @validation_id,
+          kernel_version: "0.3.1",
+          permission_package_version: "5.6.3",
+          session_signer_address: @session_signer
+        })
+
+      assert Bank.Delegations.Delegation.revoke_method(d) == :cryptographic
+    end
+
+    test "revoke_method/1 returns :sentinel for legacy artifact-less rows (#475)" do
+      {:ok, d} = Delegations.grant("sa_method_sentinel", "del_legacy")
+      assert Bank.Delegations.Delegation.revoke_method(d) == :sentinel
+    end
+
+    test "revoke_method/1 returns :sentinel for user-rooted rows (#475)" do
+      {:ok, d} =
+        Delegations.grant("sa_method_user", "0xa1b2c3d4", %{
+          permission_blob: @blob_b64,
+          permission_id: @perm_id,
+          validation_id: @validation_id,
+          kernel_version: "0.3.1",
+          permission_package_version: "5.6.3",
+          session_signer_address: @session_signer,
+          root_validator_owner: "user"
+        })
+
+      assert Bank.Delegations.Delegation.revoke_method(d) == :sentinel
+    end
+
     test "apply_callback granted with full permission block stores all artifacts decoded from hex" do
       assert {:ok, d} =
                Delegations.apply_callback(%{

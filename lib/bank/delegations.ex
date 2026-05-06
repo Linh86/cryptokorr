@@ -222,12 +222,18 @@ defmodule Bank.Delegations do
           {:ok, Delegation.t()} | {:error, :already_exists | Ecto.Changeset.t()}
   def grant(smart_account_id, delegation_id, attrs \\ %{})
       when is_binary(smart_account_id) and is_binary(delegation_id) do
+    # Default the legacy server-signed install path's
+    # `root_validator_owner` to `"operator"` so the revoke worker
+    # (#475) keeps using the cryptographic-revoke path. Browser-signed
+    # installs (#474) bypass this entry point and stamp `"user"`
+    # explicitly in `Bank.SessionPermissions.BrowserInstall`.
     attrs =
       Map.merge(attrs, %{
         smart_account_id: smart_account_id,
         delegation_id: delegation_id,
         state: :active,
-        granted_at: Map.get(attrs, :granted_at, DateTime.utc_now())
+        granted_at: Map.get(attrs, :granted_at, DateTime.utc_now()),
+        root_validator_owner: Map.get(attrs, :root_validator_owner, "operator")
       })
 
     %Delegation{}
