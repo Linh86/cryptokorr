@@ -393,17 +393,35 @@ defmodule Bank.Audit.Events do
   end
 
   # Surface the swap-receipt fields on the audit `after_ref` for
-  # swap plans only (#193). Transfer plans never populate them, so
-  # the legacy transfer-audit shape stays unchanged.
+  # swap plans only (#193 / #194). Transfer plans never populate
+  # them, so the legacy transfer-audit shape stays unchanged.
   #
-  # `:route_hash` is read directly off `plan.steps` (set by #190 at
-  # plan creation, immutable thereafter) so replay never has to
-  # rejoin against the plan to learn which route was dispatched.
-  # `:block_number` and `:actual_output_amount` come from the
-  # callback path (#193 receipt persistence).
+  # The route inputs (`:route_hash`, `:route_provider`, source /
+  # destination asset, slippage and deadline) are read directly
+  # off `plan.steps` (set by #190 at plan creation, immutable
+  # thereafter) so replay never has to rejoin against the plan to
+  # learn which route was dispatched. `:expected_output_amount`
+  # comes off the same persisted route and is paired with
+  # `:actual_output_amount` (filled in by the callback path —
+  # #193 receipt persistence) so a single audit row tells the
+  # "asked for X, got Y" story without joining to the plan or
+  # downstream events.
+  #
+  # `:calldata`, `:spender`, `:swap_target_contract`, and other
+  # raw-call inputs are deliberately NOT surfaced here — they
+  # round-trip through `plan.steps` for dispatch but never need
+  # to appear on every audit row, and keeping them off the
+  # `after_ref` keeps secret-hygiene assertions simple.
   defp swap_receipt_fields(%ExecutionPlan{steps: %{"kind" => "swap"} = steps} = plan) do
     %{
       route_hash: Map.get(steps, "route_hash"),
+      route_provider: Map.get(steps, "route_provider"),
+      source_asset: Map.get(steps, "source_asset"),
+      destination_asset: Map.get(steps, "destination_asset"),
+      expected_output_amount: Map.get(steps, "expected_output_amount"),
+      minimum_output_amount: Map.get(steps, "minimum_output_amount"),
+      slippage_bps: Map.get(steps, "slippage_bps"),
+      deadline: Map.get(steps, "deadline"),
       block_number: plan.block_number,
       actual_output_amount: decimal_string(plan.actual_output_amount)
     }

@@ -505,7 +505,11 @@ defmodule Bank.Decisions.Report do
       tx_refs: p.tx_refs || [],
       nonce: p.nonce,
       adapter_ref: p.adapter_ref,
-      active: p.active
+      active: p.active,
+      # Swap-only receipt projection (#194). Both nil for transfer
+      # plans, populated for swap plans whose callback supplied them.
+      block_number: p.block_number,
+      actual_output_amount: maybe_decimal_to_string(p.actual_output_amount)
     }
   end
 
