@@ -472,7 +472,9 @@ defmodule BankWeb.QueueLive do
         <div :if={@explanation["vault_address"]} class="col-span-2">
           <dt class="text-base-content/40">Vault</dt>
           <dd class="font-mono break-all">
-            <span :if={@explanation["vault_name"]}>{@explanation["vault_name"]}  &middot; </span>
+            <span :if={@explanation["vault_name"]}>
+              {@explanation["vault_name"]} &middot;
+            </span>
             {@explanation["vault_address"]}
           </dd>
         </div>
