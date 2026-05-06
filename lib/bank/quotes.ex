@@ -209,7 +209,61 @@ defmodule Bank.Quotes do
       end
 
     Bank.Runtime.Telemetry.preview(provider_tag, result_tag)
+    record_provider_health(provider, result_tag)
   end
+
+  # `Bank.Quotes.ProviderHealth` is the runtime-visible counterpart
+  # to the fire-and-forget telemetry emit above (#176). It tracks the
+  # same provider id Phoenix already records on the persisted
+  # `SimulationReport.provider` column for successful previews — see
+  # `attempted_provider_id/1` — and uses the SAME result-tag
+  # vocabulary on failure so an operator inspecting
+  # `/v1/health/deep` and an audit-trail row both reference the same
+  # category atom.
+  #
+  # The health tracker sanitises any out-of-allowlist reason down to
+  # `:error` before storing it, so a future regression in a provider
+  # module cannot smuggle raw upstream data into the readiness
+  # payload.
+  defp record_provider_health(provider, :ok) do
+    case provider_health_id(provider) do
+      nil -> :ok
+      provider_id -> Bank.Quotes.ProviderHealth.record_success(provider_id)
+    end
+  end
+
+  defp record_provider_health(provider, result_tag) do
+    case provider_health_id(provider) do
+      nil -> :ok
+      provider_id -> Bank.Quotes.ProviderHealth.record_failure(provider_id, result_tag)
+    end
+  end
+
+  # Resolve the stable, human-readable provider id used by the
+  # health tracker. For module providers we prefer the optional
+  # `provider_id/0` callback (matches `Preview.provider` for
+  # successful previews). For the disabled-mode short-circuit
+  # branch the caller passed the atom tag directly — convert it to
+  # the canonical `"disabled"` string.
+  defp provider_health_id(:disabled), do: "disabled"
+
+  defp provider_health_id(provider)
+       when is_atom(provider) and not is_nil(provider) do
+    _ = Code.ensure_loaded(provider)
+
+    cond do
+      function_exported?(provider, :provider_id, 0) ->
+        provider.provider_id()
+
+      function_exported?(provider, :__info__, 1) ->
+        provider |> Module.split() |> List.last() |> String.downcase()
+
+      true ->
+        Atom.to_string(provider)
+    end
+  end
+
+  defp provider_health_id(_), do: nil
 
   @doc """
   Returns `true` when the preview was produced more than

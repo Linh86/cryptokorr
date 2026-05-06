@@ -18,6 +18,8 @@ defmodule Bank.Application do
       Bank.WalletScreening.FeedHealth,
       # Node-local health tracking for stablecoin quote providers.
       Bank.Stablecoins.ProviderHealth,
+      # Node-local health tracking for live/stub quote providers (#176).
+      Bank.Quotes.ProviderHealth,
       # Per-key rate-limit buckets for /v1 (#221).
       Bank.RateLimit,
       # Generic audit-emission dedupe (#222) — used by VerifyAPIKey

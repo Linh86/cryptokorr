@@ -6,6 +6,15 @@ defmodule BankWeb.HealthControllerTest do
   # otherwise see partial overrides and fail with `:adapter_unavailable`.
   use BankWeb.ConnCase, async: false
 
+  setup do
+    # `Bank.Quotes.ProviderHealth` is a singleton ETS table shared
+    # across the test process tree (#176). Reset it before each
+    # health-controller test so deep-probe assertions start with a
+    # known-empty state regardless of which provider tests ran first.
+    Bank.Quotes.ProviderHealth.reset()
+    :ok
+  end
+
   describe "GET /health" do
     test "returns 200 with liveness payload", %{conn: conn} do
       conn = get(conn, ~p"/health")
@@ -131,6 +140,68 @@ defmodule BankWeb.HealthControllerTest do
       after
         Application.put_env(:bank, Bank.AdapterClient, original)
       end
+    end
+
+    test "includes quotes_provider check (#176)", %{conn: conn} do
+      Bank.Quotes.ProviderHealth.reset()
+
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        Req.Test.json(conn, %{status: "ok"})
+      end)
+
+      conn = get(conn, ~p"/v1/health/deep")
+      body = json_response(conn, 200)
+
+      assert body["checks"]["quotes_provider"]["status"] == "ok"
+      # No providers observed yet → empty list, no detail string.
+      assert body["checks"]["quotes_provider"]["providers"] == []
+      assert is_nil(body["checks"]["quotes_provider"]["detail"])
+    end
+
+    test "quotes_provider check downgrades to :down when a provider is :failing (#176)",
+         %{conn: conn} do
+      Bank.Quotes.ProviderHealth.reset()
+
+      for _ <- 1..5 do
+        Bank.Quotes.ProviderHealth.record_failure("tenderly", :provider_unavailable)
+      end
+
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        Req.Test.json(conn, %{status: "ok"})
+      end)
+
+      conn = get(conn, ~p"/v1/health/deep")
+      body = json_response(conn, 503)
+      assert body["status"] == "degraded"
+      assert body["checks"]["quotes_provider"]["status"] == "down"
+      assert body["checks"]["quotes_provider"]["detail"] == "provider_tenderly_failing"
+
+      providers = body["checks"]["quotes_provider"]["providers"]
+      assert is_list(providers)
+      assert Enum.any?(providers, fn p -> p["provider"] == "tenderly" end)
+    end
+
+    test "quotes_provider providers carry only category-atom failure reasons (#176)", %{
+      conn: conn
+    } do
+      Bank.Quotes.ProviderHealth.record_failure("tenderly", :provider_unavailable)
+
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        Req.Test.json(conn, %{status: "ok"})
+      end)
+
+      conn = get(conn, ~p"/v1/health/deep")
+      # One failure with zero successes → :failing → top-level 503.
+      body = response(conn, 503)
+
+      # Allowlist atom serialised as a string — no raw URLs / headers /
+      # token markers in the readiness payload.
+      assert String.contains?(body, "provider_unavailable")
+      refute String.contains?(body, "Authorization")
+      refute body =~ ~r/sk_(live|test)_/
+      refute body =~ ~r/pk_(live|test)_/
+      refute body =~ ~r{://[^\s/@]+:[^\s/@]+@}
+      refute String.contains?(body, "PRIVATE KEY")
     end
   end
 end
