@@ -126,9 +126,70 @@ The runner exercises nine checks in fixed order. Operators read top-to-bottom; t
 
 Re-running the smoke is safe: snapshot persistence demotes the prior current row via the partial unique index; intent inserts use a fresh idempotency key per run; the decision pipeline supersedes any prior current envelope; policy rules are upserted via a `morpho_smoke` scope sentinel.
 
-## Optional: testnet deposit smoke
+## Optional: explicit-confirmation Base Sepolia deposit smoke (#209)
 
-A live Base Sepolia ERC-4626 deposit smoke is **not** part of this runbook. It depends on the execution adapter from [#206](https://github.com/Linh86/cryptobank/issues/206) and the workspace's mainnet eligibility plumbing from [#178](https://github.com/Linh86/cryptobank/issues/178). When it lands, it will live as a separate Mix task with explicit operator confirmation and recorded public artifacts (transaction hash, block number, receipt).
+A live Base Sepolia ERC-4626 deposit smoke ships under [`mix bank.morpho.deposit_smoke`](../../lib/mix/tasks/bank.morpho.deposit_smoke.ex) (paired runner [`Bank.DefiVenues.Morpho.DepositSmoke`](../../lib/bank/defi_venues/morpho/deposit_smoke.ex)). Unlike the read-only `mix bank.morpho.smoke` above, this task drives the full [#206](https://github.com/Linh86/cryptobank/issues/206) dispatch path against a real chain adapter and **broadcasts a UserOperation** when the operator passes `--confirm`.
+
+> **`--confirm` is required.** Without it the task prints the pre-flight checklist and exits non-zero. CI never runs this task; even if it did, the `--confirm` gate makes accidental broadcast impossible.
+
+### Hard safety boundaries
+
+The task fails closed at three independent layers if any of these would be violated:
+
+- **Base Sepolia only.** `chain: "base"` (mainnet) is rejected by `Bank.Intents.normalize/1` (#203 P2), by `Bank.Decisions.MorphoDispatchSafety` at plan dispatch time, and by the TS adapter's `isSupportedMorphoDepositChain`.
+- **USDC only.**
+- **Allowlisted vault only** — the runner refuses to dispatch against a vault not in the workspace's active Morpho `:allowed_vault` rules.
+- **No `.env` source.** Phoenix-side config is asserted by name only (`Bank.AdapterClient :base_url`, `:dispatch_secret`, `:callback_secret`); values are never printed.
+- **No withdraw / redeem path.** Only `allocate_idle_capital` (deposit). Withdraw is operator-only and tracked under [#207](https://github.com/Linh86/cryptobank/issues/207); this task carries no withdraw surface.
+- **No arbitrary calldata.** The dispatch envelope built by `Bank.AdapterClient.dispatch_morpho_deposit/2` carries no calldata field on the wire; the adapter builds ERC-4626 `deposit(assets, receiver)` and bounded `IERC20.approve(vault, amount)` calldata itself.
+
+### Pre-flight checklist
+
+Before passing `--confirm`:
+
+1. Run `mix bank.demo.seed` so the demo workspace exists.
+2. Confirm the demo workspace has a Morpho `:allowed_vault` policy rule for the target vault (use `Bank.Policies.list_rules(%{rule_type: :allowed_vault}, workspace_id: ws.id)`).
+3. Confirm a current persisted vault snapshot exists for that vault (`Bank.DefiVenues.Morpho.Snapshots.get_current/2`).
+4. Confirm Phoenix config has `Bank.AdapterClient :base_url`, `:dispatch_secret`, and `:callback_secret` set in `config/runtime.exs` (operator-supplied; the runner asserts presence by name only).
+5. Confirm the TS chain_adapter is running, configured for Base Sepolia (`BASE_CHAIN_ID = 84_532`), with `BASE_RPC_URL`, `BUNDLER_RPC_URL`, and a smart account funded with Base Sepolia USDC. The runner cannot assert this — operator must verify before `--confirm`.
+6. Run `mix bank.morpho.deposit_smoke --confirm`.
+
+### Expected output
+
+On success the task prints public artifacts only:
+
+```
+intent_id        : <uuid>
+decision_id      : <uuid>
+plan_id          : <uuid>
+execution_status : :prepared | :signing | :broadcasting | :pending_confirmation | :confirmed
+tx_refs          : [<userop_hash>, <on-chain hash>, ...]
+chain            : base-sepolia
+asset            : USDC
+vault_address    : 0x...
+```
+
+Capture `tx_refs` (especially the on-chain hash and block number the adapter callback writes) for the deployment log. **Never paste the smoke's stdout into a public channel without scrubbing — although the runner is designed not to print secrets, treat operator runbook output as sensitive by default.**
+
+### Failure modes
+
+| Reason atom | Meaning | Operator response |
+|---|---|---|
+| `:phoenix_env` | `Bank.AdapterClient` config missing keys | Set `:base_url` / `:dispatch_secret` / `:callback_secret` in `config/runtime.exs` |
+| `:demo_workspace :not_seeded` | Demo workspace absent | Run `mix bank.demo.seed` |
+| `:vault_allowlist :no_rule` | No `:allowed_vault` policy rule | Add an `:allowed_vault` rule for the target vault |
+| `:snapshot :missing` | No current snapshot | Ingest a vault snapshot via the operator path |
+| `:intent_submit` / `:evaluate` / `:approve` / `:request_manual_execution` | Phoenix-side decision pipeline refused | Inspect the structured reason; same vocabulary the operator UI uses |
+| `:dispatch :adapter_unavailable` | TS adapter not reachable | Verify `:base_url` and that the adapter is running |
+| `:dispatch {:adapter_rejected, status, body}` | Adapter refused | Inspect structured `body` for the safe failure reason (`unsupported`, `morpho_chain_not_supported`, etc.) |
+
+### Rollback
+
+A live deposit cannot be "rolled back" once the on-chain tx confirms. To unwind:
+
+- **Pre-broadcast failure** (`:dispatch :adapter_unavailable` or `:adapter_rejected`): no on-chain effect; the plan transitions to `:aborted`. Re-run after fixing the underlying cause.
+- **Post-broadcast failure** (`:reverted`): the on-chain tx confirmed but reverted; no funds moved. The plan transitions to `:reverted` with the safe `final_reason` from the adapter callback.
+- **Post-confirmation withdrawal**: operator-only, lives in #207. **Do not** attempt to "undo" a confirmed deposit through any agent path; use the operator-only withdraw path once #207 lands.
 
 > **Mainnet boundary (post-MVP).** Base mainnet for `allocate_idle_capital` is **out of v0.1 scope**. The HTTP boundary fails closed: a public submission with `chain: "base"` is rejected with `morpho_chain_not_supported` regardless of the workspace's `mainnet_enabled` flag (#203 P2). When mainnet support arrives, it requires [#166](https://github.com/Linh86/cryptobank/issues/166) (mainnet operational policy), [#178](https://github.com/Linh86/cryptobank/issues/178) (workspace mainnet eligibility), and the post-MVP exposure / concentration engine that is explicitly tracked outside the MVP plan (#205 was closed post-MVP).
 
