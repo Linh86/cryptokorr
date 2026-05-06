@@ -3,9 +3,9 @@ defmodule Bank.Runtime.Workers.RunExecution do
   Hand a decided, auto-executable envelope off to the TypeScript
   chain adapter.
 
-  Scope: transfer path, Base + USDC only (issue #30). This worker
-  performs the outbound half of the contract in
-  `priv/adapter/contract.md`:
+  Scope: transfer path on Base + USDC (issue #30) and swap path on
+  Base Sepolia + USDC (issue #193, MVP). This worker performs the
+  outbound half of the contract in `priv/adapter/contract.md`:
 
     1. Load the decision envelope; gate it as `current` + `:auto_exec`
        + `:decided`.
@@ -24,8 +24,18 @@ defmodule Bank.Runtime.Workers.RunExecution do
        the adapter. This is the canonical fail-closed gate that
        keeps the invariant "nothing enters `:executing` while paused"
        intact end-to-end.
-    5. POST the dispatch to `{adapter_base}/dispatch/transfer` via
-       `Bank.AdapterClient.dispatch_transfer/1`.
+    5. Fork by plan kind:
+       * **transfer** — POST `{adapter_base}/dispatch/transfer` via
+         `Bank.AdapterClient.dispatch_transfer/1`.
+       * **swap** (#193) — reconstitute the route from
+         `plan.steps` via `SwapRouteArtifacts.route_from_steps/1`,
+         run the centralized #191 safety gate
+         (`SwapDispatchSafety.validate/3`), then POST
+         `{adapter_base}/dispatch/swap` via
+         `Bank.AdapterClient.dispatch_swap/1`. A safety-gate
+         failure (`:swap_*` atoms, `:runtime_paused`,
+         `:chain_paused`, `:mainnet_disabled`) is a fail-closed
+         abort; the adapter is never reached.
     6. On adapter 202, atomically advance the plan `:prepared` →
        `:signing` and the intent `:decided` → `:executing`. Emit an
        `execution.signing` audit event, broadcast the lifecycle
@@ -53,7 +63,9 @@ defmodule Bank.Runtime.Workers.RunExecution do
       `:delegation_not_active`, `:runtime_paused`, `:chain_paused`,
       `:mainnet_disabled`, `:canary_chain_not_allowed`,
       `:canary_asset_not_allowed`, `:canary_amount_exceeded`,
-      `:target_not_resolvable`, `:adapter_rejected`, `:malformed_args`.
+      `:target_not_resolvable`, `:adapter_rejected`, `:malformed_args`,
+      `{:swap_safety_gate, atom}` (#193 — every
+      `SwapDispatchSafety.failure()` atom).
   """
 
   use Oban.Worker,
@@ -67,7 +79,7 @@ defmodule Bank.Runtime.Workers.RunExecution do
   alias Bank.AdapterClient
   alias Bank.Audit.Events
   alias Bank.Decisions
-  alias Bank.Decisions.{DecisionEnvelope, ExecutionPlan}
+  alias Bank.Decisions.{DecisionEnvelope, ExecutionPlan, SwapDispatchSafety, SwapRouteArtifacts}
   alias Bank.Delegations
   alias Bank.Intents.AgentIntent
   alias Bank.Repo
@@ -288,7 +300,7 @@ defmodule Bank.Runtime.Workers.RunExecution do
          %DecisionEnvelope{} = envelope,
          %ExecutionPlan{} = claimed
        ) do
-    case AdapterClient.dispatch_transfer(claimed) do
+    case adapter_dispatch(claimed) do
       {:ok, _} ->
         progress_after_dispatch(claimed, envelope)
 
@@ -330,6 +342,70 @@ defmodule Bank.Runtime.Workers.RunExecution do
         )
 
         abort_for_adapter_rejection(claimed, 200, "invalid_response")
+
+      {:error, {:swap_safety_gate, reason_atom}} ->
+        Logger.warning(
+          "RunExecution: swap safety gate refused plan #{claimed.id} (#{reason_atom}); aborting before adapter"
+        )
+
+        abort_for_swap_safety(claimed, reason_atom)
+
+      {:error, {:invalid_swap_plan, cause}} ->
+        Logger.error(
+          "RunExecution: plan #{claimed.id} carries no usable swap route (#{cause}); aborting"
+        )
+
+        abort_for_swap_safety(claimed, cause)
+    end
+  end
+
+  # Fork the dispatch by plan kind. Transfer plans keep the legacy
+  # `dispatch_transfer` path. Swap plans (#193) go through the
+  # centralized #191 safety gate before the adapter call so a route
+  # whose deadline expired between plan creation and dispatch, or
+  # whose chain/amount drifted relative to the parent intent, is
+  # refused locally instead of being broadcast.
+  defp adapter_dispatch(%ExecutionPlan{steps: %{"kind" => "swap"} = steps} = plan) do
+    case SwapRouteArtifacts.route_from_steps(steps) do
+      {:ok, route} ->
+        context = %{intent: plan.intent, workspace_id: plan.workspace_id}
+
+        case SwapDispatchSafety.validate(route, context) do
+          :ok ->
+            AdapterClient.dispatch_swap(plan)
+
+          {:error, reason_atom} ->
+            {:error, {:swap_safety_gate, reason_atom}}
+        end
+
+      {:error, :not_a_swap} ->
+        # Defensive — the outer head guards on `kind == "swap"`, but
+        # if the steps shape ever drifts we fail closed rather than
+        # falling through to a transfer dispatch.
+        {:error, {:invalid_swap_plan, :missing_route}}
+
+      {:error, {:malformed_steps, field}} ->
+        {:error, {:invalid_swap_plan, field}}
+    end
+  end
+
+  defp adapter_dispatch(%ExecutionPlan{} = plan), do: AdapterClient.dispatch_transfer(plan)
+
+  defp abort_for_swap_safety(%ExecutionPlan{} = plan, reason_atom) do
+    reason = "swap_safety:#{Atom.to_string(reason_atom)}"
+    prior_status = plan.execution_status
+
+    case mark_plan_aborted(plan, reason) do
+      {:ok, updated_plan, intent_transition} ->
+        emit_aborted_side_effects(updated_plan, prior_status, intent_transition, reason)
+        {:cancel, {:swap_safety_gate, reason_atom}}
+
+      {:error, changeset} ->
+        Logger.error(
+          "RunExecution: abort-for-swap-safety update failed for plan #{plan.id}: #{inspect(changeset.errors)}"
+        )
+
+        {:error, changeset}
     end
   end
 

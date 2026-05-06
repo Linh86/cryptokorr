@@ -128,6 +128,93 @@ defmodule Bank.Decisions.SwapRouteArtifacts do
     }
   end
 
+  @doc """
+  Reconstitute a canonical `Bank.Intents.SwapRoute.t()` map from a
+  plan's persisted `:steps` (#193).
+
+  `from_route/1` writes string keys with JSON-friendly scalar
+  encodings (`Decimal` → string, `DateTime` → ISO8601). Dispatch
+  call sites need the canonical atom-keyed shape so they can run
+  `Bank.Decisions.SwapDispatchSafety.validate/3` without
+  re-parsing route fields by hand.
+
+  Returns `{:ok, route}` for a well-shaped persisted swap step or
+  `{:error, :not_a_swap}` for a steps map that does not carry the
+  swap kind marker. Returns `{:error, {:malformed_steps, field}}`
+  when a load-bearing field cannot be parsed (decimal /
+  datetime / integer); the safety gate's structural check then
+  surfaces the failure in the same vocabulary as routes that
+  never made it past validation.
+  """
+  @spec route_from_steps(map()) ::
+          {:ok, SwapRoute.t()} | {:error, :not_a_swap | {:malformed_steps, atom()}}
+  def route_from_steps(%{"kind" => "swap"} = steps) do
+    with {:ok, input_amount} <- parse_decimal(steps, "input_amount"),
+         {:ok, expected_output} <- parse_decimal(steps, "expected_output_amount"),
+         {:ok, minimum_output} <- parse_decimal(steps, "minimum_output_amount"),
+         {:ok, value} <- parse_decimal(steps, "value"),
+         {:ok, quote_ts} <- parse_datetime(steps, "quote_timestamp"),
+         {:ok, deadline} <- parse_datetime(steps, "deadline"),
+         {:ok, chain_id} <- parse_integer(steps, "chain_id"),
+         {:ok, slippage_bps} <- parse_integer(steps, "slippage_bps") do
+      {:ok,
+       %{
+         source_asset: Map.get(steps, "source_asset"),
+         source_token_address: Map.get(steps, "source_token_address"),
+         destination_asset: Map.get(steps, "destination_asset"),
+         destination_token_address: Map.get(steps, "destination_token_address"),
+         input_amount: input_amount,
+         expected_output_amount: expected_output,
+         minimum_output_amount: minimum_output,
+         spender: Map.get(steps, "spender"),
+         swap_target_contract: Map.get(steps, "swap_target_contract"),
+         calldata: Map.get(steps, "calldata"),
+         value: value,
+         route_provider: Map.get(steps, "route_provider"),
+         quote_timestamp: quote_ts,
+         deadline: deadline,
+         chain: Map.get(steps, "chain"),
+         chain_id: chain_id,
+         slippage_bps: slippage_bps
+       }}
+    end
+  end
+
+  def route_from_steps(_), do: {:error, :not_a_swap}
+
+  defp parse_decimal(steps, key) do
+    case Map.get(steps, key) do
+      v when is_binary(v) ->
+        case Decimal.parse(v) do
+          {dec, ""} -> {:ok, dec}
+          _ -> {:error, {:malformed_steps, String.to_atom(key)}}
+        end
+
+      _ ->
+        {:error, {:malformed_steps, String.to_atom(key)}}
+    end
+  end
+
+  defp parse_datetime(steps, key) do
+    case Map.get(steps, key) do
+      v when is_binary(v) ->
+        case DateTime.from_iso8601(v) do
+          {:ok, dt, _offset} -> {:ok, dt}
+          _ -> {:error, {:malformed_steps, String.to_atom(key)}}
+        end
+
+      _ ->
+        {:error, {:malformed_steps, String.to_atom(key)}}
+    end
+  end
+
+  defp parse_integer(steps, key) do
+    case Map.get(steps, key) do
+      v when is_integer(v) -> {:ok, v}
+      _ -> {:error, {:malformed_steps, String.to_atom(key)}}
+    end
+  end
+
   defp downcase(s) when is_binary(s), do: String.downcase(s)
 
   defp decimal_string(%Decimal{} = d), do: d |> Decimal.normalize() |> Decimal.to_string(:normal)

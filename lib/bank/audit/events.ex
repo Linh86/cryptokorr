@@ -370,6 +370,16 @@ defmodule Bank.Audit.Events do
   @spec execution_transition(ExecutionPlan.t(), atom(), keyword()) :: attrs()
   def execution_transition(%ExecutionPlan{} = plan, prior_status, opts \\ [])
       when is_atom(prior_status) or is_nil(prior_status) do
+    after_ref =
+      %{
+        id: plan.id,
+        execution_status: atom_or_nil(plan.execution_status),
+        final_outcome: atom_or_nil(plan.final_outcome),
+        final_reason: plan.final_reason,
+        tx_refs: plan.tx_refs || []
+      }
+      |> Map.merge(swap_receipt_fields(plan))
+
     %{
       actor: Keyword.get(opts, :actor, :adapter),
       event_type: "execution.#{plan.execution_status}",
@@ -377,16 +387,33 @@ defmodule Bank.Audit.Events do
       subject_id: plan.id,
       correlation_id: plan.intent_id,
       before_ref: maybe_status_ref(prior_status),
-      after_ref: %{
-        id: plan.id,
-        execution_status: atom_or_nil(plan.execution_status),
-        final_outcome: atom_or_nil(plan.final_outcome),
-        final_reason: plan.final_reason,
-        tx_refs: plan.tx_refs || []
-      },
+      after_ref: after_ref,
       workspace_id: plan.workspace_id
     }
   end
+
+  # Surface the swap-receipt fields on the audit `after_ref` for
+  # swap plans only (#193). Transfer plans never populate them, so
+  # the legacy transfer-audit shape stays unchanged.
+  #
+  # `:route_hash` is read directly off `plan.steps` (set by #190 at
+  # plan creation, immutable thereafter) so replay never has to
+  # rejoin against the plan to learn which route was dispatched.
+  # `:block_number` and `:actual_output_amount` come from the
+  # callback path (#193 receipt persistence).
+  defp swap_receipt_fields(%ExecutionPlan{steps: %{"kind" => "swap"} = steps} = plan) do
+    %{
+      route_hash: Map.get(steps, "route_hash"),
+      block_number: plan.block_number,
+      actual_output_amount: decimal_string(plan.actual_output_amount)
+    }
+  end
+
+  defp swap_receipt_fields(_plan), do: %{}
+
+  defp decimal_string(nil), do: nil
+  defp decimal_string(%Decimal{} = d), do: d |> Decimal.normalize() |> Decimal.to_string(:normal)
+  defp decimal_string(other), do: other
 
   @doc """
   `ops.stuck_plan_detected` — periodic detector flagged an
