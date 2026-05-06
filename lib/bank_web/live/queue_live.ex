@@ -299,8 +299,15 @@ defmodule BankWeb.QueueLive do
             <.icon name="hero-clock-solid" class="size-4" />
           </div>
           <div class="min-w-0">
-            <p class="text-sm font-medium truncate">
-              Approval required
+            <p class="text-sm font-medium truncate flex items-center gap-2 flex-wrap">
+              <span>Approval required</span>
+              <span
+                :if={@decision.intent && @decision.intent.kind == :swap}
+                id={"approval-kind-badge-" <> @decision.id}
+                class="badge badge-xs badge-accent"
+              >
+                swap
+              </span>
               <span class="text-base-content/40 font-normal">
                 &middot; {risk_label(@decision.risk_tier)}
               </span>
@@ -472,12 +479,26 @@ defmodule BankWeb.QueueLive do
           <.icon name="hero-bolt-solid" class="size-4" />
         </div>
         <div class="min-w-0">
-          <p class="text-sm font-medium truncate">
-            Execution: {execution_status_label(@plan.execution_status)}
+          <p class="text-sm font-medium truncate flex items-center gap-2 flex-wrap">
+            <span>Execution: {execution_status_label(@plan.execution_status)}</span>
+            <span
+              :if={swap_plan?(@plan)}
+              id={"execution-kind-badge-" <> @plan.id}
+              class="badge badge-xs badge-accent"
+            >
+              swap
+            </span>
           </p>
           <p class="text-xs text-base-content/40 font-mono truncate">
             {short_id(@plan.id)}
             {if @plan.intent, do: " &middot; #{intent_summary(@plan.intent)}", else: ""}
+          </p>
+          <p
+            :if={swap_plan?(@plan) && swap_route_summary(@plan)}
+            id={"execution-swap-summary-" <> @plan.id}
+            class="text-xs text-base-content/50 mt-0.5"
+          >
+            {swap_route_summary(@plan)}
           </p>
         </div>
       </div>
@@ -504,8 +525,15 @@ defmodule BankWeb.QueueLive do
           <.icon name={outcome_icon(@outcome)} class="size-4" />
         </div>
         <div class="min-w-0">
-          <p class="text-sm font-medium truncate">
-            {outcome_label(@outcome)}
+          <p class="text-sm font-medium truncate flex items-center gap-2 flex-wrap">
+            <span>{outcome_label(@outcome)}</span>
+            <span
+              :if={@decision.intent && @decision.intent.kind == :swap}
+              id={"decision-kind-badge-" <> @decision.id}
+              class="badge badge-xs badge-accent"
+            >
+              swap
+            </span>
             <span class="text-base-content/40 font-normal">
               &middot; {risk_label(@decision.risk_tier)}
             </span>
@@ -572,6 +600,34 @@ defmodule BankWeb.QueueLive do
   end
 
   defp intent_summary(_), do: ""
+
+  # #195 swap helpers — operate on the persisted #190 :steps shape.
+  defp swap_plan?(%{steps: %{"kind" => "swap"}}), do: true
+  defp swap_plan?(_), do: false
+
+  # Compact one-liner for the active-execution row. Mentions the
+  # source/destination asset pair and the route_provider when both
+  # are present; otherwise nil so the row falls back to the generic
+  # intent summary line above. Never renders raw addresses, calldata,
+  # or any 0x hex blob.
+  defp swap_route_summary(%{steps: %{"kind" => "swap"} = steps}) do
+    src = steps["source_asset"]
+    dst = steps["destination_asset"]
+    provider = steps["route_provider"]
+
+    cond do
+      is_binary(src) and is_binary(dst) and is_binary(provider) ->
+        "#{src} → #{dst} via #{provider}"
+
+      is_binary(src) and is_binary(dst) ->
+        "#{src} → #{dst}"
+
+      true ->
+        nil
+    end
+  end
+
+  defp swap_route_summary(_), do: nil
 
   defp short_id(nil), do: "-"
   defp short_id(id) when byte_size(id) > 12, do: String.slice(id, 0, 8) <> "..."
