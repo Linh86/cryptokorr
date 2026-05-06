@@ -1,0 +1,52 @@
+{
+  "name": "@cryptobank/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for the CryptoBank /v1 control-plane API (intents, decisions, approvals, audit, runtime).",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.1"
+  },
+  "license": "MIT",
+  "private": true,
+  "publishConfig": {
+    "access": "restricted"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Linh86/cryptobank",
+    "directory": "sdks/typescript"
+  },
+  "homepage": "https://github.com/Linh86/cryptobank/tree/main/sdks/typescript#readme",
+  "bugs": "https://github.com/Linh86/cryptobank/issues",
+  "keywords": [
+    "cryptobank",
+    "sdk",
+    "treasury",
+    "agent",
+    "base-sepolia"
+  ]
+}
