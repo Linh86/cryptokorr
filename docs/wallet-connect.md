@@ -158,13 +158,31 @@ Server-side flow now lands end-to-end:
   revoke takes the cryptographic `Kernel.uninstallValidation(...)`
   path (#58 PR #129).
 
-**EOA identity binding lands under #169.** The browser hook now
-signs an EIP-191 challenge and Phoenix verifies the recovered
-address against the connected EOA via
-`Bank.WalletBindings.verify_and_bind/2`. The verified binding is
-the foundation the smart-account delegation install (#171) builds
-on. The grant-flow signing of a *delegation payload* still needs
-a wallet SDK choice (wagmi vs WalletConnect) plus a delegation
+**EOA identity binding lands under #169.** The browser hook signs
+an EIP-191 challenge and Phoenix verifies the recovered address
+against the connected EOA via
+`Bank.WalletBindings.verify_and_bind/2`.
+
+**Browser-driven scoped install request lands under #171.** Once
+the EOA is bound, `Bank.SessionPermissions.request_install/2`
+gates the install on a verified Base-Sepolia binding, refuses
+while the runtime or workspace is paused, blocks duplicate
+installs, and dispatches through the existing
+`Bank.Runtime.Workers.GrantDelegation` worker. The browser shows
+the canonical `Bank.SessionPermissions.Scope` summary (USDC
+transfer, 0x swap, allowlisted Morpho USDC vault deposit; with
+withdraw, arbitrary calldata, unlimited approvals, leverage, and
+mainnet explicitly denied) before the operator clicks Install.
+Audit `session_permission.install_requested` carries the
+`wallet_binding_id`, `smart_account_id`, address, chain id, and
+scope summary — never a nonce, signature, or session signer key.
+
+The install UserOp itself is still signed server-side by
+`OPERATOR_PRIVATE_KEY` inside the adapter (`grant.ts`) — the
+browser provides the consent gate, scope summary, and EOA
+identity, but does not yet construct the permission UserOp.
+Browser-side signing of the delegation payload remains blocked on
+the wallet-SDK choice (wagmi vs WalletConnect) plus a delegation
 type (ERC-7579 session key vs EntryPoint v0.7 native session
 key). Until that lands, the adapter-callback flow remains the
 production path and `POST /v1/connect/smart_account` carries

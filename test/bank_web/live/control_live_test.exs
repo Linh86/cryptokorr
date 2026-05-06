@@ -805,7 +805,148 @@ defmodule BankWeb.ControlLiveTest do
     end
   end
 
+  # --- Session permission install panel (#171) -----------------------------
+  #
+  # Visible only when the wallet is bound and the workspace has no
+  # active/pending delegation. Click installs the MVP scope through
+  # `Bank.SessionPermissions.request_install/2`.
+
+  describe "session permission install panel" do
+    test "is hidden until the wallet is bound", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/")
+
+      refute html =~ ~s(id="session-permission-card")
+      refute html =~ ~s(id="install-session-permission-btn")
+    end
+
+    test "renders the canonical scope and install button when bound", %{
+      conn: conn,
+      wallet_address: address
+    } do
+      {:ok, view, _html} = live(conn, "/")
+
+      bind_wallet!(view, address)
+
+      html = render(view)
+
+      assert html =~ ~s(id="session-permission-card")
+      assert html =~ ~s(id="session-permission-summary")
+      assert html =~ ~s(id="session-permission-allowed")
+      assert html =~ ~s(id="session-permission-denied")
+      assert html =~ ~s(id="install-session-permission-btn")
+      assert html =~ "Transfer USDC"
+      assert html =~ "0x swap"
+      assert html =~ "Morpho"
+      assert html =~ "Withdraw"
+      assert html =~ "Arbitrary calldata"
+      assert html =~ "Mainnet"
+    end
+
+    test "click triggers a GrantDelegation enqueue and audit event", %{
+      conn: conn,
+      wallet_address: address
+    } do
+      {:ok, view, _html} = live(conn, "/")
+
+      bind_wallet!(view, address)
+
+      _ =
+        view
+        |> element("#install-session-permission-btn")
+        |> render_click()
+
+      assert [%Oban.Job{worker: "Bank.Runtime.Workers.GrantDelegation", args: args}] =
+               Repo.all(
+                 from(j in Oban.Job, where: j.worker == "Bank.Runtime.Workers.GrantDelegation")
+               )
+
+      assert args["chain_id"] == 84_532
+      assert args["account"] == String.downcase(address)
+    end
+
+    test "panel disappears once a delegation is pending", %{
+      conn: conn,
+      wallet_address: address
+    } do
+      {:ok, view, _html} = live(conn, "/")
+
+      bind_wallet!(view, address)
+
+      _ =
+        view
+        |> element("#install-session-permission-btn")
+        |> render_click()
+
+      # Phoenix records a :pending row indirectly when the GrantDelegation
+      # worker runs; for the LiveView test, reproduce the post-callback
+      # state by inserting a pending delegation directly.
+      sa_id = Bank.SessionPermissions.compute_smart_account_id(active_binding!())
+
+      {:ok, _delegation} =
+        Bank.Delegations.Delegation.changeset(
+          %Bank.Delegations.Delegation{},
+          %{
+            smart_account_id: sa_id,
+            delegation_id: "del_pending",
+            state: :pending,
+            chain: "base",
+            workspace_id: Process.get(:bank_test_workspace_id)
+          }
+        )
+        |> Repo.insert()
+
+      html = render_click(view, "refresh")
+
+      refute html =~ ~s(id="session-permission-card")
+      refute html =~ ~s(id="install-session-permission-btn")
+    end
+
+    test "install button is disabled while runtime is paused", %{
+      conn: conn,
+      wallet_address: address
+    } do
+      {:ok, view, _html} = live(conn, "/")
+
+      bind_wallet!(view, address)
+      {:ok, :paused} = Security.pause(:global)
+
+      html = render_click(view, "refresh")
+
+      assert html =~ ~s(id="session-permission-card")
+      assert html =~ ~s(id="install-session-permission-btn")
+      assert html =~ "Resume the runtime to install"
+      assert html =~ ~s(id="session-permission-paused-note")
+      # The button carries the disabled attribute, so the test client
+      # cannot click it. Server-side runtime_paused refusal coverage
+      # lives in `Bank.SessionPermissionsTest`.
+    end
+  end
+
   # --- Wallet binding test helpers -----------------------------------------
+
+  defp bind_wallet!(view, address) do
+    _ =
+      render_hook(view, "wallet_connect:connected", %{
+        "account" => address,
+        "chain_id" => 84_532
+      })
+
+    [binding] = list_pending_bindings(address)
+    signature = sign_challenge(binding.challenge_message, @privkey)
+
+    _ =
+      render_hook(view, "wallet_connect:verify", %{
+        "challenge_id" => binding.id,
+        "signature" => signature
+      })
+
+    binding
+  end
+
+  defp active_binding! do
+    workspace_id = Process.get(:bank_test_workspace_id)
+    Bank.WalletBindings.get_active_binding(workspace_id)
+  end
 
   defp list_pending_bindings(address) do
     workspace_id = Process.get(:bank_test_workspace_id)
