@@ -18,14 +18,17 @@ The runtime therefore displays a **CryptoBank-owned risk explanation** that take
 
 ## First supported workflow: USDC deposit into an allowlisted Morpho vault
 
-The conservative MVP workflow is:
+The conservative MVP workflow is **Base Sepolia only**:
 
-1. The agent submits a `kind: :defi_yield_deposit` intent whose `target_raw_address` is a Morpho vault address and whose `chain` is `"base-sepolia"` (testnet) or `"base"` (mainnet, requires per-workspace mainnet opt-in via [#178](https://github.com/Linh86/cryptobank/issues/178)).
-2. The decision pipeline ([`Bank.Decisions.evaluate_intent/2`](../../lib/bank/decisions.ex)) dispatches to [`Bank.Decisions.MorphoEvaluator`](../../lib/bank/decisions/morpho_evaluator.ex) on the `kind`.
-3. The evaluator resolves the persisted vault snapshot via [`Bank.DefiVenues.Morpho.Snapshots.get_current/2`](../../lib/bank/defi_venues/morpho/snapshots.ex), compiles the workspace's active Morpho rules into a [`%Bank.DefiVenues.Morpho.PolicyInput{}`](../../lib/bank/defi_venues/morpho/policy_input.ex) via [`Bank.Policies.Morpho.RulesCompiler.compile/2`](../../lib/bank/policies/morpho/rules_compiler.ex), and runs [`Bank.DefiVenues.Morpho.RiskExplanation.explain/3`](../../lib/bank/defi_venues/morpho/risk_explanation.ex).
-4. The resulting explanation map is embedded in the new `DecisionEnvelope`'s `reasons.items[0].details.morpho_risk_explanation`, the matched rule ids land in `policy_snapshot_ref`, and three Morpho-specific audit events fire alongside `decision.decided` (see *Audit & replay surface* below).
+1. The agent submits a `kind: "allocate_idle_capital"` intent whose `target_raw_address` is the allowlisted Morpho vault address and whose `chain` is `"base-sepolia"`. `chain: "base"` (mainnet) is **rejected at the HTTP boundary** for this kind regardless of the workspace's mainnet opt-in (#203 P2). Mainnet support is post-MVP — see *Mainnet boundary (post-MVP)* at the bottom.
+2. [`Bank.Intents.normalize/1`](../../lib/bank/intents.ex) maps the public `"allocate_idle_capital"` string to the internal atom `:defi_yield_deposit` and persists the `AgentIntent` row. The internal name is not part of the public vocabulary; the API response renders it back as `"allocate_idle_capital"`.
+3. The decision pipeline ([`Bank.Decisions.evaluate_intent/2`](../../lib/bank/decisions.ex)) dispatches to [`Bank.Decisions.MorphoEvaluator`](../../lib/bank/decisions/morpho_evaluator.ex) on the internal `kind`.
+4. The evaluator resolves the persisted vault snapshot via [`Bank.DefiVenues.Morpho.Snapshots.get_current/2`](../../lib/bank/defi_venues/morpho/snapshots.ex), compiles the workspace's active Morpho rules into a [`%Bank.DefiVenues.Morpho.PolicyInput{}`](../../lib/bank/defi_venues/morpho/policy_input.ex) via [`Bank.Policies.Morpho.RulesCompiler.compile/2`](../../lib/bank/policies/morpho/rules_compiler.ex), and runs [`Bank.DefiVenues.Morpho.RiskExplanation.explain/3`](../../lib/bank/defi_venues/morpho/risk_explanation.ex).
+5. The resulting explanation map is embedded in the new `DecisionEnvelope`'s `reasons.items[0].details.morpho_risk_explanation`, the matched rule ids land in `policy_snapshot_ref`, and three Morpho-specific audit events fire alongside `decision.decided` (see *Audit & replay surface* below).
 
-> **Morpho intents are internal-only at the HTTP boundary.** [`Bank.Intents.normalize/1`](../../lib/bank/intents.ex) accepts only `:transfer | :swap | :scheduled_transfer` over the `POST /v1/intents` route — `:defi_yield_deposit` is rejected. Internal callers (runtime workers, smoke tests, fixture-driven harnesses) construct Morpho intents directly via the `AgentIntent` changeset. Opening the HTTP surface is a separate issue and would convert that work into an OpenAPI-required PR.
+> **Withdraw / redeem is operator-only and never agent-initiated.** Agents may submit only `allocate_idle_capital` (deposit). Any withdraw, redeem, borrow, leverage, or looping path is operator-only safety work tracked in [#207](https://github.com/Linh86/cryptobank/issues/207) and is **never** reachable through the public agent HTTP surface.
+
+> **`allocate_idle_capital` is a public intent kind on `POST /v1/intents`.** The OpenAPI `kind` enum accepts `transfer | swap | scheduled_transfer | allocate_idle_capital`. The internal atom is `:defi_yield_deposit`; the request → internal mapping happens in `Bank.Intents.normalize/1` and the response renders the internal atom back as the public string. Submitting `kind: "defi_yield_deposit"` (the internal name) is rejected as `{:invalid, :kind}`.
 
 ## Why MVP deposits always require operator approval
 
@@ -127,7 +130,7 @@ Re-running the smoke is safe: snapshot persistence demotes the prior current row
 
 A live Base Sepolia ERC-4626 deposit smoke is **not** part of this runbook. It depends on the execution adapter from [#206](https://github.com/Linh86/cryptobank/issues/206) and the workspace's mainnet eligibility plumbing from [#178](https://github.com/Linh86/cryptobank/issues/178). When it lands, it will live as a separate Mix task with explicit operator confirmation and recorded public artifacts (transaction hash, block number, receipt).
 
-> **Mainnet boundary.** Until [#166](https://github.com/Linh86/cryptobank/issues/166) lands, treat any "deposit on `base`" as out-of-scope. The decision pipeline will still produce a `DecisionEnvelope`, but the workspace must have `mainnet_enabled: true` to even submit the underlying intent, and execution dispatch will refuse mainnet broadcasts.
+> **Mainnet boundary (post-MVP).** Base mainnet for `allocate_idle_capital` is **out of v0.1 scope**. The HTTP boundary fails closed: a public submission with `chain: "base"` is rejected with `morpho_chain_not_supported` regardless of the workspace's `mainnet_enabled` flag (#203 P2). When mainnet support arrives, it requires [#166](https://github.com/Linh86/cryptobank/issues/166) (mainnet operational policy), [#178](https://github.com/Linh86/cryptobank/issues/178) (workspace mainnet eligibility), and the post-MVP exposure / concentration engine that is explicitly tracked outside the MVP plan (#205 was closed post-MVP).
 
 ## Troubleshooting
 
@@ -162,8 +165,8 @@ The runner requires the demo workspace from `mix bank.demo.seed`. Run that first
 What this surface does **not** do (today):
 
 - No deposit / withdraw / borrow / leverage / looping execution. The decision is a `DecisionEnvelope`; the on-chain action lives in [#206](https://github.com/Linh86/cryptobank/issues/206) / [#207](https://github.com/Linh86/cryptobank/issues/207).
-- No HTTP intent submission. Morpho intents are constructed internally; opening the API surface is separate work.
-- No mainnet support without [#166](https://github.com/Linh86/cryptobank/issues/166).
+- No mainnet `allocate_idle_capital`. Base Sepolia only at the HTTP boundary; mainnet is post-MVP and gated on #166/#178.
+- No agent-initiated withdraw / redeem. Operator-only, tracked in #207.
 - No public launch docs, no external SIEM integration, no analytics dashboard.
 - Morpho data is **input** to CryptoBank's policy, not the policy itself. APY is **never** treated as a safety signal.
 

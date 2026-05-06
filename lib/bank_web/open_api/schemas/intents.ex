@@ -91,7 +91,11 @@ defmodule BankWeb.OpenApi.Schemas.IntentSubmissionRequest do
       agent_id: %Schema{type: :string, example: "agent-alice"},
       kind: %Schema{
         type: :string,
-        enum: ["transfer", "swap", "scheduled_transfer"],
+        enum: ["transfer", "swap", "scheduled_transfer", "allocate_idle_capital"],
+        description:
+          "`allocate_idle_capital` is the MVP Morpho ERC-4626 USDC deposit kind " <>
+            "(#203). It must be submitted with `chain: \"base-sepolia\"` " <>
+            "and is approval-required by construction.",
         example: "transfer"
       },
       asset: %Reference{"$ref": "#/components/schemas/Asset"},
@@ -153,7 +157,11 @@ defmodule BankWeb.OpenApi.Schemas.IntentEntity do
       schema_version: %Schema{type: :string, example: "1"},
       kind: %Schema{
         type: :string,
-        enum: ["transfer", "swap", "scheduled_transfer"],
+        enum: ["transfer", "swap", "scheduled_transfer", "allocate_idle_capital"],
+        description:
+          "Public kind string. The persisted `AgentIntent.kind` is internally " <>
+            "`:defi_yield_deposit` for `allocate_idle_capital`; the API mapping " <>
+            "is bidirectional so the response always shows the public name.",
         example: "transfer"
       },
       asset: %Reference{"$ref": "#/components/schemas/Asset"},

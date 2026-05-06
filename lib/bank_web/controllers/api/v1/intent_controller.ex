@@ -117,6 +117,16 @@ defmodule BankWeb.API.V1.IntentController do
           hint: ~s|the runtime currently accepts only `"base"`|
         )
 
+      {:error, {:morpho_chain_not_supported, chain}} ->
+        render_error(
+          conn,
+          :unprocessable_entity,
+          "morpho_chain_not_supported",
+          "chain `#{chain}` is not supported for `allocate_idle_capital`",
+          hint:
+            ~s|the MVP Morpho deposit path is Base Sepolia only — submit with `"chain": "base-sepolia"`|
+        )
+
       {:error, :mainnet_disabled} ->
         render_error(
           conn,

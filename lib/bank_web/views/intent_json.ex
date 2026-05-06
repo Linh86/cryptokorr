@@ -109,7 +109,7 @@ defmodule BankWeb.API.V1.IntentJSON do
       id: intent.id,
       agent_id: intent.agent_id,
       source: intent.source,
-      kind: intent.kind,
+      kind: public_kind(intent.kind),
       asset: intent.asset,
       chain: intent.chain,
       amount: decimal(intent.amount),
@@ -126,6 +126,13 @@ defmodule BankWeb.API.V1.IntentJSON do
       current_execution_plan_id: intent.current_execution_plan_id
     }
   end
+
+  # Internal `:defi_yield_deposit` atom is rendered to the public
+  # `"allocate_idle_capital"` string at the API boundary so the
+  # response shape matches the request shape (#203 P2). All other
+  # kinds round-trip identically.
+  defp public_kind(:defi_yield_deposit), do: :allocate_idle_capital
+  defp public_kind(other), do: other
 
   defp target(%AgentIntent{target_raw_address: raw}) when is_binary(raw) do
     %{raw_address: raw}

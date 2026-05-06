@@ -1802,10 +1802,12 @@
             "type": "string"
           },
           "kind": {
+            "description": "Public kind string. The persisted `AgentIntent.kind` is internally `:defi_yield_deposit` for `allocate_idle_capital`; the API mapping is bidirectional so the response always shows the public name.",
             "enum": [
               "transfer",
               "swap",
-              "scheduled_transfer"
+              "scheduled_transfer",
+              "allocate_idle_capital"
             ],
             "example": "transfer",
             "type": "string"
@@ -2037,10 +2039,12 @@
             "type": "string"
           },
           "kind": {
+            "description": "`allocate_idle_capital` is the MVP Morpho ERC-4626 USDC deposit kind (#203). It must be submitted with `chain: \"base-sepolia\"` and is approval-required by construction.",
             "enum": [
               "transfer",
               "swap",
-              "scheduled_transfer"
+              "scheduled_transfer",
+              "allocate_idle_capital"
             ],
             "example": "transfer",
             "type": "string"

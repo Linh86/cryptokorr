@@ -138,14 +138,44 @@ defmodule Bank.DefiVenues.Morpho.SmokeTest do
              "runbook should mention `:auto_exec` (to explain why MVP deposits never reach it)"
     end
 
-    test "calls out that Morpho intents are internal-only at the HTTP boundary" do
+    test "documents allocate_idle_capital as the public HTTP kind on Base Sepolia only" do
       runbook = File.read!(@runbook_path)
 
-      assert runbook =~ "internal",
-             "runbook should explain Morpho intents are internal-only (Bank.Intents.normalize/1 rejects defi_yield_deposit)"
+      assert runbook =~ "allocate_idle_capital",
+             "runbook should name `allocate_idle_capital` as the public HTTP kind for Morpho deposits (#203)"
 
       assert runbook =~ "Bank.Intents.normalize/1",
-             "runbook should reference Bank.Intents.normalize/1 as the HTTP boundary that rejects defi_yield_deposit"
+             "runbook should reference Bank.Intents.normalize/1 as the HTTP boundary that maps the public kind to the internal atom"
+
+      assert runbook =~ ~r/Base Sepolia only/i,
+             "runbook should explicitly state that allocate_idle_capital is Base Sepolia only at the HTTP boundary"
+    end
+
+    test "supported workflow does NOT advertise mainnet as a Morpho deposit option" do
+      runbook = File.read!(@runbook_path)
+
+      [first_workflow, _post_mvp] =
+        runbook
+        |> String.split("## Optional", parts: 2)
+
+      # The OLD wording explicitly offered base mainnet alongside
+      # base-sepolia in the supported workflow. The MVP plan trims
+      # this to Base Sepolia only; mainnet must move to its own
+      # post-MVP section. Pin the exact old phrasing as a regression
+      # tripwire and pin the new explicit-rejection phrasing as the
+      # affirmative requirement.
+      refute first_workflow =~ "mainnet, requires per-workspace mainnet opt-in",
+             "first supported workflow must not advertise mainnet as a supported workflow (#203 P2)"
+
+      assert first_workflow =~ ~r/rejected at the HTTP boundary/i,
+             "first supported workflow must explicitly state that `chain: \"base\"` is rejected at the HTTP boundary for allocate_idle_capital"
+    end
+
+    test "calls out that withdraw / redeem is operator-only and never agent-initiated" do
+      runbook = File.read!(@runbook_path)
+
+      assert runbook =~ ~r/operator-only and never agent-initiated/i,
+             "runbook should call out that withdraw/redeem is operator-only and never agent-initiated"
     end
 
     test "calls out that execution dispatch is out of scope (#206/#207)" do

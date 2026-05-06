@@ -558,6 +558,7 @@ defmodule Bank.Intents do
              {:idempotency_conflict, AgentIntent.t()}
              | {:unsupported_chain, String.t()}
              | {:unsupported_asset, String.t()}
+             | {:morpho_chain_not_supported, String.t()}
              | :mainnet_disabled
              | {:invalid, term()}}
   def submit(attrs, opts \\ []) when is_map(attrs) do
@@ -682,16 +683,17 @@ defmodule Bank.Intents do
           | {:error,
              {:unsupported_chain, String.t()}
              | {:unsupported_asset, String.t()}
+             | {:morpho_chain_not_supported, String.t()}
              | {:invalid, atom()}}
   def normalize(attrs) when is_map(attrs) do
     with {:ok, agent_id} <- require_string(attrs, "agent_id"),
          {:ok, source} <- require_atom(attrs, "source", [:agent, :user, :runtime]),
          {:ok, idempotency_key} <- require_string(attrs, "idempotency_key"),
-         {:ok, kind} <-
-           require_atom(attrs, "kind", [:transfer, :swap, :scheduled_transfer]),
+         {:ok, kind} <- parse_public_kind(attrs),
          {:ok, chain} <- require_chain(attrs),
          {:ok, asset} <- require_asset(attrs),
          {:ok, amount} <- require_amount(attrs),
+         :ok <- validate_kind_chain(kind, chain),
          {:ok, target} <- normalise_target(Map.get(attrs, "target")) do
       base = %{
         agent_id: agent_id,
@@ -826,6 +828,45 @@ defmodule Bank.Intents do
   defp atom_from_allowed(value, allowed) do
     Enum.find(allowed, fn atom -> Atom.to_string(atom) == value end)
   end
+
+  # Public kind vocabulary at the `/v1/intents` boundary. Maps the
+  # operator-/agent-facing string into the internal atom used by the
+  # decision pipeline. The internal `:defi_yield_deposit` atom is
+  # NOT exposed under its internal name on the public surface — the
+  # MVP-issue contract uses `"allocate_idle_capital"` (#203).
+  @public_kinds %{
+    "transfer" => :transfer,
+    "swap" => :swap,
+    "scheduled_transfer" => :scheduled_transfer,
+    "allocate_idle_capital" => :defi_yield_deposit
+  }
+
+  defp parse_public_kind(attrs) do
+    case Map.get(attrs, "kind") do
+      v when is_binary(v) ->
+        case Map.fetch(@public_kinds, v) do
+          {:ok, atom} -> {:ok, atom}
+          :error -> {:error, {:invalid, :kind}}
+        end
+
+      _ ->
+        {:error, {:invalid, :kind}}
+    end
+  end
+
+  # MVP Morpho deposit (#203) is Base Sepolia only. Other intent
+  # kinds keep the existing chain allowlist (`require_chain/1` +
+  # workspace mainnet gate). Fail closed at the normalize boundary
+  # so a `chain: "base"` payload cannot reach the decision pipeline
+  # for `allocate_idle_capital` even if the workspace has mainnet
+  # opted in.
+  defp validate_kind_chain(:defi_yield_deposit, "base-sepolia"), do: :ok
+
+  defp validate_kind_chain(:defi_yield_deposit, chain) when is_binary(chain) do
+    {:error, {:morpho_chain_not_supported, chain}}
+  end
+
+  defp validate_kind_chain(_kind, _chain), do: :ok
 
   defp require_chain(attrs) do
     case Map.get(attrs, "chain") do
