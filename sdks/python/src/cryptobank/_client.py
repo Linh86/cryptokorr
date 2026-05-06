@@ -226,11 +226,19 @@ class Cryptobank:
         verifies). Withdraw / redeem is operator-only; the SDK does
         not expose it.
         """
+        # The public wire enum is `allocate_idle_capital` (per
+        # `IntentSubmissionRequest.kind` in
+        # `priv/openapi/openapi.json`). The Phoenix runtime maps
+        # this string to the internal `:defi_yield_deposit` atom in
+        # `Bank.Intents.normalize/1`; submitting the internal name
+        # is rejected with `{:invalid, :kind}`. SDK callers always
+        # see the public name on responses too — see
+        # `docs/runbooks/morpho-deposits.md`.
         body: dict[str, Any] = {
             "idempotency_key": idempotency_key or self._transport._generate_idempotency_key(),
             "source": source,
             "agent_id": agent_id,
-            "kind": "defi_yield_deposit",
+            "kind": "allocate_idle_capital",
             "asset": asset,
             "chain": chain,
             "amount": amount,

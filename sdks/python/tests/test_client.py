@@ -181,7 +181,13 @@ class TestWireShape:
         assert call.json_body["chain"] == "base-sepolia"
         assert call.json_body["destination_asset"] == "USDC"
 
-    def test_submit_allocate_idle_capital_uses_defi_yield_deposit(self):
+    def test_submit_allocate_idle_capital_uses_public_wire_kind(self):
+        # The Phoenix wire enum is `allocate_idle_capital` (public
+        # name) — `priv/openapi/openapi.json` `IntentSubmissionRequest.kind`
+        # only accepts `transfer | swap | scheduled_transfer |
+        # allocate_idle_capital`. The persisted `AgentIntent.kind`
+        # atom is `:defi_yield_deposit` internally, but submitting
+        # the internal name is rejected with `{:invalid, :kind}`.
         recorder = CallRecorder([FakeResponse(status=202, body={"intent_id": "i", "state": "submitted"})])
         client = _client(recorder)
         client.submit_allocate_idle_capital(
@@ -191,7 +197,7 @@ class TestWireShape:
         )
 
         call = recorder.calls[0]
-        assert call.json_body["kind"] == "defi_yield_deposit"
+        assert call.json_body["kind"] == "allocate_idle_capital"
         # Defaults for asset / chain align with MVP Morpho.
         assert call.json_body["asset"] == "USDC"
         assert call.json_body["chain"] == "base-sepolia"

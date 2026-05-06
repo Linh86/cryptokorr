@@ -134,7 +134,7 @@ Any string the SDK surfaces to the caller passes through a
 ```ts
 await client.submitTransfer({...});                // POST /v1/intents kind=transfer
 await client.submitSwap({...});                    // POST /v1/intents kind=swap
-await client.submitAllocateIdleCapital({...});     // POST /v1/intents kind=defi_yield_deposit
+await client.submitAllocateIdleCapital({...});     // POST /v1/intents kind=allocate_idle_capital
 await client.getIntent(intentId);                  // GET  /v1/intents/:id
 await client.simulateIntent(intentId, {reason});   // POST /v1/intents/:id/simulate
 await client.cancelIntent(intentId, {reason});     // POST /v1/intents/:id/cancel

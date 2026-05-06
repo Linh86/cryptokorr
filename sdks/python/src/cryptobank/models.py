@@ -85,7 +85,7 @@ class Intent(TypedDict, total=False):
     id: str
     agent_id: str
     source: Literal["agent", "user", "runtime"]
-    kind: Literal["transfer", "swap", "scheduled_transfer", "defi_yield_deposit"]
+    kind: Literal["transfer", "swap", "scheduled_transfer", "allocate_idle_capital"]
     asset: str
     chain: str
     amount: str

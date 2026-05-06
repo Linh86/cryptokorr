@@ -9,7 +9,15 @@
 
 // --- Enums --------------------------------------------------------------
 
-export type IntentKind = "transfer" | "swap" | "scheduled_transfer" | "defi_yield_deposit";
+// Public intent kinds — the wire enum on
+// `IntentSubmissionRequest.kind` and the `IntentEntity.kind`
+// response field (see `priv/openapi/openapi.json`). The
+// `allocate_idle_capital` string is the public name for Morpho
+// ERC-4626 deposits; the persisted Elixir atom is
+// `:defi_yield_deposit` internally and the API mapping is
+// bidirectional, so callers always send and receive the public
+// name.
+export type IntentKind = "transfer" | "swap" | "scheduled_transfer" | "allocate_idle_capital";
 
 export type IntentState =
   | "submitted"

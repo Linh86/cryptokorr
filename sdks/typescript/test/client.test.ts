@@ -166,7 +166,12 @@ describe("Cryptobank.submitTransfer", () => {
 });
 
 describe("Cryptobank.submitAllocateIdleCapital", () => {
-  it("defaults chain to base-sepolia and sends kind=defi_yield_deposit", async () => {
+  it("defaults chain to base-sepolia and sends the public wire kind", async () => {
+    // Phoenix's `IntentSubmissionRequest.kind` enum (per
+    // `priv/openapi/openapi.json`) is `transfer | swap |
+    // scheduled_transfer | allocate_idle_capital`. The persisted
+    // Elixir atom is `:defi_yield_deposit`, but the wire and the
+    // SDK use the public name `allocate_idle_capital`.
     const { client, calls } = makeClient([
       { status: 202, body: { intent_id: "int_morpho", state: "submitted", idempotent_replay: false, intent: {}, links: {} } },
     ]);
@@ -177,7 +182,7 @@ describe("Cryptobank.submitAllocateIdleCapital", () => {
       vaultAddress: "0xv4ult",
     });
     expect(readBody(calls[0]!.init)).toMatchObject({
-      kind: "defi_yield_deposit",
+      kind: "allocate_idle_capital",
       chain: "base-sepolia",
       vault_address: "0xv4ult",
     });
