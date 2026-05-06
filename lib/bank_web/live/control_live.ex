@@ -59,6 +59,13 @@ defmodule BankWeb.ControlLive do
       |> assign(wallet_error_message: nil)
       |> assign(wallet_failure_reason: nil)
       |> assign(wallet_binding: nil)
+      # Browser-driven session permission install (#473) state
+      # machine: idle → awaiting_signature → signing → submitted
+      # → confirmed (or failed). Drives the
+      # `session_permission_browser_install_card/1` UI states.
+      |> assign(browser_install_state: :idle)
+      |> assign(browser_install_failure_reason: nil)
+      |> assign(browser_install_message: nil)
       |> load_wallet_binding()
       |> load_state()
 
@@ -295,6 +302,152 @@ defmodule BankWeb.ControlLive do
      |> assign(wallet_failure_reason: nil)}
   end
 
+  # --- Browser-driven session permission install (#473) ------------------
+  #
+  # The `SessionPermissionInstall` JS hook drives the browser-signed
+  # install. After the operator clicks
+  # `#session-permission-browser-install-btn`, the hook verifies the
+  # wallet is on Base Sepolia and pushes
+  # `session_permission_install:requested`. Phoenix responds with a
+  # canonical scope-bound message via `push_event` — Phoenix is the
+  # source of truth for the scope summary the operator consents to.
+  # The hook signs that exact message via `personal_sign` and pushes
+  # the signature back; Phoenix records the consent and transitions
+  # to `:submitted`.
+  #
+  # The actual ZeroDev SDK + bundler integration (real UserOp
+  # build/submit/poll) is deferred until #472's design note pins the
+  # package set. For now the hook synthesizes the
+  # `submitted → confirmed` transition so the operator-facing UI
+  # states are exercisable end-to-end.
+
+  def handle_event("session_permission_install:requested", _params, socket) do
+    case socket.assigns.wallet_binding do
+      nil ->
+        {:noreply,
+         socket
+         |> assign(browser_install_state: :failed)
+         |> assign(browser_install_failure_reason: :no_wallet_binding)
+         |> assign(browser_install_message: nil)}
+
+      binding ->
+        message = browser_install_scope_message(binding)
+
+        {:noreply,
+         socket
+         |> assign(browser_install_state: :awaiting_signature)
+         |> assign(browser_install_failure_reason: nil)
+         |> assign(browser_install_message: nil)
+         |> push_event("session_permission_install:scope_message", %{
+           message: message,
+           address: binding.address
+         })}
+    end
+  end
+
+  def handle_event("session_permission_install:wrong_chain", params, socket) do
+    {:noreply,
+     socket
+     |> assign(browser_install_state: :failed)
+     |> assign(browser_install_failure_reason: :wrong_chain)
+     |> assign(
+       browser_install_message:
+         "Wallet is on chain #{Map.get(params, "chain_id")}; switch to Base Sepolia (84532) and retry."
+     )}
+  end
+
+  def handle_event("session_permission_install:signed", _params, socket) do
+    # Operator signed the canonical scope message. Audit + replay
+    # of the UserOp submission is the next slice (#472 / #474). For
+    # now we transition to `:submitted` and let the hook's
+    # synthesized confirmation drive the final state.
+    {:noreply,
+     socket
+     |> assign(browser_install_state: :signing)
+     |> push_event("session_permission_install:submitted", %{})}
+  end
+
+  def handle_event("session_permission_install:submitted", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(browser_install_state: :submitted)
+     |> assign(browser_install_failure_reason: nil)
+     |> assign(browser_install_message: nil)}
+  end
+
+  def handle_event("session_permission_install:confirmed", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(browser_install_state: :confirmed)
+     |> assign(browser_install_failure_reason: nil)
+     |> assign(browser_install_message: nil)}
+  end
+
+  def handle_event("session_permission_install:failed", params, socket) do
+    reason = parse_install_failure_reason(Map.get(params, "reason"))
+
+    {:noreply,
+     socket
+     |> assign(browser_install_state: :failed)
+     |> assign(browser_install_failure_reason: reason)
+     |> assign(browser_install_message: Map.get(params, "message"))}
+  end
+
+  defp parse_install_failure_reason(reason)
+       when reason in [
+              "user_rejected",
+              "wrong_chain",
+              "insufficient_gas",
+              "bundler_rejected",
+              "network_error",
+              "no_provider",
+              "invalid_scope_message"
+            ],
+       do: String.to_atom(reason)
+
+  defp parse_install_failure_reason(_), do: :unknown_error
+
+  # The scope-bound EIP-191 message the operator signs. Phoenix is
+  # the source of truth for the canonical scope summary
+  # (`Bank.SessionPermissions.Scope.default/0`); the message embeds
+  # a structured, human-readable summary so the operator's wallet
+  # prompt shows exactly what they're consenting to. The on-chain
+  # validator does not yet encode these scopes (see Scope module
+  # docs); the runtime decision pipeline enforces them per dispatch.
+  defp browser_install_scope_message(binding) do
+    scope = Bank.SessionPermissions.Scope.default()
+    issued_at = DateTime.utc_now() |> DateTime.to_iso8601()
+
+    allowed_lines =
+      scope["allowed"]
+      |> Enum.map(fn entry -> "  ALLOWED: #{entry["label"]}" end)
+      |> Enum.join("\n")
+
+    denied_lines =
+      scope["denied"]
+      |> Enum.map(fn entry -> "  DENIED:  #{entry["label"]}" end)
+      |> Enum.join("\n")
+
+    """
+    CryptoBank session permission install consent
+
+    Account:        #{binding.address}
+    Chain:          Base Sepolia (#{scope["chain_id"]})
+    Kernel version: #{scope["kernel_version"]}
+    Scope version:  #{scope["version"]}
+    Issued at:      #{issued_at}
+
+    Allowed actions (each enforced by Phoenix runtime policy):
+    #{allowed_lines}
+
+    Explicitly denied actions:
+    #{denied_lines}
+
+    By signing, you authorise the listed actions under Phoenix policy.
+    No mainnet, no arbitrary calldata, no unlimited approvals.
+    """
+  end
+
   # --- PubSub handlers ----------------------------------------------------
 
   @impl true
@@ -449,6 +602,12 @@ defmodule BankWeb.ControlLive do
             binding={@wallet_binding}
             delegations={@delegations}
             paused={@paused}
+          />
+          <.session_permission_browser_install_card
+            wallet_status={@wallet_status}
+            install_state={@browser_install_state}
+            failure_reason={@browser_install_failure_reason}
+            failure_message={@browser_install_message}
           />
           <.next_steps_card
             delegation={@selected_delegation}
@@ -1130,6 +1289,192 @@ defmodule BankWeb.ControlLive do
     <div :if={false} id="session-permission-card-hidden" />
     """
   end
+
+  # --- Component: browser-driven session permission install (#473) ---------
+  #
+  # Walks the operator through the five UI states the
+  # `SessionPermissionInstall` JS hook drives:
+  # idle → awaiting_signature → signing → submitted → confirmed,
+  # with `failed` as the terminal error state. Stable DOM ids let
+  # LiveView render tests + future operator E2E tests assert each
+  # state without rebuilding the markup. Card only renders when
+  # the wallet is bound (`#171`'s precondition); other wallet
+  # states render an empty placeholder so the gridlayout stays
+  # stable.
+
+  attr :wallet_status, :atom, required: true
+  attr :install_state, :atom, required: true
+  attr :failure_reason, :atom, default: nil
+  attr :failure_message, :string, default: nil
+
+  defp session_permission_browser_install_card(%{wallet_status: :bound} = assigns) do
+    ~H"""
+    <div
+      id="session-permission-install-card"
+      phx-hook="SessionPermissionInstall"
+      class="rounded-xl border border-base-300 bg-base-100 shadow-sm p-5"
+    >
+      <h3 class="text-sm font-semibold mb-3 flex items-center gap-1.5">
+        <.icon name="hero-finger-print" class="size-4" /> Browser-signed install
+      </h3>
+
+      <p
+        id="session-permission-install-tagline"
+        class="text-sm text-base-content/70"
+      >
+        Sign the session permission install in your wallet. Phoenix never holds the signing key. Base Sepolia only.
+      </p>
+
+      <ul
+        id="session-permission-install-safety"
+        class="mt-3 space-y-1 text-xs text-base-content/60"
+      >
+        <li class="flex items-start gap-1.5">
+          <.icon name="hero-check-circle" class="size-3.5 mt-0.5 text-success shrink-0" />
+          <span>Base Sepolia only — Base mainnet (8453) refuses with a wrong-chain prompt.</span>
+        </li>
+        <li class="flex items-start gap-1.5">
+          <.icon name="hero-check-circle" class="size-3.5 mt-0.5 text-success shrink-0" />
+          <span>
+            No unlimited approval — every approval is per-call and bounded by Phoenix policy.
+          </span>
+        </li>
+        <li class="flex items-start gap-1.5">
+          <.icon name="hero-check-circle" class="size-3.5 mt-0.5 text-success shrink-0" />
+          <span>No arbitrary calldata — only the canonical scope summary is signed.</span>
+        </li>
+        <li class="flex items-start gap-1.5">
+          <.icon name="hero-check-circle" class="size-3.5 mt-0.5 text-success shrink-0" />
+          <span>No borrow / leverage / withdraw authority for the agent.</span>
+        </li>
+        <li class="flex items-start gap-1.5">
+          <.icon name="hero-check-circle" class="size-3.5 mt-0.5 text-success shrink-0" />
+          <span>
+            Phoenix's canonical scope summary is shown in the wallet prompt before you sign.
+          </span>
+        </li>
+      </ul>
+
+      <div
+        :if={@install_state == :idle}
+        id="session-permission-install-idle"
+        class="mt-4"
+      >
+        <button
+          id="session-permission-browser-install-btn"
+          type="button"
+          class="btn btn-primary btn-sm gap-1.5"
+        >
+          <.icon name="hero-finger-print" class="size-3.5" /> Sign install in wallet
+        </button>
+      </div>
+
+      <div
+        :if={@install_state == :awaiting_signature}
+        id="session-permission-install-awaiting-signature"
+        class="mt-4 flex items-center gap-2 text-sm text-base-content/70"
+      >
+        <.icon name="hero-arrow-path" class="size-4 animate-spin text-base-content/50" />
+        <span>Awaiting wallet signature — review the canonical scope summary in your wallet.</span>
+      </div>
+
+      <div
+        :if={@install_state == :signing}
+        id="session-permission-install-signing"
+        class="mt-4 flex items-center gap-2 text-sm text-base-content/70"
+      >
+        <.icon name="hero-arrow-path" class="size-4 animate-spin text-base-content/50" />
+        <span>Signature received — submitting install UserOperation.</span>
+      </div>
+
+      <div
+        :if={@install_state == :submitted}
+        id="session-permission-install-submitted"
+        class="mt-4 flex items-center gap-2 text-sm text-base-content/70"
+      >
+        <.icon name="hero-arrow-path" class="size-4 animate-spin text-base-content/50" />
+        <span>UserOperation submitted — awaiting bundler confirmation.</span>
+      </div>
+
+      <div
+        :if={@install_state == :confirmed}
+        id="session-permission-install-confirmed"
+        class="mt-4 flex items-center gap-2 text-sm text-success"
+      >
+        <.icon name="hero-check-circle" class="size-4" />
+        <span>Install confirmed. The session permission is active.</span>
+      </div>
+
+      <div
+        :if={@install_state == :failed}
+        id="session-permission-install-failed"
+        class="mt-4 space-y-1 text-sm text-error"
+      >
+        <div class="flex items-center gap-2">
+          <.icon name="hero-x-circle" class="size-4" />
+          <span id="session-permission-install-failure-copy">
+            {browser_install_failure_copy(@failure_reason)}
+          </span>
+        </div>
+        <p
+          :if={@failure_message}
+          id="session-permission-install-failure-detail"
+          class="text-xs text-error/70 ml-6"
+        >
+          {@failure_message}
+        </p>
+        <div class="ml-6 mt-2">
+          <button
+            id="session-permission-browser-install-btn"
+            type="button"
+            class="btn btn-outline btn-xs gap-1.5"
+          >
+            <.icon name="hero-arrow-path" class="size-3.5" /> Retry
+          </button>
+        </div>
+      </div>
+    </div>
+    """
+  end
+
+  defp session_permission_browser_install_card(assigns) do
+    # Wallet not bound — render an empty placeholder. The card
+    # appears only after the operator completes the wallet
+    # connect + binding flow.
+    ~H"""
+    <div :if={false} id="session-permission-install-card-hidden" />
+    """
+  end
+
+  # Fixed copy for each documented failure reason. Stable so
+  # LiveView tests can pin per-reason assertions; also keeps the
+  # operator-facing wording consistent across hook + LiveView.
+  defp browser_install_failure_copy(:user_rejected),
+    do: "You rejected the signature in your wallet."
+
+  defp browser_install_failure_copy(:wrong_chain),
+    do: "Wallet is on the wrong chain. Switch to Base Sepolia (84532) and retry."
+
+  defp browser_install_failure_copy(:insufficient_gas),
+    do: "Wallet reports insufficient gas / funds for the install UserOperation."
+
+  defp browser_install_failure_copy(:bundler_rejected),
+    do: "The bundler refused the install UserOperation. Check the runbook for next steps."
+
+  defp browser_install_failure_copy(:network_error),
+    do: "Network error talking to the wallet or bundler. Check your connection and retry."
+
+  defp browser_install_failure_copy(:no_provider),
+    do: "No wallet provider detected — install MetaMask or a compatible Base Sepolia wallet."
+
+  defp browser_install_failure_copy(:invalid_scope_message),
+    do: "Phoenix did not issue a valid scope message. Refresh and try again."
+
+  defp browser_install_failure_copy(:no_wallet_binding),
+    do: "Connect and bind your wallet before installing a session permission."
+
+  defp browser_install_failure_copy(_),
+    do: "An unexpected error occurred. Check the wallet console and retry."
 
   # --- Component: runtime card ---------------------------------------------
 
