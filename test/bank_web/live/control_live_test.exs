@@ -1047,6 +1047,180 @@ defmodule BankWeb.ControlLiveTest do
     end
   end
 
+  # --- Browser-driven session permission install card (#473) -------------
+
+  describe "session permission browser install card — wallet not bound" do
+    test "card is not rendered when the wallet is not bound", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/")
+
+      refute html =~ ~s(id="session-permission-install-card"),
+             "browser install card must not render before wallet is bound"
+
+      refute html =~ ~s(id="session-permission-install-tagline")
+      refute html =~ "Sign install in wallet"
+    end
+  end
+
+  describe "session permission browser install card — idle state" do
+    test "renders the install card with safety copy + idle button after bind",
+         %{conn: conn, wallet_address: address} do
+      {:ok, view, _html} = live(conn, "/")
+      _ = bind_wallet!(view, address)
+
+      html = render(view)
+
+      assert html =~ ~s(id="session-permission-install-card")
+      assert html =~ ~s(id="session-permission-install-tagline")
+      assert html =~ ~s(id="session-permission-install-safety")
+      assert html =~ ~s(id="session-permission-install-idle")
+      assert html =~ ~s(id="session-permission-browser-install-btn")
+      assert html =~ "Sign install in wallet"
+
+      # Safety copy is always present in the idle state.
+      assert html =~ "Base Sepolia only"
+      assert html =~ "No unlimited approval"
+      assert html =~ "No arbitrary calldata"
+      assert html =~ "No borrow / leverage / withdraw authority"
+      # The apostrophe in "Phoenix's" may render as `&#39;` after
+      # HEEx HTML-escaping; check for "canonical scope summary"
+      # alone as the load-bearing copy.
+      assert html =~ "canonical scope summary"
+    end
+  end
+
+  describe "session permission browser install card — state transitions" do
+    test "requested → awaiting_signature renders the awaiting state",
+         %{conn: conn, wallet_address: address} do
+      {:ok, view, _html} = live(conn, "/")
+      _ = bind_wallet!(view, address)
+
+      html =
+        render_hook(view, "session_permission_install:requested", %{"chain_id" => 84_532})
+
+      assert html =~ ~s(id="session-permission-install-awaiting-signature")
+      assert html =~ "Awaiting wallet signature"
+      refute html =~ ~s(id="session-permission-install-idle")
+      refute html =~ ~s(id="session-permission-install-confirmed")
+    end
+
+    test "signed → signing renders the signing state",
+         %{conn: conn, wallet_address: address} do
+      {:ok, view, _html} = live(conn, "/")
+      _ = bind_wallet!(view, address)
+      _ = render_hook(view, "session_permission_install:requested", %{"chain_id" => 84_532})
+
+      html =
+        render_hook(view, "session_permission_install:signed", %{"signature" => "0xdeadbeef"})
+
+      assert html =~ ~s(id="session-permission-install-signing")
+      assert html =~ "Signature received"
+    end
+
+    test "submitted renders the submitted state",
+         %{conn: conn, wallet_address: address} do
+      {:ok, view, _html} = live(conn, "/")
+      _ = bind_wallet!(view, address)
+      _ = render_hook(view, "session_permission_install:requested", %{"chain_id" => 84_532})
+      _ = render_hook(view, "session_permission_install:signed", %{"signature" => "0xdeadbeef"})
+
+      html = render_hook(view, "session_permission_install:submitted", %{})
+
+      assert html =~ ~s(id="session-permission-install-submitted")
+      assert html =~ "UserOperation submitted"
+    end
+
+    test "confirmed renders the success state",
+         %{conn: conn, wallet_address: address} do
+      {:ok, view, _html} = live(conn, "/")
+      _ = bind_wallet!(view, address)
+
+      html = render_hook(view, "session_permission_install:confirmed", %{})
+
+      assert html =~ ~s(id="session-permission-install-confirmed")
+      assert html =~ "Install confirmed"
+    end
+  end
+
+  describe "session permission browser install card — failure copy" do
+    test "user_rejected failure surfaces the documented copy + retry button",
+         %{conn: conn, wallet_address: address} do
+      {:ok, view, _html} = live(conn, "/")
+      _ = bind_wallet!(view, address)
+
+      html =
+        render_hook(view, "session_permission_install:failed", %{"reason" => "user_rejected"})
+
+      assert html =~ ~s(id="session-permission-install-failed")
+      assert html =~ ~s(id="session-permission-install-failure-copy")
+      assert html =~ "rejected the signature"
+      # Retry button is the same DOM id as the idle button so the
+      # JS hook's click handler picks it up.
+      assert html =~ ~s(id="session-permission-browser-install-btn")
+    end
+
+    test "wrong_chain failure surfaces the Base Sepolia copy",
+         %{conn: conn, wallet_address: address} do
+      {:ok, view, _html} = live(conn, "/")
+      _ = bind_wallet!(view, address)
+
+      html =
+        render_hook(view, "session_permission_install:wrong_chain", %{"chain_id" => 8453})
+
+      assert html =~ ~s(id="session-permission-install-failed")
+      assert html =~ "Switch to Base Sepolia"
+      assert html =~ ~s(id="session-permission-install-failure-detail")
+      assert html =~ "8453"
+    end
+
+    test "insufficient_gas failure surfaces the documented copy",
+         %{conn: conn, wallet_address: address} do
+      {:ok, view, _html} = live(conn, "/")
+      _ = bind_wallet!(view, address)
+
+      html =
+        render_hook(view, "session_permission_install:failed", %{
+          "reason" => "insufficient_gas"
+        })
+
+      assert html =~ "insufficient gas"
+    end
+
+    test "bundler_rejected failure surfaces the documented copy",
+         %{conn: conn, wallet_address: address} do
+      {:ok, view, _html} = live(conn, "/")
+      _ = bind_wallet!(view, address)
+
+      html =
+        render_hook(view, "session_permission_install:failed", %{
+          "reason" => "bundler_rejected"
+        })
+
+      assert html =~ "bundler refused"
+    end
+
+    test "network_error failure surfaces the documented copy",
+         %{conn: conn, wallet_address: address} do
+      {:ok, view, _html} = live(conn, "/")
+      _ = bind_wallet!(view, address)
+
+      html =
+        render_hook(view, "session_permission_install:failed", %{"reason" => "network_error"})
+
+      assert html =~ "Network error"
+    end
+
+    test "unknown reason falls through to the generic copy",
+         %{conn: conn, wallet_address: address} do
+      {:ok, view, _html} = live(conn, "/")
+      _ = bind_wallet!(view, address)
+
+      html =
+        render_hook(view, "session_permission_install:failed", %{"reason" => "wat"})
+
+      assert html =~ "unexpected error"
+    end
+  end
+
   # --- Wallet binding test helpers -----------------------------------------
 
   defp bind_wallet!(view, address) do
