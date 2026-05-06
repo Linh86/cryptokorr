@@ -155,21 +155,150 @@ The MVP plan keeps live execution on Base Sepolia + 0x only (#192).
 truth for live preview metadata. There is no live mainnet simulation
 in v0.1.
 
-## Smoke checklist
+## Smoke recipes
 
-  * `Bank.Quotes.attempted_provider_id(provider: :live)` returns
-    `"tenderly"`.
-  * After a successful simulate against the live provider:
-    - `Bank.Quotes.ProviderHealth.get("tenderly").status` is
-      `:healthy`,
-    - `last_success_at` is set,
-    - `/v1/health/deep` shows `quotes_provider.status: "ok"`.
-  * After a forced provider failure (Req.Test stub returning 503):
-    - `last_failure_reason` is `:provider_unavailable` (a category
-      atom; never the raw 503 body),
-    - the resulting `simulation_reports` row has `status: "failed"`
-      and `provider: "tenderly"`,
-    - the intent does NOT advance to `:executing`.
+### Local stub-mode smoke
+
+Run the deterministic stub-only smoke. No `.env`, no Tenderly HTTP,
+no DB writes outside the resettable `Bank.Quotes.ProviderHealth`
+ETS table:
+
+```sh
+mix bank.quotes.smoke
+```
+
+Expected output (PASS lines may print in either order; the summary
+is canonical):
+
+```text
+Bank quote provider smoke
+
+  PASS quotes.stub_success — stub returned %Preview{source: :stub, provider: "stub"}
+  PASS quotes.attempted_provider_id — stub/live/disabled atoms + module forms resolve to expected ids
+  PASS quotes.health_recorded_after_success — :healthy with success_count=1 after stub preview
+  PASS quotes.health_recorded_after_failure — :failing with last_failure_reason=:provider_unavailable
+  PASS quotes.health_snapshot_rollup — /v1/health/deep `quotes_provider` rolls up to :down on stub failure
+  PASS quotes.secret_hygiene — ProviderHealth state carries no Authorization/sk_/pk_/credentialed-URL/PEM markers
+  PASS quotes.live_provider_disabled_default — default deployment without `provider:` config resolves to "stub"
+
+7 / 7 PASS
+No live network, no `.env` reads, no Tenderly HTTP.
+```
+
+Exit code is 0 on PASS, 1 on FAIL — CI steps can read the exit
+status without parsing stdout. The smoke is idempotent: the
+runner snapshots `ProviderHealth` before the run and restores
+existing state afterwards so the readiness payload does not
+record the smoke's synthetic stub failure once the run exits.
+
+### Manual one-shot stub preview
+
+For a single API round-trip, hit the simulate endpoint with the
+default (stub) provider:
+
+```sh
+curl -sS -X POST http://localhost:4000/v1/intents/<intent-id>/simulate \
+  -H "x-api-key: $LOCAL_API_KEY" \
+  -H "content-type: application/json" \
+  -d '{"reason":"pre_submit_dry_run"}' \
+  | jq '.simulation | {provider, status}'
+# => { "provider": "stub", "status": "completed" }
+```
+
+### Staging live-provider smoke
+
+Live provider is opt-in. The exact env var names and config keys
+are:
+
+```elixir
+# config/runtime.exs
+config :bank, Bank.Quotes, provider: :live
+
+config :bank, Bank.Quotes.LiveProvider,
+  base_url: System.get_env("TENDERLY_BASE_URL"),
+  api_key: System.get_env("TENDERLY_API_KEY")
+```
+
+Set the environment variables outside of any committed file —
+the runbook never includes real keys, and `TENDERLY_API_KEY` /
+`TENDERLY_BASE_URL` should be passed in via the secret store
+(operator's choice — `direnv`, `kubectl create secret`, etc.).
+Missing env vars in production do NOT raise; `LiveProvider`
+degrades to `{:error, :provider_unavailable}` (logged with
+`category=not_configured`).
+
+After a staging deploy:
+
+  1. Verify the configured mode (no real keys printed):
+
+     ```sh
+     iex --remsh staging@host -e \
+       'IO.inspect(Bank.Quotes.attempted_provider_id())'
+     # => "tenderly"
+     ```
+
+  2. Run a real simulate against any seeded intent:
+
+     ```sh
+     curl -sS -X POST https://staging.example.com/v1/intents/<id>/simulate \
+       -H "x-api-key: $STAGING_API_KEY" \
+       -H "content-type: application/json" \
+       -d '{"reason":"pre_submit_dry_run"}'
+     ```
+
+     Expected response excerpt:
+
+     ```json
+     {
+       "simulation": {
+         "provider": "tenderly",
+         "status": "completed",
+         "provider_trace_ref": "tenderly-trace-…"
+       }
+     }
+     ```
+
+  3. Confirm the health surface picked up the success:
+
+     ```sh
+     curl -sS https://staging.example.com/v1/health/deep \
+       | jq '.checks.quotes_provider'
+     # => {
+     #   "status": "ok",
+     #   "detail": null,
+     #   "providers": [
+     #     {
+     #       "provider": "tenderly",
+     #       "status": "healthy",
+     #       "success_count": 1,
+     #       "failure_count": 0,
+     #       "last_success_at": "<iso8601>",
+     #       "last_failure_at": null,
+     #       "last_failure_reason": null
+     #     }
+     #   ]
+     # }
+     ```
+
+### Verifying degraded / failing states safely
+
+To prove the runtime degrades safely without breaking the live
+upstream, point `TENDERLY_BASE_URL` at an invalid host and
+re-run the simulate. The provider returns
+`{:error, :provider_unavailable}`; the persisted
+`simulation_reports` row carries `status: "failed"` and
+`provider: "tenderly"`; `/v1/health/deep` shows
+`quotes_provider.providers[].last_failure_reason:
+"provider_unavailable"`. The intent's `current_simulation_id`
+moves to the failed row and the autonomy router holds the
+intent — no `:executing` transition.
+
+The category-atom failure-reason vocabulary is the only thing
+that surfaces in the readiness payload: `provider_unavailable`,
+`simulation_failed`, `provider_disabled`, `not_yet_implemented`,
+`stale`, `unsupported`, `provider_exception`, `error`. Free-form
+upstream strings, response bodies, request URLs, Authorization
+headers, and PEM material are never persisted.
 
 ## Secret hygiene posture
 
