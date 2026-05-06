@@ -1,0 +1,22 @@
+{
+  "name": "cryptobank-vercel-ai-example",
+  "version": "0.1.0",
+  "description": "Vercel AI SDK tool definitions wrapping the CryptoBank TypeScript SDK on Base Sepolia.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test --experimental-strip-types test/tools.test.ts",
+    "demo": "node --experimental-strip-types demo.ts"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@cryptobank/sdk": "file:../../sdks/typescript"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "typescript": "^5.8.3"
+  }
+}
