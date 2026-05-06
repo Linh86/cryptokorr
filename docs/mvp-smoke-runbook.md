@@ -4,8 +4,17 @@ Operator runbook for re-running the cryptographic grant + revoke
 flow that closed #58 / #31 under PR #132. Repeats the proven
 dance against a live local stack in <5 minutes.
 
+> **MVP onboarding lives in
+> [`docs/wallet-quickstart.md`](wallet-quickstart.md).** That doc
+> walks the browser-driven Connect → Bind → Install → Revoke flow
+> partners use day-one. The curl form below is preserved as a
+> **dev fallback** for adapter integration debugging and
+> situations where the browser flow itself is the thing being
+> investigated.
+
 Pairs with:
 
+- [`docs/wallet-quickstart.md`](wallet-quickstart.md) — MVP browser onboarding (use this first).
 - [`docs/provisioning-kernel-v3.md`](provisioning-kernel-v3.md) — one-shot smart-account deploy.
 - [`docs/zerodev-permissions-integration.md`](zerodev-permissions-integration.md) — on-chain shape.
 - [`docs/incident-runbook.md`](incident-runbook.md) — if a smoke fails in the field.
