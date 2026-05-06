@@ -347,6 +347,196 @@ defmodule BankWeb.Internal.AdapterCallbackControllerTest do
     end
   end
 
+  describe "POST /internal/adapter/callback — swap receipt fields (#193)" do
+    # Build an in-flight swap plan: same in-flight setup as transfers
+    # but the plan carries a #190 swap-route steps payload, the chain
+    # mirrors the route's chain, and the asset is the route's
+    # destination asset.
+    defp in_flight_swap_plan(status) do
+      counterparty = Fixtures.counterparty()
+
+      intent =
+        Fixtures.agent_intent(
+          counterparty: counterparty,
+          chain: "base-sepolia",
+          amount: Decimal.new("10")
+        )
+
+      {:ok, intent} =
+        intent
+        |> AgentIntent.current_pointer_changeset(%{state: :executing})
+        |> Repo.update()
+
+      decision = Fixtures.decision_envelope(intent: intent, current: true)
+
+      plan =
+        Fixtures.swap_execution_plan(
+          decision: decision,
+          intent_id: intent.id,
+          execution_status: status
+        )
+
+      %{intent: intent, plan: plan}
+    end
+
+    test "execution.confirmed persists block_number, actual_output_amount, and tx_refs",
+         %{conn: conn} do
+      %{intent: intent, plan: plan} = in_flight_swap_plan(:pending_confirmation)
+
+      userop_hash = "0x" <> String.duplicate("aa", 32)
+      tx_hash = "0x" <> String.duplicate("bb", 32)
+
+      conn =
+        post(conn, "/internal/adapter/callback", %{
+          "contract_version" => 1,
+          "kind" => "execution.confirmed",
+          "execution_plan_id" => plan.id,
+          "tx_refs" => [
+            %{
+              "chain" => "base-sepolia",
+              "userop_hash" => userop_hash,
+              "hash" => tx_hash,
+              "block_number" => 42_424_242,
+              "status" => "success"
+            }
+          ],
+          "actual_output_amount" => "9.93"
+        })
+
+      assert json_response(conn, 200)["status"] == "accepted"
+
+      reloaded = Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :confirmed
+      assert reloaded.final_outcome == :confirmed
+      assert reloaded.tx_refs == [userop_hash, tx_hash]
+      assert reloaded.block_number == 42_424_242
+      assert Decimal.equal?(reloaded.actual_output_amount, Decimal.new("9.93"))
+
+      assert %AgentIntent{state: :executed} = Repo.get!(AgentIntent, intent.id)
+
+      # Audit `after_ref` carries the swap-receipt fields so replay
+      # can show the route + receipt without rejoining the plan.
+      [audit] = Repo.all(from e in AuditEvent, where: e.event_type == "execution.confirmed")
+      assert audit.after_ref["route_hash"] == plan.steps["route_hash"]
+      assert audit.after_ref["block_number"] == 42_424_242
+      assert audit.after_ref["actual_output_amount"] == "9.93"
+      assert audit.actor == :adapter
+    end
+
+    test "execution.reverted records safe failure reason and skips actual_output",
+         %{conn: conn} do
+      %{intent: intent, plan: plan} = in_flight_swap_plan(:broadcasting)
+
+      conn =
+        post(conn, "/internal/adapter/callback", %{
+          "contract_version" => 1,
+          "kind" => "execution.reverted",
+          "execution_plan_id" => plan.id,
+          "tx_refs" => [%{"hash" => "0x" <> String.duplicate("11", 32), "status" => "reverted"}],
+          "reason" => "userop_reverted: insufficient output"
+        })
+
+      assert json_response(conn, 200)["status"] == "accepted"
+
+      reloaded = Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :reverted
+      assert reloaded.final_outcome == :reverted
+      assert reloaded.final_reason == "userop_reverted: insufficient output"
+      # No actual_output on a revert; block_number absent because
+      # the test omitted it.
+      assert reloaded.actual_output_amount == nil
+      assert reloaded.block_number == nil
+
+      assert %AgentIntent{state: :blocked} = Repo.get!(AgentIntent, intent.id)
+    end
+
+    test "duplicate execution.confirmed callback is idempotent (no double receipt)",
+         %{conn: conn} do
+      %{plan: plan} = in_flight_swap_plan(:pending_confirmation)
+
+      tx_hash = "0x" <> String.duplicate("cc", 32)
+
+      payload = %{
+        "contract_version" => 1,
+        "kind" => "execution.confirmed",
+        "execution_plan_id" => plan.id,
+        "tx_refs" => [%{"hash" => tx_hash, "block_number" => 12_345}],
+        "actual_output_amount" => "9.50"
+      }
+
+      _ = post(conn, "/internal/adapter/callback", payload)
+
+      reloaded_first = Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded_first.block_number == 12_345
+      assert Decimal.equal?(reloaded_first.actual_output_amount, Decimal.new("9.50"))
+
+      # Second call — adapter retried but the plan is already
+      # terminal. The callback returns `accepted_with_warning`
+      # (mirrored on transfer's idempotent path) and never re-applies.
+      conn2 = post(conn, "/internal/adapter/callback", payload)
+      assert json_response(conn2, 200)["status"] == "accepted_with_warning"
+
+      reloaded_second = Repo.get!(ExecutionPlan, plan.id)
+      # Same values as first apply.
+      assert reloaded_second.block_number == 12_345
+      assert Decimal.equal?(reloaded_second.actual_output_amount, Decimal.new("9.50"))
+      assert reloaded_second.tx_refs == [tx_hash]
+
+      # Only one execution.confirmed audit row, not two.
+      events = Repo.all(from e in AuditEvent, where: e.event_type == "execution.confirmed")
+      assert length(events) == 1
+    end
+
+    test "malformed swap receipt fields are silently dropped (defensive)", %{conn: conn} do
+      %{plan: plan} = in_flight_swap_plan(:pending_confirmation)
+
+      conn =
+        post(conn, "/internal/adapter/callback", %{
+          "contract_version" => 1,
+          "kind" => "execution.confirmed",
+          "execution_plan_id" => plan.id,
+          "tx_refs" => [
+            %{"hash" => "0xabc", "block_number" => "not-an-int"}
+          ],
+          "actual_output_amount" => "not-a-decimal"
+        })
+
+      assert json_response(conn, 200)["status"] == "accepted"
+
+      reloaded = Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :confirmed
+      assert reloaded.block_number == nil
+      assert reloaded.actual_output_amount == nil
+      assert reloaded.tx_refs == ["0xabc"]
+    end
+
+    test "callback log line never embeds raw tx_refs / receipt body (secret hygiene)",
+         %{conn: conn} do
+      # Drive an unknown plan so the controller logs a warning
+      # carrying `safe_params(params)` — only the allowlisted keys
+      # (kind / smart_account_id / execution_plan_id / delegation_id /
+      # state) appear; the receipt-bearing keys (tx_refs,
+      # actual_output_amount) MUST NOT.
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          post(conn, "/internal/adapter/callback", %{
+            "contract_version" => 1,
+            "kind" => "execution.confirmed",
+            "execution_plan_id" => Ecto.UUID.generate(),
+            "tx_refs" => [
+              %{"hash" => "0xSECRETTXHASH", "block_number" => 99_999_999}
+            ],
+            "actual_output_amount" => "1234.56"
+          })
+        end)
+
+      assert log =~ "Execution callback for unknown plan"
+      refute log =~ "0xSECRETTXHASH"
+      refute log =~ "99999999"
+      refute log =~ "1234.56"
+    end
+  end
+
   describe "POST /internal/adapter/callback — ERC-4337 v0.7 AA-shaped tx_refs (issue #32)" do
     # The adapter's AA path carries BOTH `userop_hash` (EntryPoint
     # identity) and `hash` (chain-level tx hash) on confirmed receipts,

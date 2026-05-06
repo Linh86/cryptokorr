@@ -72,10 +72,15 @@ defmodule Bank.AdapterClient do
   alias Bank.Intents.AgentIntent
   alias Bank.Repo
 
+  # `Bank.Decisions.SwapRouteArtifacts` is referenced via fully
+  # qualified call (no compile-time alias) to avoid a circular
+  # alias ordering — `Bank.Decisions` itself uses `AdapterClient`.
+
   @contract_version 1
   @default_timeout_ms 5_000
 
   @type transfer_ok :: %{accepted: true, execution_plan_id: String.t()}
+  @type swap_ok :: %{accepted: true, execution_plan_id: String.t()}
   @type revoke_ok :: %{accepted: true, smart_account_id: String.t()}
   @type grant_ok :: %{accepted: true, smart_account_id: String.t()}
   @type transfer_error ::
@@ -84,6 +89,12 @@ defmodule Bank.AdapterClient do
           | {:adapter_rejected, pos_integer(), map() | String.t()}
           | {:adapter_error, pos_integer(), map() | String.t()}
           | {:target_not_resolvable, atom()}
+  @type swap_error ::
+          :adapter_unavailable
+          | :invalid_response
+          | {:adapter_rejected, pos_integer(), map() | String.t()}
+          | {:adapter_error, pos_integer(), map() | String.t()}
+          | {:invalid_swap_plan, atom()}
   @type revoke_error ::
           :adapter_unavailable
           | :invalid_response
@@ -108,6 +119,27 @@ defmodule Bank.AdapterClient do
   def dispatch_transfer(%ExecutionPlan{} = plan, opts \\ []) do
     with {:ok, payload} <- build_transfer_payload(plan) do
       post("/dispatch/transfer", payload, :transfer, opts)
+    end
+  end
+
+  @doc """
+  Dispatch a swap execution plan to the adapter (#193).
+
+  The plan must carry `:smart_account_id`, `:chain`, `:asset`,
+  `:signing_requirements`, and a `:steps` payload produced by
+  `Bank.Decisions.SwapRouteArtifacts.from_route/1` (#190). The
+  persisted route fields (route_hash, source/destination tokens,
+  spender, swap_target_contract, calldata, slippage_bps,
+  quote_timestamp, deadline) are forwarded verbatim — the adapter
+  is the source of truth for on-chain semantics; Phoenix only
+  validates shape via `Bank.Decisions.SwapDispatchSafety.validate/3`
+  before this call.
+  """
+  @spec dispatch_swap(ExecutionPlan.t(), keyword()) ::
+          {:ok, swap_ok()} | {:error, swap_error()}
+  def dispatch_swap(%ExecutionPlan{} = plan, opts \\ []) do
+    with {:ok, payload} <- build_swap_payload(plan) do
+      post("/dispatch/swap", payload, :swap, opts)
     end
   end
 
@@ -260,6 +292,64 @@ defmodule Bank.AdapterClient do
     end
   end
 
+  # Reconciled with merged #192 (`chain_adapter/src/contracts/schemas.ts`'s
+  # `DispatchSwapSchema`). The wire envelope keeps the v0.1 top-level
+  # dispatch fields (`input_asset`, `output_asset`, `input_amount`,
+  # `expected_output`, `slippage_bps`) and carries the #190 / #192
+  # execution-route fields (route_provider, swap_target_contract,
+  # spender, calldata, source/destination_token_address,
+  # minimum_output_amount, value, deadline) under `route` alongside
+  # `venue` and `path`. Adapter consumes the route fields directly
+  # to build the approve+swap UserOperation; an absent execution
+  # field aborts the dispatch with `swap_route_incomplete: <field>`.
+  defp build_swap_payload(%ExecutionPlan{} = plan) do
+    with {:ok, _intent} <- fetch_intent(plan),
+         {:ok, steps} <- extract_swap_steps(plan) do
+      {:ok,
+       %{
+         contract_version: @contract_version,
+         action: "swap",
+         execution_plan_id: plan.id,
+         intent_id: plan.intent_id,
+         smart_account_id: plan.smart_account_id,
+         chain: plan.chain,
+         input_asset: Map.get(steps, "source_asset"),
+         output_asset: Map.get(steps, "destination_asset"),
+         input_amount: Map.get(steps, "input_amount"),
+         expected_output: Map.get(steps, "expected_output_amount"),
+         slippage_bps: Map.get(steps, "slippage_bps"),
+         route: %{
+           venue: Map.get(steps, "route_provider"),
+           path: [
+             Map.get(steps, "source_asset"),
+             Map.get(steps, "destination_asset")
+           ],
+           route_provider: Map.get(steps, "route_provider"),
+           swap_target_contract: Map.get(steps, "swap_target_contract"),
+           spender: Map.get(steps, "spender"),
+           calldata: Map.get(steps, "calldata"),
+           source_token_address: Map.get(steps, "source_token_address"),
+           destination_token_address: Map.get(steps, "destination_token_address"),
+           minimum_output_amount: Map.get(steps, "minimum_output_amount"),
+           value: Map.get(steps, "value"),
+           deadline: Map.get(steps, "deadline")
+         },
+         signing_requirements: signing_requirements(plan),
+         correlation_id: plan.intent_id,
+         emitted_at: DateTime.utc_now() |> DateTime.to_iso8601()
+       }}
+    end
+  end
+
+  # The persisted `:steps` JSON is the source of truth for the route
+  # (#190). A plan without the swap kind marker is a programming
+  # error from the caller (`RunExecution` should only invoke
+  # `dispatch_swap/2` for swap plans); fail closed.
+  defp extract_swap_steps(%ExecutionPlan{steps: %{"kind" => "swap"} = steps}),
+    do: {:ok, steps}
+
+  defp extract_swap_steps(_plan), do: {:error, {:invalid_swap_plan, :missing_route}}
+
   defp fetch_intent(%ExecutionPlan{intent: %AgentIntent{} = intent}), do: {:ok, intent}
 
   defp fetch_intent(%ExecutionPlan{intent_id: id}) when is_binary(id) do
@@ -409,12 +499,13 @@ defmodule Bank.AdapterClient do
   # through. Address/target, signing requirements, delegation payload,
   # permission blob, and Authorization headers are intentionally
   # NEVER copied even though they may exist on the payload.
-  defp request_correlation(:transfer, %{
+  defp request_correlation(kind, %{
          execution_plan_id: ep_id,
          intent_id: intent_id,
          smart_account_id: sa_id
        })
-       when is_binary(ep_id) and is_binary(intent_id) and is_binary(sa_id) do
+       when kind in [:transfer, :swap] and is_binary(ep_id) and is_binary(intent_id) and
+              is_binary(sa_id) do
     %{execution_plan_id: ep_id, intent_id: intent_id, smart_account_id: sa_id}
   end
 
@@ -446,8 +537,8 @@ defmodule Bank.AdapterClient do
   defp reason_category(:nxdomain), do: :nxdomain
   defp reason_category(_), do: :transport_error
 
-  defp parse_accepted(:transfer, %{"accepted" => true, "execution_plan_id" => id})
-       when is_binary(id) do
+  defp parse_accepted(kind, %{"accepted" => true, "execution_plan_id" => id})
+       when kind in [:transfer, :swap] and is_binary(id) do
     {:ok, %{accepted: true, execution_plan_id: id}}
   end
 

@@ -49,6 +49,15 @@ defmodule Bank.Decisions.ExecutionPlan do
     field :final_reason, :string
     field :active, :boolean, default: true
 
+    # Swap-specific receipt fields (#193). Both nullable so transfer
+    # plans never populate them. `block_number` carries the chain
+    # inclusion block; `actual_output_amount` carries the observed
+    # post-swap output amount in destination-asset units (distinct
+    # from the route's `expected_output_amount` already persisted
+    # in `:steps` by #190).
+    field :block_number, :integer
+    field :actual_output_amount, :decimal
+
     belongs_to :decision, DecisionEnvelope
     belongs_to :intent, AgentIntent
 
@@ -118,7 +127,9 @@ defmodule Bank.Decisions.ExecutionPlan do
       :nonce,
       :final_outcome,
       :final_reason,
-      :active
+      :active,
+      :block_number,
+      :actual_output_amount
     ])
     |> validate_final_outcome_matches_status()
   end

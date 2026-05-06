@@ -2035,7 +2035,7 @@ defmodule Bank.Decisions do
   defp progress_plan_for_kind(plan, "execution.broadcast", params) do
     plan
     |> ExecutionPlan.progress_changeset(
-      attrs_with_tx_refs(%{execution_status: :broadcasting, nonce: first_nonce(params)}, params)
+      attrs_with_receipt(%{execution_status: :broadcasting, nonce: first_nonce(params)}, params)
     )
     |> Repo.update()
   end
@@ -2043,7 +2043,7 @@ defmodule Bank.Decisions do
   defp progress_plan_for_kind(plan, "execution.confirmed", params) do
     plan
     |> ExecutionPlan.progress_changeset(
-      attrs_with_tx_refs(
+      attrs_with_receipt(
         %{execution_status: :confirmed, final_outcome: :confirmed, active: false},
         params
       )
@@ -2054,7 +2054,7 @@ defmodule Bank.Decisions do
   defp progress_plan_for_kind(plan, "execution.reverted", params) do
     plan
     |> ExecutionPlan.progress_changeset(
-      attrs_with_tx_refs(
+      attrs_with_receipt(
         %{
           execution_status: :reverted,
           final_outcome: :reverted,
@@ -2069,13 +2069,43 @@ defmodule Bank.Decisions do
 
   defp progress_plan_for_kind(plan, "execution.aborted", params) do
     plan
-    |> ExecutionPlan.progress_changeset(%{
-      execution_status: :aborted,
-      final_outcome: :aborted,
-      final_reason: Map.get(params, "reason"),
-      active: false
-    })
+    |> ExecutionPlan.progress_changeset(
+      attrs_with_receipt(
+        %{
+          execution_status: :aborted,
+          final_outcome: :aborted,
+          final_reason: Map.get(params, "reason"),
+          active: false
+        },
+        params
+      )
+    )
     |> Repo.update()
+  end
+
+  # Compose the callback's receipt fields onto the plan's progress
+  # changeset attrs:
+  #
+  #   * `:tx_refs` — userop_hash + transaction_hash union (transfers
+  #     and swaps both populate); empty stays absent.
+  #   * `:block_number` (#193) — chain inclusion block from the
+  #     swap callback's `tx_refs[].block_number`. Adapter contract
+  #     guarantees a single integer per callback (see
+  #     `priv/adapter/contract.md`).
+  #   * `:actual_output_amount` (#193) — observed swap output in
+  #     destination-asset units. Carried as a top-level callback
+  #     field; absent for transfer callbacks.
+  #
+  # All swap-specific keys are filtered through narrow parsers so a
+  # malformed callback (string instead of integer, etc.) never
+  # crashes the controller — the field is simply skipped, the rest
+  # of the receipt persists, and the audit trail records what was
+  # actually applied.
+  defp attrs_with_receipt(attrs, params) do
+    attrs
+    |> attrs_with_tx_refs(params)
+    |> attrs_with_block_number(params)
+    |> attrs_with_actual_output(params)
   end
 
   defp attrs_with_tx_refs(attrs, params) do
@@ -2084,6 +2114,47 @@ defmodule Bank.Decisions do
       refs -> Map.put(attrs, :tx_refs, refs)
     end
   end
+
+  defp attrs_with_block_number(attrs, params) do
+    case block_number(params) do
+      nil -> attrs
+      bn -> Map.put(attrs, :block_number, bn)
+    end
+  end
+
+  defp attrs_with_actual_output(attrs, params) do
+    case actual_output_amount(params) do
+      nil -> attrs
+      amount -> Map.put(attrs, :actual_output_amount, amount)
+    end
+  end
+
+  # Pull the first integer `block_number` from `tx_refs`. The
+  # adapter contract anchors the block on the transaction-hash
+  # entry; if that entry is absent or the value is not a positive
+  # integer (e.g. `null` for an aborted swap, hex string for a
+  # malformed callback), persist nothing.
+  defp block_number(%{"tx_refs" => refs}) when is_list(refs) do
+    refs
+    |> Enum.find_value(fn
+      %{"block_number" => bn} when is_integer(bn) and bn > 0 -> bn
+      _ -> nil
+    end)
+  end
+
+  defp block_number(_), do: nil
+
+  # Top-level swap-receipt field. Decimal-parseable string only;
+  # numbers and malformed strings are skipped so a contract drift
+  # in the future cannot crash the callback path.
+  defp actual_output_amount(%{"actual_output_amount" => v}) when is_binary(v) do
+    case Decimal.parse(v) do
+      {dec, ""} -> dec
+      _ -> nil
+    end
+  end
+
+  defp actual_output_amount(_), do: nil
 
   defp advance_intent_for_kind(nil, _plan, _kind), do: :not_applicable
 

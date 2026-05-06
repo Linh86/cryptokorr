@@ -371,6 +371,65 @@ defmodule Bank.Fixtures do
     plan
   end
 
+  @doc """
+  Build a canonical exact-input swap-route map (the atom-keyed
+  shape `Bank.Intents.SwapRoute.t()` expects). Suitable for both
+  validator tests and dispatch-pipeline tests; pass overrides to
+  flip a single field (e.g. `deadline:` to expire the route).
+
+  Defaults a base-sepolia USDC↔USDC route with a deadline well
+  in the future. The fixture's source/destination addresses are
+  identical because v0.1 only routes USDC↔USDC, and the route
+  validator does not enforce token-pair distinctness.
+  """
+  def swap_route(overrides \\ %{}) do
+    overrides = to_map(overrides)
+
+    Map.merge(
+      %{
+        source_asset: "USDC",
+        source_token_address: "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
+        destination_asset: "USDC",
+        destination_token_address: "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
+        input_amount: Decimal.new("10"),
+        expected_output_amount: Decimal.new("9.95"),
+        minimum_output_amount: Decimal.new("9.85"),
+        spender: "0x1111111111111111111111111111111111111111",
+        swap_target_contract: "0x2222222222222222222222222222222222222222",
+        calldata: "0xdeadbeef",
+        value: Decimal.new("0"),
+        route_provider: "stub",
+        quote_timestamp: ~U[2027-01-01 00:00:00.000000Z],
+        deadline: ~U[2027-01-01 00:05:00.000000Z],
+        chain: "base-sepolia",
+        chain_id: 84_532,
+        slippage_bps: 50
+      },
+      overrides
+    )
+  end
+
+  @doc """
+  Insert an `ExecutionPlan` carrying a #190 swap-route steps
+  payload, the matching chain/asset, and (optionally) any extra
+  field overrides. The helper builds the persisted-steps payload
+  via `Bank.Decisions.SwapRouteArtifacts.from_route/1` so the
+  fixture stays in lockstep with the production producer.
+  """
+  def swap_execution_plan(attrs \\ %{}) do
+    attrs = to_map(attrs)
+    {route_overrides, plan_attrs} = Map.pop(attrs, :route, %{})
+    route = swap_route(route_overrides)
+
+    artifacts = Bank.Decisions.SwapRouteArtifacts.from_route(route)
+
+    plan_attrs
+    |> Map.put_new(:steps, artifacts.steps)
+    |> Map.put_new(:chain, route.chain)
+    |> Map.put_new(:asset, route.destination_asset)
+    |> execution_plan()
+  end
+
   def delegation(attrs \\ %{}) do
     attrs =
       attrs

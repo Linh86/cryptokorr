@@ -415,10 +415,84 @@ Corresponds to `%Bank.Intents.AgentIntent{kind: :transfer}` after a
 }
 ```
 
-### `swap`
+### `swap` (#193, MVP route on Base Sepolia)
 
-Whitelisted swap, same skeleton plus `expected_output` and
-`slippage_bps` — see `fixtures/dispatch_swap.json`.
+Phoenix dispatches a swap execution plan whose `:steps` payload was
+produced by `Bank.Decisions.SwapRouteArtifacts.from_route/1` (#190),
+after running the centralized #191 safety gate
+(`Bank.Decisions.SwapDispatchSafety.validate/3`). The wire envelope
+keeps the v0.1 top-level dispatch fields the adapter validates today
+(`input_asset`, `output_asset`, `input_amount`, `expected_output`,
+`slippage_bps`, `route.{venue, path}`) and carries the rich #190 /
+#192 execution-route fields as additive optional siblings inside
+`route`: `route_provider`, `swap_target_contract`, `spender`,
+`calldata`, `source_token_address`, `destination_token_address`,
+`minimum_output_amount`, `value`, `deadline`.
+
+When every execution-route field is present the adapter dispatches
+a real UserOperation; if any required execution field is missing it
+fails closed with `swap_route_incomplete: <field>`. Quote-only
+routes preserve the v0.1 abort posture.
+
+See `fixtures/dispatch_swap.json` for a wire-shape example.
+
+```jsonc
+{
+  "contract_version": 1,
+  "action": "swap",
+  "execution_plan_id": "<uuid>",
+  "intent_id": "<uuid>",
+  "smart_account_id": "sa_...",
+  "chain": "base-sepolia",
+  "input_asset": "USDC",
+  "output_asset": "WETH",
+  "input_amount": "100",
+  "expected_output": "0.028",
+  "slippage_bps": 50,
+  "route": {
+    // v0.1 adapter-validated subset:
+    "venue": "whitelisted_aggregator_v1",
+    "path": ["USDC", "WETH"],
+    // #190 / #192 execution-route fields (optional, additive):
+    "route_provider": "zerox",
+    "swap_target_contract": "0x...",
+    "spender": "0x...",
+    "calldata": "0x...",
+    "source_token_address": "0x...",
+    "destination_token_address": "0x...",
+    "minimum_output_amount": "0.0278",
+    "value": "0",
+    "deadline": "2026-05-06T05:05:00Z"
+  },
+  "signing_requirements": {
+    "delegation_id": "del_...",
+    "scope": { /* opaque to Phoenix */ }
+  },
+  "correlation_id": "<intent_id>",
+  "emitted_at": "..."
+}
+```
+
+The adapter responds `202 {accepted: true, execution_plan_id}` and
+emits `execution.broadcast` / `execution.confirmed` (or
+`.reverted` / `.aborted`) callbacks. Failure verdicts ride on the
+callback shape; Phoenix never anchors swap state from a non-202
+sync response.
+
+Swap callbacks reuse the existing `execution.broadcast` /
+`execution.confirmed` / `execution.reverted` / `execution.aborted`
+kinds. Compared to transfer, swap callbacks may carry two extra
+fields Phoenix persists onto the plan (`#193`):
+
+  * `tx_refs[].block_number` (positive integer) — chain inclusion
+    block. Persisted to `execution_plans.block_number`.
+  * top-level `actual_output_amount` (decimal-string) — observed
+    swap output in destination-asset units. Persisted to
+    `execution_plans.actual_output_amount`.
+
+Both are optional and ignored when absent or malformed; the rest
+of the receipt (status, `tx_refs`, `final_reason`) follows the
+transfer rules.
 
 ### `grant_delegation` (#58 grant flow)
 
