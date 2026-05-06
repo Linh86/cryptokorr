@@ -174,7 +174,11 @@ documented escape hatch.
   — browser-side delegation-payload signing remains blocked on
   the wagmi/viem (or WalletConnect) SDK choice and delegation
   type (ERC-7579 vs EntryPoint v0.7) tracked in
-  `docs/wallet-connect.md`. (Was #43.)
+  `docs/wallet-connect.md`. The operator-facing onboarding
+  walkthrough + troubleshooting matrix landed under #172 in
+  [`docs/wallet-quickstart.md`](wallet-quickstart.md), with the
+  local mocked happy-path smoke pinned by
+  `Bank.Smoke.WalletDelegationSmokeTest`. (Was #43.)
 - **Cloud staging blocked on credentials.** `docs/staging.md`:
   code-side ready, but provider, Postgres, bundler keys, paymaster
   keys, DNS, smoke run all manual. (Was #35 remainder.)

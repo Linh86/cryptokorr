@@ -418,6 +418,17 @@ Then:
 Run the test suite with `mix test`. Tests use `Ecto.Adapters.SQL.Sandbox`; the
 test database auto-creates/migrates on first run.
 
+### Browser wallet quickstart
+
+The MVP onboarding for a partner is the browser-driven wallet
+flow on Base Sepolia: connect EOA → bind via EIP-191 → install a
+scoped session permission → run intents → revoke. The full
+walkthrough, permission-scope plain-language tables, troubleshooting
+matrix, and the local mocked smoke command are in
+[`docs/wallet-quickstart.md`](docs/wallet-quickstart.md). The
+CLI/`curl` form in `docs/mvp-smoke-runbook.md` is preserved as a
+dev fallback only.
+
 ### Auth and access (private alpha)
 
 The control plane is **invite-only private alpha** — there is no public

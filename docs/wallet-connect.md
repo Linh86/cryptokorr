@@ -1,24 +1,31 @@
 # Browser wallet connect
 
-Design doc + integration plan for replacing the v0.1 placeholder
-connection UX on the control tower landing page with a real browser
-wallet flow. Tracks against issue #43 (milestone: Bank v1.1 Backlog).
+Design + architecture doc for the browser-driven wallet flow on the
+control tower landing page. The operator-facing onboarding
+walkthrough is in
+[`docs/wallet-quickstart.md`](wallet-quickstart.md); this doc
+covers the *why* and the *boundaries*.
 
-## State of the world (v0.1)
+The browser flow originally tracked under issue #43 (Bank v1.1
+backlog) and now lands as the MVP self-serve onboarding path under
+the `#164` epic — `#168` browser wallet connect, `#169` EOA
+identity binding, `#170` connection-status UI, `#171` scoped
+session permission install request, and `#172` quickstart docs +
+local mocked smoke.
 
-- Delegations are granted through the adapter's callback flow, not
-  through a browser-native sign-in.
-- The control tower landing page (`ControlLive`) explicitly shows
-  "Browser wallet connection is not yet available in v0.1" when no
-  delegation is present.
-- Partners connect by handing the Bank team their smart account id
-  out of band; we provision the delegation on the adapter side and
-  wait for the adapter to emit `delegation.state_changed{state:
-  "granted"}`, which Phoenix picks up via
-  `BankWeb.Internal.AdapterCallbackController` and promotes to
-  `:active`.
+## State of the world before the browser flow (legacy)
 
-## Target flow (v1.1)
+- Delegations were granted exclusively through the adapter's
+  callback flow, not through a browser-native sign-in.
+- Partners connected by handing the Bank team their smart-account
+  id out of band; the team provisioned the delegation on the
+  adapter side and waited for the adapter to emit
+  `delegation.state_changed{state: "granted"}`, which Phoenix
+  picks up via `BankWeb.Internal.AdapterCallbackController` and
+  promotes to `:active`. That curl-driven path is preserved as a
+  dev fallback in [`docs/mvp-smoke-runbook.md`](mvp-smoke-runbook.md).
+
+## Target flow (now landed under the #164 epic)
 
 End to end, the browser should drive it:
 
