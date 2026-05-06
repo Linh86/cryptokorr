@@ -104,12 +104,16 @@ end-to-end smokes.
   manually via `POST /v1/decisions/{id}/execute`. Multi-tenant
   deployments will need an explicit `smart_account_id` on the
   intent contract.
-- Browser-native wallet connect + EOA identity binding ships under
-  #168/#169: operators connect on Base Sepolia, sign an EIP-191
-  challenge, and Phoenix verifies the recovered EOA via
-  `Bank.WalletBindings`. Signing a *delegation payload* (smart-
-  account install) is still client-side scaffolding; v0.1 grants
-  flow through the adapter callback. (See `docs/wallet-connect.md`.)
+- Browser-native wallet connect, EOA identity binding, and scoped
+  session install ship under #168/#169/#171: operators connect on
+  Base Sepolia, sign an EIP-191 challenge (verified by
+  `Bank.WalletBindings`), see the canonical scope summary (USDC
+  transfer / 0x swap / allowlisted Morpho deposit; no withdraw,
+  no arbitrary calldata, no mainnet), and click Install to enqueue
+  the existing `GrantDelegation` worker. Browser-native signing of
+  the install UserOp itself remains scaffolded; v0.1 install
+  signing flows through the adapter's operator key. (See
+  `docs/wallet-connect.md`.)
 - Wallet-risk intelligence (sanctions, scam feeds, attribution).
   Counterparties are hand-curated; epic #55 is the future track.
 - Swap. `/dispatch/swap` validates the request, then sends a

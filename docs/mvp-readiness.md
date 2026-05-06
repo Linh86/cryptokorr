@@ -157,19 +157,24 @@ documented escape hatch.
   placeholders; per-tenant key issuance is tracked separately
   (`docs/security.md`). Manual writes attribute to `:user` with
   no actor id.
-- **Browser wallet identity binding lands under #169.**
-  `assets/js/hooks/wallet_connect.js` connects on Base Sepolia,
-  signs an EIP-191 challenge via `personal_sign`, and Phoenix
-  verifies the recovered EOA against the connected address. The
-  verified binding persists in `wallet_bindings` and is visible
-  to the connection UI (#170). Base mainnet (8453) surfaces as
-  wrong-chain in the MVP — `SUPPORTED_CHAIN_IDS = [84532]`.
-  Server-side connect endpoint + grant flow are real (PR #130).
-  The JS hook still needs wagmi/viem or WalletConnect picked,
-  installed, and wired to actually sign a delegation payload for
-  the smart-account install (#171) — until then the adapter-
-  callback flow remains the only path that creates `:active`
-  delegations. (Was #43.)
+- **Browser wallet identity binding (#169) + scoped session
+  install request (#171) land.** The browser connects on Base
+  Sepolia, signs an EIP-191 challenge via `personal_sign`
+  (verified by `Bank.WalletBindings`), and once the EOA is bound
+  the operator sees the canonical `Bank.SessionPermissions.Scope`
+  summary (USDC transfer, 0x swap, allowlisted Morpho USDC
+  deposit; withdraw / arbitrary calldata / unlimited approvals /
+  leverage / mainnet explicitly denied) and clicks Install. The
+  Phoenix-side context gates on a verified Sepolia binding,
+  refuses while the runtime or workspace is paused, blocks
+  duplicate installs, and dispatches through the existing
+  `Bank.Runtime.Workers.GrantDelegation` worker. The install
+  UserOp itself is still signed server-side by
+  `OPERATOR_PRIVATE_KEY` (`chain_adapter/src/chains/base/grant.ts`)
+  — browser-side delegation-payload signing remains blocked on
+  the wagmi/viem (or WalletConnect) SDK choice and delegation
+  type (ERC-7579 vs EntryPoint v0.7) tracked in
+  `docs/wallet-connect.md`. (Was #43.)
 - **Cloud staging blocked on credentials.** `docs/staging.md`:
   code-side ready, but provider, Postgres, bundler keys, paymaster
   keys, DNS, smoke run all manual. (Was #35 remainder.)

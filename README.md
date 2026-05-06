@@ -330,13 +330,16 @@ Each LiveView passes an `active_page` assign to the shared
 
 **What is not yet included:**
 
-* **Smart-account delegation install signing.** The connection
-  page binds the connected EOA via an EIP-191 challenge (#168 +
-  #169) on Base Sepolia, and Phoenix persists the verified
-  identity. The repo does not yet include a client-side wallet SDK
-  (WalletConnect, wagmi) for *signing the delegation payload* —
-  the smart-account install (#171) is still established through
-  the adapter callback flow.
+* **Browser-signed delegation payload.** The connection page
+  binds the connected EOA via an EIP-191 challenge (#168 + #169),
+  surfaces the canonical scope summary (USDC transfer, 0x swap,
+  allowlisted Morpho USDC vault deposit; withdraw / arbitrary
+  calldata / unlimited approvals / leverage / mainnet explicitly
+  denied), and dispatches the install request to the adapter
+  (#171). Phoenix persists the resulting delegation. The repo does
+  not yet include a client-side wallet SDK (WalletConnect, wagmi)
+  for *signing the install UserOp itself* — the install UserOp
+  is still signed server-side by `OPERATOR_PRIVATE_KEY`.
 * **Public intent intake.** `POST /v1/intents`, `GET /v1/intents/:id`,
   `POST /v1/intents/:id/simulate`, and `POST /v1/intents/:id/cancel`
   remain stubbed while the trust + simulation pipeline is still being
@@ -920,12 +923,12 @@ deferred:
   engines are present as building blocks, but the public
   `/v1/intents*` submission and inspection surface remains stubbed until
   the full end-to-end intake flow is wired.
-* **Smart-account delegation install signing.** The connection
-  page renders an EIP-1193 connect + EOA identity binding flow
-  (#168 + #169) plus the delegation state the backend tracks. A
-  browser-native flow for *signing the delegation payload*
-  (WalletConnect / wagmi, smart-account install #171) is a
-  follow-up once the adapter supports it.
+* **Browser-signed delegation payload.** The connection page
+  renders the EIP-1193 connect + EOA identity binding flow
+  (#168 + #169) plus the scoped session install request (#171)
+  alongside the delegation state. A browser-native flow for
+  *signing the install UserOp itself* (WalletConnect / wagmi)
+  is a follow-up once the wallet SDK and delegation type land.
 * **Wallet risk intelligence.** Runtime routing does not yet hard-block
   sanctioned addresses, challenge scam/phishing-labelled addresses, or
   enrich counterparties from public crypto attribution tagpacks and

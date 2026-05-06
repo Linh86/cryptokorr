@@ -41,6 +41,7 @@ defmodule BankWeb.ControlLive do
 
   alias Bank.Delegations
   alias Bank.Security
+  alias Bank.SessionPermissions
   alias Bank.WalletBindings
 
   @impl true
@@ -76,6 +77,36 @@ defmodule BankWeb.ControlLive do
       {:noreply, socket |> assign(:selected_smart_account_id, sa_id) |> refresh_selected()}
     else
       {:noreply, socket}
+    end
+  end
+
+  def handle_event("install_session_permission", _params, socket) do
+    workspace_id = socket.assigns.current_scope.workspace.id
+
+    case socket.assigns.wallet_binding do
+      nil ->
+        {:noreply,
+         put_flash(
+           socket,
+           :error,
+           "Connect and bind a wallet before installing a session permission."
+         )}
+
+      binding ->
+        case SessionPermissions.request_install(workspace_id, binding) do
+          {:ok, smart_account_id} ->
+            {:noreply,
+             socket
+             |> load_state()
+             |> put_flash(
+               :info,
+               "Session permission install requested for #{smart_account_id}. Awaiting adapter confirmation."
+             )}
+
+          {:error, reason} ->
+            {:noreply,
+             put_flash(socket, :error, "Install rejected: #{install_refusal_message(reason)}")}
+        end
     end
   end
 
@@ -412,6 +443,12 @@ defmodule BankWeb.ControlLive do
             binding={@wallet_binding}
             error_message={@wallet_error_message}
             failure_reason={@wallet_failure_reason}
+          />
+          <.session_permission_card
+            wallet_status={@wallet_status}
+            binding={@wallet_binding}
+            delegations={@delegations}
+            paused={@paused}
           />
           <.next_steps_card
             delegation={@selected_delegation}
@@ -959,6 +996,84 @@ defmodule BankWeb.ControlLive do
     """
   end
 
+  # --- Component: session permission card ---------------------------------
+  #
+  # Renders the MVP scoped-session permission preview when the wallet
+  # is bound and there is no live delegation row yet. The "Install"
+  # button enqueues a `Bank.SessionPermissions.request_install/2` —
+  # the existing delegation card takes over the UI once a row lands.
+
+  attr :wallet_status, :atom, required: true
+  attr :binding, :map, default: nil
+  attr :delegations, :list, required: true
+  attr :paused, :boolean, required: true
+
+  defp session_permission_card(%{wallet_status: :bound, delegations: []} = assigns) do
+    assigns = assign(assigns, :scope, Bank.SessionPermissions.Scope.default())
+
+    ~H"""
+    <div
+      id="session-permission-card"
+      class="rounded-xl border border-base-300 bg-base-100 shadow-sm p-5"
+    >
+      <h3 class="text-sm font-semibold mb-3 flex items-center gap-1.5">
+        <.icon name="hero-shield-check" class="size-4" /> Session permission
+      </h3>
+
+      <p class="text-sm text-base-content/70">
+        Install a scoped Kernel session permission for your bound EOA on Base Sepolia. Phoenix policy and the runtime decision pipeline gate every action below.
+      </p>
+
+      <div id="session-permission-summary" class="mt-3 space-y-3">
+        <div>
+          <h4 class="text-[0.65rem] uppercase tracking-wider text-base-content/40 mb-1">
+            Allowed
+          </h4>
+          <ul id="session-permission-allowed" class="space-y-1.5 text-sm">
+            <li :for={action <- @scope["allowed"]} class="flex items-start gap-2">
+              <.icon name="hero-check-circle" class="size-4 mt-0.5 text-success shrink-0" />
+              <span>{action["label"]}</span>
+            </li>
+          </ul>
+        </div>
+
+        <div>
+          <h4 class="text-[0.65rem] uppercase tracking-wider text-base-content/40 mb-1">
+            Explicitly denied
+          </h4>
+          <ul id="session-permission-denied" class="space-y-1.5 text-sm">
+            <li :for={denied <- @scope["denied"]} class="flex items-start gap-2">
+              <.icon name="hero-x-circle" class="size-4 mt-0.5 text-error shrink-0" />
+              <span>{denied["label"]}</span>
+            </li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="mt-4 flex items-center gap-3">
+        <button
+          id="install-session-permission-btn"
+          type="button"
+          phx-click="install_session_permission"
+          disabled={@paused}
+          class="btn btn-primary btn-sm gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <.icon name="hero-key" class="size-3.5" /> Install session permission
+        </button>
+        <span :if={@paused} id="session-permission-paused-note" class="text-xs text-warning">
+          Resume the runtime to install.
+        </span>
+      </div>
+    </div>
+    """
+  end
+
+  defp session_permission_card(assigns) do
+    ~H"""
+    <div :if={false} id="session-permission-card-hidden" />
+    """
+  end
+
   # --- Component: runtime card ---------------------------------------------
 
   attr :paused, :boolean, required: true
@@ -1032,6 +1147,35 @@ defmodule BankWeb.ControlLive do
   defp chain_label(84_532), do: "Base Sepolia (84532)"
   defp chain_label(nil), do: "-"
   defp chain_label(id) when is_integer(id), do: "Chain #{id}"
+
+  defp install_refusal_message(:workspace_mismatch),
+    do: "Wallet binding belongs to a different workspace."
+
+  defp install_refusal_message(:binding_not_verified),
+    do: "Wallet binding is not yet verified."
+
+  defp install_refusal_message(:binding_revoked),
+    do: "Wallet binding has been revoked. Reconnect to start a fresh binding."
+
+  defp install_refusal_message(:unsupported_chain),
+    do: "Only Base Sepolia (84532) is supported for the MVP install."
+
+  defp install_refusal_message(:runtime_paused),
+    do: "Runtime is paused. Resume before installing a session permission."
+
+  defp install_refusal_message(:workspace_paused),
+    do: "Workspace agent keys are paused. Unpause before installing."
+
+  defp install_refusal_message(:workspace_not_found),
+    do: "Workspace not found."
+
+  defp install_refusal_message({:already_pending, _}),
+    do: "An install is already pending. Wait for the adapter callback before retrying."
+
+  defp install_refusal_message({:already_active, _}),
+    do: "An active delegation already exists. Revoke it first to install a new one."
+
+  defp install_refusal_message(reason), do: "Install failed: #{inspect(reason)}"
 
   defp bind_failure_message(:expired),
     do: "Challenge expired. Click Connect wallet again to issue a fresh challenge."
