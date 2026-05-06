@@ -177,6 +177,18 @@ defmodule BankWeb.IntentReplayLiveTest do
       assert html =~ "0xabc12345"
     end
 
+    test "transfer plan does NOT render the swap detail block (#195)", %{
+      conn: conn,
+      intent: intent,
+      plan: plan
+    } do
+      {:ok, _view, html} = live(conn, "/audit/replay/#{intent.id}")
+
+      refute html =~ "replay-plan-swap-#{plan.id}"
+      refute html =~ "Swap route"
+      refute html =~ "replay-plan-kind-#{plan.id}"
+    end
+
     test "renders audit timeline with correlation slice", %{conn: conn, intent: intent} do
       {:ok, _view, html} = live(conn, "/audit/replay/#{intent.id}")
 
@@ -308,6 +320,158 @@ defmodule BankWeb.IntentReplayLiveTest do
 
       html = render(view)
       assert html =~ "intent.cancelled"
+    end
+  end
+
+  # --- Swap plan rendering (#195) ------------------------------------------
+
+  describe "swap plan rendering (#195)" do
+    setup do
+      intent = agent_intent(kind: :swap, asset: "USDC", chain: "base-sepolia")
+
+      decision = decision_envelope(intent: intent, current: true)
+
+      %{intent: intent, decision: decision}
+    end
+
+    test "prepared swap plan shows kind badge, route, slippage, deadline, min-out",
+         %{conn: conn, intent: intent, decision: decision} do
+      plan = swap_execution_plan(decision: decision, intent_id: intent.id)
+
+      {:ok, view, _html} = live(conn, "/audit/replay/#{intent.id}")
+
+      assert has_element?(view, "#replay-plan-kind-#{plan.id}", "swap")
+      assert has_element?(view, "#replay-plan-swap-#{plan.id}")
+
+      html = render(view)
+      assert html =~ "Swap route"
+      # Source/destination asset pair.
+      assert html =~ "USDC → USDC"
+      # Slippage / deadline / min-out / expected — all on plan.steps.
+      assert html =~ "#{plan.steps["slippage_bps"]} bps"
+      assert html =~ plan.steps["deadline"]
+      assert html =~ plan.steps["minimum_output_amount"]
+      assert html =~ plan.steps["expected_output_amount"]
+      # Quote-only banner — :prepared not yet dispatched.
+      assert html =~ "Quote-only until safety gate"
+    end
+
+    test "confirmed swap plan shows actual_output_amount and block_number, no quote-only banner",
+         %{conn: conn, intent: intent, decision: decision} do
+      plan =
+        swap_execution_plan(
+          decision: decision,
+          intent_id: intent.id,
+          execution_status: :confirmed,
+          final_outcome: :confirmed,
+          tx_refs: ["0xabc1234567890def"],
+          active: false
+        )
+
+      # Receipt fields land via the callback path
+      # (`ExecutionPlan.progress_changeset/2`), not the create
+      # changeset — mirror that here so the fixture matches the
+      # live shape.
+      {:ok, plan} =
+        plan
+        |> Bank.Decisions.ExecutionPlan.progress_changeset(%{
+          block_number: 42_424_242,
+          actual_output_amount: Decimal.new("9.93")
+        })
+        |> Bank.Repo.update()
+
+      {:ok, view, _html} = live(conn, "/audit/replay/#{intent.id}")
+
+      assert has_element?(view, "#replay-plan-swap-#{plan.id}")
+
+      html = render(view)
+      # Confirmed-status badge.
+      assert html =~ "confirmed"
+      assert html =~ "final:"
+      # Actual output + block number on receipt.
+      assert html =~ "9.93"
+      assert html =~ "42424242"
+      # Tx ref truncated.
+      assert html =~ "0xabc12345"
+      # No quote-only copy on a confirmed plan.
+      refute html =~ "Quote-only until safety gate"
+    end
+
+    test "safety-blocked swap plan shows aborted state and the swap_safety reason",
+         %{conn: conn, intent: intent, decision: decision} do
+      plan =
+        swap_execution_plan(
+          decision: decision,
+          intent_id: intent.id,
+          execution_status: :aborted,
+          final_outcome: :aborted,
+          final_reason: "swap_safety:swap_deadline_expired",
+          active: false
+        )
+
+      {:ok, _view, html} = live(conn, "/audit/replay/#{intent.id}")
+
+      assert html =~ "aborted"
+      assert html =~ "swap_safety:swap_deadline_expired"
+      # The swap detail block still renders so the operator can see
+      # WHICH route was refused.
+      assert html =~ "replay-plan-swap-#{plan.id}"
+      assert html =~ plan.steps["route_provider"]
+    end
+
+    test "adapter-rejected swap plan surfaces the safe failure reason",
+         %{conn: conn, intent: intent, decision: decision} do
+      plan =
+        swap_execution_plan(
+          decision: decision,
+          intent_id: intent.id,
+          execution_status: :aborted,
+          final_outcome: :aborted,
+          final_reason: "adapter_rejected:422:validation_failed",
+          active: false
+        )
+
+      {:ok, _view, html} = live(conn, "/audit/replay/#{intent.id}")
+
+      assert html =~ "adapter_rejected:422:validation_failed"
+      assert html =~ "replay-plan-swap-#{plan.id}"
+    end
+
+    test "secret hygiene — swap UI must not render raw calldata, spender, or token addresses",
+         %{conn: conn, intent: intent, decision: decision} do
+      plan = swap_execution_plan(decision: decision, intent_id: intent.id)
+
+      {:ok, _view, html} = live(conn, "/audit/replay/#{intent.id}")
+
+      # Calldata is the longest hex blob in plan.steps; the route_hash
+      # is also hex but only 64 chars and gets truncated by short_hash/1.
+      refute html =~ plan.steps["calldata"]
+      # Spender / target contract are 0x addresses — keep them off
+      # the operator UI even though they're persisted for dispatch.
+      refute html =~ plan.steps["spender"]
+      refute html =~ plan.steps["swap_target_contract"]
+      refute html =~ plan.steps["source_token_address"]
+      refute html =~ plan.steps["destination_token_address"]
+      # No raw bearer / Authorization material can ever appear.
+      refute html =~ "Bearer "
+      refute html =~ "Authorization:"
+    end
+
+    test "swap UI copy never implies mainnet support",
+         %{conn: conn, intent: intent, decision: decision} do
+      plan = swap_execution_plan(decision: decision, intent_id: intent.id)
+
+      {:ok, view, _html} = live(conn, "/audit/replay/#{intent.id}")
+
+      # Render the swap detail block in isolation and assert the
+      # chain copy never mentions mainnet / Base mainnet / Ethereum.
+      # The fixture is base-sepolia so any "ethereum" or "Mainnet"
+      # would have to come from a UI label that hardcodes mainnet —
+      # exactly what the acceptance criterion forbids.
+      swap_block = render(element(view, "#replay-plan-swap-#{plan.id}"))
+
+      refute swap_block =~ "ethereum"
+      refute swap_block =~ ~r/\bmainnet\b/i
     end
   end
 end

@@ -586,6 +586,13 @@ defmodule BankWeb.IntentReplayLive do
             <div class="min-w-0">
               <div class="flex items-center gap-2 flex-wrap">
                 <span class="text-[0.65rem] text-base-content/30 font-mono">v{idx}</span>
+                <span
+                  :if={swap_plan?(plan)}
+                  id={"replay-plan-kind-" <> plan.id}
+                  class="badge badge-sm badge-accent"
+                >
+                  swap
+                </span>
                 <span class={["badge badge-sm", execution_status_class(plan.execution_status)]}>
                   {plan.execution_status}
                 </span>
@@ -606,6 +613,7 @@ defmodule BankWeb.IntentReplayLive do
                   &middot; adapter: {short_id(plan.adapter_ref)}
                 </span>
               </div>
+              <.swap_plan_details :if={swap_plan?(plan)} plan={plan} />
               <div
                 :if={plan.tx_refs != []}
                 class="mt-1.5 flex items-center gap-2 flex-wrap text-xs text-base-content/60"
@@ -799,6 +807,91 @@ defmodule BankWeb.IntentReplayLive do
   defp short_hash(nil), do: "-"
   defp short_hash(hash) when byte_size(hash) > 14, do: String.slice(hash, 0, 10) <> "..."
   defp short_hash(hash), do: hash
+
+  # --- Swap-plan rendering (#195) -----------------------------------------
+
+  # Quick "is this a swap plan?" predicate against the persisted #190
+  # `:steps` payload. Defensive against legacy plans whose steps were
+  # the default `%{"items" => []}` placeholder.
+  defp swap_plan?(%{steps: %{"kind" => "swap"}}), do: true
+  defp swap_plan?(_), do: false
+
+  # Operator-visible swap detail block. Renders only the safe scalar
+  # projections of the persisted #190 route + #193 receipt — never
+  # raw calldata, spender, swap_target_contract, or token addresses,
+  # all of which round-trip through `plan.steps` for dispatch but
+  # don't belong on the replay UI.
+  attr :plan, :map, required: true
+
+  defp swap_plan_details(assigns) do
+    ~H"""
+    <div
+      id={"replay-plan-swap-" <> @plan.id}
+      class="mt-2 rounded border border-base-300 bg-base-200/40 px-3 py-2 text-xs text-base-content/70"
+    >
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="text-base-content/40 uppercase tracking-wider text-[0.6rem]">Swap route</span>
+        <span :if={@plan.steps["route_provider"]} class="font-mono">
+          {@plan.steps["route_provider"]}
+        </span>
+        <span
+          :if={@plan.steps["source_asset"] && @plan.steps["destination_asset"]}
+          class="font-medium"
+        >
+          {@plan.steps["source_asset"]} → {@plan.steps["destination_asset"]}
+        </span>
+        <span :if={@plan.steps["route_hash"]} class="font-mono text-base-content/40">
+          {short_hash(@plan.steps["route_hash"])}
+        </span>
+      </div>
+      <dl class="mt-1.5 grid grid-cols-2 gap-x-4 gap-y-0.5 text-xs sm:grid-cols-4">
+        <div :if={@plan.steps["input_amount"]}>
+          <dt class="text-base-content/40">Input</dt>
+          <dd>{@plan.steps["input_amount"]} {@plan.steps["source_asset"]}</dd>
+        </div>
+        <div :if={@plan.steps["expected_output_amount"]}>
+          <dt class="text-base-content/40">Expected out</dt>
+          <dd>{@plan.steps["expected_output_amount"]} {@plan.steps["destination_asset"]}</dd>
+        </div>
+        <div :if={@plan.steps["minimum_output_amount"]}>
+          <dt class="text-base-content/40">Min out</dt>
+          <dd>{@plan.steps["minimum_output_amount"]} {@plan.steps["destination_asset"]}</dd>
+        </div>
+        <div :if={@plan.actual_output_amount}>
+          <dt class="text-base-content/40">Actual out</dt>
+          <dd class="font-medium">
+            {decimal_string(@plan.actual_output_amount)} {@plan.steps["destination_asset"]}
+          </dd>
+        </div>
+        <div :if={is_integer(@plan.steps["slippage_bps"])}>
+          <dt class="text-base-content/40">Slippage</dt>
+          <dd>{@plan.steps["slippage_bps"]} bps</dd>
+        </div>
+        <div :if={@plan.steps["deadline"]}>
+          <dt class="text-base-content/40">Deadline</dt>
+          <dd class="font-mono text-base-content/60">{@plan.steps["deadline"]}</dd>
+        </div>
+        <div :if={@plan.block_number}>
+          <dt class="text-base-content/40">Block</dt>
+          <dd class="font-mono">{@plan.block_number}</dd>
+        </div>
+      </dl>
+      <p
+        :if={@plan.execution_status == :prepared}
+        class="mt-1.5 text-[0.7rem] text-base-content/50 italic"
+      >
+        Quote-only until safety gate + delegation approve and the adapter dispatches.
+      </p>
+    </div>
+    """
+  end
+
+  defp decimal_string(nil), do: nil
+
+  defp decimal_string(%Decimal{} = d),
+    do: d |> Decimal.normalize() |> Decimal.to_string(:normal)
+
+  defp decimal_string(other), do: other
 
   defp format_datetime(nil), do: "-"
 

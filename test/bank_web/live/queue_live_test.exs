@@ -434,4 +434,104 @@ defmodule BankWeb.QueueLiveTest do
       end
     end
   end
+
+  # --- Swap badges and metadata (#195) -------------------------------------
+
+  describe "swap badges and metadata (#195)" do
+    test "approval row carries a swap kind badge for swap intents", %{conn: conn} do
+      swap_intent = agent_intent(kind: :swap, asset: "USDC", chain: "base-sepolia")
+
+      envelope =
+        decision_envelope(
+          intent: swap_intent,
+          outcome: :approval_required,
+          risk_tier: :moderate,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      {:ok, view, _html} = live(conn, "/queue")
+
+      assert has_element?(view, "#approval-kind-badge-#{envelope.id}", "swap")
+    end
+
+    test "transfer approval row does NOT carry a swap badge", %{conn: conn} do
+      transfer_intent = agent_intent(kind: :transfer)
+
+      envelope =
+        decision_envelope(
+          intent: transfer_intent,
+          outcome: :approval_required,
+          risk_tier: :low,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      {:ok, view, _html} = live(conn, "/queue")
+
+      refute has_element?(view, "#approval-kind-badge-#{envelope.id}")
+    end
+
+    test "active execution row badges a swap plan and shows the route summary",
+         %{conn: conn} do
+      swap_intent = agent_intent(kind: :swap, chain: "base-sepolia")
+      decision = decision_envelope(intent: swap_intent, current: true)
+
+      plan =
+        swap_execution_plan(
+          decision: decision,
+          intent_id: swap_intent.id,
+          execution_status: :broadcasting
+        )
+
+      {:ok, view, _html} = live(conn, "/queue")
+
+      assert has_element?(view, "#execution-kind-badge-#{plan.id}", "swap")
+      assert has_element?(view, "#execution-swap-summary-#{plan.id}")
+
+      summary = render(element(view, "#execution-swap-summary-#{plan.id}"))
+      assert summary =~ "USDC → USDC"
+      assert summary =~ plan.steps["route_provider"]
+    end
+
+    test "held / blocked decision row carries a swap badge for swap intents",
+         %{conn: conn} do
+      swap_intent = agent_intent(kind: :swap, chain: "base-sepolia")
+
+      held =
+        decision_envelope(
+          intent: swap_intent,
+          outcome: :hold,
+          risk_tier: :elevated,
+          current: true
+        )
+
+      {:ok, view, _html} = live(conn, "/queue")
+
+      assert has_element?(view, "#decision-kind-badge-#{held.id}", "swap")
+    end
+
+    test "secret hygiene — queue UI never renders raw calldata, spender, or token addresses",
+         %{conn: conn} do
+      swap_intent = agent_intent(kind: :swap, chain: "base-sepolia")
+      decision = decision_envelope(intent: swap_intent, current: true)
+
+      plan =
+        swap_execution_plan(
+          decision: decision,
+          intent_id: swap_intent.id,
+          execution_status: :pending_confirmation
+        )
+
+      {:ok, _view, html} = live(conn, "/queue")
+
+      refute html =~ plan.steps["calldata"]
+      refute html =~ plan.steps["spender"]
+      refute html =~ plan.steps["swap_target_contract"]
+      refute html =~ plan.steps["source_token_address"]
+      refute html =~ plan.steps["destination_token_address"]
+      refute html =~ "Bearer "
+      refute html =~ "Authorization:"
+    end
+  end
 end
