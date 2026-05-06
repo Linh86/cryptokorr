@@ -1,0 +1,17 @@
+# Python build / install / test artifacts.
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.tox/
+.venv/
+.coverage
+htmlcov/
+
+# IDE.
+.vscode/
+.idea/
