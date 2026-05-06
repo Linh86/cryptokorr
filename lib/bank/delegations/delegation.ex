@@ -85,8 +85,8 @@ defmodule Bank.Delegations.Delegation do
 
   alias Bank.Workspaces.Workspace
 
-  @states [:pending, :active, :revoking, :revoke_failed, :revoked, :expired]
-  @terminal_states [:revoked, :expired]
+  @states [:pending, :active, :revoking, :revoke_failed, :revoked, :expired, :install_failed]
+  @terminal_states [:revoked, :expired, :install_failed]
 
   @type t :: %__MODULE__{}
 
@@ -126,6 +126,24 @@ defmodule Bank.Delegations.Delegation do
     # is intentionally NOT lifted to include `workspace_id` here.
     belongs_to :workspace, Workspace
 
+    # Browser-signed install attestation (#474, design § 7).
+    # `root_validator_owner` branches the revoke worker:
+    # `"operator"` rows revoke through the cryptographic-revoke
+    # path that uses `OPERATOR_PRIVATE_KEY`; `"user"` rows revoke
+    # through the sentinel anchor in v0.1 (browser-signed revoke
+    # is a v0.2 follow-up — see design § 6).
+    field :root_validator_owner, :string
+    # Optional FK to `wallet_bindings.id`. Populated for
+    # browser-signed installs so audit / replay can correlate the
+    # delegation row back to the binding the user authorised.
+    field :binding_id, :binary_id
+    # The userop hash the browser reported on `submitted`. Lets
+    # the verifier worker look the row up before the on-chain
+    # verification fires; partial-unique on `(binding_id,
+    # install_userop_hash)` prevents duplicate pending rows for
+    # the same retry attempt.
+    field :install_userop_hash, :string
+
     timestamps()
   end
 
@@ -156,16 +174,24 @@ defmodule Bank.Delegations.Delegation do
         :expires_at,
         :last_reason,
         :last_tx_hash,
-        :workspace_id
+        :workspace_id,
+        :root_validator_owner,
+        :binding_id,
+        :install_userop_hash
       ] ++ @permission_artifact_fields
     )
     |> validate_required([:smart_account_id, :delegation_id, :state, :chain])
     |> validate_byte_size(:permission_id, 4)
     |> validate_byte_size(:validation_id, 21)
+    |> validate_inclusion(:root_validator_owner, ["operator", "user"])
     |> foreign_key_constraint(:workspace_id)
     |> unique_constraint(:smart_account_id,
       name: :delegations_smart_account_active_idx,
       message: "a non-terminal delegation already exists for this smart account"
+    )
+    |> unique_constraint([:binding_id, :install_userop_hash],
+      name: :delegations_binding_install_userop_hash_idx,
+      message: "duplicate browser-signed install attempt for this binding+userop"
     )
   end
 

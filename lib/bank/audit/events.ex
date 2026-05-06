@@ -1006,6 +1006,161 @@ defmodule Bank.Audit.Events do
     }
   end
 
+  # ---------------------------------------------------------------------------
+  # Browser-signed install lifecycle (#474)
+  # ---------------------------------------------------------------------------
+
+  # Subject for the first three events is `wallet_binding` (the
+  # delegation row does not exist yet at envelope-issued time and
+  # is still `:pending` at submitted/broadcast time). The last two
+  # events fire after the row exists, so they target `delegation`.
+  # Correlation is the binding_id throughout so the full install
+  # lineage threads under one filter (mirrors the design § 8
+  # rule).
+
+  @doc """
+  `delegation.install_envelope_issued` — Phoenix returned the
+  canonical install envelope to the browser for the given binding.
+  Carries the binding id, the smart-account id Phoenix will
+  reconcile against, the chain id, and the SHA-256 hash of the
+  canonical scope JSON the browser is about to relay to the
+  ZeroDev SDK.
+  """
+  @spec delegation_install_envelope_issued(map(), keyword()) :: attrs()
+  def delegation_install_envelope_issued(%{} = envelope, opts \\ []) do
+    %{
+      actor: Keyword.get(opts, :actor, :user),
+      actor_id: Keyword.get(opts, :actor_id),
+      event_type: "delegation.install_envelope_issued",
+      subject_type: "wallet_binding",
+      subject_id: Map.fetch!(envelope, :binding_id),
+      correlation_id: Map.fetch!(envelope, :binding_id),
+      before_ref: nil,
+      after_ref: %{
+        binding_id: Map.fetch!(envelope, :binding_id),
+        smart_account_id: Map.fetch!(envelope, :smart_account_id),
+        chain_id: Map.fetch!(envelope, :chain_id),
+        scope_hash: Map.fetch!(envelope, :scope_hash)
+      },
+      workspace_id: Map.fetch!(envelope, :workspace_id)
+    }
+  end
+
+  @doc """
+  `delegation.install_signed_by_user` — the browser reported the
+  bundler accepted the install UserOp; the userop_hash is now the
+  binding-scoped install attempt id. Phoenix has persisted a
+  `:pending` delegation row keyed by `(binding_id,
+  install_userop_hash)`.
+  """
+  @spec delegation_install_signed_by_user(Delegation.t(), keyword()) :: attrs()
+  def delegation_install_signed_by_user(%Delegation{} = delegation, opts \\ []) do
+    %{
+      actor: Keyword.get(opts, :actor, :user),
+      actor_id: Keyword.get(opts, :actor_id),
+      event_type: "delegation.install_signed_by_user",
+      subject_type: "wallet_binding",
+      subject_id: delegation.binding_id,
+      correlation_id: delegation.binding_id,
+      before_ref: nil,
+      after_ref: %{
+        binding_id: delegation.binding_id,
+        delegation_id: delegation.id,
+        smart_account_id: delegation.smart_account_id,
+        install_userop_hash: delegation.install_userop_hash
+      },
+      workspace_id: delegation.workspace_id
+    }
+  end
+
+  @doc """
+  `delegation.install_broadcast` — the bundler returned a receipt
+  marking the install UserOp on chain. Carries the on-chain tx
+  hash and block number; the on-chain *verification* fires next
+  via `Bank.Runtime.Workers.VerifyInstallOnchain`.
+  """
+  @spec delegation_install_broadcast(Delegation.t(), map(), keyword()) :: attrs()
+  def delegation_install_broadcast(%Delegation{} = delegation, %{} = receipt, opts \\ []) do
+    %{
+      actor: Keyword.get(opts, :actor, :user),
+      actor_id: Keyword.get(opts, :actor_id),
+      event_type: "delegation.install_broadcast",
+      subject_type: "wallet_binding",
+      subject_id: delegation.binding_id,
+      correlation_id: delegation.binding_id,
+      before_ref: nil,
+      after_ref: %{
+        binding_id: delegation.binding_id,
+        delegation_id: delegation.id,
+        smart_account_id: delegation.smart_account_id,
+        install_userop_hash: delegation.install_userop_hash,
+        tx_hash: Map.get(receipt, :tx_hash),
+        block_number: Map.get(receipt, :block_number)
+      },
+      workspace_id: delegation.workspace_id
+    }
+  end
+
+  @doc """
+  `delegation.install_confirmed_onchain` — Phoenix verified the
+  permission validator is installed on the user's smart account
+  with the expected `validation_id`. The delegation row flips to
+  `:active`.
+  """
+  @spec delegation_install_confirmed_onchain(Delegation.t(), keyword()) :: attrs()
+  def delegation_install_confirmed_onchain(%Delegation{} = delegation, opts \\ []) do
+    %{
+      actor: Keyword.get(opts, :actor, :runtime),
+      actor_id: Keyword.get(opts, :actor_id),
+      event_type: "delegation.install_confirmed_onchain",
+      subject_type: "delegation",
+      subject_id: delegation.id,
+      correlation_id: delegation.binding_id,
+      before_ref: nil,
+      after_ref: %{
+        binding_id: delegation.binding_id,
+        delegation_id: delegation.id,
+        smart_account_id: delegation.smart_account_id,
+        permission_id: maybe_hex(delegation.permission_id),
+        validation_id: maybe_hex(delegation.validation_id),
+        installed_at_block: delegation.installed_at_block
+      },
+      workspace_id: delegation.workspace_id
+    }
+  end
+
+  @doc """
+  `delegation.install_failed` — any failure in the browser-signed
+  install flow. `reason` is one of the fixed-allowlist atoms named
+  in `Bank.SessionPermissions.BrowserInstall.failure_categories/0`.
+  Free-form upstream error strings never reach this audit row.
+  """
+  @spec delegation_install_failed(map(), keyword()) :: attrs()
+  def delegation_install_failed(%{} = ctx, opts \\ []) do
+    binding_id = Map.fetch!(ctx, :binding_id)
+
+    %{
+      actor: Keyword.get(opts, :actor, :user),
+      actor_id: Keyword.get(opts, :actor_id),
+      event_type: "delegation.install_failed",
+      subject_type: Map.get(ctx, :subject_type, "wallet_binding"),
+      subject_id: Map.get(ctx, :subject_id, binding_id),
+      correlation_id: binding_id,
+      before_ref: nil,
+      after_ref: %{
+        binding_id: binding_id,
+        delegation_id: Map.get(ctx, :delegation_id),
+        smart_account_id: Map.get(ctx, :smart_account_id),
+        reason: Map.fetch!(ctx, :reason),
+        install_userop_hash: Map.get(ctx, :install_userop_hash)
+      },
+      workspace_id: Map.fetch!(ctx, :workspace_id)
+    }
+  end
+
+  defp maybe_hex(nil), do: nil
+  defp maybe_hex(bin) when is_binary(bin), do: "0x" <> Base.encode16(bin, case: :lower)
+
   @doc """
   `execution.manually_requested` — an operator triggered manual
   execution for a decision envelope.

@@ -182,6 +182,19 @@ defmodule BankWeb.Router do
     # Wallet screening read — viewer-readable. Reference data,
     # globally scoped (NOT workspace-filtered).
     get "/screening/:chain/:address", ScreeningController, :show
+
+    # Browser-signed install reads (#474). Viewer-readable —
+    # the envelope is not state-advancing on its own (it audits
+    # but creates no delegation row); status is a poll surface.
+    # The state-advancing attestation lives under the
+    # operator-tier scope below.
+    get "/wallet_bindings/:id/install_envelope",
+        WalletBindingsInstallController,
+        :envelope
+
+    get "/wallet_bindings/:id/install_status",
+        WalletBindingsInstallController,
+        :status
   end
 
   scope "/v1", BankWeb.API.V1, as: :api_v1_operator do
@@ -218,6 +231,15 @@ defmodule BankWeb.Router do
 
     # Browser wallet connect (v1.1 scaffolding — see docs/wallet-connect.md).
     post "/connect/smart_account", ConnectController, :request
+
+    # Browser-signed install attestation (#474). State-advancing:
+    # `submitted` persists a `:pending` delegation row;
+    # `confirmed` enqueues `Bank.Runtime.Workers.VerifyInstallOnchain`
+    # (Phoenix verifies on-chain before flipping to `:active`);
+    # any failure status audits with a category atom.
+    post "/wallet_bindings/:id/install_attestation",
+         WalletBindingsInstallController,
+         :attestation
   end
 
   scope "/v1", BankWeb.API.V1, as: :api_v1_admin do

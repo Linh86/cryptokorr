@@ -4912,6 +4912,156 @@
           "TrustAssertions"
         ]
       }
+    },
+    "/v1/wallet_bindings/{id}/install_attestation": {
+      "post": {
+        "callbacks": {},
+        "description": "The browser reports each lifecycle step. Phoenix never marks\nthe delegation `:active` from a `confirmed` attestation alone\n— it enqueues `Bank.Runtime.Workers.VerifyInstallOnchain`\nwhich reads the kernel's installed validators directly.\n\n`status` is one of `submitted | confirmed | user_rejected |\nbundler_rejected | reverted`. Status-specific required\nfields are documented in the request schema.\n\nReason categories for failure statuses are pinned to a fixed\nallowlist; anything else collapses to `unknown`. Free-form\nupstream strings never reach the audit row or the\ndelegation's `last_reason` column.\n",
+        "operationId": "BankWeb.API.V1.WalletBindingsInstallController.attestation",
+        "parameters": [
+          {
+            "description": "Wallet binding id (UUID)",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": "Elixir.BankWeb.OpenApi.Schemas.InstallAttestationRequest"
+            }
+          },
+          "description": "Install attestation",
+          "required": false
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.InstallAttestationResponse"
+              }
+            },
+            "description": "Attestation recorded"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        },
+        "summary": "Record a browser-signed install attestation",
+        "tags": [
+          "WalletBindings"
+        ]
+      }
+    },
+    "/v1/wallet_bindings/{id}/install_envelope": {
+      "get": {
+        "callbacks": {},
+        "description": "Returns the canonical install envelope a browser must feed to\nthe ZeroDev SDK to build the install UserOperation. Phoenix is\nthe source of truth for the scope; the response carries the\nscope JSON verbatim plus a `scope_hash` audit anchor.\n\nRefused with `404 not_found` if the binding does not exist or\nbelongs to a different workspace, `422 unsupported_chain` if\nthe binding's `chain_id` is not Base Sepolia (84532),\n`422 binding_not_verified` if the binding has not completed\nthe EIP-191 verify step, `422 binding_revoked` if the binding\nhas been revoked, `422 runtime_paused` / `422 workspace_paused`\nif the runtime / workspace is paused.\n\nEmits a `delegation.install_envelope_issued` audit event on\nevery successful return (including idempotent re-fetches by\nthe same caller).\n",
+        "operationId": "BankWeb.API.V1.WalletBindingsInstallController.envelope",
+        "parameters": [
+          {
+            "description": "Wallet binding id (UUID)",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.InstallEnvelopeResponse"
+              }
+            },
+            "description": "Install envelope"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        },
+        "summary": "Get the browser-install envelope for a verified binding",
+        "tags": [
+          "WalletBindings"
+        ]
+      }
+    },
+    "/v1/wallet_bindings/{id}/install_status": {
+      "get": {
+        "callbacks": {},
+        "description": "Returns one of `awaiting | submitted | verifying | active |\nfailed`. `awaiting` = no attestation reported yet for this\nbinding; `submitted` = browser reported `submitted` but no\nbundler receipt yet; `verifying` = browser reported\n`confirmed`, on-chain verifier worker enqueued / running;\n`active` = on-chain verifier passed; `failed` = terminal\nfailure with a category atom on the row's `last_reason`.\n\nSame auth + workspace-isolation posture as the other two\nendpoints.\n",
+        "operationId": "BankWeb.API.V1.WalletBindingsInstallController.status",
+        "parameters": [
+          {
+            "description": "Wallet binding id (UUID)",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": "Elixir.BankWeb.OpenApi.Schemas.InstallStatusResponse"
+              }
+            },
+            "description": "Install status"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/UnprocessableEntity"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          }
+        },
+        "summary": "Read the current install state for a binding",
+        "tags": [
+          "WalletBindings"
+        ]
+      }
     }
   },
   "security": [
