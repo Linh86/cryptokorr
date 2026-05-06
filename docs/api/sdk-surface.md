@@ -209,7 +209,10 @@ target contract — Phoenix's quote provider fills those in via the
 
 Submit a Morpho ERC-4626 deposit intent.
 
-* `POST /v1/intents` with `kind: "defi_yield_deposit"`
+* `POST /v1/intents` with `kind: "allocate_idle_capital"` (the
+  public wire enum; the persisted Elixir atom is internally
+  `:defi_yield_deposit` but submitting that internal name is
+  rejected with `{:invalid, :kind}`).
 * Role: `operator`
 * Errors: `morpho_chain_not_supported`,
   `morpho_vault_not_allowlisted`, `morpho_snapshot_missing`,
@@ -510,7 +513,7 @@ type Intent = {
   id: string;
   agentId: string;
   source: "agent" | "user" | "runtime";
-  kind: "transfer" | "swap" | "scheduled_transfer" | "defi_yield_deposit";
+  kind: "transfer" | "swap" | "scheduled_transfer" | "allocate_idle_capital";
   asset: string;
   chain: string;
   amount: string;

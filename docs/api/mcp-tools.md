@@ -241,8 +241,10 @@ output, amount); execution mechanics are decided server-side.
 
 Submit a Morpho ERC-4626 deposit intent.
 
-* Backed by `POST /v1/intents` with `kind: "defi_yield_deposit"`
-  (operator).
+* Backed by `POST /v1/intents` with `kind: "allocate_idle_capital"`
+  (the public wire enum; the persisted Elixir atom is internally
+  `:defi_yield_deposit` but submitting that internal name is
+  rejected with `{:invalid, :kind}`). Operator role required.
 * Input schema:
   ```json
   {

@@ -191,9 +191,15 @@ export class Cryptobank {
   async submitAllocateIdleCapital(
     args: SubmitAllocateIdleCapitalArgs,
   ): Promise<IntentSubmitResult> {
+    // The public wire enum is `allocate_idle_capital` (per
+    // `IntentSubmissionRequest.kind` in `priv/openapi/openapi.json`).
+    // Phoenix maps this to the internal `:defi_yield_deposit` atom
+    // in `Bank.Intents.normalize/1`; submitting the internal name
+    // is rejected with `{:invalid, :kind}`. Responses always render
+    // the public name. See `docs/runbooks/morpho-deposits.md`.
     const body = {
       agentId: args.agentId,
-      kind: "defi_yield_deposit" as const,
+      kind: "allocate_idle_capital" as const,
       asset: args.asset,
       chain: args.chain ?? "base-sepolia",
       amount: args.amount,

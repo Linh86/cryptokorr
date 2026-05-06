@@ -102,7 +102,7 @@ Each row carries:
 | `unsupported_chain`         | 422  | No        | `POST /v1/intents`         | `chain` not in `["base", "base-sepolia"]`. |
 | `mainnet_disabled`          | 422  | No        | `POST /v1/intents`, `POST /v1/decisions/:id/execute` | Workspace has not opted into Base mainnet. Switch to `base-sepolia` (MVP default) or have an admin enable mainnet. |
 | `unsupported_asset`         | 422  | No        | `POST /v1/intents`         | `asset` not in the workspace's allowlist (currently `USDC`). |
-| `morpho_chain_not_supported`| 422  | No        | `POST /v1/intents` (`kind: defi_yield_deposit`) | Morpho deposit only supports `base-sepolia` in MVP. |
+| `morpho_chain_not_supported`| 422  | No        | `POST /v1/intents` (`kind: allocate_idle_capital`) | Morpho deposit only supports `base-sepolia` in MVP. |
 
 ### Smart-account selector (#184)
 
