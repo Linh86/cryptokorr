@@ -30,8 +30,10 @@ cryptobank-mcp = "cryptobank_mcp.__main__:main"
 
 [project.urls]
 Homepage = "https://github.com/Linh86/cryptobank"
+Source = "https://github.com/Linh86/cryptobank/tree/main/sdks/mcp"
 Documentation = "https://github.com/Linh86/cryptobank/blob/main/docs/api/mcp-tools.md"
 Issues = "https://github.com/Linh86/cryptobank/issues"
+Changelog = "https://github.com/Linh86/cryptobank/blob/main/sdks/mcp/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/cryptobank_mcp"]
@@ -40,5 +42,6 @@ packages = ["src/cryptobank_mcp"]
 include = [
   "src/cryptobank_mcp",
   "README.md",
+  "CHANGELOG.md",
   "tests",
 ]

@@ -42,6 +42,7 @@ Homepage = "https://github.com/Linh86/cryptobank"
 Source = "https://github.com/Linh86/cryptobank/tree/main/sdks/python"
 Issues = "https://github.com/Linh86/cryptobank/issues"
 Documentation = "https://github.com/Linh86/cryptobank/tree/main/docs/api"
+Changelog = "https://github.com/Linh86/cryptobank/blob/main/sdks/python/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where = ["src"]

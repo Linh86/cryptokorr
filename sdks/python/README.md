@@ -32,11 +32,22 @@ audit / replay bundle without hand-writing HTTP glue.
 
 ## Install
 
+Once published to PyPI:
+
 ```bash
-pip install -e sdks/python
+pip install cryptobank
 ```
 
-(Wheels and a published distribution land in a follow-up.)
+From a checkout (works today):
+
+```bash
+pip install -e sdks/python
+# or, from outside the repo:
+pip install "cryptobank @ git+https://github.com/Linh86/cryptobank.git#subdirectory=sdks/python"
+```
+
+The release/publish workflow lives in
+[`sdks/PUBLISHING.md`](../PUBLISHING.md).
 
 ## Configuration
 
