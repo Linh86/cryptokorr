@@ -43,6 +43,14 @@ npm-debug.log
 # macOS Finder metadata.
 .DS_Store
 
+# Python build / cache artifacts (sdks/mcp/).
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
 # Local env files (never commit secrets). The *.example files are tracked.
 .env
 .env.*
