@@ -59,10 +59,13 @@ defmodule BankWeb.ControlLiveTest do
       assert html =~ ~s(id="wallet-status")
     end
 
-    test "shows next step guidance for establishing delegation", %{conn: conn} do
+    test "shows next step guidance walking the operator through Connect → Bind → Install", %{
+      conn: conn
+    } do
       {:ok, _view, html} = live(conn, "/")
 
-      assert html =~ "Establish a delegation through the adapter callback flow"
+      assert html =~ "Connect a Base Sepolia wallet"
+      assert html =~ "Install session permission"
       assert html =~ ~s(id="wallet-connect-btn")
       assert html =~ "Connect wallet"
     end
@@ -159,7 +162,7 @@ defmodule BankWeb.ControlLiveTest do
       {:ok, _view, html} = live(conn, "/")
 
       assert html =~ "Pending"
-      assert html =~ "Delegation is pending"
+      assert html =~ "Session permission install in flight"
     end
 
     test "shows execution blocked", %{conn: conn} do
@@ -189,6 +192,44 @@ defmodule BankWeb.ControlLiveTest do
       {:ok, _view, html} = live(conn, "/")
 
       refute html =~ ~s(id="revoke-btn")
+    end
+  end
+
+  # --- Revoke-failed delegation (#170 surfaces last_reason) -----------------
+
+  describe "with revoke_failed delegation" do
+    setup do
+      {:ok, _del} = grant_delegation("sa_rf", "del_rf")
+      {:ok, _del} = Delegations.record_revoke_requested("sa_rf")
+
+      {:ok, _del} =
+        Delegations.record_revoke_failed("sa_rf", %{
+          last_reason: "send_rejected_by_bundler",
+          last_tx_hash: "0xfeedface"
+        })
+
+      :ok
+    end
+
+    test "shows the retry button with #revoke-retry-btn", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/")
+
+      assert html =~ ~s(id="revoke-retry-btn")
+      assert html =~ "Retry revoke"
+    end
+
+    test "surfaces last_reason in the delegation card and a banner", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/")
+
+      assert html =~ ~s(id="delegation-revoke-failure-banner")
+      assert html =~ "send_rejected_by_bundler"
+      assert html =~ "On-chain revoke failed"
+    end
+
+    test "next steps still asks the operator to retry", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/")
+
+      assert html =~ "Previous revoke attempt failed on-chain"
     end
   end
 
@@ -864,7 +905,7 @@ defmodule BankWeb.ControlLiveTest do
       assert args["account"] == String.downcase(address)
     end
 
-    test "panel disappears once a delegation is pending", %{
+    test "install button is replaced by an installing indicator once a delegation is pending", %{
       conn: conn,
       wallet_address: address
     } do
@@ -897,7 +938,8 @@ defmodule BankWeb.ControlLiveTest do
 
       html = render_click(view, "refresh")
 
-      refute html =~ ~s(id="session-permission-card")
+      assert html =~ ~s(id="session-permission-card")
+      assert html =~ ~s(id="session-permission-installing")
       refute html =~ ~s(id="install-session-permission-btn")
     end
 
@@ -919,6 +961,89 @@ defmodule BankWeb.ControlLiveTest do
       # The button carries the disabled attribute, so the test client
       # cannot click it. Server-side runtime_paused refusal coverage
       # lives in `Bank.SessionPermissionsTest`.
+    end
+  end
+
+  # --- Session permission "Installing…" view (#170) ------------------------
+
+  describe "session permission install in flight" do
+    test "renders #session-permission-installing when a pending delegation exists for the bound wallet",
+         %{conn: conn, wallet_address: address} do
+      {:ok, view, _html} = live(conn, "/")
+
+      bind_wallet!(view, address)
+
+      sa_id = Bank.SessionPermissions.compute_smart_account_id(active_binding!())
+
+      {:ok, _delegation} =
+        Bank.Delegations.Delegation.changeset(
+          %Bank.Delegations.Delegation{},
+          %{
+            smart_account_id: sa_id,
+            delegation_id: "del_pending_installing",
+            state: :pending,
+            chain: "base",
+            workspace_id: Process.get(:bank_test_workspace_id)
+          }
+        )
+        |> Repo.insert()
+
+      html = render_click(view, "refresh")
+
+      assert html =~ ~s(id="session-permission-card")
+      assert html =~ ~s(id="session-permission-installing")
+      assert html =~ "Installing"
+      assert html =~ "awaiting adapter"
+      refute html =~ ~s(id="install-session-permission-btn")
+    end
+  end
+
+  # --- Connection page banned-copy guard (#170) ----------------------------
+
+  describe "connection page copy guard" do
+    test "initial render does not imply mainnet, multi-account, unlimited, or arbitrary-calldata support",
+         %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/")
+
+      # The banned phrasings are anything that would *imply* the agent
+      # can do these things. The wrong-chain warning explicitly calls
+      # out Base mainnet as post-MVP, and the bound-state scope
+      # summary explicitly lists "Arbitrary calldata", "Unlimited
+      # token approvals", and "Mainnet execution" under the denied
+      # column — those are intentional warnings, not implications.
+      # The initial (disconnected) render should carry no scope
+      # surface at all, so none of those denied keywords appear.
+      refute html =~ "Multi-account"
+      refute html =~ "multi-account"
+      refute html =~ "Unlimited"
+      refute html =~ "Arbitrary calldata"
+      refute html =~ "Mainnet execution"
+    end
+
+    test "bound state lists the denied scope items as explicit denials, not implications",
+         %{conn: conn, wallet_address: address} do
+      {:ok, view, _html} = live(conn, "/")
+
+      bind_wallet!(view, address)
+
+      html = render(view)
+
+      # The denied column is visible and named.
+      assert html =~ ~s(id="session-permission-denied")
+      assert html =~ "Explicitly denied"
+
+      # Every denied item is rendered under the denied column,
+      # framed as a denial.
+      assert html =~ "Withdraw or redeem"
+      assert html =~ "Arbitrary calldata"
+      assert html =~ "Unlimited token approvals"
+      assert html =~ "Borrow / leverage / looping"
+      assert html =~ "Mainnet execution"
+
+      # No multi-account UX language anywhere on the page.
+      refute html =~ "Multi-account"
+      refute html =~ "Switch account"
+      refute html =~ "Select workspace"
     end
   end
 

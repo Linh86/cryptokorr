@@ -645,6 +645,19 @@ defmodule BankWeb.ControlLive do
             label="Scope"
             value={inspect(@delegation.scope)}
           />
+          <.detail_item
+            :if={@delegation.state == :revoke_failed and @delegation.last_reason}
+            label="Last failure"
+            value={@delegation.last_reason}
+          />
+        </div>
+        <div
+          :if={@delegation.state == :revoke_failed and @delegation.last_reason}
+          id="delegation-revoke-failure-banner"
+          class="px-6 py-3 mt-1 border-t border-error/20 bg-error/5 text-xs text-error"
+        >
+          <.icon name="hero-exclamation-triangle" class="size-3.5 inline-block mr-1 -mt-0.5" />
+          On-chain revoke failed: {@delegation.last_reason}. The delegation is still live; retry above.
         </div>
       </div>
 
@@ -724,12 +737,12 @@ defmodule BankWeb.ControlLive do
         <.step_item
           :if={is_nil(@delegation)}
           status={:action}
-          text="Establish a delegation through the adapter callback flow"
+          text="Connect a Base Sepolia wallet, verify the binding, then click Install session permission."
         />
         <.step_item
           :if={@delegation && @delegation.state == :pending}
           status={:waiting}
-          text="Delegation is pending — waiting for adapter confirmation"
+          text="Session permission install in flight — waiting for the adapter to confirm the on-chain grant."
         />
         <.step_item
           :if={@delegation && @delegation.state == :active && @paused}
@@ -1066,6 +1079,50 @@ defmodule BankWeb.ControlLive do
       </div>
     </div>
     """
+  end
+
+  defp session_permission_card(%{wallet_status: :bound, delegations: delegations} = assigns)
+       when is_list(delegations) do
+    pending = Enum.find(delegations, &(&1.state == :pending))
+
+    if pending do
+      assigns =
+        assigns
+        |> assign(:scope, Bank.SessionPermissions.Scope.default())
+        |> assign(:pending_delegation, pending)
+
+      ~H"""
+      <div
+        id="session-permission-card"
+        class="rounded-xl border border-base-300 bg-base-100 shadow-sm p-5"
+      >
+        <h3 class="text-sm font-semibold mb-3 flex items-center gap-1.5">
+          <.icon name="hero-shield-check" class="size-4" /> Session permission
+        </h3>
+
+        <div
+          id="session-permission-installing"
+          class="space-y-2 text-sm"
+        >
+          <div class="flex items-center gap-2 text-base-content/70">
+            <.icon name="hero-arrow-path" class="size-4 animate-spin text-base-content/50" />
+            <span>
+              Installing — awaiting adapter callback for smart account {short_id(
+                @pending_delegation.smart_account_id
+              )}.
+            </span>
+          </div>
+          <p class="text-xs text-base-content/50">
+            The control plane requested the install on Base Sepolia. The button will return once the adapter confirms or fails.
+          </p>
+        </div>
+      </div>
+      """
+    else
+      ~H"""
+      <div :if={false} id="session-permission-card-hidden" />
+      """
+    end
   end
 
   defp session_permission_card(assigns) do

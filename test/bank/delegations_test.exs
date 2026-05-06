@@ -665,6 +665,28 @@ defmodule Bank.DelegationsTest do
       assert is_nil(Delegations.get("sa_failed_grant"))
     end
 
+    test "grant_failed callback emits a delegation.grant_failed audit event (#170)" do
+      sa_id = "sa_grant_failed_audit_#{System.unique_integer([:positive])}"
+
+      assert {:error, :grant_failed} =
+               Delegations.apply_callback(%{
+                 "smart_account_id" => sa_id,
+                 "delegation_id" => "grant_failed_audit",
+                 "state" => "grant_failed",
+                 "reason" => "permission_install_failed"
+               })
+
+      events =
+        Bank.Audit.list_events(%{subject_id: sa_id}, limit: 10)
+        |> Map.fetch!(:events)
+
+      assert event = Enum.find(events, &(&1.event_type == "delegation.grant_failed"))
+      assert event.subject_type == "smart_account"
+      assert event.subject_id == sa_id
+      assert event.after_ref["reason"] == "permission_install_failed"
+      assert event.after_ref["delegation_id"] == "grant_failed_audit"
+    end
+
     test "granted callback with a known grant-failure reason is rejected defensively" do
       assert {:error, :grant_failed} =
                Delegations.apply_callback(%{

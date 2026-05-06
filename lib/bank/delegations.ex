@@ -584,6 +584,10 @@ defmodule Bank.Delegations do
         # A failed install must not create an active delegation. The
         # adapter sends this for operator-key-missing, chain mismatch,
         # install reverts, or serialization failures on the grant path.
+        # We still emit a `delegation.grant_failed` audit event so the
+        # failure is visible to ops/replay even though no delegation
+        # row lands (#170 connection-status visibility).
+        emit_grant_failed_audit(smart_account_id, delegation_id, reason, params)
         {:error, :grant_failed}
 
       "revoking" ->
@@ -688,6 +692,47 @@ defmodule Bank.Delegations do
       }
     })
   end
+
+  # Emit a `delegation.grant_failed` audit event when the adapter
+  # reports a failed install (#170). No delegation row exists for
+  # this case — the audit is the only durable trace.
+  defp emit_grant_failed_audit(sa_id, delegation_id, reason, params) do
+    chain = Map.get(params, "chain") || Map.get(params, "chain_id")
+    tx_hash = extract_tx_hash(params)
+
+    result =
+      Runtime.emit_audit(%{
+        actor: :adapter,
+        event_type: "delegation.grant_failed",
+        subject_type: "smart_account",
+        subject_id: sa_id,
+        # `smart_account_id` is a free-form string, not a UUID — leave
+        # the canonical `correlation_id` (UUID-typed) unset and rely on
+        # `subject_id` for filtering, matching `write_intent_audit/3`.
+        correlation_id: nil,
+        after_ref:
+          %{
+            "delegation_id" => delegation_id,
+            "reason" => reason
+          }
+          |> maybe_put_string("chain", chain)
+          |> maybe_put_string("tx_hash", tx_hash)
+      })
+
+    case result do
+      {:ok, _event} ->
+        :ok
+
+      {:error, reason} ->
+        require Logger
+        Logger.warning("delegation.grant_failed audit emit failed: #{inspect(reason)}")
+        :error
+    end
+  end
+
+  defp maybe_put_string(map, _key, nil), do: map
+  defp maybe_put_string(map, key, value) when is_binary(value), do: Map.put(map, key, value)
+  defp maybe_put_string(map, key, value), do: Map.put(map, key, to_string(value))
 
   defp enqueue_grant_worker(sa_id, chain_id, account, params) do
     args = %{
