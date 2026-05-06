@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cryptobank"
+version = "0.1.0"
+description = "Python SDK for the CryptoBank /v1 API (intents, decisions, audit, operator surface)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "CryptoBank" },
+]
+keywords = ["cryptobank", "sdk", "intents", "agent", "stablecoin"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+# Zero runtime dependencies. The SDK uses stdlib `urllib.request`
+# for HTTP, `json` for serialisation, and `os` / `secrets` for
+# config + idempotency-key generation. Keeping this list empty is
+# intentional — `pip install -e sdks/python` should be trivial and
+# free of version-conflict surface for downstream agent builders.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/Linh86/cryptobank"
+Source = "https://github.com/Linh86/cryptobank/tree/main/sdks/python"
+Issues = "https://github.com/Linh86/cryptobank/issues"
+Documentation = "https://github.com/Linh86/cryptobank/tree/main/docs/api"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"cryptobank" = ["py.typed"]
