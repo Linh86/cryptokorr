@@ -624,8 +624,8 @@ The following are explicitly **not** in the SDK foundation:
 * API-key management surface. Admin-only and exposed only through
   the operator console; SDK callers do not rotate their own keys.
 * Session-permission / browser-wallet flows. Browser-only.
-* Trust-assertion writes. Operator-only via `client.operator` (TBD;
-  reserved for #482).
+* Trust-assertion writes. Operator-only via `client.operator` in a
+  future issue; not part of the SDK / MCP launch surface.
 
 ## Versioning
 

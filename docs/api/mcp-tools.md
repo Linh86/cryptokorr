@@ -2,7 +2,8 @@
 
 > Status: SDK / MCP foundation (#478).
 > Implementation: stdio MCP server (#481), built on top of the
-> Python SDK (#479). Operator surface follow-up: #482.
+> Python SDK (#479). Examples follow-up: #482; package/docs
+> follow-up: #483.
 > Wire contract: [`error-codes.md`](error-codes.md),
 > [`sdk-surface.md`](sdk-surface.md), and the OpenAPI artifact
 > at [`priv/openapi/openapi.json`](../../priv/openapi/openapi.json).
