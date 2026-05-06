@@ -363,6 +363,80 @@ defmodule Bank.Audit.Events do
   end
 
   @doc """
+  `morpho.deposit_dispatched` — Phoenix handed an approved Morpho
+  deposit plan to the adapter for ERC-4626 broadcast (#206). Fires
+  alongside the standard `execution.signing` transition; consumers
+  filter on the `morpho.*` prefix to assemble the Morpho-specific
+  replay narrative.
+
+  Subject is the execution plan. Carries vault address, snapshot
+  identity, asset/amount, receiver smart account, and the policy
+  rule ids the operator approved against. Excludes calldata —
+  that's adapter-built and not load-bearing for replay attribution.
+  """
+  @spec morpho_deposit_dispatched(ExecutionPlan.t(), Decimal.t(), keyword()) :: attrs()
+  def morpho_deposit_dispatched(%ExecutionPlan{} = plan, %Decimal{} = amount, opts \\ []) do
+    steps = plan.steps || %{}
+
+    %{
+      actor: Keyword.get(opts, :actor, :runtime),
+      actor_id: Keyword.get(opts, :actor_id),
+      event_type: "morpho.deposit_dispatched",
+      subject_type: "execution_plan",
+      subject_id: plan.id,
+      correlation_id: plan.intent_id,
+      after_ref: %{
+        vault_address: Map.get(steps, "vault_address"),
+        chain_id: Map.get(steps, "chain_id"),
+        asset: plan.asset,
+        amount: Decimal.to_string(amount, :normal),
+        receiver: Map.get(steps, "receiver"),
+        snapshot_id: Map.get(steps, "snapshot_id"),
+        snapshot_payload_hash: Map.get(steps, "snapshot_payload_hash"),
+        policy_rule_ids: Map.get(steps, "policy_rule_ids", []),
+        decision_id: plan.decision_id
+      },
+      workspace_id: plan.workspace_id
+    }
+  end
+
+  @doc """
+  `morpho.deposit_aborted` — pre-dispatch Morpho safety gate
+  (`Bank.Decisions.MorphoDispatchSafety`) refused, or the worker
+  aborted the plan post-claim before any adapter call (#206).
+
+  Subject is the execution plan. `after_ref.reason` is the gate's
+  failure atom (`:morpho_chain_not_supported`,
+  `:morpho_asset_not_supported`, `:morpho_vault_not_allowlisted`,
+  `:morpho_snapshot_missing`, `:morpho_snapshot_expired`,
+  `:morpho_snapshot_drifted`, `:morpho_steps_missing`).
+  """
+  @spec morpho_deposit_aborted(ExecutionPlan.t(), atom() | String.t(), keyword()) :: attrs()
+  def morpho_deposit_aborted(%ExecutionPlan{} = plan, reason, opts \\ []) do
+    steps = plan.steps || %{}
+
+    %{
+      actor: Keyword.get(opts, :actor, :runtime),
+      actor_id: Keyword.get(opts, :actor_id),
+      event_type: "morpho.deposit_aborted",
+      subject_type: "execution_plan",
+      subject_id: plan.id,
+      correlation_id: plan.intent_id,
+      after_ref: %{
+        vault_address: Map.get(steps, "vault_address"),
+        chain_id: Map.get(steps, "chain_id"),
+        snapshot_id: Map.get(steps, "snapshot_id"),
+        reason: reason_to_string(reason),
+        decision_id: plan.decision_id
+      },
+      workspace_id: plan.workspace_id
+    }
+  end
+
+  defp reason_to_string(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp reason_to_string(reason) when is_binary(reason), do: reason
+
+  @doc """
   `execution.<status>` — execution-plan status transition. The status
   is derived from the plan's `execution_status` so the caller only
   hands in the plan.
@@ -859,14 +933,29 @@ defmodule Bank.Audit.Events do
       smart_account_id: plan.smart_account_id
     }
 
-    case Keyword.get(opts, :route_metadata) do
-      %{route_hash: hash, route_provider: provider} ->
-        Map.merge(base, %{route_hash: hash, route_provider: provider})
-
-      _ ->
-        base
-    end
+    base
+    |> maybe_merge_route_metadata(Keyword.get(opts, :route_metadata))
+    |> maybe_merge_morpho_metadata(Keyword.get(opts, :morpho_metadata))
   end
+
+  defp maybe_merge_route_metadata(after_ref, %{route_hash: hash, route_provider: provider}),
+    do: Map.merge(after_ref, %{route_hash: hash, route_provider: provider})
+
+  defp maybe_merge_route_metadata(after_ref, _), do: after_ref
+
+  defp maybe_merge_morpho_metadata(
+         after_ref,
+         %{morpho_vault_address: vault, morpho_snapshot_id: snap_id} = meta
+       )
+       when is_binary(vault) do
+    Map.merge(after_ref, %{
+      morpho_vault_address: vault,
+      morpho_snapshot_id: snap_id,
+      morpho_snapshot_payload_hash: Map.get(meta, :morpho_snapshot_payload_hash)
+    })
+  end
+
+  defp maybe_merge_morpho_metadata(after_ref, _), do: after_ref
 
   @doc """
   `intent.auto_exec_held` — an `:auto_exec` decision was reached but

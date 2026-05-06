@@ -494,6 +494,80 @@ Both are optional and ignored when absent or malformed; the rest
 of the receipt (status, `tx_refs`, `final_reason`) follows the
 transfer rules.
 
+### `morpho_deposit` (#206)
+
+Allowlisted Morpho ERC-4626 USDC deposit on Base Sepolia. See
+`fixtures/dispatch_morpho_deposit.json`.
+
+```jsonc
+{
+  "action": "morpho_deposit",
+  "execution_plan_id": "...",
+  "intent_id": "...",
+  "smart_account_id": "sa_...",
+  "chain": "base-sepolia",       // Base Sepolia ONLY in v0.1
+  "asset": "USDC",               // single-asset MVP
+  "amount": "100",               // decimal string
+  "vault_address": "0x...",      // allowlisted Morpho vault
+  "receiver": "sa_...",          // smart_account_id (opaque); the
+                                 // adapter uses its configured
+                                 // smartAccountAddress as the
+                                 // on-chain ERC-4626 receiver
+  "snapshot_id": "...",          // PersistedVaultSnapshot.id Phoenix
+                                 // captured at plan creation; the
+                                 // adapter passes it through for
+                                 // audit attribution and never reads
+                                 // a snapshot itself
+  "snapshot_payload_hash": "...",// hex hash of the same snapshot
+  "policy_rule_ids": ["..."],    // workspace Morpho rule ids the
+                                 // operator approved against
+  "signing_requirements": { "delegation_id": "del_...", "scope": {} },
+  "correlation_id": "...",
+  "emitted_at": "..."
+}
+```
+
+The adapter:
+
+1. Validates the envelope with the
+   `DispatchMorphoDepositSchema` (zod).
+2. Re-checks chain support twice: generic `isSupportedChain`
+   (rejects unknown chains) then `isSupportedMorphoDepositChain`
+   (Base Sepolia only — `chain: "base"` fails closed even though
+   the generic guard would admit it).
+3. Re-checks asset support (`isSupportedAsset` — USDC only).
+4. Builds inner calldata itself — Phoenix never supplies adapter
+   calldata for `morpho_deposit`. The wire payload deliberately
+   has no `calldata` / `swap_target_contract` / `spender` fields.
+   The inner shape is `SimpleAccount.executeBatch(...)` carrying:
+
+     a. `IERC20.approve(vault_address, amount)` — bounded only.
+        The adapter never authorises an unlimited allowance on
+        the Morpho vault.
+
+     b. `IERC4626.deposit(amount, receiver)` — the receiver is
+        the smart account address (the deposit credits shares to
+        the same account that owns the input USDC).
+
+   Atomicity: an attacker cannot race the bounded approval
+   against the deposit; the executeBatch keeps both inner calls
+   in one UserOp.
+
+5. Signs the canonical v0.7 user-op hash with the delegation
+   key, submits to the configured bundler, and emits the
+   `execution.broadcast → confirmed | reverted | aborted`
+   callback chain. `tx_refs` carry `userop_hash` on broadcast and
+   both `userop_hash` + on-chain `hash` on confirm/revert.
+   `block_number` is included on confirm/revert.
+
+Pre-dispatch safety (vault allowlist, snapshot freshness +
+material drift, mainnet eligibility, pause gates) is the Phoenix
+caller's responsibility — see
+`Bank.Decisions.MorphoDispatchSafety`. The adapter trusts those
+have already cleared and adds only the structural validation
+above. Withdraw / redeem is operator-only and never
+agent-initiated; this action exposes no withdraw path.
+
 ### `grant_delegation` (#58 grant flow)
 
 Phoenix dispatches this to install a fresh ZeroDev permission

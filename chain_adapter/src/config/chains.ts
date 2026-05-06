@@ -54,3 +54,23 @@ export type SupportedSwapChain = "base-sepolia";
 export function isSupportedSwapChain(chain: string): chain is SupportedSwapChain {
   return chain === "base-sepolia";
 }
+
+/**
+ * Morpho-deposit-specific chain allowlist (#206).
+ *
+ * MVP plan: Morpho ERC-4626 USDC deposits are Base Sepolia only.
+ * Mainnet Morpho is post-MVP and depends on #166/#178 plus the
+ * exposure / concentration engine that was explicitly deferred.
+ * The generic `isSupportedChain` still admits `"base"` for the
+ * legacy transfer path; the morpho dispatch handler calls this
+ * helper to fail closed if a `chain: "base"` envelope ever reaches
+ * the adapter. Belt-and-suspenders with the Phoenix boundary gate
+ * in `Bank.Intents.normalize/1` (#203 P2).
+ */
+export type SupportedMorphoDepositChain = "base-sepolia";
+
+export function isSupportedMorphoDepositChain(
+  chain: string,
+): chain is SupportedMorphoDepositChain {
+  return chain === "base-sepolia";
+}

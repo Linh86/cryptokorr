@@ -79,7 +79,13 @@ defmodule Bank.Runtime.Workers.RunExecution do
   alias Bank.AdapterClient
   alias Bank.Audit.Events
   alias Bank.Decisions
-  alias Bank.Decisions.{DecisionEnvelope, ExecutionPlan, SwapDispatchSafety, SwapRouteArtifacts}
+  alias Bank.Decisions.{
+    DecisionEnvelope,
+    ExecutionPlan,
+    MorphoDispatchSafety,
+    SwapDispatchSafety,
+    SwapRouteArtifacts
+  }
   alias Bank.Delegations
   alias Bank.Intents.AgentIntent
   alias Bank.Repo
@@ -304,6 +310,13 @@ defmodule Bank.Runtime.Workers.RunExecution do
       {:ok, _} ->
         progress_after_dispatch(claimed, envelope)
 
+      {:error, {:morpho_safety, reason}} ->
+        Logger.warning(
+          "RunExecution: Morpho dispatch safety gate refused plan #{claimed.id}: #{inspect(reason)}"
+        )
+
+        abort_for_morpho_safety(claimed, reason)
+
       {:error, :adapter_unavailable} ->
         revert_after_adapter_failure(claimed, :adapter_unavailable)
 
@@ -364,7 +377,10 @@ defmodule Bank.Runtime.Workers.RunExecution do
   # centralized #191 safety gate before the adapter call so a route
   # whose deadline expired between plan creation and dispatch, or
   # whose chain/amount drifted relative to the parent intent, is
-  # refused locally instead of being broadcast.
+  # refused locally instead of being broadcast. Morpho deposit
+  # plans (#206, `:defi_yield_deposit`) go through their own
+  # `MorphoDispatchSafety.validate/2` gate (vault allowlist,
+  # snapshot freshness, material drift) before the adapter call.
   defp adapter_dispatch(%ExecutionPlan{steps: %{"kind" => "swap"} = steps} = plan) do
     case SwapRouteArtifacts.route_from_steps(steps) do
       {:ok, route} ->
@@ -389,6 +405,13 @@ defmodule Bank.Runtime.Workers.RunExecution do
     end
   end
 
+  defp adapter_dispatch(%ExecutionPlan{intent: %AgentIntent{kind: :defi_yield_deposit}} = plan) do
+    case MorphoDispatchSafety.validate(plan) do
+      :ok -> AdapterClient.dispatch_morpho_deposit(plan)
+      {:error, reason} -> {:error, {:morpho_safety, reason}}
+    end
+  end
+
   defp adapter_dispatch(%ExecutionPlan{} = plan), do: AdapterClient.dispatch_transfer(plan)
 
   defp abort_for_swap_safety(%ExecutionPlan{} = plan, reason_atom) do
@@ -403,6 +426,30 @@ defmodule Bank.Runtime.Workers.RunExecution do
       {:error, changeset} ->
         Logger.error(
           "RunExecution: abort-for-swap-safety update failed for plan #{plan.id}: #{inspect(changeset.errors)}"
+        )
+
+        {:error, changeset}
+    end
+  end
+
+  defp abort_for_morpho_safety(%ExecutionPlan{} = plan, reason) do
+    reason_str = "morpho_safety:#{reason}"
+    prior_status = plan.execution_status
+
+    case mark_plan_aborted(plan, reason_str) do
+      {:ok, updated_plan, intent_transition} ->
+        # Standard execution.aborted side effects.
+        emit_aborted_side_effects(updated_plan, prior_status, intent_transition, reason_str)
+
+        # Plus the Morpho-specific abort event for replay attribution.
+        _ =
+          Runtime.emit_audit(Events.morpho_deposit_aborted(updated_plan, reason, actor: :runtime))
+
+        {:cancel, reason}
+
+      {:error, changeset} ->
+        Logger.error(
+          "RunExecution: abort-for-morpho-safety update failed for plan #{plan.id}: #{inspect(changeset.errors)}"
         )
 
         {:error, changeset}
@@ -568,6 +615,12 @@ defmodule Bank.Runtime.Workers.RunExecution do
     _ =
       Runtime.emit_audit(Events.execution_transition(plan, prior_status, actor: :runtime))
 
+    # Morpho-specific dispatch event for replay attribution (#206 +
+    # #208's `morpho.*` namespace). Emitted in addition to, not in
+    # place of, `execution.<status>` so the standard execution
+    # narrative stays uniform across kinds.
+    maybe_emit_morpho_dispatched(plan)
+
     Notifier.execution_progressed(plan, prior_status)
 
     case intent_transition do
@@ -590,6 +643,17 @@ defmodule Bank.Runtime.Workers.RunExecution do
         :ok
     end
   end
+
+  defp maybe_emit_morpho_dispatched(
+         %ExecutionPlan{
+           intent: %AgentIntent{kind: :defi_yield_deposit, amount: %Decimal{} = amount}
+         } = plan
+       ) do
+    _ = Runtime.emit_audit(Events.morpho_deposit_dispatched(plan, amount, actor: :runtime))
+    :ok
+  end
+
+  defp maybe_emit_morpho_dispatched(_plan), do: :ok
 
   defp emit_aborted_side_effects(plan, prior_status, intent_transition, reason) do
     _ =

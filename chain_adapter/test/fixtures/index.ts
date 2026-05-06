@@ -35,6 +35,7 @@ function loadFixture<T>(filename: string): T {
 
 export const dispatchTransfer = loadFixture("dispatch_transfer.json");
 export const dispatchSwap = loadFixture("dispatch_swap.json");
+export const dispatchMorphoDeposit = loadFixture("dispatch_morpho_deposit.json");
 export const dispatchRevokeDelegation = loadFixture(
   "dispatch_revoke_delegation.json",
 );

@@ -144,6 +144,32 @@ defmodule Bank.AdapterClient do
   end
 
   @doc """
+  Dispatch an approved Morpho ERC-4626 USDC deposit execution plan to
+  the adapter (#206).
+
+  The plan must carry `:chain == "base-sepolia"`, `:asset == "USDC"`,
+  `:smart_account_id`, `:signing_requirements`, and a Morpho `:steps`
+  payload built by `Bank.Decisions.MorphoDepositArtifacts`. The
+  payload sent on the wire excludes calldata — the adapter builds
+  ERC-4626 `deposit(assets, receiver)` and bounded `IERC20.approve`
+  calldata itself from the safe primitives (vault address, amount,
+  receiver). Phoenix never supplies adapter calldata, and the
+  adapter never accepts caller-supplied bytes.
+
+  Pre-dispatch safety re-checks (vault allowlist, snapshot
+  freshness, material drift) are the caller's responsibility — see
+  `Bank.Decisions.MorphoDispatchSafety.validate/2`. This function
+  trusts that the gate has run.
+  """
+  @spec dispatch_morpho_deposit(ExecutionPlan.t(), keyword()) ::
+          {:ok, transfer_ok()} | {:error, transfer_error()}
+  def dispatch_morpho_deposit(%ExecutionPlan{} = plan, opts \\ []) do
+    with {:ok, payload} <- build_morpho_deposit_payload(plan) do
+      post("/dispatch/morpho_deposit", payload, :morpho_deposit, opts)
+    end
+  end
+
+  @doc """
   Dispatch an on-chain delegation revoke for a smart account.
 
   The adapter is expected to sign and broadcast the revoke transaction
@@ -341,6 +367,39 @@ defmodule Bank.AdapterClient do
     end
   end
 
+  # The Morpho deposit payload is intentionally narrow: vault
+  # address, asset, amount, receiver smart account, snapshot
+  # identity, policy rule ids. No calldata, no spender, no target
+  # contract — the adapter builds ERC-4626 deposit + bounded ERC-20
+  # approve calldata itself from these primitives. The receiver IS
+  # the smart account (acceptance: "Deposit receiver is the smart
+  # account"); the adapter resolves the on-chain account address
+  # from `smart_account_id`.
+  defp build_morpho_deposit_payload(%ExecutionPlan{} = plan) do
+    with {:ok, intent} <- fetch_intent(plan),
+         {:ok, steps} <- fetch_morpho_steps(plan) do
+      {:ok,
+       %{
+         contract_version: @contract_version,
+         action: "morpho_deposit",
+         execution_plan_id: plan.id,
+         intent_id: plan.intent_id,
+         smart_account_id: plan.smart_account_id,
+         chain: plan.chain,
+         asset: plan.asset,
+         amount: decimal_to_string(intent.amount),
+         vault_address: Map.fetch!(steps, "vault_address"),
+         receiver: Map.fetch!(steps, "receiver"),
+         snapshot_id: Map.get(steps, "snapshot_id"),
+         snapshot_payload_hash: Map.get(steps, "snapshot_payload_hash"),
+         policy_rule_ids: Map.get(steps, "policy_rule_ids", []),
+         signing_requirements: signing_requirements(plan),
+         correlation_id: plan.intent_id,
+         emitted_at: DateTime.utc_now() |> DateTime.to_iso8601()
+       }}
+    end
+  end
+
   # The persisted `:steps` JSON is the source of truth for the route
   # (#190). A plan without the swap kind marker is a programming
   # error from the caller (`RunExecution` should only invoke
@@ -349,6 +408,11 @@ defmodule Bank.AdapterClient do
     do: {:ok, steps}
 
   defp extract_swap_steps(_plan), do: {:error, {:invalid_swap_plan, :missing_route}}
+
+  defp fetch_morpho_steps(%ExecutionPlan{steps: %{"kind" => "morpho_deposit"} = steps}),
+    do: {:ok, steps}
+
+  defp fetch_morpho_steps(_), do: {:error, {:target_not_resolvable, :morpho_steps_missing}}
 
   defp fetch_intent(%ExecutionPlan{intent: %AgentIntent{} = intent}), do: {:ok, intent}
 
