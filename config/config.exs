@@ -80,6 +80,11 @@ config :bank, Oban,
     executions_confirm: 10,
     security_revoke: 3,
     delegations_grant: 3,
+    # Browser-signed install on-chain verification (#474).
+    # Workers do read-only `eth_call`/`eth_getCode` against the
+    # configured Base Sepolia RPC; concurrency 3 matches the
+    # other delegation-side queues.
+    delegations_verify_install: 3,
     # API key usage aggregation (#218d). One concurrent job is
     # plenty — the daily cron schedules at most one job per day
     # and operator-driven backfill jobs are explicit.
