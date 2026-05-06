@@ -257,7 +257,8 @@ defmodule Bank.Audit do
         decisions: [%DecisionEnvelope{}, ...],      # oldest first
         plans: [%ExecutionPlan{}, ...],             # oldest first
         audit: [%AuditEvent{}, ...],                # oldest first
-        stablecoin_route_evidence: [%{}, ...]       # route evaluations captured in audit
+        stablecoin_route_evidence: [%{}, ...],      # route evaluations captured in audit
+        swap_route_evidence: [%{}, ...]             # one map per swap plan: route inputs + receipt + outcome
       }
 
   All children are ordered deterministically by `(inserted_at, id)`.
@@ -325,9 +326,64 @@ defmodule Bank.Audit do
       screening_evidence: Bank.WalletScreening.Evidence.for_intent(intent),
       stablecoin_route_evidence: stablecoin_route_evidence(audit),
       morpho_evidence: morpho_evidence(audit),
+      swap_route_evidence: swap_route_evidence(plans),
       matched_activities: Bank.Activity.Reconciliation.match_for_plans(plans)
     }
   end
+
+  # One map per swap execution plan, pre-joining the persisted #190
+  # route inputs (carried on `plan.steps`) with the runtime outcome
+  # (status / final_outcome / final_reason) and the #193 receipt
+  # columns (block_number / actual_output_amount / tx_refs). Replay
+  # readers can render "swap N: route X dispatched, expected Y, got
+  # Z, status confirmed" without re-walking the audit log or
+  # dereferencing the steps blob themselves.
+  #
+  # Calldata, spender, swap_target_contract, source/destination
+  # token addresses, and value are intentionally NOT in this
+  # projection — they're operational inputs the dispatch needs but
+  # not "evidence" a reviewer needs to read. They remain on
+  # `plan.steps` for callers that want them.
+  defp swap_route_evidence(plans) do
+    plans
+    |> Enum.filter(fn
+      %ExecutionPlan{steps: %{"kind" => "swap"}} -> true
+      _ -> false
+    end)
+    |> Enum.map(&swap_evidence_for_plan/1)
+  end
+
+  defp swap_evidence_for_plan(%ExecutionPlan{steps: steps} = plan) do
+    %{
+      plan_id: plan.id,
+      decision_id: plan.decision_id,
+      chain: plan.chain,
+      route_hash: Map.get(steps, "route_hash"),
+      route_provider: Map.get(steps, "route_provider"),
+      source_asset: Map.get(steps, "source_asset"),
+      destination_asset: Map.get(steps, "destination_asset"),
+      input_amount: Map.get(steps, "input_amount"),
+      expected_output_amount: Map.get(steps, "expected_output_amount"),
+      minimum_output_amount: Map.get(steps, "minimum_output_amount"),
+      slippage_bps: Map.get(steps, "slippage_bps"),
+      deadline: Map.get(steps, "deadline"),
+      quote_timestamp: Map.get(steps, "quote_timestamp"),
+      execution_status: plan.execution_status,
+      final_outcome: plan.final_outcome,
+      final_reason: plan.final_reason,
+      block_number: plan.block_number,
+      actual_output_amount: swap_decimal_string(plan.actual_output_amount),
+      tx_refs: plan.tx_refs || [],
+      active: plan.active
+    }
+  end
+
+  defp swap_decimal_string(nil), do: nil
+
+  defp swap_decimal_string(%Decimal{} = d),
+    do: d |> Decimal.normalize() |> Decimal.to_string(:normal)
+
+  defp swap_decimal_string(other), do: other
 
   defp stablecoin_route_evidence(events) do
     events
