@@ -36,7 +36,7 @@ describe("GET /health", () => {
     expect(body.status).toBe("ok");
     expect(body.service).toBe("cryptobank-ts-adapter");
     expect(body.contract_version).toBe(1);
-    expect(body.supported_chains).toEqual(["base"]);
+    expect(body.supported_chains).toEqual(["base", "base-sepolia"]);
     expect(body.supported_assets).toEqual(["USDC"]);
     expect(body.timestamp).toBeTruthy();
   });

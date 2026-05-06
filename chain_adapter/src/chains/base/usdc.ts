@@ -1,14 +1,18 @@
 /**
- * USDC on Base — contract ABI fragment + transfer helper.
+ * USDC on Base — contract ABI fragment + transfer / approve helpers.
  *
- * Only the ERC-20 `transfer` function is needed for v0.1.
- * No approval / allowance dance — the smart-account delegation
- * grants transfer authority directly.
+ * For the transfer path (#137) only `transfer` and `balanceOf` are
+ * needed — the smart-account delegation grants transfer authority
+ * directly. For the swap path (#192) the adapter additionally needs
+ * `approve(spender, amount)` so the smart account can authorise a
+ * bounded amount of input token for the 0x router. The runtime
+ * chooses bounded over unbounded to keep blast radius limited if a
+ * router is later compromised.
  */
 
 import { type Abi } from "viem";
 
-/** Minimal ERC-20 ABI for transfer + balanceOf. */
+/** Minimal ERC-20 ABI for transfer + approve + balanceOf. */
 export const ERC20_TRANSFER_ABI: Abi = [
   {
     name: "transfer",
@@ -16,6 +20,16 @@ export const ERC20_TRANSFER_ABI: Abi = [
     stateMutability: "nonpayable",
     inputs: [
       { name: "to", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "bool" }],
+  },
+  {
+    name: "approve",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "spender", type: "address" },
       { name: "amount", type: "uint256" },
     ],
     outputs: [{ name: "", type: "bool" }],

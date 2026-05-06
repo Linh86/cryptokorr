@@ -36,7 +36,10 @@ import {
 } from "viem/account-abstraction";
 import type { PrivateKeyAccount } from "viem/accounts";
 import { ERC20_TRANSFER_ABI } from "./usdc.js";
-import { SIMPLE_ACCOUNT_EXECUTE_ABI } from "./entrypoint.js";
+import {
+  SIMPLE_ACCOUNT_EXECUTE_ABI,
+  SIMPLE_ACCOUNT_EXECUTE_BATCH_ABI,
+} from "./entrypoint.js";
 import type { BundlerClient } from "./bundler.js";
 
 /**
@@ -99,6 +102,72 @@ export function buildTransferCallData(
   amount: bigint,
 ): Hex {
   return buildExecuteCallData(tokenAddress, 0n, encodeErc20Transfer(to, amount));
+}
+
+/** Encode `IERC20.approve(spender, amount)` — bounded only. */
+export function encodeErc20Approve(spender: Address, amount: bigint): Hex {
+  return encodeFunctionData({
+    abi: ERC20_TRANSFER_ABI,
+    functionName: "approve",
+    args: [spender, amount],
+  });
+}
+
+/**
+ * Wrap a sequence of (target, value, data) inner calls into
+ * `SimpleAccount.executeBatch(...)` calldata. Used by the swap path
+ * (#192) to atomically `approve(router, amount)` and call the router
+ * in a single UserOperation — splitting into two UserOps would let
+ * an attacker race the approval against the swap, while one batched
+ * UserOp keeps the approval scope bounded to the same operation.
+ */
+export function buildExecuteBatchCallData(
+  calls: ReadonlyArray<{ target: Address; value: bigint; data: Hex }>,
+): Hex {
+  const targets = calls.map((c) => c.target);
+  const values = calls.map((c) => c.value);
+  const datas = calls.map((c) => c.data);
+
+  return encodeFunctionData({
+    abi: SIMPLE_ACCOUNT_EXECUTE_BATCH_ABI,
+    functionName: "executeBatch",
+    args: [targets, values, datas],
+  });
+}
+
+/**
+ * Convenience: build the UserOperation `callData` for a 0x-style
+ * exact-input swap: bounded `approve(spender, inputAmount)` followed
+ * by the router call (`target`, `value`, `routerCalldata`). Both
+ * inner calls are batched into a single
+ * `SimpleAccount.executeBatch(...)` so they share atomicity.
+ *
+ * The approval is bounded to the input amount being swapped; we do
+ * not request unlimited (`MAX_UINT256`) authority. The 0x routing
+ * contract retains the residual allowance until the next swap, which
+ * is acceptable for v0.1 because the input amount is exactly the
+ * amount the operator just approved spending.
+ */
+export function buildSwapBatchCallData(params: {
+  inputToken: Address;
+  spender: Address;
+  swapTarget: Address;
+  swapValue: bigint;
+  swapCalldata: Hex;
+  approveAmount: bigint;
+}): Hex {
+  return buildExecuteBatchCallData([
+    {
+      target: params.inputToken,
+      value: 0n,
+      data: encodeErc20Approve(params.spender, params.approveAmount),
+    },
+    {
+      target: params.swapTarget,
+      value: params.swapValue,
+      data: params.swapCalldata,
+    },
+  ]);
 }
 
 /**

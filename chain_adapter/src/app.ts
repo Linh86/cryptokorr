@@ -100,7 +100,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       status: "ok",
       service: "cryptobank-ts-adapter",
       contract_version: config.contractVersion,
-      supported_chains: ["base"],
+      supported_chains: ["base", "base-sepolia"],
       supported_assets: ["USDC"],
       timestamp: new Date().toISOString(),
     });
@@ -134,6 +134,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
     async (request: FastifyRequest, reply) => {
       const result = await handleSwapDispatch(request.body, {
         callbackClient,
+        baseClients,
       });
 
       return reply.status(202).send(result);

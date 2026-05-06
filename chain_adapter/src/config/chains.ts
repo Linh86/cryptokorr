@@ -1,8 +1,13 @@
 /**
- * Chain configuration — Base only in v0.1.
+ * Chain configuration — Base mainnet + Base Sepolia.
  *
- * No multi-chain abstraction. This module is deliberately narrow:
- * one chain, one set of constants.
+ * Both chain *labels* are accepted on the dispatch envelope. Which
+ * actual network the adapter operates on is determined by the
+ * deployment's `BASE_CHAIN_ID` env var (8453 mainnet / 84532 sepolia)
+ * plus the matching `BASE_RPC_URL` / `BUNDLER_RPC_URL`. Accepting both
+ * labels keeps the adapter compatible with the v0.1 mainnet transfer
+ * path AND the #192 MVP testnet 0x swap path without requiring two
+ * separate deployments to share the same code base.
  */
 
 export const BASE_CHAIN = {
@@ -16,8 +21,16 @@ export const BASE_CHAIN = {
   maxGasPriceGwei: 5n,
 } as const;
 
-export type SupportedChain = "base";
+export const BASE_SEPOLIA_CHAIN = {
+  id: 84532,
+  name: "base-sepolia",
+  confirmations: 2,
+  blockTimeSeconds: 2,
+  maxGasPriceGwei: 5n,
+} as const;
+
+export type SupportedChain = "base" | "base-sepolia";
 
 export function isSupportedChain(chain: string): chain is SupportedChain {
-  return chain === "base";
+  return chain === "base" || chain === "base-sepolia";
 }
