@@ -182,28 +182,38 @@ documented escape hatch.
   placeholders; per-tenant key issuance is tracked separately
   (`docs/security.md`). Manual writes attribute to `:user` with
   no actor id.
-- **Browser wallet identity binding (#169) + scoped session
-  install request (#171) land.** The browser connects on Base
-  Sepolia, signs an EIP-191 challenge via `personal_sign`
-  (verified by `Bank.WalletBindings`), and once the EOA is bound
-  the operator sees the canonical `Bank.SessionPermissions.Scope`
-  summary (USDC transfer, 0x swap, allowlisted Morpho USDC
-  deposit; withdraw / arbitrary calldata / unlimited approvals /
-  leverage / mainnet explicitly denied) and clicks Install. The
-  Phoenix-side context gates on a verified Sepolia binding,
-  refuses while the runtime or workspace is paused, blocks
-  duplicate installs, and dispatches through the existing
-  `Bank.Runtime.Workers.GrantDelegation` worker. The install
-  UserOp itself is still signed server-side by
-  `OPERATOR_PRIVATE_KEY` (`chain_adapter/src/chains/base/grant.ts`)
-  — browser-side delegation-payload signing remains blocked on
-  the wagmi/viem (or WalletConnect) SDK choice and delegation
-  type (ERC-7579 vs EntryPoint v0.7) tracked in
-  `docs/wallet-connect.md`. The operator-facing onboarding
-  walkthrough + troubleshooting matrix landed under #172 in
-  [`docs/wallet-quickstart.md`](wallet-quickstart.md), with the
-  local mocked happy-path smoke pinned by
-  `Bank.Smoke.WalletDelegationSmokeTest`. (Was #43.)
+- **Browser-signed install epic #471 lands.** The browser
+  connects on Base Sepolia, signs the EIP-191 binding challenge
+  via `personal_sign` (verified by `Bank.WalletBindings`), and the
+  user's EOA also signs the install UserOperation in the browser
+  — `OPERATOR_PRIVATE_KEY` is no longer in the normal install
+  path. Phoenix's three install endpoints
+  (`GET /install_envelope`, `POST /install_attestation`,
+  `GET /install_status` — #474) drive the lifecycle through
+  `awaiting → submitted → verifying → active | failed` with the
+  delegation row only flipping `:active` after
+  `Bank.Runtime.Workers.VerifyInstallOnchain` reads the kernel
+  via `eth_call` and confirms the validator is installed.
+  Failure categories are pinned to a fixed allowlist
+  (`user_rejected | bundler_rejected | bundler_unavailable |
+  chain_id_mismatch | insufficient_funds | userop_reverted |
+  attestation_timeout | unknown`) — no free-form upstream string
+  reaches `last_reason` or any audit row. Revoke posture (#475)
+  branches on `delegations.root_validator_owner`: legacy
+  `:operator`-rooted rows keep cryptographic revoke; new
+  `:user`-rooted rows take the v0.1 sentinel audit anchor (the
+  user-signed cryptographic revoke flow is a v0.2 follow-up).
+  Reviewer-ready smoke runbook:
+  [`docs/runbooks/browser-signed-install-smoke.md`](runbooks/browser-signed-install-smoke.md).
+  Architecture: [`docs/design/browser-signed-install.md`](design/browser-signed-install.md).
+  (Closes the #43 / #169 / #171 / #172 lineage.)
+- **Honest gap inside #471.** The frontend ZeroDev SDK + bundler
+  wiring landed as a scaffold (#473) — the JS hook still
+  synthesises the `submitted → confirmed` transition with
+  `setTimeout`. Phoenix-side state machine is fully exercisable;
+  the real on-chain happy path requires Path B in the smoke
+  runbook (manual `cast` UserOp or dev-console SDK injection)
+  until the SDK call is wired in a v0.2 follow-up.
 - **Cloud staging blocked on credentials.** `docs/staging.md`:
   code-side ready, but provider, Postgres, bundler keys, paymaster
   keys, DNS, smoke run all manual. (Was #35 remainder.)
@@ -283,8 +293,11 @@ or staging:
    simulation and advances the intent pointer; the others are
    history-only.
 8. **Revoke.** `POST /v1/security/revoke_delegation` triggers the
-   cryptographic revoke flow on Base Sepolia (or sentinel-era
-   fallback if `permission` block is absent).
+   revoke worker. For legacy `:operator`-rooted rows the adapter
+   signs `Kernel.uninstallValidation(...)` with
+   `OPERATOR_PRIVATE_KEY`. For browser-signed `:user`-rooted rows
+   (#475) the worker takes the sentinel audit anchor — the
+   v0.2 user-signed cryptographic revoke flow is a follow-up.
 
 The smoke runbook at `docs/mvp-smoke-runbook.md` carries the curl
 recipes for every step.
@@ -296,8 +309,10 @@ recipes for every step.
   Multi-tenant deployments need an explicit smart_account_id field
   on the intent contract.
 - Agent API auth is documented but not enforced.
-- Browser-native wallet connect UX is a stub — operator-driven
-  flow only.
+- Browser-signed install (epic #471) ships with the #473 frontend
+  ZeroDev SDK + bundler wiring as a scaffold; full real on-chain
+  reproducibility uses Path B of
+  [`docs/runbooks/browser-signed-install-smoke.md`](runbooks/browser-signed-install-smoke.md).
 - Single-operator alpha; no SSO, no rate limits on `/v1/`, no
   per-tenant isolation.
 - No HSM/KMS for `OPERATOR_PRIVATE_KEY` (env var with startup
