@@ -442,6 +442,93 @@ flow, approve / reject, workspace switcher, chain gating — is in
 A fresh DB cannot reach `/dashboard` or `/v1/intents` until a
 bootstrap admin approves the first user into a workspace.
 
+## Build agents on top of CryptoBank
+
+Three packages share the `/v1/*` API surface so an agent can submit
+intents, follow decisions, and surface approval-required state to a
+human without hand-rolling HTTP. The shared contract lives under
+[`docs/api/`](docs/api/README.md); each package's
+[`sdks/<package>/README.md`](sdks/README.md) documents its full
+surface.
+
+| Package                                       | Audience                         | Install (after publish)             |
+| --------------------------------------------- | -------------------------------- | ----------------------------------- |
+| [`cryptobank`](sdks/python/README.md)         | Python services / agent runtimes | `pip install cryptobank`            |
+| [`@cryptobank/sdk`](sdks/typescript/README.md) | Node 18+ servers / edge          | `npm install @cryptobank/sdk`       |
+| [`cryptobank-mcp`](sdks/mcp/README.md)        | stdio MCP hosts (Claude Desktop, Cursor) | `pip install cryptobank-mcp` |
+
+All three target Base Sepolia (`chain: "base-sepolia"`) and USDC by
+default; mainnet (`chain: "base"`) is gated behind a workspace flag and
+surfaces as `mainnet_disabled` until enabled. API keys are read from
+`CRYPTOBANK_API_KEY` — never hardcode.
+
+A first transfer intent looks the same in every SDK:
+
+```python
+# Python
+from cryptobank import Cryptobank
+client = Cryptobank.from_env()  # CRYPTOBANK_API_KEY + CRYPTOBANK_BASE_URL
+
+result = client.submit_transfer(
+    agent_id="agent-alice",
+    asset="USDC",
+    chain="base-sepolia",
+    amount="10.50",
+    target={"counterparty_id": "b6a10f53-8c6e-4d79-9bb9-3e1e5b1f1a11"},
+)
+wait = client.wait_for_decision(result["intent_id"], timeout_seconds=30)
+# wait["requires_approval"] is True for approval_required — that is a
+# successful response, not an exception. The agent should hand off to a
+# human, not loop.
+```
+
+```ts
+// TypeScript
+import { Cryptobank } from "@cryptobank/sdk";
+const client = Cryptobank.fromEnv();
+
+const result = await client.submitTransfer({
+  agentId: "agent-alice",
+  asset: "USDC",
+  chain: "base-sepolia",
+  amount: "10.50",
+  target: { counterpartyId: "b6a10f53-8c6e-4d79-9bb9-3e1e5b1f1a11" },
+});
+const decision = await client.waitForDecision(result.intentId, { timeoutSeconds: 30 });
+// decision.outcome === "approval_required" is a successful response; do
+// not loop.
+```
+
+For Claude Desktop / Cursor / other MCP-aware hosts, drop this into
+your MCP config and restart the host:
+
+```json
+{
+  "mcpServers": {
+    "cryptobank": {
+      "command": "cryptobank-mcp",
+      "env": {
+        "CRYPTOBANK_API_KEY": "cb_your_key_here",
+        "CRYPTOBANK_BASE_URL": "https://api.your-tenant.example.com",
+        "CRYPTOBANK_READONLY": "false"
+      }
+    }
+  }
+}
+```
+
+Set `CRYPTOBANK_READONLY=true` to omit write and operator tools from
+`tools/list` entirely — useful for read-only audit chatbots. The full
+tool list and JSON Schemas are in
+[`docs/api/mcp-tools.md`](docs/api/mcp-tools.md). Forbidden surfaces
+(delegation revoke, policy edits, trust mutation, API-key management,
+chain/agent pause-resume, abort_execution, browser-wallet flows) are
+**never** exposed as MCP tools — those stay on the operator console.
+
+The release/publish workflow for all three packages lives in
+[`sdks/PUBLISHING.md`](sdks/PUBLISHING.md). Publishing is **manual
+and authorization-gated** — CI does not push to PyPI or npm.
+
 ## Schema strategy
 
 The domain schema (issue #4) is deliberately explicit about a few
