@@ -163,6 +163,14 @@ defmodule Bank.Quotes do
 
     case resolve_provider(setting) do
       {:ok, module} ->
+        # `Code.ensure_loaded/1` is load-bearing: under ExUnit's
+        # async runner the provider module may not be loaded yet
+        # when this function is first called, and a bare
+        # `function_exported?/3` would silently fall through to the
+        # Module.split fallback (returning e.g. "liveprovider"
+        # instead of the contract id "tenderly").
+        _ = Code.ensure_loaded(module)
+
         if function_exported?(module, :provider_id, 0) do
           module.provider_id()
         else

@@ -44,6 +44,13 @@ export const DispatchTransferSchema = z.object({
 });
 export type DispatchTransfer = z.infer<typeof DispatchTransferSchema>;
 
+/**
+ * 0x-prefixed hex blob (calldata, signed payloads, etc.). Length is not
+ * pinned — calldata size depends on the encoded function. Empty `"0x"`
+ * is rejected because a swap call must carry an inner function selector.
+ */
+const hexBlob = z.string().regex(/^0x[0-9a-fA-F]+$/);
+
 /** POST /dispatch/swap */
 export const DispatchSwapSchema = z.object({
   contract_version: z.literal(1),
@@ -60,6 +67,22 @@ export const DispatchSwapSchema = z.object({
   route: z.object({
     venue: z.string().min(1),
     path: z.array(z.string()),
+    // Execution-route fields (optional, additive). #189 / #190 produce a
+    // rich route map; the wire-level dispatch envelope passes the
+    // adapter-relevant subset under `route` so the adapter can build the
+    // approve+swap UserOperation. When all required execution fields are
+    // present the adapter dispatches a real UserOp; when any is missing
+    // it aborts with `swap_route_incomplete: <field>`. Quote-only routes
+    // (without execution fields) preserve the v0.1 fail-closed posture.
+    swap_target_contract: hexAddress.optional(),
+    calldata: hexBlob.optional(),
+    spender: hexAddress.optional(),
+    source_token_address: hexAddress.optional(),
+    destination_token_address: hexAddress.optional(),
+    minimum_output_amount: decimalString.optional(),
+    value: decimalString.optional(),
+    route_provider: z.string().min(1).optional(),
+    deadline: rfc3339.optional(),
   }),
   signing_requirements: z.object({
     delegation_id: z.string().min(1),
