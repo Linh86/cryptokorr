@@ -24,11 +24,16 @@ smoke runbook lives in [`docs/mvp-smoke-runbook.md`](mvp-smoke-runbook.md).
   arbitrary calldata, unlimited approvals, borrow / leverage, and
   mainnet are explicitly denied — see the **Permission scope**
   section below for the plain-language rendering.
-- The MVP browser flow does **not** sign the install UserOp itself.
-  The browser signs the EIP-191 binding challenge; the install
-  UserOp is signed server-side by `OPERATOR_PRIVATE_KEY` inside the
-  adapter. Browser-side signing of the install UserOp is tracked
-  under the wagmi/viem follow-up in `docs/wallet-connect.md`.
+- The MVP browser flow signs **both** the EIP-191 binding challenge
+  AND the install UserOperation in the browser via the user's
+  connected EOA wallet. `OPERATOR_PRIVATE_KEY` is **not** involved
+  in the normal install path — Phoenix marks the delegation
+  `:active` only after `Bank.Runtime.Workers.VerifyInstallOnchain`
+  reads the kernel and confirms the validator is installed (#474).
+  See [`docs/runbooks/browser-signed-install-smoke.md`](runbooks/browser-signed-install-smoke.md)
+  for the reviewer-ready smoke runbook and
+  [`docs/design/browser-signed-install.md`](design/browser-signed-install.md)
+  for the architecture.
 
 ## Before you start
 
@@ -101,27 +106,49 @@ allowed and denied actions, sourced from
 the agent's full authority on Base Sepolia for the duration of the
 delegation.
 
-### 5. Install
+### 5. Install (browser-signed)
 
 Click **Install session permission**
-(`#install-session-permission-btn`). Phoenix:
+(`#session-permission-browser-install-btn`). The browser-driven
+flow (epic #471) takes over:
 
-1. Validates the binding is verified, on Base Sepolia, and the
-   workspace + runtime are not paused.
-2. Stamps a `session_permission.install_requested` audit event with
-   the binding id, smart-account id, address, chain id, and scope
-   summary — never a nonce, signature, or session signer key.
-3. Dispatches through `Bank.Runtime.Workers.GrantDelegation` to the
-   adapter's `POST /dispatch/grant_delegation` endpoint. The
-   adapter signs the install UserOp server-side with
-   `OPERATOR_PRIVATE_KEY`, broadcasts it to the bundler, and emits
-   `delegation.state_changed{state: "granted"}` once on chain.
+1. Phoenix returns the canonical install envelope from
+   `GET /v1/wallet_bindings/:id/install_envelope` — scope JSON,
+   `scope_hash`, kernel + permissions package version, and the
+   browser-tier bundler RPC URL.
+2. The JS hook checks the wallet is on Base Sepolia (84532); any
+   other chain pushes `session_permission_install:wrong_chain`
+   without invoking `eth_requestAccounts`.
+3. Your wallet pops a `personal_sign` prompt over the
+   server-issued scope-bound message. Sign it.
+4. The browser builds and submits the install UserOperation through
+   the public-tier bundler — **your EOA is the signer**.
+   `OPERATOR_PRIVATE_KEY` is not involved.
+5. The browser POSTs each lifecycle step to
+   `POST /v1/wallet_bindings/:id/install_attestation`
+   (`submitted`, then `confirmed` with the bundler `tx_hash` +
+   `block_number`). On `confirmed`, Phoenix enqueues
+   `Bank.Runtime.Workers.VerifyInstallOnchain` — it does **not**
+   mark the delegation `:active` from the browser report alone.
+6. The verifier worker reads the kernel's installed validator set
+   via `eth_call`. Only after the on-chain check passes does the
+   delegation row flip to `:active`.
 
 While the install is in flight the card shows
-`#session-permission-installing` ("Installing — awaiting adapter
-callback…"). When the granted callback lands, the
+`#session-permission-installing` ("Installing — awaiting on-chain
+verification…"). When the verifier passes, the
 **Smart Account Delegation** card on the left flips to **Active**
-with the on-chain tx hash.
+with the on-chain tx hash and an emitted
+`delegation.install_confirmed_onchain` audit event.
+
+> **Honest gap (v0.2 follow-up):** the JS hook in `main` ships the
+> #473 scaffold, which still synthesises the bundler
+> `submitted → confirmed` transition with a `setTimeout`
+> stand-in. Until the real ZeroDev SDK call is wired, the
+> verifier worker's `eth_call` returns `:not_installed` and the
+> row terminates as `:install_failed`. Reviewers running the full
+> on-chain happy path should follow Path B in
+> [`docs/runbooks/browser-signed-install-smoke.md`](runbooks/browser-signed-install-smoke.md).
 
 ### 6. Run an intent
 
@@ -134,11 +161,23 @@ section walks the curl form.
 
 When you are done, click **Revoke delegation**
 (`#revoke-btn`) on the delegation card. Phoenix calls
-`Bank.Security.revoke_delegation/2`, which dispatches the
-cryptographic `Kernel.uninstallValidation(...)` call through the
-adapter. The card flips to **Revoking** then **Revoked**, and any
-follow-up intent for that smart account is held / blocked by the
-runtime decision pipeline.
+`Bank.Security.revoke_delegation/2`. The revoke worker
+(`Bank.Runtime.Workers.RevokeDelegation`) branches on the row's
+`root_validator_owner` (#475):
+
+- **Operator-rooted (legacy)** — adapter signs
+  `Kernel.uninstallValidation(...)` with `OPERATOR_PRIVATE_KEY`.
+  Card flips to **Revoking** then **Revoked**.
+- **User-rooted (browser-signed)** — operator EOA cannot
+  cryptographically uninstall a user-rooted kernel. v0.1 ships the
+  **sentinel audit anchor** (no-op `execute(self, 0, 0x)` UserOp)
+  as the operator-emergency revoke posture. The user-signed
+  cryptographic revoke flow is a v0.2 follow-up — see
+  [`docs/design/browser-signed-install.md`](design/browser-signed-install.md)
+  § 6.
+
+Either path: any follow-up intent for that smart account is held /
+blocked by the runtime decision pipeline.
 
 ## Permission scope
 
@@ -187,11 +226,14 @@ If a step blocks for more than ~30 seconds, check
 ## Security guarantees
 
 - **No private-key paste**, ever. The browser hook signs the
-  server-issued binding message via `personal_sign`; Phoenix never
-  receives or stores key material. The on-chain validator key
-  (`OPERATOR_PRIVATE_KEY`) lives only in the adapter's runtime
-  environment and is sourced from the operator's secrets manager —
-  see [`docs/operator-secrets-checklist.md`](operator-secrets-checklist.md).
+  server-issued binding message AND the install UserOperation via
+  the user's EOA (`personal_sign` for the binding,
+  EIP-4337-compliant signature for the install). Phoenix never
+  receives or stores key material. `OPERATOR_PRIVATE_KEY` is NOT
+  involved in the normal install path — it remains the legacy
+  cryptographic-revoke key for `:operator`-rooted delegations and
+  is sourced from the operator's secrets manager (see
+  [`docs/operator-secrets-checklist.md`](operator-secrets-checklist.md)).
 - **No signing surface beyond `personal_sign`** in the browser hook.
   `eth_sign`, `eth_signTransaction`, `eth_signTypedData*`, and any
   broadcast method are forbidden by source-level guard

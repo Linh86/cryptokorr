@@ -335,11 +335,13 @@ Each LiveView passes an `active_page` assign to the shared
   surfaces the canonical scope summary (USDC transfer, 0x swap,
   allowlisted Morpho USDC vault deposit; withdraw / arbitrary
   calldata / unlimited approvals / leverage / mainnet explicitly
-  denied), and dispatches the install request to the adapter
-  (#171). Phoenix persists the resulting delegation. The repo does
-  not yet include a client-side wallet SDK (WalletConnect, wagmi)
-  for *signing the install UserOp itself* — the install UserOp
-  is still signed server-side by `OPERATOR_PRIVATE_KEY`.
+  denied), and the user's connected EOA signs both the EIP-191
+  binding challenge AND the install UserOperation in the browser
+  (epic #471). `OPERATOR_PRIVATE_KEY` is NOT involved in the normal
+  install path; Phoenix marks the delegation `:active` only after
+  the on-chain verifier worker reads the kernel and confirms the
+  validator is installed (#474). Reviewer-ready smoke runbook:
+  `docs/runbooks/browser-signed-install-smoke.md`.
 * **Public intent intake.** `POST /v1/intents`, `GET /v1/intents/:id`,
   `POST /v1/intents/:id/simulate`, and `POST /v1/intents/:id/cancel`
   remain stubbed while the trust + simulation pipeline is still being

@@ -184,16 +184,22 @@ Audit `session_permission.install_requested` carries the
 `wallet_binding_id`, `smart_account_id`, address, chain id, and
 scope summary — never a nonce, signature, or session signer key.
 
-The install UserOp itself is still signed server-side by
-`OPERATOR_PRIVATE_KEY` inside the adapter (`grant.ts`) — the
-browser provides the consent gate, scope summary, and EOA
-identity, but does not yet construct the permission UserOp.
-Browser-side signing of the delegation payload remains blocked on
-the wallet-SDK choice (wagmi vs WalletConnect) plus a delegation
-type (ERC-7579 session key vs EntryPoint v0.7 native session
-key). Until that lands, the adapter-callback flow remains the
-production path and `POST /v1/connect/smart_account` carries
-`delegation_payload: null` for operator-driven flows.
+**Browser-signed install lands under epic #471.** The user's
+connected EOA signs the install UserOperation directly via the
+ZeroDev SDK; `OPERATOR_PRIVATE_KEY` is no longer in the normal
+install path. Phoenix's three install endpoints (#474) drive the
+lifecycle through `awaiting → submitted → verifying → active |
+failed`, with the delegation row only flipping `:active` after
+`Bank.Runtime.Workers.VerifyInstallOnchain` reads the kernel via
+`eth_call` and confirms the validator is installed. Revoke
+posture (#475) branches on `delegations.root_validator_owner`:
+legacy `:operator` rows keep cryptographic revoke; new `:user`
+rows take the v0.1 sentinel audit anchor. Reviewer-ready smoke
+runbook: [`docs/runbooks/browser-signed-install-smoke.md`](runbooks/browser-signed-install-smoke.md).
+Architecture: [`docs/design/browser-signed-install.md`](design/browser-signed-install.md).
+Legacy operator-driven dispatch (`POST /v1/connect/smart_account`
+with `delegation_payload: null`) is preserved for adapter
+integration tests and back-compat with pre-#471 deployments.
 
 **Operator runbook**: end-to-end cryptographic grant + revoke
 runs against a provisioned `OPERATOR_PRIVATE_KEY` matching the
