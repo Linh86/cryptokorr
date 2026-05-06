@@ -478,6 +478,46 @@ defmodule Bank.IntentsTest do
     end
   end
 
+  describe "submit/2 — allocate_idle_capital public kind (#203 P2)" do
+    test "accepts allocate_idle_capital → maps to :defi_yield_deposit on base-sepolia" do
+      raw = "0xabcdef0000000000000000000000000000000abc"
+
+      body =
+        valid_body(%{
+          "kind" => "allocate_idle_capital",
+          "chain" => "base-sepolia",
+          "target" => %{"raw_address" => raw}
+        })
+
+      assert {:ok, %{intent: intent}} = Intents.submit(body)
+      assert intent.kind == :defi_yield_deposit
+      assert intent.chain == "base-sepolia"
+      assert intent.target_raw_address == raw
+    end
+
+    test "rejects allocate_idle_capital with chain: \"base\" (mainnet) at boundary" do
+      body =
+        valid_body(%{
+          "kind" => "allocate_idle_capital",
+          "chain" => "base",
+          "target" => %{"raw_address" => "0xabcdef0000000000000000000000000000000abc"}
+        })
+
+      assert {:error, {:morpho_chain_not_supported, "base"}} = Intents.submit(body)
+    end
+
+    test "rejects the internal name `defi_yield_deposit` on the public surface" do
+      body =
+        valid_body(%{
+          "kind" => "defi_yield_deposit",
+          "chain" => "base-sepolia",
+          "target" => %{"raw_address" => "0xabcdef0000000000000000000000000000000abc"}
+        })
+
+      assert {:error, {:invalid, :kind}} = Intents.submit(body)
+    end
+  end
+
   defp valid_body(overrides) when is_map(overrides) do
     %{
       "idempotency_key" => "k-#{System.unique_integer([:positive])}",

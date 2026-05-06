@@ -210,6 +210,89 @@ defmodule BankWeb.API.V1.IntentControllerTest do
     end
   end
 
+  describe "POST /v1/intents — allocate_idle_capital (#203 P2)" do
+    test "creates a Morpho deposit intent and renders the public kind back",
+         %{conn: conn} do
+      raw = "0xabcdef0000000000000000000000000000000abc"
+
+      payload =
+        valid_payload(%{
+          "agent_id" => "agent-morpho",
+          "idempotency_key" => "k-morpho-#{System.unique_integer([:positive])}",
+          "kind" => "allocate_idle_capital",
+          "chain" => "base-sepolia",
+          "target" => %{"raw_address" => raw}
+        })
+
+      conn = post(conn, ~p"/v1/intents", payload)
+      body = json_response(conn, 202)
+
+      assert body["state"] == "submitted"
+      assert body["intent"]["kind"] == "allocate_idle_capital"
+      assert body["intent"]["chain"] == "base-sepolia"
+
+      intent = Repo.get!(AgentIntent, body["intent_id"])
+      assert intent.kind == :defi_yield_deposit
+      assert intent.chain == "base-sepolia"
+      assert intent.target_raw_address == raw
+    end
+
+    test "rejects allocate_idle_capital with chain: \"base\" (mainnet) at the boundary",
+         %{conn: conn} do
+      payload =
+        valid_payload(%{
+          "agent_id" => "agent-morpho-base",
+          "idempotency_key" => "k-morpho-base",
+          "kind" => "allocate_idle_capital",
+          "chain" => "base",
+          "target" => %{"raw_address" => "0xabcdef0000000000000000000000000000000abc"}
+        })
+
+      conn = post(conn, ~p"/v1/intents", payload)
+      body = json_response(conn, 422)
+
+      assert body["error"]["code"] == "morpho_chain_not_supported"
+      assert body["error"]["message"] =~ "base"
+      assert body["error"]["hint"] =~ "base-sepolia"
+
+      # No intent or job persisted.
+      refute_enqueued(worker: EvaluateIntent)
+    end
+
+    test "rejects the internal name `defi_yield_deposit` on the public surface",
+         %{conn: conn} do
+      payload =
+        valid_payload(%{
+          "agent_id" => "agent-morpho-internal",
+          "idempotency_key" => "k-morpho-internal",
+          "kind" => "defi_yield_deposit",
+          "chain" => "base-sepolia",
+          "target" => %{"raw_address" => "0xabcdef0000000000000000000000000000000abc"}
+        })
+
+      conn = post(conn, ~p"/v1/intents", payload)
+      body = json_response(conn, 422)
+
+      # Public surface only knows `allocate_idle_capital` for Morpho;
+      # the internal atom string is never accepted as a public kind.
+      assert body["error"]["code"] in ["invalid_body", "invalid_kind"]
+    end
+
+    test "GET /v1/intents/:id renders kind as the public string",
+         %{conn: conn} do
+      intent =
+        Fixtures.agent_intent(
+          kind: :defi_yield_deposit,
+          chain: "base-sepolia"
+        )
+
+      conn = get(conn, ~p"/v1/intents/#{intent.id}")
+      body = json_response(conn, 200)
+
+      assert body["intent"]["kind"] == "allocate_idle_capital"
+    end
+  end
+
   describe "GET /v1/intents/:id" do
     test "returns the submitted intent", %{conn: conn} do
       intent = Fixtures.agent_intent()
