@@ -79,6 +79,7 @@ defmodule Bank.Runtime.Workers.RunExecution do
   alias Bank.AdapterClient
   alias Bank.Audit.Events
   alias Bank.Decisions
+
   alias Bank.Decisions.{
     DecisionEnvelope,
     ExecutionPlan,
@@ -86,6 +87,7 @@ defmodule Bank.Runtime.Workers.RunExecution do
     SwapDispatchSafety,
     SwapRouteArtifacts
   }
+
   alias Bank.Delegations
   alias Bank.Intents.AgentIntent
   alias Bank.Repo

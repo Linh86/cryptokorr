@@ -437,6 +437,116 @@ defmodule Bank.Audit.Events do
   defp reason_to_string(reason) when is_binary(reason), do: reason
 
   @doc """
+  `morpho.withdraw_previewed` — operator inspected the vault's
+  withdraw preview without yet committing to a request (#207).
+
+  Subject is the vault snapshot the preview was computed against
+  (so audit consumers grouping by snapshot see the operator's
+  inspection alongside the agent's deposit attribution). Carries
+  a `correlation_id` the caller threads across the
+  `morpho.withdraw_*` chain so replay can rebuild the
+  operator-action narrative independently of any intent.
+
+  Withdraw is operator-only and never agent-initiated; the
+  `actor` is hardcoded `:user` (operator).
+  """
+  @spec morpho_withdraw_previewed(String.t() | nil, map(), keyword()) :: attrs()
+  def morpho_withdraw_previewed(workspace_id, preview, opts \\ []) do
+    %{
+      actor: :user,
+      actor_id: Keyword.get(opts, :actor_id),
+      event_type: "morpho.withdraw_previewed",
+      subject_type: "morpho_vault_snapshot",
+      subject_id: Map.get(preview, :snapshot_id),
+      correlation_id: Keyword.get(opts, :correlation_id),
+      after_ref: %{
+        vault_address: Map.get(preview, :vault_address),
+        chain_id: Map.get(preview, :chain_id),
+        requested_assets: decimal_to_string(Map.get(preview, :requested_assets)),
+        max_withdrawable: decimal_to_string(Map.get(preview, :max_withdrawable)),
+        would_block: Map.get(preview, :would_block?),
+        would_partial: Map.get(preview, :would_partial?),
+        snapshot_payload_hash: Map.get(preview, :snapshot_payload_hash),
+        snapshot_fetched_at: Map.get(preview, :snapshot_fetched_at)
+      },
+      workspace_id: workspace_id
+    }
+  end
+
+  @doc """
+  `morpho.withdraw_blocked` — operator-initiated withdraw refused
+  by the safety gate (#207). Reason is one of the operator
+  failure atoms (`:morpho_withdraw_blocked` for insufficient
+  liquidity, `:morpho_withdraw_partial_required` for partial
+  without explicit consent).
+
+  Subject is the synthetic correlation_id (no vault snapshot
+  context if the gate refused before snapshot lookup); audit
+  consumers find the chain via `correlation_id`.
+  """
+  @spec morpho_withdraw_blocked(
+          String.t() | nil,
+          String.t() | nil,
+          atom() | String.t(),
+          keyword()
+        ) :: attrs()
+  def morpho_withdraw_blocked(workspace_id, vault_address, reason, opts \\ []) do
+    correlation_id = Keyword.get(opts, :correlation_id)
+
+    %{
+      actor: :user,
+      actor_id: Keyword.get(opts, :actor_id),
+      event_type: "morpho.withdraw_blocked",
+      subject_type: "morpho_withdraw_request",
+      subject_id: correlation_id,
+      correlation_id: correlation_id,
+      after_ref: %{
+        vault_address: vault_address,
+        reason: reason_to_string(reason)
+      },
+      workspace_id: workspace_id
+    }
+  end
+
+  @doc """
+  `morpho.withdraw_planned` — operator-initiated withdraw
+  accepted by the safety gate; the request is recorded in the
+  audit log and is ready for the (future) adapter dispatch
+  slice to broadcast the ERC-4626 `withdraw(assets, receiver,
+  owner)` UserOperation (#207 follow-up).
+
+  `effective_assets` is the amount that will actually be
+  requested at dispatch — equal to `requested_assets` for a
+  full withdraw, or clamped to `max_withdrawable` when the
+  operator explicitly accepted a partial flow.
+  """
+  @spec morpho_withdraw_planned(String.t() | nil, map(), Decimal.t(), boolean(), keyword()) ::
+          attrs()
+  def morpho_withdraw_planned(workspace_id, preview, effective_assets, partial?, opts \\ []) do
+    correlation_id = Keyword.get(opts, :correlation_id)
+
+    %{
+      actor: :user,
+      actor_id: Keyword.get(opts, :actor_id),
+      event_type: "morpho.withdraw_planned",
+      subject_type: "morpho_withdraw_request",
+      subject_id: correlation_id,
+      correlation_id: correlation_id,
+      after_ref: %{
+        vault_address: Map.get(preview, :vault_address),
+        chain_id: Map.get(preview, :chain_id),
+        requested_assets: decimal_to_string(Map.get(preview, :requested_assets)),
+        effective_assets: decimal_to_string(effective_assets),
+        max_withdrawable: decimal_to_string(Map.get(preview, :max_withdrawable)),
+        partial: partial?,
+        snapshot_id: Map.get(preview, :snapshot_id),
+        snapshot_payload_hash: Map.get(preview, :snapshot_payload_hash)
+      },
+      workspace_id: workspace_id
+    }
+  end
+
+  @doc """
   `execution.<status>` — execution-plan status transition. The status
   is derived from the plan's `execution_status` so the caller only
   hands in the plan.

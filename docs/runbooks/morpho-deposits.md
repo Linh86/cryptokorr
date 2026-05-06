@@ -189,7 +189,67 @@ A live deposit cannot be "rolled back" once the on-chain tx confirms. To unwind:
 
 - **Pre-broadcast failure** (`:dispatch :adapter_unavailable` or `:adapter_rejected`): no on-chain effect; the plan transitions to `:aborted`. Re-run after fixing the underlying cause.
 - **Post-broadcast failure** (`:reverted`): the on-chain tx confirmed but reverted; no funds moved. The plan transitions to `:reverted` with the safe `final_reason` from the adapter callback.
-- **Post-confirmation withdrawal**: operator-only, lives in #207. **Do not** attempt to "undo" a confirmed deposit through any agent path; use the operator-only withdraw path once #207 lands.
+- **Post-confirmation withdrawal**: operator-only via the safety path described below. **Do not** attempt to "undo" a confirmed deposit through any agent path.
+
+## Operator-only Morpho withdraw safety path (#207)
+
+**Permanent product rule: agents can park capital; only operators can withdraw.** Agents have NO callable path — REST, SDK, MCP, or high-level intent — to initiate a Morpho withdraw or redeem. The `Bank.Intents.AgentIntent.@kinds` enum deliberately omits `:withdraw` / `:redeem` / `:morpho_withdraw`, the public `Bank.Intents.normalize/1` boundary refuses all withdraw kind strings, and the operator surface ([`Bank.DefiVenues.Morpho.OperatorWithdraw`](../../lib/bank/defi_venues/morpho/operator_withdraw.ex)) requires `actor_role: :operator`. These invariants are pinned by [`agent_no_withdraw_test.exs`](../../test/bank/defi_venues/morpho/agent_no_withdraw_test.exs).
+
+### What ships in #207
+
+This issue closes the **safety path**: operator-only preview + planning + audit + replay. Adapter-side dispatch (the actual on-chain `IERC4626.withdraw(assets, receiver, owner)` UserOperation broadcast) is the next slice; the audit chain emitted here is forward-compatible — when the adapter dispatch lands it threads the same `correlation_id` through `morpho.withdraw_dispatched` / `morpho.withdraw_confirmed` / `morpho.withdraw_failed` events.
+
+### Operator entry points
+
+Two functions, both operator-only (`actor_role: :operator` required):
+
+- [`Bank.DefiVenues.Morpho.OperatorWithdraw.preview/4`](../../lib/bank/defi_venues/morpho/operator_withdraw.ex) — inspect the vault's withdrawable upper bound + would-block? / would-partial? signals against the workspace's allowlisted vault. Emits `morpho.withdraw_previewed` for replay; does not advance to a request.
+- [`Bank.DefiVenues.Morpho.OperatorWithdraw.request_withdraw/4`](../../lib/bank/defi_venues/morpho/operator_withdraw.ex) — request an actual withdraw. Validates operator role + vault allowlist + snapshot freshness + block-or-explicit-partial gate, emits the `morpho.withdraw_*` audit chain, returns a stable `correlation_id` the operator captures for replay lookup.
+
+### Block-or-explicit-partial gate
+
+Per #207 acceptance — when `requested_assets > snapshot.state.total_assets`:
+
+| Operator opt | Behaviour |
+|---|---|
+| `allow_partial: false` (default) | `{:error, :morpho_withdraw_partial_required}`. Refuse; force the operator to either explicitly accept a partial or scale the request down. |
+| `allow_partial: true` | Accept the request with `effective_assets = max_withdrawable` (clamped). The audit row carries both `requested_assets` and `effective_assets` so post-hoc inspection sees what was asked vs what will broadcast. |
+
+When the snapshot reports `total_assets == 0`: always blocked with `{:error, :morpho_withdraw_blocked}`, regardless of `allow_partial`.
+
+### Why a snapshot-derived ceiling for v0.1
+
+The authoritative `IERC4626.maxWithdraw(owner)` value lives on-chain. v0.1 deliberately avoids a chain read at preview time — the preview layer's job is fail-closed safety, not strict precision. The snapshot's `state.total_assets` is the vault's absolute liquidity ceiling; an operator-initiated request larger than that is unambiguously blockable without a chain round-trip. Treat preview's `:max_withdrawable` as an UPPER bound: actual chain `maxWithdraw` may be lower (other withdrawals, cap reductions, etc.) but never higher.
+
+### Replay narrative
+
+Every operator withdraw action emits a chain of `morpho.withdraw_*` audit events tagged with the same `correlation_id`. The chain shape:
+
+- **Accepted**: `morpho.withdraw_previewed` → `morpho.withdraw_planned`. Future dispatch slice will append `morpho.withdraw_dispatched` → `morpho.withdraw_confirmed` (or `_failed`).
+- **Blocked (zero liquidity OR partial-required without consent)**: `morpho.withdraw_previewed` → `morpho.withdraw_blocked`. The `after_ref.reason` carries the structured failure atom.
+- **Refused before snapshot lookup** (operator-role / vault allowlist / snapshot missing): no `previewed` event; the operator-side `:error` tuple is the audit trail. Future improvement: emit a `morpho.withdraw_blocked` even for these refusals.
+
+The existing `Bank.Audit.replay/1` `morpho_evidence` slice (#208) automatically picks up these events because they share the `morpho.` prefix.
+
+### Hard safety boundaries
+
+- **Operator-only.** `actor_role: :operator` required; `:agent`, `:runtime`, missing role refused with `:operator_role_required`.
+- **Allowlisted vault only.** Workspace's `:allowed_vault` policy rules are the source of truth (case-insensitive on address comparison, mirroring [#206](https://github.com/Linh86/cryptobank/issues/206)'s `MorphoDispatchSafety`).
+- **Base Sepolia + USDC only.** Pinned at the module's `@chain` / `@chain_id` / `@asset` constants.
+- **No agent intent kind for withdraw.** Pinned by `agent_no_withdraw_test.exs`.
+- **No arbitrary calldata.** The future adapter dispatch will build ERC-4626 calldata itself from `vault_address` + `amount` + `receiver` (mirroring [#206](https://github.com/Linh86/cryptobank/issues/206)'s deposit pattern).
+
+### Failure modes
+
+| Atom | Meaning |
+|---|---|
+| `:operator_role_required` | Caller did not pass `actor_role: :operator` |
+| `:morpho_withdraw_vault_not_allowlisted` | Vault not in workspace's `:allowed_vault` rules |
+| `:morpho_withdraw_snapshot_missing` | `Snapshots.get_current/2` returned nil |
+| `:morpho_withdraw_blocked` | Snapshot reports zero liquidity; cannot satisfy any request |
+| `:morpho_withdraw_partial_required` | Request exceeds liquidity; operator must explicitly pass `allow_partial: true` |
+| `:morpho_withdraw_invalid_amount` | `requested_assets` is nil, non-positive, or not a `Decimal.t/0` |
+| `:morpho_withdraw_snapshot_invalid` | Snapshot's `state.total_assets` is missing or unparseable |
 
 > **Mainnet boundary (post-MVP).** Base mainnet for `allocate_idle_capital` is **out of v0.1 scope**. The HTTP boundary fails closed: a public submission with `chain: "base"` is rejected with `morpho_chain_not_supported` regardless of the workspace's `mainnet_enabled` flag (#203 P2). When mainnet support arrives, it requires [#166](https://github.com/Linh86/cryptobank/issues/166) (mainnet operational policy), [#178](https://github.com/Linh86/cryptobank/issues/178) (workspace mainnet eligibility), and the post-MVP exposure / concentration engine that is explicitly tracked outside the MVP plan (#205 was closed post-MVP).
 
