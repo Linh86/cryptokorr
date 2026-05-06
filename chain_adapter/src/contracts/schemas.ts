@@ -51,6 +51,45 @@ export type DispatchTransfer = z.infer<typeof DispatchTransferSchema>;
  */
 const hexBlob = z.string().regex(/^0x[0-9a-fA-F]+$/);
 
+/**
+ * POST /dispatch/morpho_deposit (#206).
+ *
+ * Phoenix-approved Morpho ERC-4626 USDC deposit. The adapter
+ * builds calldata itself from the safe primitives (vault address,
+ * amount, receiver); Phoenix never supplies adapter calldata, and
+ * this schema deliberately has no `calldata` / `swap_target_contract`
+ * fields. The receiver is the smart account.
+ *
+ * Pre-dispatch safety (vault allowlist, chain == base-sepolia,
+ * asset == USDC, snapshot freshness + drift) is the caller's
+ * responsibility — see `Bank.Decisions.MorphoDispatchSafety`. The
+ * adapter trusts those have already cleared and re-checks only the
+ * structural invariants here (chain support, asset support,
+ * payload shape).
+ */
+export const DispatchMorphoDepositSchema = z.object({
+  contract_version: z.literal(1),
+  action: z.literal("morpho_deposit"),
+  execution_plan_id: uuid,
+  intent_id: uuid,
+  smart_account_id: z.string().min(1),
+  chain: z.string().min(1),
+  asset: z.string().min(1),
+  amount: decimalString,
+  vault_address: hexAddress,
+  receiver: z.string().min(1),
+  snapshot_id: uuid.nullable(),
+  snapshot_payload_hash: z.string().min(1).nullable(),
+  policy_rule_ids: z.array(uuid),
+  signing_requirements: z.object({
+    delegation_id: z.string().min(1),
+    scope: z.record(z.unknown()),
+  }),
+  correlation_id: uuid,
+  emitted_at: rfc3339,
+});
+export type DispatchMorphoDeposit = z.infer<typeof DispatchMorphoDepositSchema>;
+
 /** POST /dispatch/swap */
 export const DispatchSwapSchema = z.object({
   contract_version: z.literal(1),

@@ -16,6 +16,7 @@ import type { CallbackClient } from "./callbacks/client.js";
 import type { BaseClients } from "./chains/base/client.js";
 import { handleTransferDispatch } from "./dispatch/transfer.js";
 import { handleSwapDispatch } from "./dispatch/swap.js";
+import { handleMorphoDepositDispatch } from "./dispatch/morpho_deposit.js";
 import { handleRevokeDispatch } from "./dispatch/revoke.js";
 import { handleGrantDispatch } from "./dispatch/grant.js";
 import { AdapterError, ValidationError } from "./lib/errors.js";
@@ -135,6 +136,24 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       const result = await handleSwapDispatch(request.body, {
         callbackClient,
         baseClients,
+      });
+
+      return reply.status(202).send(result);
+    },
+  );
+
+  // -----------------------------------------------------------------------
+  // POST /dispatch/morpho_deposit (#206)
+  // -----------------------------------------------------------------------
+
+  app.post(
+    "/dispatch/morpho_deposit",
+    { preHandler: verifyDispatchAuth },
+    async (request: FastifyRequest, reply) => {
+      const result = await handleMorphoDepositDispatch(request.body, {
+        callbackClient,
+        baseClients,
+        usdcAddress: config.usdcContractAddress,
       });
 
       return reply.status(202).send(result);

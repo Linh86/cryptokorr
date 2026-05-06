@@ -69,12 +69,14 @@ defmodule Bank.Decisions do
   alias Bank.Decisions.{
     DecisionEnvelope,
     ExecutionPlan,
+    MorphoDepositArtifacts,
     SimulationReport,
     SwapDispatchSafety,
     SwapRouteArtifacts,
     TrustAssessment
   }
 
+  alias Bank.DefiVenues.Morpho.Snapshots
   alias Bank.Delegations
   alias Bank.Intents.AgentIntent
   alias Bank.Policies
@@ -1347,7 +1349,9 @@ defmodule Bank.Decisions do
 
     with {:ok, swap_artifacts} <-
            maybe_validate_and_build_swap(intent_kind, intent, workspace_id, opts),
-         {chain, asset} <- resolve_chain_and_asset(swap_artifacts),
+         {:ok, morpho_artifacts} <-
+           maybe_build_morpho_deposit(intent_kind, intent, envelope, smart_account_id, source),
+         {chain, asset} <- resolve_chain_and_asset(swap_artifacts, morpho_artifacts, intent),
          :ok <- validate_executable_envelope(envelope),
          :ok <- validate_no_active_plan(envelope.id),
          :ok <- validate_stablecoin_adapter_ready(envelope),
@@ -1367,13 +1371,18 @@ defmodule Bank.Decisions do
           workspace_id: workspace_id
         }
         |> maybe_put_swap_steps(swap_artifacts)
+        |> maybe_put_morpho_steps(morpho_artifacts)
 
       {:ok, plan} =
         %ExecutionPlan{}
         |> ExecutionPlan.changeset(plan_attrs)
         |> Repo.insert()
 
-      audit_opts = put_route_metadata(opts, swap_artifacts)
+      audit_opts =
+        opts
+        |> put_route_metadata(swap_artifacts)
+        |> put_morpho_metadata(morpho_artifacts)
+
       _ = Runtime.emit_audit(audit_attrs_for_source(plan, source, audit_opts))
 
       Runtime.broadcast_intent_lifecycle(envelope.intent_id, :execution_requested, %{
@@ -1434,20 +1443,89 @@ defmodule Bank.Decisions do
     end)
   end
 
-  # `:swap` intents carry chain/asset on the route. All other kinds
-  # remain on the v0.1 single-tenant default of base/USDC; that
-  # default is intentionally preserved here so the transfer path is
-  # unchanged.
-  defp resolve_chain_and_asset(%{chain: chain, asset: asset}), do: {chain, asset}
-  defp resolve_chain_and_asset(nil), do: {"base", "USDC"}
+  # `:swap` intents carry chain/asset on the route. `:defi_yield_deposit`
+  # (Morpho, #206) carries chain/asset on the intent itself (boundary
+  # gate enforces `chain == "base-sepolia"` and `asset == "USDC"`).
+  # Other kinds remain on the v0.1 single-tenant default of
+  # base/USDC; that default is intentionally preserved so the
+  # transfer path is unchanged.
+  defp resolve_chain_and_asset(%{chain: chain, asset: asset}, _morpho, _intent),
+    do: {chain, asset}
+
+  defp resolve_chain_and_asset(nil, %{chain: chain, asset: asset}, _intent), do: {chain, asset}
+
+  defp resolve_chain_and_asset(nil, nil, _intent), do: {"base", "USDC"}
+
+  # Build Morpho deposit artifacts for `:defi_yield_deposit` kind
+  # (#206). Snapshot freshness + drift gating happens at dispatch
+  # time in `Bank.Decisions.MorphoDispatchSafety` rather than here:
+  # the operator approval may be older than the snapshot TTL but the
+  # plan creation is still legitimate; the worker re-checks before
+  # broadcast. Returns `{:error, :morpho_intent_target_missing}` if
+  # the intent has no `target_raw_address` (vault), since that's a
+  # hard precondition the upstream HTTP boundary already enforces.
+  defp maybe_build_morpho_deposit(
+         :defi_yield_deposit,
+         %AgentIntent{} = intent,
+         %DecisionEnvelope{} = envelope,
+         smart_account_id,
+         source
+       ) do
+    case intent.target_raw_address do
+      vault when is_binary(vault) and vault != "" ->
+        chain_id = morpho_chain_id_for(intent.chain)
+        snapshot = chain_id && Snapshots.get_current(chain_id, vault)
+        rule_ids = decision_morpho_rule_ids(envelope)
+        actor = morpho_approval_actor(source)
+
+        artifacts =
+          MorphoDepositArtifacts.from_intent(
+            intent,
+            envelope,
+            snapshot,
+            smart_account_id,
+            rule_ids,
+            actor
+          )
+
+        {:ok, artifacts}
+
+      _ ->
+        {:error, :morpho_intent_target_missing}
+    end
+  end
+
+  defp maybe_build_morpho_deposit(_kind, _intent, _envelope, _sa, _source), do: {:ok, nil}
+
+  defp morpho_chain_id_for("base-sepolia"), do: 84_532
+  defp morpho_chain_id_for("base"), do: 8453
+  defp morpho_chain_id_for(_), do: nil
+
+  defp decision_morpho_rule_ids(%DecisionEnvelope{policy_snapshot_ref: %{"rule_ids" => ids}})
+       when is_list(ids),
+       do: ids
+
+  defp decision_morpho_rule_ids(_), do: []
+
+  defp morpho_approval_actor(:manual), do: :user
+  defp morpho_approval_actor(:auto), do: :runtime
+  defp morpho_approval_actor(_), do: :runtime
 
   defp maybe_put_swap_steps(attrs, nil), do: attrs
   defp maybe_put_swap_steps(attrs, %{steps: steps}), do: Map.put(attrs, :steps, steps)
+
+  defp maybe_put_morpho_steps(attrs, nil), do: attrs
+  defp maybe_put_morpho_steps(attrs, %{steps: steps}), do: Map.put(attrs, :steps, steps)
 
   defp put_route_metadata(opts, nil), do: opts
 
   defp put_route_metadata(opts, %{audit_metadata: meta}),
     do: Keyword.put(opts, :route_metadata, meta)
+
+  defp put_morpho_metadata(opts, nil), do: opts
+
+  defp put_morpho_metadata(opts, %{audit_metadata: meta}),
+    do: Keyword.put(opts, :morpho_metadata, meta)
 
   defp default_reason_for(:manual), do: "manual_confirm"
   defp default_reason_for(:auto), do: "auto_exec_dispatch"
@@ -1456,7 +1534,8 @@ defmodule Bank.Decisions do
     Bank.Audit.Events.execution_manually_requested(plan,
       actor: Keyword.get(opts, :actor, :user),
       actor_id: Keyword.get(opts, :actor_id),
-      route_metadata: Keyword.get(opts, :route_metadata)
+      route_metadata: Keyword.get(opts, :route_metadata),
+      morpho_metadata: Keyword.get(opts, :morpho_metadata)
     )
   end
 
@@ -1464,7 +1543,8 @@ defmodule Bank.Decisions do
     Bank.Audit.Events.execution_auto_dispatched(plan,
       actor: Keyword.get(opts, :actor, :runtime),
       actor_id: Keyword.get(opts, :actor_id),
-      route_metadata: Keyword.get(opts, :route_metadata)
+      route_metadata: Keyword.get(opts, :route_metadata),
+      morpho_metadata: Keyword.get(opts, :morpho_metadata)
     )
   end
 

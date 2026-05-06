@@ -1,0 +1,25 @@
+{
+  "contract_version": 1,
+  "action": "morpho_deposit",
+  "execution_plan_id": "33333333-3333-4333-8333-333333333334",
+  "intent_id": "44444444-4444-4444-8444-444444444445",
+  "smart_account_id": "sa_0xdeadbeef",
+  "chain": "base-sepolia",
+  "asset": "USDC",
+  "amount": "100",
+  "vault_address": "0xabcdef0000000000000000000000000000000abc",
+  "receiver": "sa_0xdeadbeef",
+  "snapshot_id": "55555555-5555-4555-8555-555555555556",
+  "snapshot_payload_hash": "1f1c6feec161155e5db84998b5b8e8eeb7751705e6877241824a8d175ca8af05",
+  "policy_rule_ids": ["66666666-6666-4666-8666-666666666667"],
+  "signing_requirements": {
+    "delegation_id": "del_primary",
+    "scope": {
+      "chain": "base-sepolia",
+      "asset": "USDC",
+      "max_amount": "500"
+    }
+  },
+  "correlation_id": "44444444-4444-4444-8444-444444444445",
+  "emitted_at": "2026-05-06T08:00:00Z"
+}
