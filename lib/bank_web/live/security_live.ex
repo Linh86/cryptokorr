@@ -2296,6 +2296,9 @@ defmodule BankWeb.SecurityLive do
           <span :if={@delegation.revoke_requested_at}>
             revoke requested: {format_datetime(@delegation.revoke_requested_at)}
           </span>
+          <span class="badge badge-xs badge-ghost" title={revoke_method_tooltip(@delegation)}>
+            {revoke_method_label(@delegation)}
+          </span>
         </div>
       </div>
       <.button
@@ -2438,6 +2441,27 @@ defmodule BankWeb.SecurityLive do
   defp delegation_badge_class(:revoked), do: "badge-ghost"
   defp delegation_badge_class(:expired), do: "badge-ghost"
   defp delegation_badge_class(_), do: "badge-ghost"
+
+  # Surface the v0.1 revoke posture (#475) to operators. Per
+  # `docs/design/browser-signed-install.md` § 6, browser-signed
+  # delegations get the sentinel audit anchor; the user-signed
+  # `Kernel.uninstallValidation(...)` flow ships in v0.2.
+  defp revoke_method_label(%Bank.Delegations.Delegation{} = d) do
+    case Bank.Delegations.Delegation.revoke_method(d) do
+      :cryptographic -> "revoke: cryptographic"
+      :sentinel -> "revoke: sentinel"
+    end
+  end
+
+  defp revoke_method_tooltip(%Bank.Delegations.Delegation{} = d) do
+    case Bank.Delegations.Delegation.revoke_method(d) do
+      :cryptographic ->
+        "Operator EOA signs Kernel.uninstallValidation(...). Available for operator-rooted delegations with full permission artifacts."
+
+      :sentinel ->
+        "Operator EOA signs a no-op execute(self, 0, 0x) audit anchor. Used for browser-signed delegations (user-signed cryptographic revoke ships in v0.2) and legacy artifact-less rows."
+    end
+  end
 
   defp event_type_badge_class("security." <> _), do: "badge-error"
   defp event_type_badge_class("delegation." <> _), do: "badge-error"

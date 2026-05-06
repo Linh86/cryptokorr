@@ -247,23 +247,36 @@ defmodule Bank.Delegations.Delegation do
   def terminal_states, do: @terminal_states
 
   @doc """
-  Returns true iff this delegation has the complete permission
-  artifact set required for a cryptographic revoke dispatch (#58).
+  Returns true iff this delegation can be cryptographically revoked
+  via the operator EOA (#58, #475).
 
-  The adapter schema requires a serialized plugin blob, 4-byte
-  `permission_id`, 21-byte `validation_id`, `kernel_version`,
-  `permission_package_version`, and `session_signer_address` (the
-  20-byte EOA used to rebuild the keyless plugin's stub
-  `ModularSigner` at revoke-time). Treating a partial row as
-  cryptographically revocable would send malformed JSON and make the
-  adapter reject the request after the worker has already selected the
-  crypto path. We therefore require the complete wire-shape here.
+  Two conditions must hold:
 
-  Rows where this returns `false` continue to revoke via the
-  sentinel UserOp until their delegation is regranted under the new
-  flow.
+    * The row must carry the full permission-artifact wire-shape
+      the adapter needs to build a `Kernel.uninstallValidation(...)`
+      UserOp (serialized plugin blob, 4-byte `permission_id`,
+      21-byte `validation_id`, `kernel_version`,
+      `permission_package_version`, and the 20-byte
+      `session_signer_address` used to rebuild the keyless plugin's
+      stub `ModularSigner` at revoke-time). Treating a partial row
+      as cryptographically revocable would send malformed JSON and
+      make the adapter reject the request after the worker has
+      already selected the crypto path.
+
+    * `root_validator_owner` must NOT be `"user"`. Browser-signed
+      installs (#474) populate the artifact columns just like
+      operator-signed installs, but the kernel's root validator is
+      the user's EOA — the `OPERATOR_PRIVATE_KEY` is no longer
+      authorised to call `uninstallValidation` on those rows.
+      `:user` rows take the sentinel-revoke audit anchor in v0.1
+      (browser-signed cryptographic revoke ships in v0.2 — see
+      `docs/design/browser-signed-install.md` § 6).
+
+  Rows where this returns `false` revoke via the sentinel UserOp.
   """
   @spec cryptographically_revocable?(t()) :: boolean()
+  def cryptographically_revocable?(%__MODULE__{root_validator_owner: "user"}), do: false
+
   def cryptographically_revocable?(%__MODULE__{
         permission_blob: blob,
         permission_id: pid,
@@ -281,6 +294,27 @@ defmodule Bank.Delegations.Delegation do
       do: true
 
   def cryptographically_revocable?(%__MODULE__{}), do: false
+
+  @doc """
+  Returns the revoke path that will be used for this delegation
+  (#475).
+
+    * `:cryptographic` — operator EOA signs
+      `Kernel.uninstallValidation(...)`. Available only for
+      operator-rooted rows whose permission artifacts are fully
+      populated (see `cryptographically_revocable?/1`).
+
+    * `:sentinel` — operator EOA signs a no-op
+      `execute(self, 0, 0x)` UserOp as an audit anchor. Used for
+      legacy rows without permission artifacts and for
+      browser-signed (`root_validator_owner: "user"`) rows in v0.1
+      — browser-signed cryptographic revoke is a v0.2 follow-up
+      (see `docs/design/browser-signed-install.md` § 6).
+  """
+  @spec revoke_method(t()) :: :cryptographic | :sentinel
+  def revoke_method(%__MODULE__{} = delegation) do
+    if cryptographically_revocable?(delegation), do: :cryptographic, else: :sentinel
+  end
 
   # Validate fixed-size :binary fields. ZeroDev's `permissionId` is
   # exactly 4 bytes and `validationId` is exactly 21 bytes; a row

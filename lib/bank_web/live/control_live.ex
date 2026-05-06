@@ -793,6 +793,7 @@ defmodule BankWeb.ControlLive do
             label="Revoke requested"
             value={format_datetime(@delegation.revoke_requested_at)}
           />
+          <.detail_item label="Revoke method" value={revoke_method_label(@delegation)} />
           <.detail_item
             :if={@delegation.last_tx_hash}
             label="Tx hash"
@@ -1529,6 +1530,17 @@ defmodule BankWeb.ControlLive do
   defp delegation_label(:revoked), do: "Revoked"
   defp delegation_label(:expired), do: "Expired"
   defp delegation_label(_), do: "Unknown"
+
+  # Surface the v0.1 revoke posture (#475) to operators. Per
+  # `docs/design/browser-signed-install.md` § 6, browser-signed
+  # delegations get the sentinel audit anchor; the user-signed
+  # `Kernel.uninstallValidation(...)` flow ships in v0.2.
+  defp revoke_method_label(%Bank.Delegations.Delegation{} = d) do
+    case Bank.Delegations.Delegation.revoke_method(d) do
+      :cryptographic -> "Cryptographic uninstall (operator EOA)"
+      :sentinel -> "Sentinel audit anchor (v0.1; user-signed revoke ships in v0.2)"
+    end
+  end
 
   defp delegation_icon(:active), do: "hero-link-solid"
   defp delegation_icon(:pending), do: "hero-clock"
