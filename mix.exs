@@ -76,7 +76,9 @@ defmodule Bank.MixProject do
       {:bandit, "~> 1.5"},
       {:oban, "~> 2.19"},
       {:req, "~> 0.5"},
-      {:open_api_spex, "~> 3.21"}
+      {:open_api_spex, "~> 3.21"},
+      {:ex_secp256k1, "~> 0.8"},
+      {:ex_keccak, "~> 0.7"}
     ]
   end
 

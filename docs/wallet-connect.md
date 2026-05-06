@@ -77,19 +77,34 @@ callback kind.
   `POST /dispatch/grant_delegation` (no longer stubbed — wired
   end-to-end since #58, confirmed live on Base Sepolia under PR
   #132).
-- `assets/js/hooks/wallet_connect.js` — read-only EIP-1193 hook
-  (#168). On user click it requests accounts, reads `eth_chainId`,
-  and pushes `wallet_connect:connected`, `wallet_connect:wrong_chain`,
-  `wallet_connect:cancelled`, or `wallet_connect:error` to the
-  LiveView. It also subscribes to `accountsChanged` and
-  `chainChanged` so the UI tracks live wallet state. The hook does
-  not sign anything; signing + delegation grant land with the SDK
-  decision below.
-- Control tower: a `wallet-status-card` region renders disconnected,
-  connecting, connected, wrong-chain, not-installed, and error
-  states. The Connect button is enabled; the disconnect button
-  clears the local UI state without touching the wallet (EIP-1193
-  has no programmatic disconnect).
+- `assets/js/hooks/wallet_connect.js` — EIP-1193 hook for the MVP
+  binding flow (#168 + #169). On user click it calls
+  `eth_requestAccounts`, reads `eth_chainId`, and pushes
+  `wallet_connect:connected` to the LiveView. The server responds
+  with `wallet_connect:challenge` (carrying a server-issued EIP-191
+  message); the hook calls `personal_sign` and pushes
+  `wallet_connect:verify` back. `personal_sign` is the only signing
+  method the hook is allowed to invoke — typed-data signing,
+  `eth_sign`, and `eth_signTransaction` are forbidden by source-level
+  test (`wallet_connect_hook_safety_test.exs`). The hook also
+  subscribes to `accountsChanged` and `chainChanged` so the UI
+  tracks live wallet state, and is restricted to Base Sepolia
+  (chain id 84532) for the MVP — Base mainnet (8453) surfaces as
+  wrong-chain.
+- `Bank.WalletBindings` (#169) — server-side context. Issues
+  short-lived challenges (5-minute TTL), persists pending /
+  verified / revoked rows in `wallet_bindings`, verifies signatures
+  via `Bank.WalletBindings.Signature.verify_eip191/3`, and audits
+  every transition with `wallet_binding.{challenge_issued,verified,
+  failed,revoked}`. Audit `after_ref` carries address + chain id +
+  timestamps only — never the nonce, message body, or signature.
+- Control tower: a `wallet-status-card` region renders
+  disconnected, connecting, awaiting-signature, bound, wrong-chain,
+  not-installed, error, and bind-failed states. The bound state
+  loads from the active binding row on every mount via
+  `WalletBindings.get_active_binding/1`, so a verified EOA survives
+  page reloads. The disconnect button revokes the active binding
+  before resetting the local UI.
 
 ## Remaining work (the actual SDK integration)
 
@@ -143,15 +158,17 @@ Server-side flow now lands end-to-end:
   revoke takes the cryptographic `Kernel.uninstallValidation(...)`
   path (#58 PR #129).
 
-**Still client-side scaffolding for the grant flow**:
-`assets/js/hooks/wallet_connect.js` lands the read-only connect UX
-under #168 — accounts, chain id, wrong-chain warning, disconnect.
-Signing a delegation payload still needs a wallet SDK choice
-(wagmi vs WalletConnect) plus a delegation type (ERC-7579 session
-key vs EntryPoint v0.7 native session key). Until that lands, the
-adapter-callback flow remains the production path and
-`POST /v1/connect/smart_account` carries `delegation_payload:
-null` for operator-driven flows.
+**EOA identity binding lands under #169.** The browser hook now
+signs an EIP-191 challenge and Phoenix verifies the recovered
+address against the connected EOA via
+`Bank.WalletBindings.verify_and_bind/2`. The verified binding is
+the foundation the smart-account delegation install (#171) builds
+on. The grant-flow signing of a *delegation payload* still needs
+a wallet SDK choice (wagmi vs WalletConnect) plus a delegation
+type (ERC-7579 session key vs EntryPoint v0.7 native session
+key). Until that lands, the adapter-callback flow remains the
+production path and `POST /v1/connect/smart_account` carries
+`delegation_payload: null` for operator-driven flows.
 
 **Operator runbook**: end-to-end cryptographic grant + revoke
 runs against a provisioned `OPERATOR_PRIVATE_KEY` matching the

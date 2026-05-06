@@ -5,18 +5,26 @@
 // listens for the EIP-1193 `accountsChanged` and `chainChanged` events so
 // the LiveView reflects the wallet's live state.
 //
-// The hook only reads from the wallet:
+// Two interactions touch the wallet, both gated behind explicit user
+// actions:
 //
-//   * `eth_requestAccounts` — gated behind a user click, prompts the
-//     wallet to expose accounts.
-//   * `eth_accounts` — passive read after `accountsChanged`.
-//   * `eth_chainId` — passive read of the active network.
+//   * `eth_requestAccounts` — runs after a click on `#wallet-connect-btn`
+//     and prompts the wallet to expose accounts.
+//   * `personal_sign` — runs only when the server pushes a
+//     `wallet_connect:challenge` event in response to a connected
+//     wallet, and only signs the EIP-191 binding message that the
+//     server issued. The message is server-issued, short-lived, and
+//     single-use; the hook does not construct it.
 //
-// It never asks the wallet to sign, broadcast, or expose key material.
-// Signing + delegation grants are out of scope for #168 and land with
-// the SDK + adapter integration tracked in `docs/wallet-connect.md`.
+// All other reads are passive: `eth_accounts` and `eth_chainId`. The
+// hook never broadcasts a transaction, never handles private keys,
+// and never invokes any other signing JSON-RPC method. Those
+// invariants are pinned by `wallet_connect_hook_safety_test.exs`.
 
-const SUPPORTED_CHAIN_IDS = [8453, 84532] // Base mainnet, Base Sepolia
+// Base Sepolia is the only enabled chain for the MVP wallet binding
+// flow. Base mainnet (8453) must surface as wrong-chain so the operator
+// switches before we ever issue a binding challenge.
+const SUPPORTED_CHAIN_IDS = [84_532]
 
 export const WalletConnect = {
   mounted() {
@@ -25,6 +33,10 @@ export const WalletConnect = {
     this.handleChainChanged = this.handleChainChanged.bind(this)
 
     this.el.addEventListener("click", this.handleClick)
+
+    // Server-pushed binding challenge — sign it and push the signature
+    // back to the LiveView for verification.
+    this.handleEvent("wallet_connect:challenge", (payload) => this.signChallenge(payload))
 
     const provider = window.ethereum
     if (provider && typeof provider.on === "function") {
@@ -123,6 +135,48 @@ export const WalletConnect = {
       this.pushEvent("wallet_connect:connected", {account, chain_id: chainId})
     } catch (err) {
       this.pushEvent("wallet_connect:error", {message: err?.message || String(err)})
+    }
+  },
+
+  // Sign a server-issued EIP-191 challenge for wallet identity binding.
+  // The hook does not build the message — it only forwards what the
+  // server pushed. The server alone owns the nonce, expiry, and shape.
+  async signChallenge(payload) {
+    const challengeId = payload && payload.challenge_id
+    const message = payload && payload.message
+    const account = payload && payload.address
+
+    if (!challengeId || !message || !account) {
+      this.pushEvent("wallet_connect:verify_error", {
+        challenge_id: challengeId || null,
+        reason: "invalid_challenge",
+      })
+      return
+    }
+
+    const provider = window.ethereum
+    if (!provider) {
+      this.pushEvent("wallet_connect:verify_error", {
+        challenge_id: challengeId,
+        reason: "no_provider",
+      })
+      return
+    }
+
+    try {
+      const signature = await provider.request({
+        method: "personal_sign",
+        params: [message, account],
+      })
+      this.pushEvent("wallet_connect:verify", {
+        challenge_id: challengeId,
+        signature,
+      })
+    } catch (err) {
+      this.pushEvent("wallet_connect:verify_error", {
+        challenge_id: challengeId,
+        reason: err?.message || String(err),
+      })
     }
   },
 }

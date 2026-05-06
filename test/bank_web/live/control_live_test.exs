@@ -5,6 +5,7 @@ defmodule BankWeb.ControlLiveTest do
 
   use BankWeb.ConnCase, async: false
 
+  import Ecto.Query, only: [from: 2]
   import Phoenix.LiveViewTest
 
   setup :register_and_log_in_user_as_admin
@@ -12,10 +13,25 @@ defmodule BankWeb.ControlLiveTest do
   alias Bank.Delegations
   alias Bank.Security
   alias Bank.Security.PauseState
+  alias Bank.WalletBindings
+  alias Bank.WalletBindings.Signature
+  alias Bank.WalletBindings.WalletBinding
+  alias Bank.Repo
+
+  # secp256k1 generator point — convenient deterministic test key.
+  @privkey <<1::256>>
+  @other_privkey <<2::256>>
 
   setup do
     PauseState.reset()
-    :ok
+
+    {:ok, pubkey} = ExSecp256k1.create_public_key(@privkey)
+    {:ok, address} = Signature.address_from_pubkey(pubkey)
+
+    {:ok, other_pubkey} = ExSecp256k1.create_public_key(@other_privkey)
+    {:ok, other_address} = Signature.address_from_pubkey(other_pubkey)
+
+    %{wallet_address: address, other_wallet_address: other_address}
   end
 
   # --- Mount / render -------------------------------------------------------
@@ -353,11 +369,14 @@ defmodule BankWeb.ControlLiveTest do
     end
   end
 
-  # --- Wallet status region (#168) -----------------------------------------
+  # --- Wallet status region (#168 + #169) ---------------------------------
   #
   # The `WalletConnect` JS hook on `#wallet-status-card` pushes events
-  # for each EIP-1193 transition. These tests cover the server-side
-  # state machine using `render_hook/3` to simulate hook pushes.
+  # for each EIP-1193 transition. After a Base Sepolia connect, the
+  # server immediately issues a binding challenge and the hook is
+  # expected to sign + push back. Tests use `render_hook/3` to simulate
+  # browser pushes and `Signature.eip191_hash/1 + ExSecp256k1.sign/2`
+  # to build valid signatures.
 
   describe "wallet status region — initial render" do
     test "shows disconnected state with Connect button", %{conn: conn} do
@@ -368,7 +387,8 @@ defmodule BankWeb.ControlLiveTest do
       assert html =~ ~s(id="wallet-status-disconnected")
       assert html =~ ~s(id="wallet-connect-btn")
       assert html =~ "Connect wallet"
-      refute html =~ ~s(id="wallet-status-connected")
+      refute html =~ ~s(id="wallet-status-bound")
+      refute html =~ ~s(id="wallet-status-awaiting-signature")
       refute html =~ ~s(id="wallet-status-wrong-chain")
       refute html =~ ~s(id="wallet-status-not-installed")
       refute html =~ ~s(id="wallet-disconnect-btn")
@@ -376,8 +396,6 @@ defmodule BankWeb.ControlLiveTest do
 
     test "wallet card mounts the WalletConnect hook", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/")
-
-      # The hook attaches to the wrapper; click delegation finds the inner button.
       assert html =~ ~s(phx-hook="WalletConnect")
     end
   end
@@ -404,46 +422,298 @@ defmodule BankWeb.ControlLiveTest do
 
       assert html =~ ~s(id="wallet-status-connecting")
       assert html =~ "Connecting"
-      refute html =~ ~s(id="wallet-connect-btn")
     end
   end
 
-  describe "wallet status region — connected" do
-    test "wallet_connect:connected shows the address and disconnect button", %{conn: conn} do
+  describe "wallet status region — connected → awaiting signature" do
+    test "wallet_connect:connected issues a challenge and shows awaiting state", %{
+      conn: conn,
+      wallet_address: address
+    } do
       {:ok, view, _html} = live(conn, "/")
 
       html =
         render_hook(view, "wallet_connect:connected", %{
-          "account" => "0x1234567890abcdef1234567890abcdef12345678",
+          "account" => address,
           "chain_id" => 84_532
         })
 
-      assert html =~ ~s(id="wallet-status-connected")
+      assert html =~ ~s(id="wallet-status-awaiting-signature")
       assert html =~ ~s(id="wallet-status-address")
-      assert html =~ "0x1234567890abcdef1234567890abcdef12345678"
+      assert html =~ address
       assert html =~ ~s(id="wallet-status-chain")
       assert html =~ "Base Sepolia"
       assert html =~ "84532"
       assert html =~ ~s(id="wallet-disconnect-btn")
       refute html =~ ~s(id="wallet-status-disconnected")
-      refute html =~ ~s(id="wallet-status-wrong-chain")
+      refute html =~ ~s(id="wallet-status-bound")
     end
 
-    test "Base mainnet chain renders Base label", %{conn: conn} do
+    test "wallet_connect:connected pushes a wallet_connect:challenge event", %{
+      conn: conn,
+      wallet_address: address
+    } do
       {:ok, view, _html} = live(conn, "/")
 
+      _ =
+        render_hook(view, "wallet_connect:connected", %{
+          "account" => address,
+          "chain_id" => 84_532
+        })
+
+      # The push_event puts the binding details on the LiveSocket so
+      # the JS hook can sign with personal_sign. The signed challenge
+      # comes back on the wallet_connect:verify event.
+      assert_push_event(view, "wallet_connect:challenge", %{
+        challenge_id: id,
+        message: message,
+        address: ^address
+      })
+
+      assert is_binary(id)
+      assert message =~ "CryptoBank wants to bind"
+      assert message =~ address
+      assert message =~ "84532 (Base Sepolia)"
+    end
+
+    test "wallet_connect:connected on Base mainnet renders bind_failed", %{
+      conn: conn,
+      wallet_address: address
+    } do
+      {:ok, view, _html} = live(conn, "/")
+
+      # Defense-in-depth: the JS hook shouldn't push connected with
+      # 8453 (P2 fix), but if a stale build does, the server rejects
+      # the chain at the context boundary.
       html =
         render_hook(view, "wallet_connect:connected", %{
-          "account" => "0xabc",
+          "account" => address,
           "chain_id" => 8453
         })
 
-      assert html =~ "Base (8453)"
+      assert html =~ ~s(id="wallet-status-bind-failed")
+      assert html =~ "Only Base Sepolia"
     end
   end
 
-  describe "wallet status region — wrong chain" do
-    test "wallet_connect:wrong_chain shows non-destructive warning with chain id", %{conn: conn} do
+  describe "wallet status region — verify happy path" do
+    test "wallet_connect:verify with a valid signature renders bound", %{
+      conn: conn,
+      wallet_address: address
+    } do
+      {:ok, view, _html} = live(conn, "/")
+
+      _ =
+        render_hook(view, "wallet_connect:connected", %{
+          "account" => address,
+          "chain_id" => 84_532
+        })
+
+      [binding] = list_pending_bindings(address)
+      signature = sign_challenge(binding.challenge_message, @privkey)
+
+      html =
+        render_hook(view, "wallet_connect:verify", %{
+          "challenge_id" => binding.id,
+          "signature" => signature
+        })
+
+      assert html =~ ~s(id="wallet-status-bound")
+      assert html =~ ~s(id="wallet-status-bound-label")
+      assert html =~ "Wallet identity bound"
+      assert html =~ ~s(id="wallet-status-address")
+      assert html =~ address
+      assert html =~ ~s(id="wallet-status-verified-at")
+      assert html =~ ~s(id="wallet-disconnect-btn")
+    end
+
+    test "bound state survives a re-mount via get_active_binding", %{
+      conn: conn,
+      wallet_address: address
+    } do
+      {:ok, view, _html} = live(conn, "/")
+
+      _ =
+        render_hook(view, "wallet_connect:connected", %{
+          "account" => address,
+          "chain_id" => 84_532
+        })
+
+      [binding] = list_pending_bindings(address)
+      signature = sign_challenge(binding.challenge_message, @privkey)
+
+      _ =
+        render_hook(view, "wallet_connect:verify", %{
+          "challenge_id" => binding.id,
+          "signature" => signature
+        })
+
+      # Re-mount the LiveView; the binding row in the DB drives the
+      # bound state without requiring the browser to re-sign.
+      {:ok, _view2, html2} = live(conn, "/")
+
+      assert html2 =~ ~s(id="wallet-status-bound")
+      assert html2 =~ address
+    end
+  end
+
+  describe "wallet status region — verify rejection paths" do
+    test "expired challenge surfaces bind_failed: expired", %{
+      conn: conn,
+      wallet_address: address
+    } do
+      {:ok, view, _html} = live(conn, "/")
+
+      _ =
+        render_hook(view, "wallet_connect:connected", %{
+          "account" => address,
+          "chain_id" => 84_532
+        })
+
+      [binding] = list_pending_bindings(address)
+      stale = DateTime.add(DateTime.utc_now(), -10, :second)
+
+      Repo.update_all(
+        from(b in WalletBinding, where: b.id == ^binding.id),
+        set: [expires_at: stale]
+      )
+
+      signature = sign_challenge(binding.challenge_message, @privkey)
+
+      html =
+        render_hook(view, "wallet_connect:verify", %{
+          "challenge_id" => binding.id,
+          "signature" => signature
+        })
+
+      assert html =~ ~s(id="wallet-status-bind-failed")
+      assert html =~ "Challenge expired"
+    end
+
+    test "replayed signature on already-verified binding surfaces bind_failed", %{
+      conn: conn,
+      wallet_address: address
+    } do
+      {:ok, view, _html} = live(conn, "/")
+
+      _ =
+        render_hook(view, "wallet_connect:connected", %{
+          "account" => address,
+          "chain_id" => 84_532
+        })
+
+      [binding] = list_pending_bindings(address)
+      signature = sign_challenge(binding.challenge_message, @privkey)
+
+      _ =
+        render_hook(view, "wallet_connect:verify", %{
+          "challenge_id" => binding.id,
+          "signature" => signature
+        })
+
+      html =
+        render_hook(view, "wallet_connect:verify", %{
+          "challenge_id" => binding.id,
+          "signature" => signature
+        })
+
+      assert html =~ ~s(id="wallet-status-bind-failed")
+      assert html =~ "already verified"
+    end
+
+    test "signature from a different EOA surfaces address_mismatch", %{
+      conn: conn,
+      wallet_address: address
+    } do
+      {:ok, view, _html} = live(conn, "/")
+
+      _ =
+        render_hook(view, "wallet_connect:connected", %{
+          "account" => address,
+          "chain_id" => 84_532
+        })
+
+      [binding] = list_pending_bindings(address)
+      bogus_signature = sign_challenge(binding.challenge_message, @other_privkey)
+
+      html =
+        render_hook(view, "wallet_connect:verify", %{
+          "challenge_id" => binding.id,
+          "signature" => bogus_signature
+        })
+
+      assert html =~ ~s(id="wallet-status-bind-failed")
+      assert html =~ "different address"
+    end
+
+    test "malformed signature surfaces bind_failed", %{
+      conn: conn,
+      wallet_address: address
+    } do
+      {:ok, view, _html} = live(conn, "/")
+
+      _ =
+        render_hook(view, "wallet_connect:connected", %{
+          "account" => address,
+          "chain_id" => 84_532
+        })
+
+      [binding] = list_pending_bindings(address)
+
+      html =
+        render_hook(view, "wallet_connect:verify", %{
+          "challenge_id" => binding.id,
+          "signature" => "0xdead"
+        })
+
+      assert html =~ ~s(id="wallet-status-bind-failed")
+      assert html =~ "malformed"
+    end
+
+    test "wallet_connect:verify_error from the browser surfaces bind_failed", %{
+      conn: conn,
+      wallet_address: address
+    } do
+      {:ok, view, _html} = live(conn, "/")
+
+      _ =
+        render_hook(view, "wallet_connect:connected", %{
+          "account" => address,
+          "chain_id" => 84_532
+        })
+
+      html =
+        render_hook(view, "wallet_connect:verify_error", %{
+          "challenge_id" => "anything",
+          "reason" => "User rejected the request"
+        })
+
+      assert html =~ ~s(id="wallet-status-bind-failed")
+      assert html =~ "rejected"
+    end
+  end
+
+  describe "wallet status region — wrong chain (Base mainnet)" do
+    test "wallet_connect:wrong_chain on Base mainnet surfaces wrong_chain UI", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      html =
+        render_hook(view, "wallet_connect:wrong_chain", %{
+          "account" => "0xdeadbeef",
+          "chain_id" => 8453
+        })
+
+      assert html =~ ~s(id="wallet-status-wrong-chain")
+      assert html =~ ~s(id="wallet-status-wrong-chain-id")
+      assert html =~ "Switch to Base Sepolia"
+      assert html =~ "8453"
+      assert html =~ "post-MVP"
+      assert html =~ "0xdeadbeef"
+      assert html =~ ~s(id="wallet-disconnect-btn")
+      refute html =~ ~s(id="wallet-status-bound")
+    end
+
+    test "wallet_connect:wrong_chain on Ethereum mainnet (chain 1)", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/")
 
       html =
@@ -453,32 +723,38 @@ defmodule BankWeb.ControlLiveTest do
         })
 
       assert html =~ ~s(id="wallet-status-wrong-chain")
-      assert html =~ ~s(id="wallet-status-wrong-chain-id")
-      assert html =~ "Switch to Base"
-      assert html =~ "84532"
-      assert html =~ "0xdeadbeef"
-      assert html =~ ~s(id="wallet-disconnect-btn")
-      # Wrong chain is non-destructive: connected card and address are not shown.
-      refute html =~ ~s(id="wallet-status-connected")
     end
   end
 
-  describe "wallet status region — disconnected" do
-    test "wallet_connect:disconnected resets to disconnected state", %{conn: conn} do
+  describe "wallet status region — disconnect" do
+    test "wallet_connect:disconnected resets state and revokes binding", %{
+      conn: conn,
+      wallet_address: address
+    } do
       {:ok, view, _html} = live(conn, "/")
 
       _ =
         render_hook(view, "wallet_connect:connected", %{
-          "account" => "0xabc",
+          "account" => address,
           "chain_id" => 84_532
         })
 
-      html = render_hook(view, "wallet_connect:disconnected", %{})
+      [binding] = list_pending_bindings(address)
+      signature = sign_challenge(binding.challenge_message, @privkey)
+
+      _ =
+        render_hook(view, "wallet_connect:verify", %{
+          "challenge_id" => binding.id,
+          "signature" => signature
+        })
+
+      html = view |> element("#wallet-disconnect-btn") |> render_click()
 
       assert html =~ ~s(id="wallet-status-disconnected")
-      assert html =~ ~s(id="wallet-connect-btn")
-      refute html =~ ~s(id="wallet-status-connected")
-      refute html =~ ~s(id="wallet-disconnect-btn")
+      refute html =~ ~s(id="wallet-status-bound")
+
+      assert nil ==
+               WalletBindings.get_active_binding(Process.get(:bank_test_workspace_id))
     end
 
     test "wallet_connect:cancelled resets to disconnected state", %{conn: conn} do
@@ -488,57 +764,65 @@ defmodule BankWeb.ControlLiveTest do
       html = render_hook(view, "wallet_connect:cancelled", %{})
 
       assert html =~ ~s(id="wallet-status-disconnected")
-      refute html =~ ~s(id="wallet-status-connecting")
-    end
-
-    test "clicking disconnect button clears the connected state locally", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/")
-
-      _ =
-        render_hook(view, "wallet_connect:connected", %{
-          "account" => "0xfeedface",
-          "chain_id" => 84_532
-        })
-
-      html = view |> element("#wallet-disconnect-btn") |> render_click()
-
-      assert html =~ ~s(id="wallet-status-disconnected")
-      refute html =~ "0xfeedface"
     end
   end
 
-  describe "wallet status region — error" do
-    test "wallet_connect:error shows error message and retry button", %{conn: conn} do
+  describe "wallet status region — error (browser-side)" do
+    test "wallet_connect:error shows the browser-reported message", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/")
 
       html =
-        render_hook(view, "wallet_connect:error", %{"message" => "User rejected the request"})
+        render_hook(view, "wallet_connect:error", %{"message" => "Provider unreachable"})
 
       assert html =~ ~s(id="wallet-status-error")
       assert html =~ ~s(id="wallet-status-error-message")
-      assert html =~ "User rejected the request"
+      assert html =~ "Provider unreachable"
       assert html =~ ~s(id="wallet-connect-btn")
     end
   end
 
   describe "wallet status region — chain change after connect" do
-    test "wrong_chain after connected swaps the visible region", %{conn: conn} do
+    test "wrong_chain after awaiting_signature swaps the visible region", %{
+      conn: conn,
+      wallet_address: address
+    } do
       {:ok, view, _html} = live(conn, "/")
 
       _ =
         render_hook(view, "wallet_connect:connected", %{
-          "account" => "0xabc",
+          "account" => address,
           "chain_id" => 84_532
         })
 
       html =
         render_hook(view, "wallet_connect:wrong_chain", %{
-          "account" => "0xabc",
-          "chain_id" => 1
+          "account" => address,
+          "chain_id" => 8453
         })
 
       assert html =~ ~s(id="wallet-status-wrong-chain")
-      refute html =~ ~s(id="wallet-status-connected")
+      refute html =~ ~s(id="wallet-status-awaiting-signature")
     end
+  end
+
+  # --- Wallet binding test helpers -----------------------------------------
+
+  defp list_pending_bindings(address) do
+    workspace_id = Process.get(:bank_test_workspace_id)
+    address_lower = String.downcase(address)
+
+    Repo.all(
+      from(b in WalletBinding,
+        where:
+          b.workspace_id == ^workspace_id and b.address == ^address_lower and
+            is_nil(b.verified_at) and is_nil(b.revoked_at)
+      )
+    )
+  end
+
+  defp sign_challenge(message, privkey) do
+    digest = Signature.eip191_hash(message)
+    {:ok, {r, s, v}} = ExSecp256k1.sign(digest, privkey)
+    "0x" <> Base.encode16(r <> s <> <<v + 27>>, case: :lower)
   end
 end

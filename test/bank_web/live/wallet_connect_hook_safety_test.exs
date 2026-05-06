@@ -2,11 +2,20 @@ defmodule BankWeb.WalletConnectHookSafetyTest do
   @moduledoc """
   Source-level invariants for `assets/js/hooks/wallet_connect.js`.
 
-  Issue #168 explicitly forbids the hook from signing or broadcasting
-  anything. The acceptance criteria pin "no private key handling
-  exists anywhere" and "no transaction broadcast" as hard rules. We
-  enforce that at source level so the rule survives future edits even
-  if the JS test stack is unavailable.
+  Acceptance criteria pinned by #168 and tightened by #169:
+
+    * No private key handling anywhere.
+    * No transaction broadcast.
+    * Only `personal_sign` is allowed for signing — typed-data,
+      legacy `eth_sign`, and `eth_signTransaction` stay forbidden so
+      the hook can never be talked into signing a transaction or an
+      arbitrary structured payload.
+    * `personal_sign` is only ever invoked inside `signChallenge`,
+      which the server triggers via a `wallet_connect:challenge` push
+      event. The hook never builds the message itself.
+
+  We enforce these at source level so the rule survives future edits
+  even when no JS test stack is wired up.
   """
 
   use ExUnit.Case, async: true
@@ -29,22 +38,6 @@ defmodule BankWeb.WalletConnectHookSafetyTest do
     refute source =~ "seed_phrase"
   end
 
-  test "hook never invokes signing JSON-RPC methods", %{source: source} do
-    forbidden = [
-      "personal_sign",
-      "eth_sign",
-      "eth_signTransaction",
-      "eth_signTypedData",
-      "eth_signTypedData_v3",
-      "eth_signTypedData_v4"
-    ]
-
-    for method <- forbidden do
-      refute source =~ method,
-             "wallet_connect.js must not invoke #{method} (signing is out of scope for #168)"
-    end
-  end
-
   test "hook never invokes broadcast JSON-RPC methods", %{source: source} do
     forbidden = [
       "eth_sendTransaction",
@@ -54,15 +47,45 @@ defmodule BankWeb.WalletConnectHookSafetyTest do
 
     for method <- forbidden do
       refute source =~ method,
-             "wallet_connect.js must not broadcast (#{method} is out of scope for #168)"
+             "wallet_connect.js must not broadcast (#{method} is out of scope)"
     end
   end
 
-  test "hook only uses the read-only EIP-1193 methods declared in scope", %{source: source} do
-    allowed = ~w(eth_requestAccounts eth_accounts eth_chainId)
+  test "hook never invokes signing methods other than personal_sign", %{source: source} do
+    # `personal_sign` is the only signing method #169 allows. The hook
+    # must NOT touch typed-data signing, raw eth_sign, or transaction
+    # signing — even by accident, so the substring is forbidden.
+    forbidden = [
+      "eth_signTransaction",
+      "eth_signTypedData",
+      "eth_signTypedData_v3",
+      "eth_signTypedData_v4"
+    ]
+
+    for method <- forbidden do
+      refute source =~ method,
+             "wallet_connect.js must not invoke #{method} — only personal_sign is in scope"
+    end
+
+    # Bare `eth_sign` is dangerous because it signs any 32-byte hash.
+    # Allow it only as a substring inside `eth_signTransaction` or
+    # `eth_signTypedData`, which we've already banned. A standalone
+    # `"eth_sign"` literal must not appear.
+    refute source =~ ~r/"eth_sign"/,
+           "wallet_connect.js must not invoke the legacy eth_sign method — use personal_sign"
+  end
+
+  test "hook only uses approved JSON-RPC methods", %{source: source} do
+    # Approved set:
+    #   - eth_requestAccounts: gated behind a user click
+    #   - eth_accounts:        passive read after `accountsChanged`
+    #   - eth_chainId:         passive read of active network
+    #   - personal_sign:       only invoked from `signChallenge` in
+    #                          response to a server-issued challenge
+    allowed = ~w(eth_requestAccounts eth_accounts eth_chainId personal_sign)
 
     used =
-      ~r/method:\s*"(eth_[A-Za-z0-9_]+)"/
+      ~r/method:\s*"([a-zA-Z_][a-zA-Z0-9_]*)"/
       |> Regex.scan(source)
       |> Enum.map(fn [_full, m] -> m end)
       |> Enum.uniq()
@@ -70,17 +93,35 @@ defmodule BankWeb.WalletConnectHookSafetyTest do
     extras = used -- allowed
 
     assert extras == [],
-           "wallet_connect.js uses unexpected EIP-1193 methods: #{inspect(extras)}. " <>
-             "Only #{inspect(allowed)} are in scope for #168."
+           "wallet_connect.js uses unexpected JSON-RPC methods: #{inspect(extras)}. " <>
+             "Only #{inspect(allowed)} are approved."
   end
 
   test "hook gates eth_requestAccounts behind a user click", %{source: source} do
-    # The hook must only call eth_requestAccounts inside a click-driven path.
-    # We assert the method is reached through the `beginConnect` function
-    # which is invoked from the click delegation in `handleClick`.
     assert source =~ "beginConnect"
     assert source =~ "handleClick"
     assert source =~ ~r/handleClick.*?wallet-connect-btn/s
     assert source =~ ~r/beginConnect.*?eth_requestAccounts/s
+  end
+
+  test "hook gates personal_sign behind a server-issued challenge", %{source: source} do
+    # personal_sign must only run from `signChallenge`, which is wired
+    # to the server-pushed `wallet_connect:challenge` event. The hook
+    # must not build the message itself — the server alone owns nonce,
+    # expiry, and shape.
+    assert source =~ "signChallenge"
+    assert source =~ ~r/wallet_connect:challenge.*?signChallenge/s
+    assert source =~ ~r/signChallenge.*?personal_sign/s
+  end
+
+  test "hook restricts the active chain to Base Sepolia for the MVP", %{source: source} do
+    # Base mainnet (8453) must surface as wrong-chain so the operator
+    # switches before a binding challenge is issued. Only 84532 is
+    # supported in the MVP.
+    assert source =~ ~r/SUPPORTED_CHAIN_IDS\s*=\s*\[84_?532\]/,
+           "wallet_connect.js must declare Base Sepolia as the only supported chain"
+
+    refute source =~ ~r/SUPPORTED_CHAIN_IDS\s*=\s*\[8453/,
+           "wallet_connect.js must not list Base mainnet (8453) in SUPPORTED_CHAIN_IDS for the MVP"
   end
 end

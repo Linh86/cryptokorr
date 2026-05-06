@@ -16,14 +16,16 @@ defmodule BankWeb.ControlLive do
 
   ## Design decisions
 
-  **Read-only browser wallet connect.** The page renders a wallet
-  status region driven by the EIP-1193 `WalletConnect` JS hook.
-  The hook reads provider state only — it never asks the wallet to
-  sign or broadcast — so an alpha operator can confirm their EOA
-  address and chain without granting a delegation. Delegation is
-  still established through the adapter callback flow; a browser
-  signing path lands with the SDK + adapter integration tracked
-  in `docs/wallet-connect.md`.
+  **Browser wallet connect with EOA identity binding.** The page
+  renders a wallet status region driven by the EIP-1193
+  `WalletConnect` JS hook. After the operator connects on Base
+  Sepolia, Phoenix issues a short-lived signed challenge
+  (`Bank.WalletBindings`); the browser signs it with `personal_sign`
+  and Phoenix verifies the signature recovers the connected EOA.
+  The verified binding is the foundation the smart-account
+  delegation install (#171) builds on. The hook never broadcasts
+  transactions and never handles private keys — it only signs
+  the server-issued message.
 
   **Multi-account aware.** Operators routinely run more than one
   smart account (e.g. production treasury plus a sandbox account).
@@ -39,6 +41,7 @@ defmodule BankWeb.ControlLive do
 
   alias Bank.Delegations
   alias Bank.Security
+  alias Bank.WalletBindings
 
   @impl true
   def mount(_params, _session, socket) do
@@ -53,6 +56,9 @@ defmodule BankWeb.ControlLive do
       |> assign(wallet_account: nil)
       |> assign(wallet_chain_id: nil)
       |> assign(wallet_error_message: nil)
+      |> assign(wallet_failure_reason: nil)
+      |> assign(wallet_binding: nil)
+      |> load_wallet_binding()
       |> load_state()
 
     {:ok, socket}
@@ -123,25 +129,22 @@ defmodule BankWeb.ControlLive do
 
   # --- Wallet connect events ----------------------------------------------
   #
-  # The `WalletConnect` JS hook pushes these events after the EIP-1193
-  # handshake. The hook only reads provider state — no signing or
-  # broadcasting happens here. Full signing + delegation grant land with
-  # the SDK + adapter integration tracked in `docs/wallet-connect.md`.
+  # The `WalletConnect` JS hook drives the connection + binding flow.
+  # After the wallet exposes accounts on Base Sepolia, Phoenix issues a
+  # signed challenge; the browser signs and pushes the signature back;
+  # Phoenix verifies and stamps the binding. No private keys, no
+  # broadcasts.
 
   def handle_event("wallet_connect:unavailable", _params, socket) do
-    {:noreply,
-     socket
-     |> assign(wallet_status: :not_installed)
-     |> assign(wallet_account: nil)
-     |> assign(wallet_chain_id: nil)
-     |> assign(wallet_error_message: nil)}
+    {:noreply, reset_wallet(socket, status: :not_installed)}
   end
 
   def handle_event("wallet_connect:connecting", _params, socket) do
     {:noreply,
      socket
      |> assign(wallet_status: :connecting)
-     |> assign(wallet_error_message: nil)}
+     |> assign(wallet_error_message: nil)
+     |> assign(wallet_failure_reason: nil)}
   end
 
   def handle_event(
@@ -149,12 +152,80 @@ defmodule BankWeb.ControlLive do
         %{"account" => account, "chain_id" => chain_id},
         socket
       ) do
+    workspace_id = socket.assigns.current_scope.workspace.id
+    user_id = socket.assigns.current_scope.user.id
+
+    case WalletBindings.issue_challenge(workspace_id, user_id, %{
+           address: account,
+           chain_id: chain_id
+         }) do
+      {:ok, binding} ->
+        {:noreply,
+         socket
+         |> assign(wallet_status: :awaiting_signature)
+         |> assign(wallet_account: binding.address)
+         |> assign(wallet_chain_id: binding.chain_id)
+         |> assign(wallet_error_message: nil)
+         |> assign(wallet_failure_reason: nil)
+         |> push_event("wallet_connect:challenge", %{
+           challenge_id: binding.id,
+           message: binding.challenge_message,
+           address: binding.address
+         })}
+
+      {:error, reason} when is_atom(reason) ->
+        {:noreply,
+         socket
+         |> assign(wallet_status: :bind_failed)
+         |> assign(wallet_account: account)
+         |> assign(wallet_chain_id: chain_id)
+         |> assign(wallet_failure_reason: reason)}
+
+      {:error, %Ecto.Changeset{}} ->
+        {:noreply,
+         socket
+         |> assign(wallet_status: :bind_failed)
+         |> assign(wallet_account: account)
+         |> assign(wallet_chain_id: chain_id)
+         |> assign(wallet_failure_reason: :invalid_challenge)}
+    end
+  end
+
+  def handle_event(
+        "wallet_connect:verify",
+        %{"challenge_id" => challenge_id, "signature" => signature},
+        socket
+      )
+      when is_binary(challenge_id) and is_binary(signature) do
+    case WalletBindings.verify_and_bind(challenge_id, signature) do
+      {:ok, binding} ->
+        {:noreply,
+         socket
+         |> assign(wallet_status: :bound)
+         |> assign(wallet_account: binding.address)
+         |> assign(wallet_chain_id: binding.chain_id)
+         |> assign(wallet_binding: binding)
+         |> assign(wallet_failure_reason: nil)
+         |> assign(wallet_error_message: nil)}
+
+      {:error, reason} ->
+        {:noreply,
+         socket
+         |> assign(wallet_status: :bind_failed)
+         |> assign(wallet_failure_reason: bind_failure_reason(reason))}
+    end
+  end
+
+  def handle_event(
+        "wallet_connect:verify_error",
+        %{"reason" => reason},
+        socket
+      ) do
     {:noreply,
      socket
-     |> assign(wallet_status: :connected)
-     |> assign(wallet_account: account)
-     |> assign(wallet_chain_id: chain_id)
-     |> assign(wallet_error_message: nil)}
+     |> assign(wallet_status: :bind_failed)
+     |> assign(wallet_failure_reason: :user_rejected)
+     |> assign(wallet_error_message: reason)}
   end
 
   def handle_event(
@@ -167,41 +238,30 @@ defmodule BankWeb.ControlLive do
      |> assign(wallet_status: :wrong_chain)
      |> assign(wallet_account: Map.get(params, "account"))
      |> assign(wallet_chain_id: chain_id)
-     |> assign(wallet_error_message: nil)}
+     |> assign(wallet_error_message: nil)
+     |> assign(wallet_failure_reason: nil)}
   end
 
   def handle_event("wallet_connect:cancelled", _params, socket) do
-    {:noreply,
-     socket
-     |> assign(wallet_status: :not_connected)
-     |> assign(wallet_account: nil)
-     |> assign(wallet_chain_id: nil)
-     |> assign(wallet_error_message: nil)}
+    {:noreply, reset_wallet(socket)}
   end
 
   def handle_event("wallet_connect:disconnected", _params, socket) do
-    {:noreply,
-     socket
-     |> assign(wallet_status: :not_connected)
-     |> assign(wallet_account: nil)
-     |> assign(wallet_chain_id: nil)
-     |> assign(wallet_error_message: nil)}
+    socket = revoke_active_binding(socket, :wallet_disconnected)
+    {:noreply, reset_wallet(socket)}
   end
 
   def handle_event("wallet_connect:disconnect", _params, socket) do
-    {:noreply,
-     socket
-     |> assign(wallet_status: :not_connected)
-     |> assign(wallet_account: nil)
-     |> assign(wallet_chain_id: nil)
-     |> assign(wallet_error_message: nil)}
+    socket = revoke_active_binding(socket, :operator_requested)
+    {:noreply, reset_wallet(socket)}
   end
 
   def handle_event("wallet_connect:error", params, socket) do
     {:noreply,
      socket
      |> assign(wallet_status: :error)
-     |> assign(wallet_error_message: Map.get(params, "message", "Unknown wallet error"))}
+     |> assign(wallet_error_message: Map.get(params, "message", "Unknown wallet error"))
+     |> assign(wallet_failure_reason: nil)}
   end
 
   # --- PubSub handlers ----------------------------------------------------
@@ -212,6 +272,63 @@ defmodule BankWeb.ControlLive do
   end
 
   def handle_info(_msg, socket), do: {:noreply, socket}
+
+  # --- Wallet helpers ------------------------------------------------------
+
+  defp load_wallet_binding(socket) do
+    workspace_id = socket.assigns.current_scope.workspace.id
+
+    case WalletBindings.get_active_binding(workspace_id) do
+      nil ->
+        socket
+
+      %_{} = binding ->
+        socket
+        |> assign(wallet_status: :bound)
+        |> assign(wallet_account: binding.address)
+        |> assign(wallet_chain_id: binding.chain_id)
+        |> assign(wallet_binding: binding)
+    end
+  end
+
+  defp reset_wallet(socket, opts \\ []) do
+    status = Keyword.get(opts, :status, :not_connected)
+
+    socket
+    |> assign(wallet_status: status)
+    |> assign(wallet_account: nil)
+    |> assign(wallet_chain_id: nil)
+    |> assign(wallet_error_message: nil)
+    |> assign(wallet_failure_reason: nil)
+    |> assign(wallet_binding: nil)
+  end
+
+  defp revoke_active_binding(socket, reason) do
+    case socket.assigns.wallet_binding do
+      nil ->
+        socket
+
+      %_{id: id} ->
+        _ = WalletBindings.revoke_binding(id, reason)
+        socket
+    end
+  end
+
+  # Translate verify_and_bind error reasons into the small UI vocabulary
+  # the wallet status card renders. The full reason set still lives in
+  # the audit trail; the UI only needs to tell the operator what to
+  # try next.
+  defp bind_failure_reason(:not_found), do: :challenge_not_found
+  defp bind_failure_reason(:already_verified), do: :already_verified
+  defp bind_failure_reason(:revoked), do: :revoked
+  defp bind_failure_reason(:expired), do: :expired
+  defp bind_failure_reason(:address_mismatch), do: :address_mismatch
+  defp bind_failure_reason(:malformed_signature), do: :malformed_signature
+  defp bind_failure_reason(:invalid_signature), do: :invalid_signature
+  defp bind_failure_reason(:invalid_recovery_id), do: :malformed_signature
+  defp bind_failure_reason(:invalid_address), do: :malformed_signature
+  defp bind_failure_reason(other) when is_atom(other), do: other
+  defp bind_failure_reason(_), do: :unknown
 
   # --- State loading -------------------------------------------------------
 
@@ -292,7 +409,9 @@ defmodule BankWeb.ControlLive do
             status={@wallet_status}
             account={@wallet_account}
             chain_id={@wallet_chain_id}
+            binding={@wallet_binding}
             error_message={@wallet_error_message}
+            failure_reason={@wallet_failure_reason}
           />
           <.next_steps_card
             delegation={@selected_delegation}
@@ -641,7 +760,9 @@ defmodule BankWeb.ControlLive do
   attr :status, :atom, required: true
   attr :account, :string, default: nil
   attr :chain_id, :integer, default: nil
+  attr :binding, :map, default: nil
   attr :error_message, :string, default: nil
+  attr :failure_reason, :atom, default: nil
 
   defp wallet_status_card(assigns) do
     ~H"""
@@ -676,13 +797,13 @@ defmodule BankWeb.ControlLive do
         </div>
 
         <div
-          :if={@status == :connected}
-          id="wallet-status-connected"
+          :if={@status == :awaiting_signature}
+          id="wallet-status-awaiting-signature"
           class="space-y-2 text-sm"
         >
-          <div class="flex items-center gap-2">
-            <.icon name="hero-check-circle-solid" class="size-4 text-success" />
-            <span class="text-base-content/70">Connected</span>
+          <div class="flex items-center gap-2 text-base-content/70">
+            <.icon name="hero-arrow-path" class="size-4 animate-spin text-base-content/50" />
+            <span>Awaiting signature — confirm the binding message in your wallet…</span>
           </div>
           <div>
             <dt class="text-[0.65rem] uppercase tracking-wider text-base-content/40 mb-0.5">
@@ -706,6 +827,51 @@ defmodule BankWeb.ControlLive do
             phx-click="wallet_connect:disconnect"
             class="btn btn-ghost btn-xs gap-1.5"
           >
+            <.icon name="hero-link-slash" class="size-3.5" /> Cancel
+          </button>
+        </div>
+
+        <div
+          :if={@status == :bound}
+          id="wallet-status-bound"
+          class="space-y-2 text-sm"
+        >
+          <div class="flex items-center gap-2">
+            <.icon name="hero-check-badge-solid" class="size-4 text-success" />
+            <span id="wallet-status-bound-label" class="font-medium text-success">
+              Wallet identity bound
+            </span>
+          </div>
+          <div>
+            <dt class="text-[0.65rem] uppercase tracking-wider text-base-content/40 mb-0.5">
+              Address
+            </dt>
+            <dd id="wallet-status-address" class="font-mono text-sm text-base-content/80 break-all">
+              {@account}
+            </dd>
+          </div>
+          <div>
+            <dt class="text-[0.65rem] uppercase tracking-wider text-base-content/40 mb-0.5">
+              Chain
+            </dt>
+            <dd id="wallet-status-chain" class="text-sm text-base-content/80">
+              {chain_label(@chain_id)}
+            </dd>
+          </div>
+          <div :if={@binding && @binding.verified_at}>
+            <dt class="text-[0.65rem] uppercase tracking-wider text-base-content/40 mb-0.5">
+              Verified
+            </dt>
+            <dd id="wallet-status-verified-at" class="text-sm text-base-content/80">
+              {format_datetime(@binding.verified_at)}
+            </dd>
+          </div>
+          <button
+            id="wallet-disconnect-btn"
+            type="button"
+            phx-click="wallet_connect:disconnect"
+            class="btn btn-ghost btn-xs gap-1.5"
+          >
             <.icon name="hero-link-slash" class="size-3.5" /> Disconnect
           </button>
         </div>
@@ -718,7 +884,7 @@ defmodule BankWeb.ControlLive do
           <div class="flex items-start gap-2 text-warning">
             <.icon name="hero-exclamation-triangle" class="size-4 mt-0.5 shrink-0" />
             <p class="text-base-content/80">
-              Wallet is on chain id <span id="wallet-status-wrong-chain-id">{@chain_id}</span>. Switch to Base (8453) or Base Sepolia (84532) to continue.
+              Wallet is on chain id <span id="wallet-status-wrong-chain-id">{@chain_id}</span>. Switch to Base Sepolia (84532) to continue. Base mainnet (8453) is post-MVP.
             </p>
           </div>
           <p :if={@account} class="text-xs text-base-content/50 font-mono break-all">
@@ -731,6 +897,26 @@ defmodule BankWeb.ControlLive do
             class="btn btn-ghost btn-xs gap-1.5"
           >
             <.icon name="hero-link-slash" class="size-3.5" /> Disconnect
+          </button>
+        </div>
+
+        <div
+          :if={@status == :bind_failed}
+          id="wallet-status-bind-failed"
+          class="space-y-2 text-sm"
+        >
+          <div class="flex items-start gap-2 text-error">
+            <.icon name="hero-exclamation-circle" class="size-4 mt-0.5 shrink-0" />
+            <p id="wallet-status-bind-failed-message" class="text-base-content/80">
+              {bind_failure_message(@failure_reason)}
+            </p>
+          </div>
+          <button
+            id="wallet-connect-btn"
+            type="button"
+            class="btn btn-xs btn-outline"
+          >
+            Try again
           </button>
         </div>
 
@@ -758,7 +944,7 @@ defmodule BankWeb.ControlLive do
           class="space-y-2 text-sm"
         >
           <p class="text-base-content/70">
-            Connect a browser wallet to view your public address. Base Sepolia (84532) is the supported chain.
+            Connect a browser wallet to bind your EOA for the MVP. Base Sepolia (84532) is the only supported chain.
           </p>
           <button
             id="wallet-connect-btn"
@@ -843,10 +1029,43 @@ defmodule BankWeb.ControlLive do
   defp short_id(id) when byte_size(id) > 12, do: String.slice(id, 0, 8) <> "..."
   defp short_id(id), do: id
 
-  defp chain_label(8453), do: "Base (8453)"
   defp chain_label(84_532), do: "Base Sepolia (84532)"
   defp chain_label(nil), do: "-"
   defp chain_label(id) when is_integer(id), do: "Chain #{id}"
+
+  defp bind_failure_message(:expired),
+    do: "Challenge expired. Click Connect wallet again to issue a fresh challenge."
+
+  defp bind_failure_message(:address_mismatch),
+    do: "The signature was produced by a different address. Reconnect the wallet you signed with."
+
+  defp bind_failure_message(:malformed_signature),
+    do:
+      "Signature was malformed. Try connecting again — your wallet should produce a 65-byte secp256k1 signature."
+
+  defp bind_failure_message(:invalid_signature),
+    do: "Signature could not be recovered. Try connecting again."
+
+  defp bind_failure_message(:already_verified),
+    do: "Binding is already verified. Refresh the page to view it."
+
+  defp bind_failure_message(:revoked),
+    do: "This binding was revoked. Click Connect wallet to start a fresh one."
+
+  defp bind_failure_message(:challenge_not_found),
+    do: "Challenge expired or never issued. Click Connect wallet to retry."
+
+  defp bind_failure_message(:user_rejected),
+    do: "Wallet rejected the signing prompt. Click Connect wallet to try again."
+
+  defp bind_failure_message(:invalid_challenge),
+    do: "Challenge could not be issued. Confirm you are on Base Sepolia (84532) and try again."
+
+  defp bind_failure_message(:chain_not_supported),
+    do: "Only Base Sepolia (84532) is supported in the MVP."
+
+  defp bind_failure_message(_),
+    do: "Wallet binding failed. Click Connect wallet to retry."
 
   defp short_hash(nil), do: "-"
   defp short_hash(hash) when byte_size(hash) > 14, do: String.slice(hash, 0, 10) <> "..."

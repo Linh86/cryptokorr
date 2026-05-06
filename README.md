@@ -330,11 +330,12 @@ Each LiveView passes an `active_page` assign to the shared
 
 **What is not yet included:**
 
-* **Browser wallet signing.** The connection page now includes a
-  read-only EIP-1193 connect surface (#168) so an operator can
-  expose their EOA + chain to the UI. The repo does not yet include
-  a client-side wallet SDK (WalletConnect, wagmi) for *signing*
-  delegation payloads — delegation is still established through
+* **Smart-account delegation install signing.** The connection
+  page binds the connected EOA via an EIP-191 challenge (#168 +
+  #169) on Base Sepolia, and Phoenix persists the verified
+  identity. The repo does not yet include a client-side wallet SDK
+  (WalletConnect, wagmi) for *signing the delegation payload* —
+  the smart-account install (#171) is still established through
   the adapter callback flow.
 * **Public intent intake.** `POST /v1/intents`, `GET /v1/intents/:id`,
   `POST /v1/intents/:id/simulate`, and `POST /v1/intents/:id/cancel`
@@ -919,11 +920,12 @@ deferred:
   engines are present as building blocks, but the public
   `/v1/intents*` submission and inspection surface remains stubbed until
   the full end-to-end intake flow is wired.
-* **Browser wallet signing.** The connection page renders a
-  read-only EIP-1193 connect surface (#168) plus the delegation
-  state the backend already tracks. A browser-native *signing* flow
-  (WalletConnect / wagmi) for delegation payloads is a follow-up
-  once the adapter supports it.
+* **Smart-account delegation install signing.** The connection
+  page renders an EIP-1193 connect + EOA identity binding flow
+  (#168 + #169) plus the delegation state the backend tracks. A
+  browser-native flow for *signing the delegation payload*
+  (WalletConnect / wagmi, smart-account install #171) is a
+  follow-up once the adapter supports it.
 * **Wallet risk intelligence.** Runtime routing does not yet hard-block
   sanctioned addresses, challenge scam/phishing-labelled addresses, or
   enrich counterparties from public crypto attribution tagpacks and
