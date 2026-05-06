@@ -35,9 +35,21 @@ defmodule Bank.MainnetGateTest do
   alias Bank.Runtime.Workers.RevokeDelegation
   alias Bank.Runtime.Workers.RunExecution
   alias Bank.Security
+  alias Bank.Security.PauseState
   alias Bank.Workspaces
 
   import Bank.Fixtures
+
+  # Reset the global PauseState before each test so a leaked
+  # `:global` pause from a prior test file (e.g. control LiveView,
+  # security LiveView, swap-dispatch-safety) cannot turn the
+  # mainnet-gate assertions in this file into a `:runtime_paused`
+  # flake. Same hygiene fix applied to
+  # `test/bank/cross_account_isolation_test.exs` in #191's PR.
+  setup do
+    PauseState.reset()
+    :ok
+  end
 
   defp workspace_with_flag(flag) when is_boolean(flag) do
     suffix = System.unique_integer([:positive])
