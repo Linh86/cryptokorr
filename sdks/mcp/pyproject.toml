@@ -1,0 +1,44 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cryptobank-mcp"
+version = "0.1.0"
+description = "stdio MCP server for CryptoBank agent tools"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "CryptoBank" }]
+keywords = ["mcp", "model-context-protocol", "cryptobank", "agent", "stdio"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = []
+
+[project.scripts]
+cryptobank-mcp = "cryptobank_mcp.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/Linh86/cryptobank"
+Documentation = "https://github.com/Linh86/cryptobank/blob/main/docs/api/mcp-tools.md"
+Issues = "https://github.com/Linh86/cryptobank/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cryptobank_mcp"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/cryptobank_mcp",
+  "README.md",
+  "tests",
+]
