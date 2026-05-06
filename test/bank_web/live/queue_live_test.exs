@@ -534,4 +534,185 @@ defmodule BankWeb.QueueLiveTest do
       refute html =~ "Authorization:"
     end
   end
+
+  # --- Morpho deposit risk-explanation UI (#204) ---------------------------
+
+  describe "morpho deposit approval card (#204)" do
+    @morpho_vault "0x" <> String.duplicate("a4", 20)
+    @morpho_explanation %{
+      "kind" => "morpho_vault_risk",
+      "venue" => "morpho",
+      "vault_address" => @morpho_vault,
+      "vault_name" => "Demo USDC Vault",
+      "chain_id" => 84_532,
+      "loan_asset" => "USDC",
+      "decision" => "approval_required",
+      "risk_tier" => "moderate",
+      "summary" => "Approval required because vault is not yet listed.",
+      "primary_reasons" => [
+        %{
+          "code" => "vault_listed",
+          "severity" => "approval",
+          "message" => "Vault is not listed on Morpho yet."
+        },
+        %{
+          "code" => "snapshot_freshness_warnings",
+          "severity" => "warn",
+          "message" => "Warning snapshot age 4m 12s exceeds 5m floor."
+        }
+      ],
+      "checks" => [
+        %{
+          "code" => "vault_allowlist",
+          "status" => "pass",
+          "label" => "Vault on workspace allowlist",
+          "source" => "policy.morpho_vault_allowlist"
+        },
+        %{
+          "code" => "asset_match",
+          "status" => "pass",
+          "label" => "Loan asset matches intent",
+          "source" => "snapshot.loan_asset"
+        },
+        %{
+          "code" => "vault_listed",
+          "status" => "warn",
+          "label" => "Vault listed",
+          "source" => "snapshot.listed"
+        }
+      ],
+      "market_allocations" => [],
+      "source_refs" => []
+    }
+
+    defp morpho_decision_setup(_ctx) do
+      intent = morpho_deposit_intent(target_raw_address: @morpho_vault)
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          risk_tier: :moderate,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z],
+          reasons: %{
+            "items" => [
+              %{
+                "code" => "morpho_risk_explanation",
+                "message" => @morpho_explanation["summary"],
+                "details" => %{"morpho_risk_explanation" => @morpho_explanation}
+              }
+            ]
+          }
+        )
+
+      %{intent: intent, envelope: envelope}
+    end
+
+    setup :morpho_decision_setup
+
+    test "approval row shows the morpho deposit kind badge", %{conn: conn, envelope: envelope} do
+      {:ok, view, _html} = live(conn, "/queue")
+
+      assert has_element?(view, "#approval-morpho-badge-#{envelope.id}", "morpho deposit")
+      refute has_element?(view, "#approval-kind-badge-#{envelope.id}")
+    end
+
+    test "expanded approval details surface the morpho risk explanation",
+         %{conn: conn, envelope: envelope} do
+      {:ok, view, _html} = live(conn, "/queue")
+
+      view |> element("#details-btn-#{envelope.id}") |> render_click()
+
+      assert has_element?(view, "#approval-morpho-details-#{envelope.id}")
+      assert has_element?(view, "#approval-morpho-summary-#{envelope.id}")
+      assert has_element?(view, "#approval-morpho-reasons-#{envelope.id}")
+      assert has_element?(view, "#approval-morpho-checks-#{envelope.id}")
+
+      details = render(element(view, "#approval-morpho-details-#{envelope.id}"))
+
+      assert details =~ "Demo USDC Vault"
+      assert details =~ @morpho_vault
+      assert details =~ "84532"
+      assert details =~ "Approval required because vault is not yet listed."
+      # Primary reasons are rendered with severity + code + message.
+      assert details =~ "vault_listed"
+      assert details =~ "Vault is not listed on Morpho yet."
+      assert details =~ "approval"
+      # Checks render with their pass/warn label.
+      assert details =~ "Vault on workspace allowlist"
+      assert details =~ "Loan asset matches intent"
+    end
+
+    test "approval / reject controls remain present for morpho decisions",
+         %{conn: conn, envelope: envelope} do
+      {:ok, _view, html} = live(conn, "/queue")
+
+      assert html =~ ~s(id="approve-btn-#{envelope.id}")
+      assert html =~ ~s(id="reject-btn-#{envelope.id}")
+    end
+
+    test "held morpho decision row carries the morpho badge", %{conn: conn} do
+      held_intent = morpho_deposit_intent(target_raw_address: @morpho_vault)
+
+      held =
+        decision_envelope(
+          intent: held_intent,
+          outcome: :hold,
+          risk_tier: :elevated,
+          current: true,
+          reasons: %{
+            "items" => [
+              %{
+                "code" => "morpho_risk_explanation",
+                "message" => "Snapshot stale.",
+                "details" => %{"morpho_risk_explanation" => @morpho_explanation}
+              }
+            ]
+          }
+        )
+
+      {:ok, view, _html} = live(conn, "/queue")
+
+      assert has_element?(view, "#decision-morpho-badge-#{held.id}", "morpho deposit")
+    end
+
+    test "non-morpho approval does NOT render morpho badge or details panel",
+         %{conn: conn} do
+      transfer_intent = agent_intent(kind: :transfer)
+
+      transfer_decision =
+        decision_envelope(
+          intent: transfer_intent,
+          outcome: :approval_required,
+          risk_tier: :low,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      {:ok, view, _html} = live(conn, "/queue")
+
+      refute has_element?(view, "#approval-morpho-badge-#{transfer_decision.id}")
+
+      view |> element("#details-btn-#{transfer_decision.id}") |> render_click()
+      refute has_element?(view, "#approval-morpho-details-#{transfer_decision.id}")
+    end
+
+    test "secret hygiene — morpho approval card never embeds raw provider payloads",
+         %{conn: conn, envelope: envelope} do
+      {:ok, view, _html} = live(conn, "/queue")
+      view |> element("#details-btn-#{envelope.id}") |> render_click()
+
+      details = render(element(view, "#approval-morpho-details-#{envelope.id}"))
+
+      refute details =~ "Bearer "
+      refute details =~ "Authorization:"
+      refute details =~ "private_key"
+      # market_allocations / pending_caps / source warnings are
+      # intentionally NOT projected onto the approval block.
+      refute details =~ "market_allocations"
+      refute details =~ "pending_caps"
+      refute details =~ "source_warnings"
+    end
+  end
 end

@@ -308,6 +308,13 @@ defmodule BankWeb.QueueLive do
               >
                 swap
               </span>
+              <span
+                :if={@decision.intent && @decision.intent.kind == :defi_yield_deposit}
+                id={"approval-morpho-badge-" <> @decision.id}
+                class="badge badge-xs badge-accent"
+              >
+                morpho deposit
+              </span>
               <span class="text-base-content/40 font-normal">
                 &middot; {risk_label(@decision.risk_tier)}
               </span>
@@ -366,6 +373,10 @@ defmodule BankWeb.QueueLive do
         class="mt-4 ml-11 rounded-lg bg-base-200/40 border border-base-300 p-4 text-xs space-y-3"
       >
         <.approval_intent_facts :if={@decision.intent} intent={@decision.intent} />
+        <.approval_morpho_details
+          :if={morpho_decision?(@decision)}
+          decision={@decision}
+        />
         <.approval_reasons reasons={@decision.reasons} />
         <.approval_policy_snapshot decision={@decision} />
       </div>
@@ -416,6 +427,93 @@ defmodule BankWeb.QueueLive do
         <li :for={r <- @items} class="flex items-start gap-1.5">
           <span class="font-mono text-base-content/40">{r["code"] || "reason"}:</span>
           <span class="text-base-content/70">{r["message"] || ""}</span>
+        </li>
+      </ul>
+    </div>
+    """
+  end
+
+  # #204 — Morpho deposit risk explanation panel. Renders the
+  # subset of `morpho_risk_explanation` that lets an operator
+  # decide approve/reject without reading raw JSON: vault
+  # identity, decision/risk_tier, summary, and the primary
+  # reasons/checks. Never renders raw provider payloads,
+  # snapshot warnings array, market_allocations, or any
+  # 0x-prefixed calldata-shaped strings.
+  attr :decision, :map, required: true
+
+  defp approval_morpho_details(assigns) do
+    explanation = morpho_explanation(assigns.decision.reasons)
+
+    assigns =
+      assigns
+      |> assign(:explanation, explanation)
+      |> assign(:primary_reasons, primary_reasons(explanation))
+      |> assign(:checks, morpho_checks(explanation))
+
+    ~H"""
+    <div
+      :if={@explanation}
+      id={"approval-morpho-details-" <> @decision.id}
+      class="space-y-2 border-t border-base-300/60 pt-2"
+    >
+      <h4 class="text-[0.65rem] uppercase tracking-wider text-base-content/50">
+        Morpho risk explanation
+      </h4>
+      <dl class="grid grid-cols-2 gap-x-4 gap-y-1">
+        <div>
+          <dt class="text-base-content/40">Decision</dt>
+          <dd>{@explanation["decision"]}</dd>
+        </div>
+        <div>
+          <dt class="text-base-content/40">Risk tier</dt>
+          <dd>{@explanation["risk_tier"]}</dd>
+        </div>
+        <div :if={@explanation["vault_address"]} class="col-span-2">
+          <dt class="text-base-content/40">Vault</dt>
+          <dd class="font-mono break-all">
+            <span :if={@explanation["vault_name"]}>{@explanation["vault_name"]}  &middot; </span>
+            {@explanation["vault_address"]}
+          </dd>
+        </div>
+        <div :if={@explanation["chain_id"]}>
+          <dt class="text-base-content/40">Chain</dt>
+          <dd class="font-mono">{@explanation["chain_id"]}</dd>
+        </div>
+        <div :if={@explanation["loan_asset"]}>
+          <dt class="text-base-content/40">Loan asset</dt>
+          <dd>{@explanation["loan_asset"]}</dd>
+        </div>
+      </dl>
+      <p
+        :if={@explanation["summary"]}
+        id={"approval-morpho-summary-" <> @decision.id}
+        class="text-base-content/70"
+      >
+        {@explanation["summary"]}
+      </p>
+      <ul
+        :if={@primary_reasons != []}
+        id={"approval-morpho-reasons-" <> @decision.id}
+        class="space-y-0.5"
+      >
+        <li :for={r <- @primary_reasons} class="flex items-start gap-1.5">
+          <span class={["badge badge-xs", morpho_severity_class(r["severity"])]}>
+            {r["severity"]}
+          </span>
+          <span class="font-mono text-base-content/40">{r["code"]}:</span>
+          <span class="text-base-content/70">{r["message"]}</span>
+        </li>
+      </ul>
+      <ul
+        :if={@checks != []}
+        id={"approval-morpho-checks-" <> @decision.id}
+        class="grid grid-cols-1 gap-0.5 text-[0.7rem] sm:grid-cols-2"
+      >
+        <li :for={c <- @checks} class="flex items-center gap-1.5">
+          <.icon name={check_icon(c["status"])} class={["size-3", check_status_class(c["status"])]} />
+          <span class="font-mono text-base-content/40">{c["code"]}</span>
+          <span class="text-base-content/60">&middot; {c["label"]}</span>
         </li>
       </ul>
     </div>
@@ -534,6 +632,13 @@ defmodule BankWeb.QueueLive do
             >
               swap
             </span>
+            <span
+              :if={@decision.intent && @decision.intent.kind == :defi_yield_deposit}
+              id={"decision-morpho-badge-" <> @decision.id}
+              class="badge badge-xs badge-accent"
+            >
+              morpho deposit
+            </span>
             <span class="text-base-content/40 font-normal">
               &middot; {risk_label(@decision.risk_tier)}
             </span>
@@ -628,6 +733,54 @@ defmodule BankWeb.QueueLive do
   end
 
   defp swap_route_summary(_), do: nil
+
+  # #204 — Morpho-deposit decision discriminator. Hooked off the
+  # parent intent's :defi_yield_deposit kind, which the
+  # MorphoEvaluator is the only producer for in v0.1.
+  defp morpho_decision?(%{intent: %{kind: :defi_yield_deposit}}), do: true
+  defp morpho_decision?(_), do: false
+
+  # Pull the embedded `morpho_risk_explanation` out of the decision's
+  # reasons map. The MorphoEvaluator stamps it under
+  # `reasons.items[0].details.morpho_risk_explanation` (see
+  # `Bank.Decisions.MorphoEvaluator.build_envelope_attrs/7`); legacy /
+  # mock decisions that don't carry the embed return nil so the
+  # approval card silently skips the Morpho block.
+  defp morpho_explanation(%{"items" => items}) when is_list(items) do
+    Enum.find_value(items, fn item ->
+      case item do
+        %{"details" => %{"morpho_risk_explanation" => exp}} when is_map(exp) -> exp
+        _ -> nil
+      end
+    end)
+  end
+
+  defp morpho_explanation(_), do: nil
+
+  defp primary_reasons(%{"primary_reasons" => list}) when is_list(list), do: list
+  defp primary_reasons(_), do: []
+
+  defp morpho_checks(%{"checks" => list}) when is_list(list), do: list
+  defp morpho_checks(_), do: []
+
+  defp morpho_severity_class("block"), do: "badge-error"
+  defp morpho_severity_class("hold"), do: "badge-warning"
+  defp morpho_severity_class("approval"), do: "badge-info"
+  defp morpho_severity_class("warn"), do: "badge-warning"
+  defp morpho_severity_class("info"), do: "badge-ghost"
+  defp morpho_severity_class(_), do: "badge-ghost"
+
+  defp check_icon("pass"), do: "hero-check-circle"
+  defp check_icon("warn"), do: "hero-exclamation-triangle"
+  defp check_icon("fail"), do: "hero-x-circle"
+  defp check_icon("missing"), do: "hero-question-mark-circle"
+  defp check_icon(_), do: "hero-question-mark-circle"
+
+  defp check_status_class("pass"), do: "text-success"
+  defp check_status_class("warn"), do: "text-warning"
+  defp check_status_class("fail"), do: "text-error"
+  defp check_status_class("missing"), do: "text-base-content/40"
+  defp check_status_class(_), do: "text-base-content/40"
 
   defp short_id(nil), do: "-"
   defp short_id(id) when byte_size(id) > 12, do: String.slice(id, 0, 8) <> "..."

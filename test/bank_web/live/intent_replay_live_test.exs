@@ -474,4 +474,217 @@ defmodule BankWeb.IntentReplayLiveTest do
       refute swap_block =~ ~r/\bmainnet\b/i
     end
   end
+
+  # --- Morpho deposit risk-explanation evidence (#204) ---------------------
+
+  describe "morpho evidence card (#204)" do
+    @vault_address "0x" <> String.duplicate("a4", 20)
+    @explanation %{
+      "kind" => "morpho_vault_risk",
+      "venue" => "morpho",
+      "vault_address" => @vault_address,
+      "vault_name" => "Demo USDC Vault",
+      "chain_id" => 84_532,
+      "loan_asset" => "USDC",
+      "decision" => "approval_required",
+      "risk_tier" => "moderate",
+      "summary" => "Approval required because vault is not yet listed.",
+      "primary_reasons" => [
+        %{
+          "code" => "vault_listed",
+          "severity" => "approval",
+          "message" => "Vault is not listed on Morpho yet."
+        }
+      ],
+      "checks" => [],
+      "market_allocations" => [],
+      "source_refs" => []
+    }
+
+    test "morpho-less intent renders the section with an empty-state message",
+         %{conn: conn} do
+      intent = agent_intent()
+
+      {:ok, view, _html} = live(conn, "/audit/replay/#{intent.id}")
+
+      assert has_element?(view, "#replay-morpho-evidence")
+
+      block = render(element(view, "#replay-morpho-evidence"))
+      assert block =~ "No Morpho evidence captured"
+    end
+
+    test "morpho.risk_explained event surfaces vault, decision, summary, primary reasons",
+         %{conn: conn} do
+      intent = morpho_deposit_intent(target_raw_address: @vault_address)
+
+      audit_event(
+        event_type: "morpho.risk_explained",
+        subject_type: "agent_intent",
+        subject_id: intent.id,
+        correlation_id: intent.id,
+        actor: :runtime,
+        after_ref: %{
+          "morpho_risk_explanation" => @explanation,
+          "snapshot" => %{
+            "id" => "snap_demo_001",
+            "payload_hash" => String.duplicate("d", 64),
+            "fetched_at" => "2027-01-01T00:00:00Z"
+          },
+          "policy_rule_ids" => [Ecto.UUID.generate()],
+          "proposed_amount" => "1000"
+        }
+      )
+
+      {:ok, view, _html} = live(conn, "/audit/replay/#{intent.id}")
+
+      assert has_element?(view, "#replay-morpho-evidence")
+
+      block = render(element(view, "#replay-morpho-evidence"))
+      assert block =~ "risk_explained"
+      assert block =~ "approval_required"
+      assert block =~ "moderate"
+      assert block =~ @vault_address
+      assert block =~ "Approval required because vault is not yet listed."
+      assert block =~ "Vault is not listed on Morpho yet."
+    end
+
+    test "morpho.policy_blocked event surfaces vault, chain, and reason",
+         %{conn: conn} do
+      intent = morpho_deposit_intent(target_raw_address: @vault_address)
+
+      audit_event(
+        event_type: "morpho.policy_blocked",
+        subject_type: "agent_intent",
+        subject_id: intent.id,
+        correlation_id: intent.id,
+        actor: :runtime,
+        after_ref: %{
+          "vault_address" => @vault_address,
+          "chain_id" => 84_532,
+          "block_reason_codes" => ["vault_not_allowlisted"],
+          "summary" => "Vault is not on the allowlist.",
+          "policy_rule_ids" => [Ecto.UUID.generate()]
+        }
+      )
+
+      {:ok, view, _html} = live(conn, "/audit/replay/#{intent.id}")
+
+      block = render(element(view, "#replay-morpho-evidence"))
+
+      assert block =~ "policy_blocked"
+      assert block =~ @vault_address
+      assert block =~ "84532"
+      assert block =~ "Vault is not on the allowlist."
+    end
+
+    test "morpho.snapshot_stale event highlights stale fields",
+         %{conn: conn} do
+      intent = morpho_deposit_intent(target_raw_address: @vault_address)
+
+      audit_event(
+        event_type: "morpho.snapshot_stale",
+        subject_type: "agent_intent",
+        subject_id: intent.id,
+        correlation_id: intent.id,
+        actor: :runtime,
+        after_ref: %{
+          "vault_address" => @vault_address,
+          "chain_id" => 84_532,
+          "fetched_at" => "2027-01-01T00:00:00Z",
+          "stale_fields" => [
+            %{"field" => "warnings", "state" => "expired"},
+            %{"field" => "apy", "state" => "stale"}
+          ]
+        }
+      )
+
+      {:ok, view, _html} = live(conn, "/audit/replay/#{intent.id}")
+
+      block = render(element(view, "#replay-morpho-evidence"))
+
+      assert block =~ "snapshot_stale"
+      assert block =~ "warnings (expired)"
+      assert block =~ "apy (stale)"
+    end
+
+    test "morpho.deposit_dispatched event surfaces snapshot identity and amount",
+         %{conn: conn} do
+      intent = morpho_deposit_intent(target_raw_address: @vault_address)
+
+      audit_event(
+        event_type: "morpho.deposit_dispatched",
+        subject_type: "agent_intent",
+        subject_id: intent.id,
+        correlation_id: intent.id,
+        actor: :runtime,
+        after_ref: %{
+          "vault_address" => @vault_address,
+          "chain_id" => 84_532,
+          "asset" => "USDC",
+          "amount" => "1000",
+          "receiver" => "0x" <> String.duplicate("be", 20),
+          "snapshot_id" => "snap_dispatched_001",
+          "snapshot_payload_hash" => String.duplicate("e", 64)
+        }
+      )
+
+      {:ok, view, _html} = live(conn, "/audit/replay/#{intent.id}")
+
+      block = render(element(view, "#replay-morpho-evidence"))
+
+      assert block =~ "deposit_dispatched"
+      assert block =~ "1000 USDC"
+    end
+
+    test "secret hygiene — morpho evidence never renders raw payloads or auth headers",
+         %{conn: conn} do
+      intent = morpho_deposit_intent(target_raw_address: @vault_address)
+
+      audit_event(
+        event_type: "morpho.risk_explained",
+        subject_type: "agent_intent",
+        subject_id: intent.id,
+        correlation_id: intent.id,
+        actor: :runtime,
+        after_ref: %{
+          "morpho_risk_explanation" => @explanation,
+          "snapshot" => %{"id" => "snap_secret_test"},
+          "policy_rule_ids" => [],
+          "proposed_amount" => "5"
+        }
+      )
+
+      {:ok, view, _html} = live(conn, "/audit/replay/#{intent.id}")
+      block = render(element(view, "#replay-morpho-evidence"))
+
+      refute block =~ "Bearer "
+      refute block =~ "Authorization:"
+      refute block =~ "private_key"
+      # Allocations / source warnings are not surfaced in this card.
+      refute block =~ "market_allocations"
+      refute block =~ "source_warnings"
+      # Mainnet-implying copy must never appear (MVP is sepolia-only).
+      refute block =~ ~r/\bmainnet\b/i
+    end
+
+    test "non-morpho intent does NOT inject morpho events into the section",
+         %{conn: conn} do
+      intent = agent_intent()
+
+      audit_event(
+        event_type: "intent.submitted",
+        subject_type: "agent_intent",
+        subject_id: intent.id,
+        correlation_id: intent.id,
+        actor: :agent
+      )
+
+      {:ok, view, _html} = live(conn, "/audit/replay/#{intent.id}")
+
+      block = render(element(view, "#replay-morpho-evidence"))
+      assert block =~ "No Morpho evidence captured"
+      refute block =~ "risk_explained"
+      refute block =~ "deposit_dispatched"
+    end
+  end
 end
