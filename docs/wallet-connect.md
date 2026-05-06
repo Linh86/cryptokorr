@@ -184,16 +184,29 @@ Audit `session_permission.install_requested` carries the
 `wallet_binding_id`, `smart_account_id`, address, chain id, and
 scope summary — never a nonce, signature, or session signer key.
 
-The install UserOp itself is still signed server-side by
-`OPERATOR_PRIVATE_KEY` inside the adapter (`grant.ts`) — the
-browser provides the consent gate, scope summary, and EOA
-identity, but does not yet construct the permission UserOp.
-Browser-side signing of the delegation payload remains blocked on
-the wallet-SDK choice (wagmi vs WalletConnect) plus a delegation
-type (ERC-7579 session key vs EntryPoint v0.7 native session
-key). Until that lands, the adapter-callback flow remains the
-production path and `POST /v1/connect/smart_account` carries
-`delegation_payload: null` for operator-driven flows.
+**Update (epic #471, child issues #472–#476): the install UserOp
+is now signed by the user's wallet in the browser via the ZeroDev
+SDK — no server/operator key signs the normal install path.** The
+browser submits the signed UserOp to the bundler directly and
+reports each step (`submitted` → `confirmed`, or any failure
+category from
+`Bank.SessionPermissions.BrowserInstall.failure_categories/0`) to
+Phoenix via `POST /v1/wallet_bindings/:id/install_attestation`.
+Phoenix records the lifecycle as audit events
+(`delegation.install_envelope_issued`,
+`delegation.install_signed_by_user`,
+`delegation.install_broadcast`,
+`delegation.install_confirmed_onchain`) and marks the delegation
+`:active` only after `Bank.Runtime.Workers.VerifyInstallOnchain`
+reads the on-chain validator via `eth_call` and confirms it
+matches the `validation_id` Phoenix expected (no chain writes
+from the verifier). The legacy server-signed install through
+`Bank.Runtime.Workers.GrantDelegation` is preserved as a
+development fallback and for legacy delegations
+(`root_validator_owner: "operator"`). For the design rationale
+see [`docs/design/browser-signed-install.md`](design/browser-signed-install.md);
+for the reviewer-grade smoke see
+[`docs/runbooks/browser-signed-install.md`](runbooks/browser-signed-install.md).
 
 **Operator runbook**: end-to-end cryptographic grant + revoke
 runs against a provisioned `OPERATOR_PRIVATE_KEY` matching the

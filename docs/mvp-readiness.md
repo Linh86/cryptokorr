@@ -182,28 +182,39 @@ documented escape hatch.
   placeholders; per-tenant key issuance is tracked separately
   (`docs/security.md`). Manual writes attribute to `:user` with
   no actor id.
-- **Browser wallet identity binding (#169) + scoped session
-  install request (#171) land.** The browser connects on Base
-  Sepolia, signs an EIP-191 challenge via `personal_sign`
-  (verified by `Bank.WalletBindings`), and once the EOA is bound
-  the operator sees the canonical `Bank.SessionPermissions.Scope`
-  summary (USDC transfer, 0x swap, allowlisted Morpho USDC
-  deposit; withdraw / arbitrary calldata / unlimited approvals /
-  leverage / mainnet explicitly denied) and clicks Install. The
-  Phoenix-side context gates on a verified Sepolia binding,
-  refuses while the runtime or workspace is paused, blocks
-  duplicate installs, and dispatches through the existing
-  `Bank.Runtime.Workers.GrantDelegation` worker. The install
-  UserOp itself is still signed server-side by
-  `OPERATOR_PRIVATE_KEY` (`chain_adapter/src/chains/base/grant.ts`)
-  — browser-side delegation-payload signing remains blocked on
-  the wagmi/viem (or WalletConnect) SDK choice and delegation
-  type (ERC-7579 vs EntryPoint v0.7) tracked in
-  `docs/wallet-connect.md`. The operator-facing onboarding
-  walkthrough + troubleshooting matrix landed under #172 in
-  [`docs/wallet-quickstart.md`](wallet-quickstart.md), with the
-  local mocked happy-path smoke pinned by
-  `Bank.Smoke.WalletDelegationSmokeTest`. (Was #43.)
+- **Browser-signed install is live and is the default path for new
+  Base Sepolia users (epic #471, child issues #472–#476).** The
+  browser connects on Base Sepolia, signs an EIP-191 binding
+  challenge via `personal_sign` (verified by `Bank.WalletBindings`),
+  and once the EOA is bound the operator sees the canonical
+  `Bank.SessionPermissions.Scope` summary (USDC transfer, 0x swap,
+  allowlisted Morpho USDC deposit; withdraw / arbitrary calldata /
+  unlimited approvals / leverage / mainnet explicitly denied) and
+  clicks Install. **The user's wallet — not any operator/server
+  key — signs the install UserOperation directly via the ZeroDev
+  SDK in the browser; the browser submits to the bundler
+  directly.** Phoenix records the install lifecycle as audit
+  events (`delegation.install_envelope_issued` →
+  `delegation.install_signed_by_user` →
+  `delegation.install_broadcast` →
+  `delegation.install_confirmed_onchain`) and marks the delegation
+  `:active` only after `Bank.Runtime.Workers.VerifyInstallOnchain`
+  reads the on-chain validator via `eth_call` and confirms it
+  matches the `validation_id` Phoenix expected. The legacy
+  operator-signed install path is preserved as a development
+  fallback and for legacy delegations
+  (`root_validator_owner: "operator"`); revoke for those rows
+  remains the cryptographic `Kernel.uninstallValidation(...)` path
+  through `OPERATOR_PRIVATE_KEY`. The operator-facing onboarding
+  walkthrough + troubleshooting matrix lives in
+  [`docs/wallet-quickstart.md`](wallet-quickstart.md); the
+  reviewer-grade smoke runbook with explicit visible-fail checks
+  for wrong-chain, user rejection, missing on-chain verification,
+  and malicious browser is in
+  [`docs/runbooks/browser-signed-install.md`](runbooks/browser-signed-install.md).
+  Local happy-path smoke is pinned by
+  `Bank.Smoke.WalletDelegationSmokeTest`. (Was #43; superseded by
+  epic #471.)
 - **Cloud staging blocked on credentials.** `docs/staging.md`:
   code-side ready, but provider, Postgres, bundler keys, paymaster
   keys, DNS, smoke run all manual. (Was #35 remainder.)

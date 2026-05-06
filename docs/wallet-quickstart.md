@@ -24,11 +24,21 @@ smoke runbook lives in [`docs/mvp-smoke-runbook.md`](mvp-smoke-runbook.md).
   arbitrary calldata, unlimited approvals, borrow / leverage, and
   mainnet are explicitly denied — see the **Permission scope**
   section below for the plain-language rendering.
-- The MVP browser flow does **not** sign the install UserOp itself.
-  The browser signs the EIP-191 binding challenge; the install
-  UserOp is signed server-side by `OPERATOR_PRIVATE_KEY` inside the
-  adapter. Browser-side signing of the install UserOp is tracked
-  under the wagmi/viem follow-up in `docs/wallet-connect.md`.
+- **The browser-signed install path is the default for new
+  bindings.** The user's connected EOA wallet signs the install
+  UserOperation directly via the ZeroDev SDK in the browser, the
+  browser submits to the bundler, and Phoenix marks the delegation
+  `:active` only after on-chain verification by
+  `Bank.Runtime.Workers.VerifyInstallOnchain` (`eth_call` only — no
+  chain writes). **No operator/server key signs the install
+  UserOperation on the normal path.** The legacy server-signed
+  install path through the chain adapter is preserved as a
+  development fallback and for legacy delegations
+  (`root_validator_owner: "operator"`); see
+  [`docs/runbooks/browser-signed-install.md`](runbooks/browser-signed-install.md)
+  for the reviewer-grade smoke and
+  [`docs/design/browser-signed-install.md`](design/browser-signed-install.md)
+  for the design rationale.
 
 ## Before you start
 
@@ -111,17 +121,38 @@ Click **Install session permission**
 2. Stamps a `session_permission.install_requested` audit event with
    the binding id, smart-account id, address, chain id, and scope
    summary — never a nonce, signature, or session signer key.
-3. Dispatches through `Bank.Runtime.Workers.GrantDelegation` to the
-   adapter's `POST /dispatch/grant_delegation` endpoint. The
-   adapter signs the install UserOp server-side with
-   `OPERATOR_PRIVATE_KEY`, broadcasts it to the bundler, and emits
-   `delegation.state_changed{state: "granted"}` once on chain.
+3. Returns the canonical install envelope to the browser via
+   `GET /v1/wallet_bindings/:id/install_envelope` — scope JSON,
+   smart-account address, chain id, EntryPoint v0.7 address,
+   kernel version, permissions package version, and a SHA-256
+   `scope_hash`.
+4. The ZeroDev SDK in the browser builds the install UserOperation
+   against the envelope, byte-for-byte, and prompts your wallet to
+   sign. Your wallet — not any server key — is the only signer.
+5. The browser submits the signed UserOp to the bundler RPC
+   directly, then reports back to Phoenix via
+   `POST /v1/wallet_bindings/:id/install_attestation` (`status:
+   "submitted"` then `status: "confirmed"`). Phoenix stamps
+   `delegation.install_signed_by_user` and
+   `delegation.install_broadcast`, then enqueues
+   `Bank.Runtime.Workers.VerifyInstallOnchain`.
+6. The verifier worker is the **sole writer** of the `:active`
+   transition. It reads the smart account's installed permission
+   validator via `eth_call` and asserts it matches the
+   `validation_id` Phoenix expected; on success it stamps
+   `delegation.install_confirmed_onchain` and flips the row to
+   `:active`. On any verification failure the row stays out of
+   `:active` and surfaces an `:install_failed` reason from the
+   eight-atom allowlist in
+   `Bank.SessionPermissions.BrowserInstall.failure_categories/0`.
 
 While the install is in flight the card shows
-`#session-permission-installing` ("Installing — awaiting adapter
-callback…"). When the granted callback lands, the
-**Smart Account Delegation** card on the left flips to **Active**
-with the on-chain tx hash.
+`#session-permission-installing` ("Installing — awaiting on-chain
+verification…"). The browser polls
+`GET /v1/wallet_bindings/:id/install_status` for state transitions
+(`awaiting → submitted → verifying → active | failed`). When the
+verifier confirms on-chain, the **Smart Account Delegation** card
+on the left flips to **Active** with the on-chain tx hash.
 
 ### 6. Run an intent
 
@@ -224,12 +255,20 @@ contract still holds end-to-end. CI runs it as part of
 
 ## Live Base Sepolia smoke
 
-When you want to validate the full flow against a real bundler /
-operator key on Base Sepolia, follow
-[`docs/mvp-smoke-runbook.md`](mvp-smoke-runbook.md). The browser
-walkthrough above replaces the curl-driven §Grant section with the
-Connect → Bind → Install path; everything else (transfer, revoke,
-verification) is identical.
+When you want to validate the full **browser-signed** flow against a
+real bundler on Base Sepolia (the MVP launch path), follow
+[`docs/runbooks/browser-signed-install.md`](runbooks/browser-signed-install.md).
+That runbook is reviewer-grade: every step has an expected audit
+event, every documented failure mode has a visible-fail check (wrong
+chain, user rejection, missing on-chain verification, malicious
+browser), and the `:active` transition is gated on the verifier
+worker so a fake-pass is impossible by construction.
+
+The legacy operator-signed flow against `OPERATOR_PRIVATE_KEY` is
+preserved as a development fallback in
+[`docs/mvp-smoke-runbook.md`](mvp-smoke-runbook.md) — use it for
+adapter integration tests or for unblocking partners while
+debugging the browser path itself.
 
 ## CLI / headless setup is a dev fallback only
 
