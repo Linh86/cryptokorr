@@ -79,6 +79,7 @@ defmodule Bank.Decisions.MorphoEvaluator do
 
   alias Bank.Audit.Events
   alias Bank.Decisions.DecisionEnvelope
+  alias Bank.DefiVenues.Morpho.PersistedVaultSnapshot
   alias Bank.DefiVenues.Morpho.RiskExplanation
   alias Bank.DefiVenues.Morpho.Snapshots
   alias Bank.Intents.AgentIntent
@@ -104,6 +105,12 @@ defmodule Bank.Decisions.MorphoEvaluator do
     vault_address = intent.target_raw_address
 
     snapshot = resolve_snapshot(opts, chain_id, vault_address)
+
+    freshness =
+      case snapshot do
+        %PersistedVaultSnapshot{} -> Snapshots.freshness_summary(snapshot, now)
+        _ -> %{}
+      end
 
     rules = resolve_rules(opts, intent.workspace_id)
 
@@ -158,7 +165,15 @@ defmodule Bank.Decisions.MorphoEvaluator do
 
     case Repo.transaction(multi) do
       {:ok, %{decision: envelope, intent: updated_intent}} ->
-        emit_audits(updated_intent, prior_state, envelope)
+        emit_audits(
+          updated_intent,
+          prior_state,
+          envelope,
+          snapshot,
+          explanation,
+          morpho_rule_ids,
+          freshness
+        )
 
         # Inbox notification (#234). Best-effort, mirroring
         # `Bank.Decisions.evaluate_intent/2`.
@@ -291,8 +306,41 @@ defmodule Bank.Decisions.MorphoEvaluator do
   defp intent_state_for_outcome(:block), do: :blocked
   defp intent_state_for_outcome(_other), do: :decided
 
-  defp emit_audits(intent, prior_state, envelope) do
+  # Audit emission order matters for replay: Morpho-specific
+  # evidence lands BEFORE the generic `decision.decided` so a
+  # replay reader walking the audit list in
+  # `(ts, id)` order sees risk-explained → (optional)
+  # snapshot_stale → (optional) policy_blocked → decision.decided
+  # → intent.state_changed. The Morpho events share the intent's
+  # workspace_id so they participate in the same workspace
+  # boundary as the rest of the decision pipeline (#208).
+  defp emit_audits(
+         intent,
+         prior_state,
+         envelope,
+         snapshot,
+         explanation,
+         rule_ids,
+         freshness
+       ) do
     audit_opts = [workspace_id: intent.workspace_id]
+
+    _ =
+      Runtime.emit_audit(
+        Events.morpho_risk_explained(intent, snapshot, explanation, rule_ids, audit_opts)
+      )
+
+    if snapshot && morpho_snapshot_stale?(freshness) do
+      _ =
+        Runtime.emit_audit(Events.morpho_snapshot_stale(intent, snapshot, freshness, audit_opts))
+    end
+
+    if envelope.outcome == :block do
+      _ =
+        Runtime.emit_audit(
+          Events.morpho_policy_blocked(intent, explanation, rule_ids, audit_opts)
+        )
+    end
 
     _ = Runtime.emit_audit(Events.decision_decided(envelope, audit_opts))
 
@@ -303,6 +351,12 @@ defmodule Bank.Decisions.MorphoEvaluator do
 
     :ok
   end
+
+  defp morpho_snapshot_stale?(freshness) when is_map(freshness) do
+    Enum.any?(freshness, fn {_field, state} -> state in [:stale, :expired] end)
+  end
+
+  defp morpho_snapshot_stale?(_), do: false
 
   defp maybe_enqueue_approval_expiry(%DecisionEnvelope{
          outcome: :approval_required,
