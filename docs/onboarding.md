@@ -186,7 +186,7 @@ We tell partners these up front. Most are tracked as explicit issues.
 | Limitation                                            | Status                                          |
 | ----------------------------------------------------- | ----------------------------------------------- |
 | Base (mainnet + Sepolia) only — no multi-chain.       | Intentional for alpha.                          |
-| Transfers only — no swaps, no scheduled transfers.    | Swaps post-alpha.                               |
+| Live swap is Base Sepolia + 0x router only (USDC ↔ USDT and USDC ↔ ETH, exact-input). No scheduled transfers. | Mainnet swap, 1inch / CCTP / Jupiter live execution, and arbitrary-token support stay post-MVP. See `docs/runbooks/swap-dispatch.md`. |
 | Control tower does not yet have an intents page.      | Tracked as #44.                                 |
 | No multi-account support in the operator UI.          | Tracked as #46.                                 |
 | Audit pagination is coarse (no filter by date range). | Tracked as #45.                                 |
