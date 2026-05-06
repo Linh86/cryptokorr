@@ -17,6 +17,15 @@ defmodule Bank.Ops.HealthTest do
 
   alias Bank.Ops.Health
 
+  setup do
+    # `Bank.Quotes.ProviderHealth` is a singleton ETS table that
+    # `Health.snapshot/1` now reads (#176). Reset before each test
+    # so prior provider-health observations cannot leak into this
+    # snapshot's rollup status.
+    Bank.Quotes.ProviderHealth.reset()
+    :ok
+  end
+
   describe "BankWeb.Telemetry.periodic_measurements/0" do
     test "is empty in :test so the poller does not call emit_telemetry/0" do
       assert BankWeb.Telemetry.periodic_measurements() == []

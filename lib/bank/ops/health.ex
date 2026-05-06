@@ -115,7 +115,8 @@ defmodule Bank.Ops.Health do
     checks = %{
       database: database(),
       adapter: adapter(),
-      stuck_plans: stuck_plans(opts)
+      stuck_plans: stuck_plans(opts),
+      quotes_provider: quotes_provider()
     }
 
     status =
@@ -225,6 +226,70 @@ defmodule Bank.Ops.Health do
           :exit, _ -> %{status: :unknown, detail: "adapter_check_exit"}
         end
     end
+  end
+
+  @doc """
+  Quote-provider health rolled up from
+  `Bank.Quotes.ProviderHealth.all/0` (#176).
+
+  Visible to operators on `/v1/health/deep` so a live-provider outage
+  shows up in the same payload as adapter / database / stuck-plan
+  signals. The check is read-only and node-local: it never issues an
+  HTTP request to the provider — that would defeat the failure-
+  observability purpose by introducing a probe-side failure mode.
+
+  `:status` rollup over the per-provider statuses:
+
+    * `:ok` — every tracked provider is `:healthy` or `:unknown`,
+      OR no providers have been observed yet (fresh boot before
+      the first preview call).
+    * `:degraded` — at least one provider is in `:degraded` status
+      (≥80% success but at least one failure observed).
+    * `:down` — at least one provider is in `:failing` status
+      (<80% success rate). Per-provider `:failing` is the strongest
+      signal we can emit without a probe call; the worst per-provider
+      status wins at the rollup.
+
+  ## Detail field
+
+  `:detail` is `nil` when every provider is healthy, otherwise a
+  short fixed allowlist string identifying the worst-known provider:
+  `"provider_<id>_degraded"` / `"provider_<id>_failing"` where
+  `<id>` is the same stable provider id Phoenix records on
+  `SimulationReport.provider`. Provider ids are operator-supplied
+  via the `Bank.Quotes.Provider.provider_id/0` callback and never
+  carry raw URLs / headers / API keys.
+
+  The full per-provider list rides under the `:providers` field so
+  the deep-health payload exposes last_success_at / last_failure_at
+  / last_failure_reason for every tracked provider in one round-trip.
+  """
+  @spec quotes_provider() :: %{
+          status: check_status(),
+          detail: String.t() | nil,
+          providers: [Bank.Quotes.ProviderHealth.provider_state()]
+        }
+  def quotes_provider do
+    providers = Bank.Quotes.ProviderHealth.all()
+
+    {status, detail} =
+      cond do
+        providers == [] ->
+          {:ok, nil}
+
+        Enum.any?(providers, &(&1.status == :failing)) ->
+          worst = Enum.find(providers, &(&1.status == :failing))
+          {:down, "provider_" <> worst.provider <> "_failing"}
+
+        Enum.any?(providers, &(&1.status == :degraded)) ->
+          worst = Enum.find(providers, &(&1.status == :degraded))
+          {:degraded, "provider_" <> worst.provider <> "_degraded"}
+
+        true ->
+          {:ok, nil}
+      end
+
+    %{status: status, detail: detail, providers: providers}
   end
 
   @doc """
