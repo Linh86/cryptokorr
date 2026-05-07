@@ -85,6 +85,13 @@ config :bank, Oban,
     # configured Base Sepolia RPC; concurrency 3 matches the
     # other delegation-side queues.
     delegations_verify_install: 3,
+    # Browser-signed install bundler-receipt poller (#500). Each
+    # job hits `eth_getUserOperationReceipt` once and either
+    # snoozes (null receipt) or terminates (success → enqueue
+    # verifier; revert/timeout → mark install_failed). Concurrency
+    # 5 covers a small burst of concurrent installs across
+    # workspaces; raise if real traffic warrants.
+    delegations_poll_install_receipt: 5,
     # API key usage aggregation (#218d). One concurrent job is
     # plenty — the daily cron schedules at most one job per day
     # and operator-driven backfill jobs are explicit.

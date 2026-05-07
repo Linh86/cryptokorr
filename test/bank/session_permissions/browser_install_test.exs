@@ -160,6 +160,26 @@ defmodule Bank.SessionPermissions.BrowserInstallTest do
       assert Enum.any?(events, &(&1.event_type == "delegation.install_signed_by_user"))
     end
 
+    test "submitted enqueues PollInstallReceipt in the same transaction (#500 tab-close fix)",
+         %{workspace: workspace, binding: binding} do
+      {:ok, %{state: :submitted, delegation: delegation}} =
+        BrowserInstall.record_attestation(workspace.id, binding, %{
+          "status" => "submitted",
+          "install_userop_hash" => @valid_userop_hash,
+          "permission_id" => @valid_permission_id,
+          "validation_id" => @valid_validation_id
+        })
+
+      [%Oban.Job{args: args}] = all_poll_jobs()
+      assert args["delegation_id"] == delegation.id
+      assert args["binding_id"] == binding.id
+      assert args["workspace_id"] == workspace.id
+      assert args["install_userop_hash"] == @valid_userop_hash
+      # Deadline is a future ISO 8601 instant — we don't pin the
+      # exact value (clock-driven), just that it parses.
+      assert {:ok, %DateTime{}, _} = DateTime.from_iso8601(args["deadline_at"])
+    end
+
     test "is idempotent on duplicate `submitted` for same binding+userop",
          %{workspace: workspace, binding: binding} do
       params = %{
@@ -412,5 +432,9 @@ defmodule Bank.SessionPermissions.BrowserInstallTest do
 
   defp all_verify_jobs do
     Repo.all(from(j in Oban.Job, where: j.worker == "Bank.Runtime.Workers.VerifyInstallOnchain"))
+  end
+
+  defp all_poll_jobs do
+    Repo.all(from(j in Oban.Job, where: j.worker == "Bank.Runtime.Workers.PollInstallReceipt"))
   end
 end
