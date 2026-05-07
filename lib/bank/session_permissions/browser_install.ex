@@ -60,6 +60,7 @@ defmodule Bank.SessionPermissions.BrowserInstall do
   alias Bank.Audit.Events
   alias Bank.Delegations.Delegation
   alias Bank.Repo
+  alias Bank.Runtime.Workers.PollInstallReceipt
   alias Bank.Runtime.Workers.VerifyInstallOnchain
   alias Bank.Security
   alias Bank.SessionPermissions
@@ -254,15 +255,18 @@ defmodule Bank.SessionPermissions.BrowserInstall do
                 session_signer_address: configured_session_signer_address()
               }
 
-              %Delegation{}
-              |> Delegation.changeset(attrs)
-              |> Repo.insert()
-              |> case do
-                {:ok, delegation} ->
-                  {:inserted, delegation}
-
-                {:error, changeset} ->
+              with {:ok, delegation} <-
+                     %Delegation{}
+                     |> Delegation.changeset(attrs)
+                     |> Repo.insert(),
+                   :ok <- enqueue_poller(delegation, workspace_id) do
+                {:inserted, delegation}
+              else
+                {:error, %Ecto.Changeset{} = changeset} ->
                   Repo.rollback({:invalid_attestation, changeset_reason(changeset)})
+
+                {:error, reason} ->
+                  Repo.rollback({:invalid_attestation, reason})
               end
           end
         end)
@@ -584,6 +588,31 @@ defmodule Bank.SessionPermissions.BrowserInstall do
     case errors do
       [{field, _} | _] -> field
       _ -> :invalid
+    end
+  end
+
+  # Enqueue the bundler-receipt poller so a tab-close after
+  # `submitted` still reaches a verdict (#500). The poller is the
+  # safety net; the browser's `confirmed` POST is the fast-path
+  # optimisation. Both routes converge on `VerifyInstallOnchain`
+  # which dedupes by `delegation_id`. Returns `:ok` on
+  # `{:ok, _job}` from `Oban.insert/1`; any insertion failure
+  # surfaces as `{:error, reason}` so the caller can roll back the
+  # row insert (a `:pending` row without a poller is exactly the
+  # tab-close hazard #500 fixes).
+  defp enqueue_poller(%Delegation{} = delegation, workspace_id) do
+    args = %{
+      "delegation_id" => delegation.id,
+      "binding_id" => delegation.binding_id,
+      "workspace_id" => workspace_id,
+      "install_userop_hash" => delegation.install_userop_hash,
+      "bundler_rpc_url" => bundler_rpc_url(),
+      "deadline_at" => PollInstallReceipt.deadline_at_iso()
+    }
+
+    case args |> PollInstallReceipt.new() |> Oban.insert() do
+      {:ok, _job} -> :ok
+      {:error, reason} -> {:error, reason}
     end
   end
 end

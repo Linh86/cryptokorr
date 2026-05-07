@@ -26,7 +26,15 @@ defmodule Bank.Runtime.Workers.VerifyInstallOnchain do
   use Oban.Worker,
     queue: :delegations_verify_install,
     max_attempts: 5,
-    unique: [period: 60, fields: [:args], keys: [:delegation_id]]
+    # Uniqueness is per-worker (`fields: [:worker, :args]`) so a
+    # sibling worker that also keys on `delegation_id` (e.g.,
+    # `Bank.Runtime.Workers.PollInstallReceipt` in #500) does not
+    # accidentally satisfy this verifier's uniqueness check and
+    # silently swallow the verifier's insert. The original
+    # `fields: [:args]` was global; #500 introduced a second worker
+    # with `delegation_id` in args which made the global scope
+    # observably wrong.
+    unique: [period: 60, fields: [:worker, :args], keys: [:delegation_id]]
 
   require Logger
 

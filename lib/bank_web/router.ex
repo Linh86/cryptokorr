@@ -15,6 +15,29 @@ defmodule BankWeb.Router do
     plug :accepts, ["json"]
   end
 
+  # Browser-session JSON pipeline (#500). Used by the operator-
+  # console install hook so the browser can POST install
+  # attestations against Phoenix without minting an API key. Same
+  # session cookie + CSRF posture as `:browser` (i.e.,
+  # `:protect_from_forgery` checks the per-session token on every
+  # unsafe method regardless of content type), but accepts JSON
+  # only and goes through `BankWeb.Plugs.FetchCurrentUser` so
+  # `current_scope` is populated for role checks.
+  #
+  # Distinct from `:api_authenticated` (which is API-key auth) and
+  # from `:browser` (which is HTML-only). The two install
+  # surfaces — `/v1/wallet_bindings/:id/install_*` (API-key) and
+  # `/wallet_bindings/:id/install_*` (this pipeline) — share the
+  # same `Bank.SessionPermissions.BrowserInstall` context module
+  # and so cannot diverge in business logic.
+  pipeline :browser_session_json do
+    plug :accepts, ["json"]
+    plug :fetch_session
+    plug :protect_from_forgery
+    plug :put_secure_browser_headers
+    plug BankWeb.Plugs.FetchCurrentUser
+  end
+
   # API key bearer auth (#218b). Reads `Authorization: Bearer
   # cb_<body>`, verifies via `Bank.APIKeys.verify_key/1`, populates
   # `conn.assigns.current_scope` so downstream `RequireRole` and
@@ -294,6 +317,22 @@ defmodule BankWeb.Router do
     # row. The pause persists across control-plane restarts.
     post "/security/pause_chain", SecurityController, :pause_chain
     post "/security/resume_chain", SecurityController, :resume_chain
+  end
+
+  # Browser-session install endpoints (#500). Sibling of the
+  # `/v1/wallet_bindings/:id/install_*` API-key surface above.
+  # Same context module, same JSON shape, but session-cookie auth
+  # + CSRF protection so the operator-console hook can drive the
+  # install without minting an API key. The role gate lives inside
+  # the controller (`require_role/2`) because we want one
+  # controller method to render JSON 401/403 instead of redirecting
+  # — the browser hook handles those status codes directly.
+  scope "/wallet_bindings", BankWeb do
+    pipe_through :browser_session_json
+
+    get "/:id/install_envelope", WalletBindingsInstallController, :envelope
+    get "/:id/install_status", WalletBindingsInstallController, :status
+    post "/:id/install_attestation", WalletBindingsInstallController, :attestation
   end
 
   # Internal adapter callback — private network, not part of /v1/.
