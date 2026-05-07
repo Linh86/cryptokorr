@@ -185,7 +185,10 @@ defmodule BankWeb.IntentReplayLiveTest do
       {:ok, _view, html} = live(conn, "/audit/replay/#{intent.id}")
 
       refute html =~ "replay-plan-swap-#{plan.id}"
-      refute html =~ "Swap route"
+      # Swap-plan-only marker copy from the per-plan detail block;
+      # the page-level swap-routes card is allowed to render its
+      # own empty state heading even on a transfer intent.
+      refute html =~ "Quote-only until safety gate"
       refute html =~ "replay-plan-kind-#{plan.id}"
     end
 
@@ -685,6 +688,82 @@ defmodule BankWeb.IntentReplayLiveTest do
       assert block =~ "No Morpho evidence captured"
       refute block =~ "risk_explained"
       refute block =~ "deposit_dispatched"
+    end
+  end
+
+  describe "swap route evidence card" do
+    test "intent without a swap plan renders the card with the empty-state copy",
+         %{conn: conn} do
+      intent = agent_intent()
+
+      {:ok, view, _html} = live(conn, "/audit/replay/#{intent.id}")
+
+      assert has_element?(view, "#replay-swap-routes")
+      block = render(element(view, "#replay-swap-routes"))
+      assert block =~ "No swap route evidence captured"
+      refute block =~ ~s(id="replay-swap-route-1")
+    end
+
+    test "swap intent with a confirmed plan surfaces route + execution outcome",
+         %{conn: conn} do
+      intent = agent_intent(kind: :swap, asset: "USDC", chain: "base-sepolia")
+      decision = decision_envelope(intent: intent, current: true)
+
+      plan =
+        swap_execution_plan(
+          decision: decision,
+          intent_id: intent.id,
+          execution_status: :confirmed,
+          final_outcome: :confirmed,
+          tx_refs: ["0xabc1234567890def"],
+          active: false
+        )
+
+      {:ok, plan} =
+        plan
+        |> Bank.Decisions.ExecutionPlan.progress_changeset(%{
+          block_number: 42_424_242,
+          actual_output_amount: Decimal.new("9.93")
+        })
+        |> Bank.Repo.update()
+
+      {:ok, view, _html} = live(conn, "/audit/replay/#{intent.id}")
+
+      assert has_element?(view, "#replay-swap-routes")
+      assert has_element?(view, "#replay-swap-route-1")
+
+      block = render(element(view, "#replay-swap-routes"))
+      assert block =~ "confirmed"
+      assert block =~ plan.steps["source_asset"]
+      assert block =~ plan.steps["destination_asset"]
+      assert block =~ plan.steps["expected_output_amount"]
+      assert block =~ plan.steps["minimum_output_amount"]
+      # actual_output_amount is rendered through swap_route_value/2
+      # which reads the audit-projected map; 9.93 is the post-receipt
+      # value Bank.Audit.swap_route_evidence/1 surfaces.
+      assert block =~ "9.93"
+      assert block =~ "42424242"
+    end
+
+    test "aborted swap plan surfaces the failure reason verbatim",
+         %{conn: conn} do
+      intent = agent_intent(kind: :swap, asset: "USDC", chain: "base-sepolia")
+      decision = decision_envelope(intent: intent, current: true)
+
+      _plan =
+        swap_execution_plan(
+          decision: decision,
+          intent_id: intent.id,
+          execution_status: :aborted,
+          final_outcome: :aborted,
+          final_reason: "swap_amount_invalid"
+        )
+
+      {:ok, view, _html} = live(conn, "/audit/replay/#{intent.id}")
+
+      block = render(element(view, "#replay-swap-routes"))
+      assert block =~ "aborted"
+      assert block =~ "swap_amount_invalid"
     end
   end
 end

@@ -134,6 +134,7 @@ defmodule BankWeb.IntentReplayLive do
         <.decision_report_card intent_id={@intent_id} report={@report} />
         <.audit_timeline_card events={@bundle.audit} />
         <.morpho_evidence_card events={@bundle[:morpho_evidence] || []} />
+        <.swap_route_card routes={@bundle[:swap_route_evidence] || []} />
         <.stablecoin_route_card routes={@bundle[:stablecoin_route_evidence] || []} />
         <.trust_history_card trust_assessments={@bundle.trust_assessments} />
         <.simulation_history_card simulations={@bundle.simulations} />
@@ -457,6 +458,133 @@ defmodule BankWeb.IntentReplayLive do
     </section>
     """
   end
+
+  # --- Section: swap route evidence ----------------------------------------
+  #
+  # Built by `Bank.Audit.swap_route_evidence/1`: one map per
+  # `kind: "swap"` execution plan with route metadata + the plan's
+  # execution outcome. Surfaced here so operators can see the
+  # 0x-routed swap evidence next to the other replay slices.
+
+  attr :routes, :list, required: true
+
+  defp swap_route_card(assigns) do
+    ~H"""
+    <section
+      id="replay-swap-routes"
+      class="rounded-xl border border-base-300 bg-base-100 shadow-sm overflow-hidden"
+    >
+      <header class="px-6 py-4 border-b border-base-300 flex items-center justify-between">
+        <h2 class="text-sm font-semibold flex items-center gap-1.5">
+          <.icon name="hero-arrow-trending-up" class="size-4" /> Swap routes
+        </h2>
+        <span class="badge badge-sm badge-ghost">{length(@routes)}</span>
+      </header>
+      <div :if={@routes == []} class="px-6 py-6 text-sm text-base-content/50 text-center">
+        No swap route evidence captured for this intent.
+      </div>
+      <ol :if={@routes != []} class="divide-y divide-base-300">
+        <li
+          :for={{route, idx} <- Enum.with_index(@routes, 1)}
+          id={"replay-swap-route-" <> Integer.to_string(idx)}
+          class="px-6 py-4"
+        >
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0 space-y-1">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="text-[0.65rem] text-base-content/30 font-mono">v{idx}</span>
+                <span class={[
+                  "badge badge-sm",
+                  swap_status_class(swap_route_value(route, :execution_status))
+                ]}>
+                  {swap_route_value(route, :execution_status)}
+                </span>
+                <span
+                  :if={swap_route_value(route, :final_outcome)}
+                  class="badge badge-sm badge-outline"
+                >
+                  {swap_route_value(route, :final_outcome)}
+                </span>
+                <span
+                  :if={swap_route_value(route, :route_provider)}
+                  class="badge badge-sm badge-ghost"
+                >
+                  provider: {swap_route_value(route, :route_provider)}
+                </span>
+                <span :if={swap_route_value(route, :chain)} class="badge badge-sm badge-ghost">
+                  chain: {swap_route_value(route, :chain)}
+                </span>
+              </div>
+              <dl class="grid grid-cols-2 gap-x-4 gap-y-0.5 text-xs sm:grid-cols-3">
+                <div :if={swap_route_value(route, :source_asset)}>
+                  <dt class="text-base-content/40">From</dt>
+                  <dd class="font-mono">{swap_route_value(route, :source_asset)}</dd>
+                </div>
+                <div :if={swap_route_value(route, :destination_asset)}>
+                  <dt class="text-base-content/40">To</dt>
+                  <dd class="font-mono">{swap_route_value(route, :destination_asset)}</dd>
+                </div>
+                <div :if={swap_route_value(route, :input_amount)}>
+                  <dt class="text-base-content/40">Input</dt>
+                  <dd class="font-mono">{swap_route_value(route, :input_amount)}</dd>
+                </div>
+                <div :if={swap_route_value(route, :expected_output_amount)}>
+                  <dt class="text-base-content/40">Expected out</dt>
+                  <dd class="font-mono">{swap_route_value(route, :expected_output_amount)}</dd>
+                </div>
+                <div :if={swap_route_value(route, :minimum_output_amount)}>
+                  <dt class="text-base-content/40">Min out</dt>
+                  <dd class="font-mono">{swap_route_value(route, :minimum_output_amount)}</dd>
+                </div>
+                <div :if={swap_route_value(route, :actual_output_amount)}>
+                  <dt class="text-base-content/40">Actual out</dt>
+                  <dd class="font-mono">{swap_route_value(route, :actual_output_amount)}</dd>
+                </div>
+                <div :if={swap_route_value(route, :slippage_bps)}>
+                  <dt class="text-base-content/40">Slippage bps</dt>
+                  <dd class="font-mono">{swap_route_value(route, :slippage_bps)}</dd>
+                </div>
+                <div :if={swap_route_value(route, :route_hash)}>
+                  <dt class="text-base-content/40">Route hash</dt>
+                  <dd class="font-mono break-all">
+                    {short_hash(swap_route_value(route, :route_hash))}
+                  </dd>
+                </div>
+                <div :if={swap_route_value(route, :block_number)}>
+                  <dt class="text-base-content/40">Block</dt>
+                  <dd class="font-mono">{swap_route_value(route, :block_number)}</dd>
+                </div>
+              </dl>
+              <div
+                :if={swap_route_value(route, :final_reason)}
+                class="mt-1 text-xs text-base-content/50 italic"
+              >
+                {swap_route_value(route, :final_reason)}
+              </div>
+            </div>
+            <span class="text-xs text-base-content/40 font-mono shrink-0">
+              plan {short_id(swap_route_value(route, :plan_id))}
+            </span>
+          </div>
+        </li>
+      </ol>
+    </section>
+    """
+  end
+
+  defp swap_route_value(route, key) when is_map(route) do
+    Map.get(route, key) || Map.get(route, to_string(key))
+  end
+
+  defp swap_status_class(:confirmed), do: "badge-success"
+  defp swap_status_class("confirmed"), do: "badge-success"
+  defp swap_status_class(:failed), do: "badge-error"
+  defp swap_status_class("failed"), do: "badge-error"
+  defp swap_status_class(:reverted), do: "badge-error"
+  defp swap_status_class("reverted"), do: "badge-error"
+  defp swap_status_class(:aborted), do: "badge-warning"
+  defp swap_status_class("aborted"), do: "badge-warning"
+  defp swap_status_class(_), do: "badge-ghost"
 
   # --- Section: stablecoin route evidence ----------------------------------
 
