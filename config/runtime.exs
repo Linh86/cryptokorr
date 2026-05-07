@@ -291,8 +291,51 @@ if config_env() == :prod do
 
   maybe_ipv6 = if System.get_env("ECTO_IPV6") in ~w(true 1), do: [:inet6], else: []
 
+  # Postgres TLS (audit finding H3). Encrypted connection by default; peer
+  # verification is on by default and uses the system CA bundle. Operators
+  # whose managed Postgres serves a self-signed cert can either set
+  # `DATABASE_CA_CERT_PATH` to a PEM file or, as a last resort, set
+  # `DATABASE_SSL_VERIFY=none` to keep encryption without peer verification.
+  database_ssl_opts =
+    case System.get_env("DATABASE_SSL_VERIFY", "peer") do
+      "none" ->
+        [verify: :verify_none]
+
+      "peer" ->
+        cacert_opts =
+          case System.get_env("DATABASE_CA_CERT_PATH") do
+            nil -> [cacerts: :public_key.cacerts_get()]
+            "" -> [cacerts: :public_key.cacerts_get()]
+            path -> [cacertfile: path]
+          end
+
+        sni =
+          case URI.parse(database_url).host do
+            nil -> []
+            "" -> []
+            host -> [server_name_indication: String.to_charlist(host)]
+          end
+
+        cacert_opts ++
+          sni ++
+          [
+            verify: :verify_peer,
+            depth: 3,
+            customize_hostname_check: [
+              match_fun: :public_key.pkix_verify_hostname_match_fun(:https)
+            ]
+          ]
+
+      other ->
+        raise """
+        DATABASE_SSL_VERIFY=#{inspect(other)} is not supported.
+        Allowed values: "peer" (default) or "none".
+        """
+    end
+
   config :bank, Bank.Repo,
-    # ssl: true,
+    ssl: true,
+    ssl_opts: database_ssl_opts,
     url: database_url,
     pool_size: String.to_integer(System.get_env("POOL_SIZE") || "10"),
     # For machines with several cores, consider starting multiple pools of `pool_size`
