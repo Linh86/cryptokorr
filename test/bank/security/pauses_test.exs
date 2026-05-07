@@ -477,6 +477,39 @@ defmodule Bank.Security.PausesTest do
       %{id: ws_id} = create_workspace!("paused-scope")
       refute Pauses.paused?(ws_id, :smart_account, "sa")
     end
+
+    test "lazy expiry: returns false once expires_at has passed even before sweeper runs (audit M9)" do
+      %{id: ws_id} = create_workspace!("paused-lazy-expiry")
+      user = create_user!()
+      # Insert a pause with a future expiry so the changeset accepts it,
+      # then backdate `expires_at` directly to simulate the window between
+      # expiry and the next `SweepExpiredPauses` tick. Without the lazy
+      # filter on `active_query`, this row would still register as paused
+      # until the sweeper marks it resumed.
+      future = DateTime.utc_now() |> DateTime.add(3600, :second)
+
+      {:ok, :paused, pause} =
+        Pauses.create_pause(ws_id, :chain, "base", actor: user, expires_at: future)
+
+      assert Pauses.paused?(ws_id, :chain, "base")
+
+      past = DateTime.utc_now() |> DateTime.add(-60, :second)
+
+      {1, _} =
+        Repo.update_all(
+          from(p in Pause, where: p.id == ^pause.id),
+          set: [expires_at: past]
+        )
+
+      # Row still has `resumed_at: nil` — sweeper has not run yet — but
+      # the read boundary now reflects expiry.
+      reloaded = Repo.get!(Pause, pause.id)
+      assert is_nil(reloaded.resumed_at)
+      assert DateTime.compare(reloaded.expires_at, DateTime.utc_now()) == :lt
+
+      refute Pauses.paused?(ws_id, :chain, "base")
+      assert is_nil(Pauses.get_active_pause(ws_id, :chain, "base"))
+    end
   end
 
   describe "cross-workspace isolation" do

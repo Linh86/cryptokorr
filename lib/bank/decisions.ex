@@ -1075,78 +1075,149 @@ defmodule Bank.Decisions do
     apply_approval_decision(envelope_id, :block, reason, actor_id)
   end
 
+  # Operator approval / rejection (audit C5).
+  #
+  # The whole flow runs in a single `Repo.transaction/1` that takes
+  # `FOR UPDATE` on the prior envelope before touching it. The
+  # partial unique index `decision_envelopes_intent_current_idx`
+  # (`WHERE current`) is the final safety net, but the row-level
+  # lock turns the loser of a concurrent approve/approve or
+  # approve/expire race from a `unique_violation` 500 into a
+  # deterministic `{:error, :already_superseded}` that the
+  # controller maps to 409. Approval expiry follows the same path
+  # via `Bank.Runtime.Workers.ExpireApproval`.
   defp apply_approval_decision(envelope_id, successor_outcome, reason, actor_id) do
-    with {:ok, prior, intent} <- load_for_approval(envelope_id) do
-      now = DateTime.utc_now()
-      prior_intent_state = intent.state
-      target_intent_state = target_state_for_outcome(successor_outcome)
+    txn_result =
+      Repo.transaction(fn ->
+        case load_for_approval_locked(envelope_id) do
+          {:ok, prior, intent} ->
+            case run_approval_multi(prior, intent, successor_outcome, reason, actor_id) do
+              {:ok, %{successor: successor, intent: updated_intent}} ->
+                {:ok, prior, successor, intent.state, updated_intent}
 
-      reason_code =
-        case successor_outcome do
-          :auto_exec -> "operator_approved"
-          :block -> "operator_rejected"
+              {:error, _step, %Ecto.Changeset{} = cs, _changes} ->
+                if approval_unique_violation?(cs) do
+                  Repo.rollback(:already_superseded)
+                else
+                  Repo.rollback(cs)
+                end
+
+              {:error, _step, reason, _changes} ->
+                Repo.rollback(reason)
+            end
+
+          {:error, reason} ->
+            Repo.rollback(reason)
+        end
+      end)
+
+    case txn_result do
+      {:ok, {:ok, prior, successor, prior_intent_state, updated_intent}} ->
+        # Effects emit AFTER commit so a rolled-back transaction never
+        # produces an audit row or a notifier broadcast.
+        emit_approval_effects(prior, successor, prior_intent_state, updated_intent, actor_id)
+        {:ok, successor, post_decision_disposition(successor)}
+
+      {:error, %Ecto.Changeset{} = cs} ->
+        Logger.error("Decisions.apply_approval_decision: changeset failed: #{inspect(cs)}")
+        {:error, cs}
+
+      {:error, reason} ->
+        # Known state-machine returns from `load_for_approval_locked/1`
+        # (`:not_found`, `:already_superseded`, `{:wrong_outcome, _}`,
+        # `{:wrong_state, _}`, `:intent_not_found`) are caller-visible
+        # contract — the controller maps them to 4xx. Don't pollute
+        # the error log with them. Anything else is unexpected.
+        unless known_load_error?(reason) do
+          Logger.error("Decisions.apply_approval_decision: failed: #{inspect(reason)}")
         end
 
-      multi =
-        Multi.new()
-        |> Multi.update(:mark_not_current, DecisionEnvelope.mark_not_current(prior))
-        |> Multi.insert(:successor, fn _ ->
-          DecisionEnvelope.supersede(prior, %{
-            outcome: successor_outcome,
-            risk_tier: prior.risk_tier,
-            reasons: %{
-              "items" => [
-                %{
-                  "code" => reason_code,
-                  "message" => reason,
-                  "actor_id" => actor_id
-                }
-              ]
-            },
-            policy_snapshot_ref: prior.policy_snapshot_ref,
-            trust_assessment_id: prior.trust_assessment_id,
-            simulation_report_id: prior.simulation_report_id,
-            decided_at: now,
-            decided_by: :user,
-            state: successor_state_for(successor_outcome),
-            current: true,
-            approval_expires_at: nil
-          })
-        end)
-        |> Multi.update(:intent, fn %{successor: successor} ->
-          AgentIntent.current_pointer_changeset(intent, %{
-            current_decision_id: successor.id,
-            state: target_intent_state
-          })
-        end)
-
-      case Repo.transaction(multi) do
-        {:ok, %{successor: successor, intent: updated_intent}} ->
-          emit_approval_effects(
-            prior,
-            successor,
-            prior_intent_state,
-            updated_intent,
-            actor_id
-          )
-
-          {:ok, successor, post_decision_disposition(successor)}
-
-        {:error, step, reason, _changes} ->
-          Logger.error(
-            "Decisions.apply_approval_decision: multi failed at #{step}: #{inspect(reason)}"
-          )
-
-          {:error, reason}
-      end
+        {:error, reason}
     end
+  end
+
+  defp known_load_error?(:not_found), do: true
+  defp known_load_error?(:already_superseded), do: true
+  defp known_load_error?(:intent_not_found), do: true
+  defp known_load_error?({:wrong_outcome, _}), do: true
+  defp known_load_error?({:wrong_state, _}), do: true
+  defp known_load_error?(_), do: false
+
+  defp run_approval_multi(prior, intent, successor_outcome, reason, actor_id) do
+    now = DateTime.utc_now()
+    target_intent_state = target_state_for_outcome(successor_outcome)
+
+    reason_code =
+      case successor_outcome do
+        :auto_exec -> "operator_approved"
+        :block -> "operator_rejected"
+      end
+
+    multi =
+      Multi.new()
+      |> Multi.update(:mark_not_current, DecisionEnvelope.mark_not_current(prior))
+      |> Multi.insert(:successor, fn _ ->
+        DecisionEnvelope.supersede(prior, %{
+          outcome: successor_outcome,
+          risk_tier: prior.risk_tier,
+          reasons: %{
+            "items" => [
+              %{
+                "code" => reason_code,
+                "message" => reason,
+                "actor_id" => actor_id
+              }
+            ]
+          },
+          policy_snapshot_ref: prior.policy_snapshot_ref,
+          trust_assessment_id: prior.trust_assessment_id,
+          simulation_report_id: prior.simulation_report_id,
+          decided_at: now,
+          decided_by: :user,
+          state: successor_state_for(successor_outcome),
+          current: true,
+          approval_expires_at: nil
+        })
+      end)
+      |> Multi.update(:intent, fn %{successor: successor} ->
+        AgentIntent.current_pointer_changeset(intent, %{
+          current_decision_id: successor.id,
+          state: target_intent_state
+        })
+      end)
+
+    Repo.transaction(multi)
+  end
+
+  # Concurrent approve/approve or approve/expire that bypassed the
+  # `FOR UPDATE` lock (impossible from this module, but the partial
+  # unique index `decision_envelopes_intent_current_idx WHERE
+  # current` is the structural backstop) surfaces as a unique
+  # constraint error on the successor insert. Translate it into the
+  # same `:already_superseded` tag the controller already maps to
+  # 409.
+  defp approval_unique_violation?(%Ecto.Changeset{errors: errors}) do
+    Enum.any?(errors, fn
+      {_field, {_msg, opts}} ->
+        Keyword.get(opts, :constraint) == :unique and
+          Keyword.get(opts, :constraint_name) == "decision_envelopes_intent_current_idx"
+    end)
   end
 
   defp post_decision_disposition(%DecisionEnvelope{outcome: :auto_exec}), do: :recorded
   defp post_decision_disposition(%DecisionEnvelope{outcome: :block}), do: :no_dispatch
 
-  defp load_for_approval(envelope_id) do
-    case Repo.get(DecisionEnvelope, envelope_id) do
+  # `FOR UPDATE`-locked load of the prior envelope. Must be called
+  # inside an open `Repo.transaction/1`; the lock is held until that
+  # transaction commits or rolls back (#audit C5). The state-machine
+  # checks (`current`, `outcome`, `state`) match the legacy
+  # `load_for_approval/1` body — only the SELECT acquires a row lock.
+  defp load_for_approval_locked(envelope_id) do
+    query =
+      from(d in DecisionEnvelope, where: d.id == ^envelope_id)
+      |> lock("FOR UPDATE")
+
+    case Repo.one(query) do
       nil ->
         {:error, :not_found}
 

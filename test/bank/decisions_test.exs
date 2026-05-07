@@ -181,6 +181,67 @@ defmodule Bank.DecisionsTest do
                Decisions.approve(envelope.id, actor_id: "op-2")
     end
 
+    test "audit C5: concurrent approves converge — exactly one successor, the loser gets :already_superseded",
+         %{envelope: envelope} do
+      # Two operators race on the same approval_required envelope.
+      # The `FOR UPDATE` lock taken inside `apply_approval_decision/4`
+      # serializes the writes; the loser observes `current = false`
+      # on its locked SELECT and returns `{:error, :already_superseded}`
+      # instead of crashing on the `decision_envelopes_intent_current_idx`
+      # unique violation.
+      results =
+        1..6
+        |> Task.async_stream(
+          fn i ->
+            Ecto.Adapters.SQL.Sandbox.allow(Bank.Repo, self(), self())
+            Decisions.approve(envelope.id, actor_id: "op-race-#{i}")
+          end,
+          ordered: false,
+          max_concurrency: 6,
+          timeout: 5_000
+        )
+        |> Enum.map(fn {:ok, r} -> r end)
+
+      ok_results = Enum.filter(results, &match?({:ok, _, _}, &1))
+      err_results = Enum.filter(results, &match?({:error, :already_superseded}, &1))
+
+      # Exactly one writer commits the successor.
+      assert length(ok_results) == 1
+      # Every other concurrent writer collapses to :already_superseded —
+      # never a `unique_violation` 500.
+      assert length(err_results) == 5
+      # No other error shape should leak through.
+      assert length(ok_results) + length(err_results) == 6
+
+      # DB invariant: exactly one current envelope for this intent.
+      current_count =
+        Bank.Repo.aggregate(
+          from(d in DecisionEnvelope,
+            where: d.intent_id == ^envelope.intent_id and d.current == true
+          ),
+          :count
+        )
+
+      assert current_count == 1
+    end
+
+    test "audit C5: prior already non-current returns :already_superseded (not 500)",
+         %{envelope: envelope} do
+      # Simulate the post-race state directly: flip the prior to
+      # `current = false` (as if a parallel approve / expire just
+      # committed). The locked load inside `apply_approval_decision/4`
+      # observes the flag and returns the structured tag — the
+      # controller maps this to 409.
+      {1, _} =
+        Bank.Repo.update_all(
+          from(d in DecisionEnvelope, where: d.id == ^envelope.id),
+          set: [current: false]
+        )
+
+      assert {:error, :already_superseded} =
+               Decisions.approve(envelope.id, actor_id: "op-late")
+    end
+
     test "rejects when outcome is not approval_required" do
       intent = agent_intent()
       envelope = decision_envelope(intent: intent, outcome: :auto_exec, current: true)

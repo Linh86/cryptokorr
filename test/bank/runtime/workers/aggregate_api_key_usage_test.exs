@@ -125,6 +125,45 @@ defmodule Bank.Runtime.Workers.AggregateAPIKeyUsageTest do
 
       assert length(events) == 2
     end
+
+    test "audit M8: SQL-level partial unique index dedupes parallel emitters bypassing pre-check" do
+      # Manual back-fill paralleling cron previously broke
+      # idempotency at the SQL layer — the per-key pre-check is
+      # SELECT-then-INSERT, not atomic. With the
+      # `audit_events_recurring_dedupe_idx` partial unique index in
+      # place and `dedupe: :recurring_window` on the writer, two
+      # inserts of the same `(subject_id, after_ref->>'window_start')`
+      # row collapse to one.
+      window_start = ~U[2026-04-30 00:00:00.000000Z]
+      window_end = ~U[2026-05-01 00:00:00.000000Z]
+
+      %{key: key} = ws_user_key("m8-dedupe")
+
+      attrs =
+        Bank.Audit.Events.api_key_used(key, %{
+          window_start: window_start,
+          window_end: window_end,
+          last_used_at: ~U[2026-04-30 12:00:00.000000Z]
+        })
+
+      assert {:ok, %Bank.Audit.AuditEvent{}} =
+               Bank.Audit.append_event(attrs, dedupe: :recurring_window)
+
+      assert {:ok, :already_exists} =
+               Bank.Audit.append_event(attrs, dedupe: :recurring_window)
+
+      window_iso = DateTime.to_iso8601(window_start)
+
+      assert Bank.Repo.aggregate(
+               from(e in Bank.Audit.AuditEvent,
+                 where:
+                   e.event_type == "api_key.used" and
+                     e.subject_id == ^key.id and
+                     fragment("?->>'window_start' = ?", e.after_ref, ^window_iso)
+               ),
+               :count
+             ) == 1
+    end
   end
 
   describe "secret hygiene" do

@@ -19,7 +19,7 @@ defmodule Bank.Runtime.Workers.AggregateAPIKeyUsage do
 
   ## Idempotency
 
-  Three layers protect against duplicate audit rows:
+  Four layers protect against duplicate audit rows:
 
   1. **Cron scheduling**: `Oban.Plugins.Cron` inserts at most one
      job per crontab firing (`30 0 * * *`).
@@ -29,20 +29,26 @@ defmodule Bank.Runtime.Workers.AggregateAPIKeyUsage do
      second job for the same args while the first is still
      active.
   3. **Per-key DB pre-check** via `Bank.APIKeys.used_event_exists?/2`
-     before each `Audit.append_event/1` call.
+     before each `Audit.append_event/1` call (cheap optimization;
+     avoids a useless write attempt on a re-run).
+  4. **SQL-level partial unique index** —
+     `audit_events_recurring_dedupe_idx` on
+     `(subject_id, after_ref->>'window_start')` restricted to
+     `event_type IN ('ops.stuck_plan_detected', 'api_key.used')`.
+     Combined with `on_conflict: :nothing` on the writer, this is
+     the hard structural guarantee. Manual back-fill running in
+     parallel with cron now collapses cleanly instead of producing
+     duplicate rows (audit M8).
 
-  ### Queue concurrency MUST stay at 1
+  ### Queue concurrency = 1 is now an optimization, not a correctness
+  guarantee
 
-  Layer 3 (the per-key pre-check) is NOT atomic at the SQL level —
-  there is no unique constraint on
-  `(audit_events.subject_id, after_ref->>window_start)` for
-  `api_key.used`. If two workers ran the same window
-  simultaneously, both could see "no existing event" and both
-  insert. The `:api_key_usage` queue is configured with
-  concurrency `1` in `config/config.exs` to serialize jobs and
-  close that race. Bumping the queue concurrency without first
-  adding a SQL-level unique constraint would silently regress
-  idempotency.
+  Before audit M8 the per-key pre-check was NOT atomic at the SQL
+  level, so the `:api_key_usage` queue had to be configured with
+  concurrency `1` to keep duplicate audit rows out. With the partial
+  unique index in place, parallel emitters converge at the SQL
+  layer; the queue setting can stay at 1 for resource-contention
+  reasons but it is no longer the sole guarantor of dedupe.
 
   An explicit `args.window_start` / `args.window_end` override is
   supported for tests and for back-fill operator runs.
@@ -88,9 +94,15 @@ defmodule Bank.Runtime.Workers.AggregateAPIKeyUsage do
                 last_used_at: key.last_used_at
               })
 
-            case Audit.append_event(attrs) do
-              {:ok, _event} ->
+            case Audit.append_event(attrs, dedupe: :recurring_window) do
+              {:ok, %Bank.Audit.AuditEvent{}} ->
                 {emitted + 1, skipped, errors}
+
+              {:ok, :already_exists} ->
+                # A parallel back-fill or a Oban queue-concurrency
+                # anomaly already wrote this row. The partial unique
+                # index made the duplicate insert a no-op.
+                {emitted, skipped + 1, errors}
 
               {:error, reason} ->
                 Logger.warning(

@@ -470,18 +470,42 @@ defmodule Bank.Security.Pauses do
 
   defp lock_active(workspace_id, scope_type, scope_value) do
     workspace_id
-    |> active_query(scope_type, scope_value)
+    |> active_query(scope_type, scope_value, lazy_expiry: false)
     |> lock("FOR UPDATE")
     |> Repo.one()
   end
 
-  defp active_query(workspace_id, scope_type, scope_value) do
-    from p in Pause,
-      where:
-        p.workspace_id == ^workspace_id and
-          p.scope_type == ^scope_type and
-          p.scope_value == ^scope_value and
-          is_nil(p.resumed_at)
+  # `active_query/4` is the single SQL boundary for "is this scope
+  # currently paused". The `:lazy_expiry` mode (default `true`) layers
+  # on `(expires_at IS NULL OR expires_at > now())` so a pause whose
+  # `expires_at` has passed but whose row has not yet been swept by
+  # `Bank.Runtime.Workers.SweepExpiredPauses` is treated as inactive
+  # at the read boundary — `paused?/3` and `get_active_pause/3` see
+  # it disappear immediately, not on the next sweeper tick (#audit
+  # M9).
+  #
+  # The `lock_active/3` write path uses `lazy_expiry: false` so the
+  # `FOR UPDATE` selector still finds the unresumed row (matching the
+  # partial unique index `pauses_active_uniq`, which is `WHERE
+  # resumed_at IS NULL` — it does not care about expiry). The sweeper
+  # remains the canonical resumer for expired rows.
+  defp active_query(workspace_id, scope_type, scope_value, opts \\ []) do
+    lazy_expiry? = Keyword.get(opts, :lazy_expiry, true)
+
+    base =
+      from p in Pause,
+        where:
+          p.workspace_id == ^workspace_id and
+            p.scope_type == ^scope_type and
+            p.scope_value == ^scope_value and
+            is_nil(p.resumed_at)
+
+    if lazy_expiry? do
+      now = DateTime.utc_now()
+      from p in base, where: is_nil(p.expires_at) or p.expires_at > ^now
+    else
+      base
+    end
   end
 
   defp unique_active_violation?(%Ecto.Changeset{errors: errors}) do

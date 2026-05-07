@@ -79,6 +79,51 @@ defmodule Bank.Runtime.Workers.ScanStuckPlansTest do
              ) == 1
     end
 
+    test "audit M8: SQL-level partial unique index dedupes parallel emitters bypassing pre-check" do
+      # Bypass the per-plan pre-check — pre-build the audit attrs and
+      # call `Audit.append_event/2` twice with the same
+      # `(subject_id, after_ref->>'window_start')` key. With the
+      # `audit_events_recurring_dedupe_idx` partial unique index in
+      # place and `dedupe: :recurring_window`, the second insert
+      # collapses to `{:ok, :already_exists}` instead of producing a
+      # second row. Without the index this test would create two
+      # rows under load (manual back-fill paralleling cron) — that
+      # was the audit M8 finding.
+      now = DateTime.utc_now()
+      window_start = Health.detection_window_start(now)
+      window_iso = DateTime.to_iso8601(window_start)
+      plan_id = Ecto.UUID.generate()
+
+      attrs =
+        Bank.Audit.Events.ops_stuck_plan_detected(
+          %{
+            id: plan_id,
+            workspace_id: nil,
+            execution_status: :prepared,
+            updated_at: now,
+            stuck_for_seconds: 700,
+            threshold_seconds: 600
+          },
+          window_start: window_start
+        )
+
+      assert {:ok, %AuditEvent{}} =
+               Bank.Audit.append_event(attrs, dedupe: :recurring_window)
+
+      assert {:ok, :already_exists} =
+               Bank.Audit.append_event(attrs, dedupe: :recurring_window)
+
+      assert Repo.aggregate(
+               from(e in AuditEvent,
+                 where:
+                   e.event_type == "ops.stuck_plan_detected" and
+                     e.subject_id == ^plan_id and
+                     fragment("?->>'window_start' = ?", e.after_ref, ^window_iso)
+               ),
+               :count
+             ) == 1
+    end
+
     test "emits no rows when no plans are stuck" do
       now = DateTime.utc_now()
       window_start = Health.detection_window_start(now)

@@ -29,14 +29,23 @@ defmodule Bank.Runtime.Workers.ScanStuckPlans do
 
   ## Idempotency
 
-  Two layers protect against duplicate audit rows:
+  Three layers protect against duplicate audit rows:
 
     1. **Aligned dedupe window** — `window_start` is floored to
        a #{300}-second bucket, so two ticks inside the same
        bucket hash the same key.
     2. **Per-plan DB pre-check** —
        `Bank.Ops.Health.stuck_plan_event_exists?/2` before each
-       `Audit.append_event/1` call.
+       `Audit.append_event/1` call (cheap optimization; avoids a
+       useless write attempt on a re-run).
+    3. **SQL-level partial unique index** —
+       `audit_events_recurring_dedupe_idx` on
+       `(subject_id, after_ref->>'window_start')` restricted to
+       `event_type IN ('ops.stuck_plan_detected', 'api_key.used')`.
+       Combined with `on_conflict: :nothing` on the writer, this
+       turns the layered guards from "best effort" into a hard
+       invariant that holds even when manual back-fill jobs run
+       in parallel with cron (audit M8).
 
   Alert-side dedupe is handled by `Bank.Ops.Alerts.emit/1`'s
   `(workspace_id, dedupe_key)` unique index — repeated emit calls
@@ -110,8 +119,8 @@ defmodule Bank.Runtime.Workers.ScanStuckPlans do
           true ->
             attrs = Events.ops_stuck_plan_detected(detail, window_start: window_start)
 
-            case Audit.append_event(attrs) do
-              {:ok, _event} ->
+            case Audit.append_event(attrs, dedupe: :recurring_window) do
+              {:ok, %Bank.Audit.AuditEvent{}} ->
                 :telemetry.execute(
                   [:bank, :ops, :stuck_plan, :detected],
                   %{count: 1},
@@ -119,6 +128,14 @@ defmodule Bank.Runtime.Workers.ScanStuckPlans do
                 )
 
                 {emitted + 1, skipped, errors}
+
+              {:ok, :already_exists} ->
+                # A parallel emitter (manual back-fill or a Oban
+                # queue-concurrency anomaly) raced us to the same
+                # `(subject_id, window_start)` slot. The partial
+                # unique index converted that into a no-op; count
+                # it as skipped, not errored.
+                {emitted, skipped + 1, errors}
 
               {:error, reason} ->
                 Logger.warning(
