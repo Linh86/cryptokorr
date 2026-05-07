@@ -24,7 +24,7 @@
     "zod": "^3.25.23"
   },
   "devDependencies": {
-    "@types/node": "^22.15.21",
+    "@types/node": "^25.6.1",
     "eslint": "^9.27.0",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3",
