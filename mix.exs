@@ -73,12 +73,14 @@ defmodule Bank.MixProject do
       {:telemetry_poller, "~> 1.0"},
       {:jason, "~> 1.2"},
       {:dns_cluster, "~> 0.2.0"},
-      {:bandit, "~> 1.5"},
+      {:bandit, "~> 1.11"},
       {:oban, "~> 2.19"},
       {:req, "~> 0.5"},
       {:open_api_spex, "~> 3.21"},
       {:ex_secp256k1, "~> 0.8"},
-      {:ex_keccak, "~> 0.7"}
+      {:ex_keccak, "~> 0.7"},
+      {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false},
+      {:sobelow, "~> 0.13", only: [:dev], runtime: false}
     ]
   end
 
@@ -109,6 +111,7 @@ defmodule Bank.MixProject do
       precommit: [
         "compile --warnings-as-errors",
         "deps.unlock --unused",
+        "deps.audit",
         "format",
         "test",
         "openapi.check"
