@@ -207,13 +207,21 @@ documented escape hatch.
   [`docs/runbooks/browser-signed-install-smoke.md`](runbooks/browser-signed-install-smoke.md).
   Architecture: [`docs/design/browser-signed-install.md`](design/browser-signed-install.md).
   (Closes the #43 / #169 / #171 / #172 lineage.)
-- **Honest gap inside #471.** The frontend ZeroDev SDK + bundler
-  wiring landed as a scaffold (#473) — the JS hook still
-  synthesises the `submitted → confirmed` transition with
-  `setTimeout`. Phoenix-side state machine is fully exercisable;
-  the real on-chain happy path requires Path B in the smoke
-  runbook (manual `cast` UserOp or dev-console SDK injection)
-  until the SDK call is wired in a v0.2 follow-up.
+- **Browser-signed install launch lane (#471 follow-on).** Three
+  open issues finalise the user-signed install path: #500
+  (Phoenix browser-session-authenticated install routes +
+  server-side `Bank.Runtime.Workers.PollInstallUserOpReceipt` so
+  the row survives a tab-close), #501 (frontend ZeroDev SDK +
+  bundler submission replacing the #473 scaffold), and this
+  issue's docs/smoke (#502). When all three merge on `main`,
+  Path A in
+  [`docs/runbooks/browser-signed-install-smoke.md`](runbooks/browser-signed-install-smoke.md)
+  is the launch reviewer flow. **Until then**, the reviewer
+  escape hatch is Path B (manual `cast` UserOp or dev-console SDK
+  injection) — the Phoenix-side state machine, audit lifecycle,
+  failure-category allowlist, and on-chain verifier worker are
+  fully shipped today and accept attestations from either path
+  identically.
 - **Cloud staging blocked on credentials.** `docs/staging.md`:
   code-side ready, but provider, Postgres, bundler keys, paymaster
   keys, DNS, smoke run all manual. (Was #35 remainder.)

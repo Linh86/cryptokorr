@@ -141,14 +141,16 @@ verification…"). When the verifier passes, the
 with the on-chain tx hash and an emitted
 `delegation.install_confirmed_onchain` audit event.
 
-> **Honest gap (v0.2 follow-up):** the JS hook in `main` ships the
-> #473 scaffold, which still synthesises the bundler
-> `submitted → confirmed` transition with a `setTimeout`
-> stand-in. Until the real ZeroDev SDK call is wired, the
-> verifier worker's `eth_call` returns `:not_installed` and the
-> row terminates as `:install_failed`. Reviewers running the full
-> on-chain happy path should follow Path B in
-> [`docs/runbooks/browser-signed-install-smoke.md`](runbooks/browser-signed-install-smoke.md).
+> **Path A vs Path B.** The reviewer-grade smoke runbook
+> [`docs/runbooks/browser-signed-install-smoke.md`](runbooks/browser-signed-install-smoke.md)
+> documents two paths to a verified `:active` delegation:
+> **Path A** is the real automated browser flow once the
+> launch-lane PRs (#500 backend session-auth + receipt poller, #501
+> frontend ZeroDev SDK + bundler) are merged on `main`; **Path B**
+> is the manual `cast` / dev-console SDK fallback that always works
+> and remains documented as the reviewer escape hatch. Either path
+> writes the same Phoenix-side audit lifecycle and the verifier
+> worker is the sole writer of `:active`.
 
 ### 6. Run an intent
 
