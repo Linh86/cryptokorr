@@ -115,6 +115,22 @@ defmodule Bank.IntentsTest do
       assert Intents.counts_by_state(search: "").submitted == 2
       assert Intents.counts_by_state(search: "   ").submitted == 2
     end
+
+    # Audit H11 — LIKE/ILIKE wildcard escape. Without escaping, "_" matches
+    # every single-character agent_id and "%" matches everything.
+    test "treats ILIKE wildcards in the search term as literals" do
+      _alpha = agent_intent(agent_id: "agent-alpha")
+      _beta = agent_intent(agent_id: "agent-beta")
+      literal_underscore = agent_intent(agent_id: "agent_99")
+
+      # Bare "_" must match only agents that contain a literal underscore,
+      # not every single character. Two of the three fixtures use "-" not "_".
+      assert Intents.counts_by_state(search: "_").submitted == 1
+
+      # "%" alone must not become a "match everything" wildcard.
+      assert Intents.counts_by_state(search: "%").submitted == 0
+      _ = literal_underscore
+    end
   end
 
   describe "counts_by_state/1 — :state opt is ignored by design" do

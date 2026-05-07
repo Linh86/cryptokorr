@@ -43,6 +43,27 @@ defmodule Bank.CounterpartiesTest do
       assert Enum.map(entries, & &1.name) == ["Coffee Vendor"]
     end
 
+    # Audit H11 — LIKE wildcard escaping. Without escaping, a search term
+    # of "%" matches every row and "_" matches any single character.
+    test "treats LIKE wildcards in the query term as literals" do
+      _a = Fixtures.counterparty(name: "Alpha")
+      _b = Fixtures.counterparty(name: "Bravo")
+      literal = Fixtures.counterparty(name: "100% Capital")
+      underscore = Fixtures.counterparty(name: "abc_def")
+
+      %{entries: percent_match} = Counterparties.list_counterparties(%{q: "100%"})
+      assert Enum.map(percent_match, & &1.id) == [literal.id]
+
+      %{entries: underscore_match} = Counterparties.list_counterparties(%{q: "abc_def"})
+      assert Enum.map(underscore_match, & &1.id) == [underscore.id]
+
+      # A bare "_" must NOT match every single-character row — it must
+      # match only literal underscores. None of our fixture names contain
+      # a literal "_" with surrounding context that would match.
+      %{entries: bare_underscore} = Counterparties.list_counterparties(%{q: "_"})
+      assert Enum.map(bare_underscore, & &1.id) == [underscore.id]
+    end
+
     test "filters by active flag" do
       active = Fixtures.counterparty(name: "Active")
       archived = Fixtures.counterparty(name: "Archived", active: false)

@@ -774,13 +774,21 @@ defmodule Bank.Counterparties do
 
   # --- list / filter plumbing -------------------------------------------
 
+  # Escape LIKE wildcard metacharacters in user-supplied search terms so
+  # they match literally instead of acting as wildcards (audit H11).
+  # Backslash is the default Postgres LIKE escape character; pre-escape
+  # any literal backslashes in the term too.
+  defp escape_like_term(term) when is_binary(term) do
+    String.replace(term, ["\\", "%", "_"], fn ch -> "\\" <> ch end)
+  end
+
   defp apply_counterparty_filters(query, filters) do
     Enum.reduce(filters, query, fn
       {:q, nil}, q ->
         q
 
       {:q, term}, q when is_binary(term) ->
-        like = "%" <> String.downcase(term) <> "%"
+        like = "%" <> escape_like_term(String.downcase(term)) <> "%"
         where(q, [c], fragment("lower(?)", c.name) |> like(^like))
 
       {:active, nil}, q ->

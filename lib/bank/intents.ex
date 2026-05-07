@@ -947,7 +947,7 @@ defmodule Bank.Intents do
   defp apply_search_filter(q, nil), do: q
 
   defp apply_search_filter(q, term) do
-    pattern = "%" <> term <> "%"
+    pattern = "%" <> escape_like_term(term) <> "%"
 
     # id is a UUID field; cast explicitly so ILIKE matches on its textual
     # form. agent_id is already a string.
@@ -957,5 +957,13 @@ defmodule Bank.Intents do
       fragment("CAST(? AS text) ILIKE ?", i.id, ^pattern) or
         ilike(i.agent_id, ^pattern)
     )
+  end
+
+  # Escape LIKE/ILIKE wildcard metacharacters in user-supplied search terms so
+  # they match literally instead of acting as wildcards (audit H11). Backslash
+  # is the default Postgres escape character; pre-escape literal backslashes
+  # in the term too.
+  defp escape_like_term(term) when is_binary(term) do
+    String.replace(term, ["\\", "%", "_"], fn ch -> "\\" <> ch end)
   end
 end
