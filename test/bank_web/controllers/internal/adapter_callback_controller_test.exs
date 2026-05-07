@@ -638,7 +638,12 @@ defmodule BankWeb.Internal.AdapterCallbackControllerTest do
 
   describe "POST /internal/adapter/callback — execution.aborted" do
     test "moves plan to :aborted and intent to :blocked", %{conn: conn} do
-      %{intent: intent, plan: plan} = in_flight_plan(:broadcasting)
+      # Per the prior-state whitelist (audit C2), `execution.aborted`
+      # is only legal from `:prepared` or `:signing` — the abort
+      # path the adapter takes when it has claimed the plan but
+      # could not dispatch (signature failure, EntryPoint refusal,
+      # etc.). `:broadcasting` would be rejected as illegal.
+      %{intent: intent, plan: plan} = in_flight_plan(:signing)
 
       conn =
         post(conn, "/internal/adapter/callback", %{

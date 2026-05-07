@@ -947,9 +947,16 @@ defmodule Bank.DecisionsTest do
     alias Bank.Decisions.ExecutionPlan
 
     test "execution.confirmed flips active: false" do
+      # Note: prior-state machine (audit C2) rejects
+      # `execution.confirmed` against a `:signing` plan, so the
+      # fixture sits the plan at `:broadcasting` (a legal prior
+      # state for the confirmation callback). The original intent
+      # of this test — verify that the terminal transition flips
+      # `active: false` so the partial unique index releases —
+      # is unchanged.
       intent = agent_intent(state: :executing)
       envelope = decision_envelope(intent: intent)
-      plan = execution_plan(decision: envelope, execution_status: :signing, active: true)
+      plan = execution_plan(decision: envelope, execution_status: :broadcasting, active: true)
 
       assert {:ok, _result} =
                Decisions.apply_execution_callback(%{
@@ -1021,9 +1028,16 @@ defmodule Bank.DecisionsTest do
     end
 
     test "execution.aborted flips active: false" do
+      # Note: prior-state machine (audit C2) rejects
+      # `execution.aborted` against a `:broadcasting` plan, so the
+      # fixture sits the plan at `:signing` (a legal prior state
+      # for the abort callback — the adapter rejected during
+      # signing/dispatch). The original intent of this test —
+      # verify the terminal transition flips `active: false` —
+      # is unchanged.
       intent = agent_intent(state: :executing)
       envelope = decision_envelope(intent: intent)
-      plan = execution_plan(decision: envelope, execution_status: :broadcasting, active: true)
+      plan = execution_plan(decision: envelope, execution_status: :signing, active: true)
 
       assert {:ok, _result} =
                Decisions.apply_execution_callback(%{
@@ -1250,13 +1264,18 @@ defmodule Bank.DecisionsTest do
     end
 
     test "execution.aborted lands a warning operator notification", %{workspace: ws} do
+      # Prior-state whitelist (audit C2) only permits
+      # `execution.aborted` from `:prepared` or `:signing`. Use
+      # `:signing` here — the abort path the adapter takes when
+      # it has claimed the plan but the signature step failed —
+      # so the legitimate notification path is exercised.
       intent = agent_intent(state: :executing, workspace_id: ws.id)
       envelope = decision_envelope(intent: intent, outcome: :auto_exec, current: true)
 
       plan =
         execution_plan(
           decision: envelope,
-          execution_status: :broadcasting,
+          execution_status: :signing,
           active: true,
           workspace_id: ws.id
         )

@@ -1648,6 +1648,24 @@ defmodule Bank.Decisions do
   # and `apply_execution_callback/1`.
   @terminal_execution_statuses [:confirmed, :reverted, :aborted]
 
+  # Per-kind prior-state whitelist for adapter callbacks (audit C2).
+  # The terminal-state lock above only catches "callback against an
+  # already-finalised plan" — it does NOT catch "callback that skips
+  # lifecycle stages." Without this whitelist a leaked
+  # `ADAPTER_CALLBACK_SECRET` could let an attacker post
+  # `kind: "execution.confirmed"` for a `:prepared` plan and mark
+  # the plan succeeded without ever broadcasting on chain. Each
+  # entry below encodes "this kind is only legal from one of these
+  # prior states"; anything else is rejected with
+  # `{:error, {:illegal_transition, kind, current_status}}` and an
+  # `execution.callback_rejected_illegal_transition` audit row.
+  @allowed_prior_states %{
+    "execution.broadcast" => [:signing],
+    "execution.confirmed" => [:broadcasting, :pending_confirmation],
+    "execution.reverted" => [:broadcasting, :pending_confirmation],
+    "execution.aborted" => [:prepared, :signing]
+  }
+
   @doc """
   Apply an `execution.*` adapter callback to the referenced plan,
   atomically updating the plan's status (and final outcome for
@@ -1703,6 +1721,7 @@ defmodule Bank.Decisions do
              :plan_not_found
              | :unknown_kind
              | {:terminal_state, atom()}
+             | {:illegal_transition, String.t(), atom()}
              | Ecto.Changeset.t()}
   def apply_execution_callback(%{"kind" => kind, "execution_plan_id" => plan_id} = params)
       when kind in @execution_callback_kinds and is_binary(plan_id) do
@@ -1742,8 +1761,11 @@ defmodule Bank.Decisions do
                 __intent: plan.intent
               }
 
-            {:error, changeset} ->
+            {:error, %Ecto.Changeset{} = changeset} ->
               Repo.rollback(changeset)
+
+            {:error, {:illegal_transition, _, _} = reason} ->
+              Repo.rollback(reason)
           end
       end
     end)
@@ -1760,12 +1782,56 @@ defmodule Bank.Decisions do
 
         {:ok, Map.delete(result, :__intent)}
 
+      {:error, {:illegal_transition, attempted_kind, current_status} = reason} ->
+        # Audit C2: a forged or buggy callback tried to skip
+        # lifecycle stages. Emit the forensic row *outside* the
+        # rolled-back transaction so the signal lands even though
+        # the plan transition was refused. This is the operator's
+        # tripwire for a leaked-secret abuse pattern: a burst of
+        # these rows means somebody is hitting the callback
+        # endpoint with kind/state combinations the adapter
+        # contract forbids.
+        _ = emit_illegal_transition_audit(plan_id, attempted_kind, current_status)
+        {:error, reason}
+
       {:error, reason} ->
         {:error, reason}
     end
   end
 
   def apply_execution_callback(_), do: {:error, :unknown_kind}
+
+  # Emit the forensic audit row for a refused callback. Best-effort:
+  # if the audit insert itself errors we log and continue — the
+  # caller already has the structured `{:illegal_transition, ...}`
+  # error tuple, and a missing audit row should never escalate into
+  # a 500 response on the callback ingress.
+  defp emit_illegal_transition_audit(plan_id, attempted_kind, current_status) do
+    attrs = %{
+      actor: :adapter,
+      event_type: "execution.callback_rejected_illegal_transition",
+      subject_type: "execution_plan",
+      subject_id: plan_id,
+      correlation_id: nil,
+      after_ref: %{
+        attempted_kind: attempted_kind,
+        current_status: Atom.to_string(current_status)
+      }
+    }
+
+    case Audit.append_event(attrs) do
+      {:ok, _event} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "Failed to emit execution.callback_rejected_illegal_transition audit: " <>
+            "plan_id=#{plan_id} kind=#{attempted_kind} status=#{current_status} reason=#{inspect(reason)}"
+        )
+
+        :error
+    end
+  end
 
   @doc """
   True for `execution_status` values that have reached a terminal
@@ -2112,55 +2178,79 @@ defmodule Bank.Decisions do
 
   defp no_intent_transition(_), do: :not_applicable
 
-  defp progress_plan_for_kind(plan, "execution.broadcast", params) do
-    plan
-    |> ExecutionPlan.progress_changeset(
-      attrs_with_receipt(%{execution_status: :broadcasting, nonce: first_nonce(params)}, params)
-    )
-    |> Repo.update()
+  defp progress_plan_for_kind(plan, "execution.broadcast" = kind, params) do
+    with :ok <- validate_prior_state(plan, kind) do
+      plan
+      |> ExecutionPlan.progress_changeset(
+        attrs_with_receipt(%{execution_status: :broadcasting, nonce: first_nonce(params)}, params)
+      )
+      |> Repo.update()
+    end
   end
 
-  defp progress_plan_for_kind(plan, "execution.confirmed", params) do
-    plan
-    |> ExecutionPlan.progress_changeset(
-      attrs_with_receipt(
-        %{execution_status: :confirmed, final_outcome: :confirmed, active: false},
-        params
+  defp progress_plan_for_kind(plan, "execution.confirmed" = kind, params) do
+    with :ok <- validate_prior_state(plan, kind) do
+      plan
+      |> ExecutionPlan.progress_changeset(
+        attrs_with_receipt(
+          %{execution_status: :confirmed, final_outcome: :confirmed, active: false},
+          params
+        )
       )
-    )
-    |> Repo.update()
+      |> Repo.update()
+    end
   end
 
-  defp progress_plan_for_kind(plan, "execution.reverted", params) do
-    plan
-    |> ExecutionPlan.progress_changeset(
-      attrs_with_receipt(
-        %{
-          execution_status: :reverted,
-          final_outcome: :reverted,
-          final_reason: Map.get(params, "reason"),
-          active: false
-        },
-        params
+  defp progress_plan_for_kind(plan, "execution.reverted" = kind, params) do
+    with :ok <- validate_prior_state(plan, kind) do
+      plan
+      |> ExecutionPlan.progress_changeset(
+        attrs_with_receipt(
+          %{
+            execution_status: :reverted,
+            final_outcome: :reverted,
+            final_reason: Map.get(params, "reason"),
+            active: false
+          },
+          params
+        )
       )
-    )
-    |> Repo.update()
+      |> Repo.update()
+    end
   end
 
-  defp progress_plan_for_kind(plan, "execution.aborted", params) do
-    plan
-    |> ExecutionPlan.progress_changeset(
-      attrs_with_receipt(
-        %{
-          execution_status: :aborted,
-          final_outcome: :aborted,
-          final_reason: Map.get(params, "reason"),
-          active: false
-        },
-        params
+  defp progress_plan_for_kind(plan, "execution.aborted" = kind, params) do
+    with :ok <- validate_prior_state(plan, kind) do
+      plan
+      |> ExecutionPlan.progress_changeset(
+        attrs_with_receipt(
+          %{
+            execution_status: :aborted,
+            final_outcome: :aborted,
+            final_reason: Map.get(params, "reason"),
+            active: false
+          },
+          params
+        )
       )
-    )
-    |> Repo.update()
+      |> Repo.update()
+    end
+  end
+
+  # Audit C2 guard: refuse callbacks whose `kind` is not in the
+  # whitelist for the plan's current `execution_status`. Returns
+  # `:ok` when the transition is allowed, or
+  # `{:error, {:illegal_transition, kind, current_status}}` to be
+  # bubbled up through `Repo.rollback/1` and audited from the
+  # post-transaction wrapper in `apply_execution_callback/1`.
+  defp validate_prior_state(%ExecutionPlan{execution_status: status}, kind) do
+    allowed = Map.fetch!(@allowed_prior_states, kind)
+
+    if status in allowed do
+      :ok
+    else
+      {:error, {:illegal_transition, kind, status}}
+    end
   end
 
   # Compose the callback's receipt fields onto the plan's progress
