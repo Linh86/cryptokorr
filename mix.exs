@@ -101,11 +101,12 @@ defmodule Bank.MixProject do
         "esbuild.install --if-missing",
         "cmd --cd assets npm ci"
       ],
-      "assets.build": ["compile", "tailwind bank", "esbuild bank"],
+      "assets.build": ["compile", "tailwind bank", "esbuild bank", "esbuild theme_init"],
       "assets.deploy": [
         "cmd --cd assets npm ci",
         "tailwind bank --minify",
         "esbuild bank --minify",
+        "esbuild theme_init --minify",
         "phx.digest"
       ],
       precommit: [

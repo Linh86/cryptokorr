@@ -25,12 +25,25 @@ config :bank, BankWeb.Endpoint,
   pubsub_server: Bank.PubSub,
   live_view: [signing_salt: "CQZmoS/E"]
 
-# Configure esbuild (the version is required)
+# Configure esbuild (the version is required).
+#
+# Two profiles:
+#   * `:bank` — main app bundle (LiveView socket, hooks, vendor libs).
+#   * `:theme_init` — tiny synchronous bootstrap for `data-theme`
+#     (audit M7). Built as a separate entry so the inline `<script>`
+#     in root.html.heex can be removed and CSP `script-src 'self'`
+#     can stay strict. Output path lines up with the verified-route
+#     reference in root.html.heex.
 config :esbuild,
   version: "0.25.4",
   bank: [
     args:
       ~w(js/app.js --bundle --target=es2022 --outdir=../priv/static/assets/js --external:/fonts/* --external:/images/* --alias:@=.),
+    cd: Path.expand("../assets", __DIR__),
+    env: %{"NODE_PATH" => [Path.expand("../deps", __DIR__), Mix.Project.build_path()]}
+  ],
+  theme_init: [
+    args: ~w(js/theme-init.js --bundle --target=es2022 --outdir=../priv/static/assets/js),
     cd: Path.expand("../assets", __DIR__),
     env: %{"NODE_PATH" => [Path.expand("../deps", __DIR__), Mix.Project.build_path()]}
   ]
@@ -53,6 +66,24 @@ config :logger, :default_formatter,
 
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason
+
+# Request log redaction (audit M5). Phoenix's request logger and
+# Plug.Parsers expose params under `[$request_id]` log lines; without
+# a filter list any param key matching one of the strings below
+# would be written verbatim to the log target. Substring match (not
+# exact) so e.g. `:api_key_id` is also redacted, not only `:api_key`.
+config :phoenix, :filter_parameters, [
+  "secret",
+  "bearer",
+  "password",
+  "authorization",
+  "signature",
+  "private_key",
+  "api_key",
+  "token",
+  "_csrf_token",
+  "session"
+]
 
 # Oban: background workers for runtime orchestration.
 #

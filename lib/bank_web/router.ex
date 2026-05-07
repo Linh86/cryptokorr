@@ -8,6 +8,10 @@ defmodule BankWeb.Router do
     plug :put_root_layout, html: {BankWeb.Layouts, :root}
     plug :protect_from_forgery
     plug :put_secure_browser_headers
+    # Strict CSP for HTML responses (audit M7). Runs AFTER
+    # put_secure_browser_headers so it overwrites Phoenix's permissive
+    # default CSP. See `BankWeb.Plugs.PutCSP` for directive rationale.
+    plug BankWeb.Plugs.PutCSP
     plug BankWeb.Plugs.FetchCurrentUser
   end
 
@@ -35,6 +39,11 @@ defmodule BankWeb.Router do
     plug :fetch_session
     plug :protect_from_forgery
     plug :put_secure_browser_headers
+    # Strict CSP applied to JSON responses too (audit M7). The
+    # `browser_session_json` pipeline never renders HTML, but a
+    # browser that gets tricked into rendering this response (e.g.
+    # via a content-type sniffing bug) would still be constrained.
+    plug BankWeb.Plugs.PutCSP
     plug BankWeb.Plugs.FetchCurrentUser
   end
 

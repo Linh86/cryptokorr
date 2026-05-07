@@ -1,13 +1,36 @@
 defmodule BankWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :bank
 
-  # The session will be stored in the cookie and signed,
-  # this means its contents can be read but not tampered with.
-  # Set :encryption_salt if you would also like to encrypt it.
+  # Session cookie hardening (audit M6).
+  #
+  #   * `:encryption_salt` flips the cookie store from sign-only to
+  #     authenticated-encryption. Combined with `secret_key_base` and
+  #     `signing_salt` (which stays — they're independent salts that
+  #     derive separate keys for signing vs encryption), the cookie
+  #     contents are no longer plaintext-readable on the wire.
+  #     The salt itself is checked into source like `signing_salt`;
+  #     the encryption *key* is derived at runtime from
+  #     `secret_key_base`, which IS a per-environment secret.
+  #   * `:secure` is conditional on the compile-time Mix env so dev /
+  #     test (HTTP, no TLS) still set the cookie. Prod (HTTPS via
+  #     `force_ssl` in config/prod.exs) requires the secure flag so
+  #     browsers refuse to send the cookie over plain HTTP.
+  #   * `:http_only` is set explicitly. The Plug default is already
+  #     true, but pinning it here documents the posture and protects
+  #     against a future Plug change.
+  #
+  # `same_site: "Lax"` is retained for v0.1: tightening to `:strict`
+  # breaks OAuth callback flows that arrive as a top-level navigation
+  # from accounts.google.com, and the operator console doesn't yet
+  # have a cleanup path for that. # audit M6 follow-up — revisit
+  # once the OAuth callback flow can tolerate `:strict`.
   @session_options [
     store: :cookie,
     key: "_bank_key",
     signing_salt: "CA5JzA/2",
+    encryption_salt: "y4LAm8tFAeD+mdIRk2hmwU1y65mL0jhJ",
+    http_only: true,
+    secure: Mix.env() == :prod,
     same_site: "Lax"
   ]
 
@@ -43,10 +66,19 @@ defmodule BankWeb.Endpoint do
   plug Plug.RequestId
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint]
 
+  # Body-size cap (audit H12). The Plug.Parsers default `length` is
+  # 8 MB which is more than any legitimate request this app accepts
+  # (the largest payload is the install attestation, well under 1 MB)
+  # and gives an unauthenticated attacker an easy memory-exhaustion
+  # vector against the endpoint. 1 MB is a global ceiling; per-route
+  # tightening for high-fanout webhooks (e.g. /internal/*) is a
+  # follow-up that requires per-pipeline parsers and is intentionally
+  # out of scope for this commit.
   plug Plug.Parsers,
     parsers: [:urlencoded, :multipart, :json],
     pass: ["*/*"],
-    json_decoder: Phoenix.json_library()
+    json_decoder: Phoenix.json_library(),
+    length: 1_000_000
 
   plug Plug.MethodOverride
   plug Plug.Head

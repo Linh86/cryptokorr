@@ -26,6 +26,8 @@ config :bank, BankWeb.Endpoint,
   secret_key_base: "uRSfKG8vUXwwCtGzCCQFSUODkCGTse1rKAvr9BakkiHHZMxpbhJHKHiT/CBBUgSu",
   watchers: [
     esbuild: {Esbuild, :install_and_run, [:bank, ~w(--sourcemap=inline --watch)]},
+    esbuild_theme_init:
+      {Esbuild, :install_and_run, [:theme_init, ~w(--sourcemap=inline --watch)]},
     tailwind: {Tailwind, :install_and_run, [:bank, ~w(--watch)]}
   ]
 
