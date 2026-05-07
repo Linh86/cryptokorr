@@ -43,6 +43,17 @@ defmodule BankWeb.WalletBindingsInstallControllerTest do
   @valid_permission_id "0xcafebabe"
   @valid_validation_id "0x02cafebabecafebabecafebabecafebabecafebabe"
 
+  # Reset the global runtime pause state before every test so a
+  # bleed from a sibling test (which set the runtime to `:paused`
+  # and didn't reset on its way out) doesn't surface as
+  # `runtime_paused` here. The hook safety test added under #501
+  # shifts the random test ordering and exposes that latent
+  # cross-test bleed; this setup is the minimum flake-fix.
+  setup do
+    Bank.Security.PauseState.reset()
+    :ok
+  end
+
   describe "auth posture — operator session" do
     setup :register_and_log_in_user
     setup :install_binding
