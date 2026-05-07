@@ -68,6 +68,7 @@ defmodule Bank.Decisions do
 
   alias Bank.Decisions.{
     DecisionEnvelope,
+    ExecuteIdempotencyKey,
     ExecutionPlan,
     MorphoDepositArtifacts,
     SimulationReport,
@@ -1320,6 +1321,114 @@ defmodule Bank.Decisions do
     with {:ok, envelope} <- get_envelope(envelope_id),
          {:ok, plan} <- create_execution_plan(envelope, smart_account_id, :manual, opts) do
       {:ok, plan}
+    end
+  end
+
+  @doc """
+  Idempotency-aware variant of `request_manual_execution/3` (audit C6).
+
+  Accepts an `idempotency_key` and a `body_hash` (SHA-256 of the
+  canonical request body) alongside the manual-execution arguments.
+  Behaviour:
+
+    * **First use of the key** — runs the same gate set as
+      `request_manual_execution/3` and, on success, persists a
+      `Bank.Decisions.ExecuteIdempotencyKey` row linking the
+      `(decision_id, idempotency_key)` pair to the freshly-created
+      `ExecutionPlan`. Returns `{:ok, {:created, plan}}`.
+
+    * **Same key + same body** — looks up the prior row and returns
+      `{:ok, {:replayed, plan}}` with the original plan loaded. No
+      gates run, no new plan is inserted, no new audit event is
+      written.
+
+    * **Same key + different body** — returns `{:error,
+      :idempotency_conflict}`. The controller surfaces this as
+      `409`.
+
+  Mirrors the body-hash dedupe `Bank.Intents.submit/2` uses for
+  `POST /v1/intents` so the runtime has one shape for retry
+  semantics.
+  """
+  @spec request_manual_execution_with_key(
+          String.t(),
+          String.t(),
+          String.t(),
+          keyword()
+        ) ::
+          {:ok, {:created | :replayed, ExecutionPlan.t()}}
+          | {:error, :idempotency_conflict | atom() | String.t()}
+  def request_manual_execution_with_key(envelope_id, smart_account_id, idempotency_key, opts)
+      when is_binary(envelope_id) and is_binary(smart_account_id) and
+             is_binary(idempotency_key) do
+    body_hash = Keyword.fetch!(opts, :body_hash)
+    plan_opts = Keyword.delete(opts, :body_hash)
+
+    case lookup_execute_idempotency(envelope_id, idempotency_key) do
+      %ExecuteIdempotencyKey{body_hash: ^body_hash, execution_plan_id: plan_id} ->
+        {:ok, {:replayed, Repo.get!(ExecutionPlan, plan_id)}}
+
+      %ExecuteIdempotencyKey{} ->
+        {:error, :idempotency_conflict}
+
+      nil ->
+        with {:ok, envelope} <- get_envelope(envelope_id),
+             {:ok, plan} <-
+               create_execution_plan(envelope, smart_account_id, :manual, plan_opts),
+             {:ok, _record} <-
+               record_execute_idempotency(envelope_id, idempotency_key, body_hash, plan.id) do
+          {:ok, {:created, plan}}
+        else
+          {:error, {:idempotency_race, body_hash}} ->
+            # Concurrent retry already inserted a row for this key.
+            # Re-read so the spec-shaped reply still works.
+            case lookup_execute_idempotency(envelope_id, idempotency_key) do
+              %ExecuteIdempotencyKey{body_hash: ^body_hash, execution_plan_id: plan_id} ->
+                {:ok, {:replayed, Repo.get!(ExecutionPlan, plan_id)}}
+
+              %ExecuteIdempotencyKey{} ->
+                {:error, :idempotency_conflict}
+
+              nil ->
+                {:error, :idempotency_race}
+            end
+
+          {:error, _reason} = err ->
+            err
+        end
+    end
+  end
+
+  defp lookup_execute_idempotency(decision_id, idempotency_key) do
+    Repo.get_by(ExecuteIdempotencyKey,
+      decision_id: decision_id,
+      idempotency_key: idempotency_key
+    )
+  end
+
+  defp record_execute_idempotency(decision_id, idempotency_key, body_hash, plan_id) do
+    %ExecuteIdempotencyKey{}
+    |> ExecuteIdempotencyKey.changeset(%{
+      decision_id: decision_id,
+      idempotency_key: idempotency_key,
+      body_hash: body_hash,
+      execution_plan_id: plan_id
+    })
+    |> Repo.insert()
+    |> case do
+      {:ok, record} ->
+        {:ok, record}
+
+      {:error, %Ecto.Changeset{errors: errors}} ->
+        if Enum.any?(errors, fn
+             {:idempotency_key, {_msg, opts}} -> opts[:constraint] == :unique
+             {:decision_id, {_msg, opts}} -> opts[:constraint] == :unique
+             _ -> false
+           end) do
+          {:error, {:idempotency_race, body_hash}}
+        else
+          {:error, :idempotency_record_failed}
+        end
     end
   end
 

@@ -109,6 +109,14 @@ defmodule BankWeb.API.V1.DecisionController do
     manual confirm. Requires `smart_account_id` in the body; the
     adapter will sign with the delegation bound to that account.
     Returns `202` with the new execution plan on success.
+
+    Idempotency (audit C6): the `Idempotency-Key` header is
+    accepted but optional in v0.1 — the partial unique index on
+    `(decision_id) WHERE active` is the safety net for retries
+    that arrive without one. When the header is present, a
+    duplicate `(decision_id, key)` with a matching body returns
+    `202` and the original execution plan; a duplicate with a
+    mismatched body returns `409 idempotency_conflict`.
     """,
     tags: ["Decisions"],
     parameters: [@decision_id_param, @idempotency_key_ref, @request_id_in_ref],
@@ -133,27 +141,47 @@ defmodule BankWeb.API.V1.DecisionController do
     smart_account_id = Map.get(params, "smart_account_id")
     reason = Map.get(params, "reason", "manual_confirm")
     workspace_id = conn.assigns.current_scope.workspace.id
+    idempotency_key = read_idempotency_key(conn)
 
     with {:ok, uuid} <- cast_uuid(id),
          :ok <- require_smart_account_id(smart_account_id),
          {:ok, _envelope} <- Decisions.get_envelope_in_workspace(uuid, workspace_id) do
-      case Decisions.request_manual_execution(uuid, smart_account_id,
-             reason: reason,
-             actor_id: nil
-           ) do
-        {:ok, plan} ->
+      execute_opts = [reason: reason, actor_id: nil]
+
+      result =
+        case idempotency_key do
+          nil ->
+            case Decisions.request_manual_execution(uuid, smart_account_id, execute_opts) do
+              {:ok, plan} -> {:ok, {:created, plan}}
+              other -> other
+            end
+
+          key ->
+            body_hash = execute_body_hash(smart_account_id, reason)
+
+            Decisions.request_manual_execution_with_key(
+              uuid,
+              smart_account_id,
+              key,
+              [body_hash: body_hash] ++ execute_opts
+            )
+        end
+
+      case result do
+        {:ok, {:created, plan}} ->
+          render_execute_plan(conn, plan)
+
+        {:ok, {:replayed, plan}} ->
+          render_execute_plan(conn, plan)
+
+        {:error, :idempotency_conflict} ->
           conn
-          |> put_status(:accepted)
+          |> put_status(:conflict)
           |> json(%{
-            data: %{
-              id: plan.id,
-              decision_id: plan.decision_id,
-              intent_id: plan.intent_id,
-              execution_status: plan.execution_status,
-              smart_account_id: plan.smart_account_id,
-              active: plan.active
-            },
-            status: "execution_enqueued"
+            error: %{
+              code: "idempotency_conflict",
+              message: "Idempotency-Key reused with a mismatched payload."
+            }
           })
 
         {:error, :not_found} ->
@@ -236,6 +264,55 @@ defmodule BankWeb.API.V1.DecisionController do
   end
 
   # --- Helpers ------------------------------------------------------------
+
+  defp read_idempotency_key(conn) do
+    # Plug normalises header names to lowercase. The OpenAPI spec
+    # advertises the canonical `Idempotency-Key`; this reader is the
+    # only place the runtime touches the wire form.
+    case Plug.Conn.get_req_header(conn, "idempotency-key") do
+      [value | _] ->
+        case String.trim(value) do
+          "" -> nil
+          trimmed -> trimmed
+        end
+
+      [] ->
+        nil
+    end
+  end
+
+  # Hash the operation params that distinguish one execute call from
+  # another — `smart_account_id` and `reason`. The decision id is
+  # already part of the idempotency-record's `(decision_id, key)`
+  # composite, so it is excluded from the hash. Mirrors the
+  # canonical-JSON SHA-256 shape `Bank.Intents` uses for
+  # `agent_intents.payload_hash` (#135 idempotency).
+  defp execute_body_hash(smart_account_id, reason) do
+    canonical = %{
+      "smart_account_id" => smart_account_id,
+      "reason" => reason
+    }
+
+    :sha256
+    |> :crypto.hash(Jason.encode!(canonical))
+    |> Base.encode16(case: :lower)
+  end
+
+  defp render_execute_plan(conn, plan) do
+    conn
+    |> put_status(:accepted)
+    |> json(%{
+      data: %{
+        id: plan.id,
+        decision_id: plan.decision_id,
+        intent_id: plan.intent_id,
+        execution_status: plan.execution_status,
+        smart_account_id: plan.smart_account_id,
+        active: plan.active
+      },
+      status: "execution_enqueued"
+    })
+  end
 
   defp cast_uuid(value) when is_binary(value) do
     case Ecto.UUID.cast(value) do

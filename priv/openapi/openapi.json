@@ -3762,7 +3762,7 @@
     "/v1/decisions/{id}/execute": {
       "post": {
         "callbacks": {},
-        "description": "Triggers execution on an `auto_exec` envelope. Used for hold\nrelease, retry after an aborted plan, and tiered-autonomy\nmanual confirm. Requires `smart_account_id` in the body; the\nadapter will sign with the delegation bound to that account.\nReturns `202` with the new execution plan on success.\n",
+        "description": "Triggers execution on an `auto_exec` envelope. Used for hold\nrelease, retry after an aborted plan, and tiered-autonomy\nmanual confirm. Requires `smart_account_id` in the body; the\nadapter will sign with the delegation bound to that account.\nReturns `202` with the new execution plan on success.\n\nIdempotency (audit C6): the `Idempotency-Key` header is\naccepted but optional in v0.1 — the partial unique index on\n`(decision_id) WHERE active` is the safety net for retries\nthat arrive without one. When the header is present, a\nduplicate `(decision_id, key)` with a matching body returns\n`202` and the original execution plan; a duplicate with a\nmismatched body returns `409 idempotency_conflict`.\n",
         "operationId": "BankWeb.API.V1.DecisionController.execute",
         "parameters": [
           {

@@ -487,6 +487,146 @@ defmodule Bank.DecisionsTest do
     end
   end
 
+  describe "request_manual_execution_with_key/4 (audit C6 idempotency)" do
+    test "first call with a key returns {:ok, {:created, plan}}" do
+      envelope = decision_envelope(outcome: :auto_exec, current: true)
+      {:ok, _del} = Delegations.grant("sa_idem_create", "del_idem_create")
+
+      assert {:ok, {:created, plan}} =
+               Decisions.request_manual_execution_with_key(
+                 envelope.id,
+                 "sa_idem_create",
+                 "k-create",
+                 body_hash: "hash-create",
+                 reason: "manual_confirm"
+               )
+
+      assert plan.decision_id == envelope.id
+      assert plan.smart_account_id == "sa_idem_create"
+    end
+
+    test "same key + same body replays the original plan with no new insert" do
+      envelope = decision_envelope(outcome: :auto_exec, current: true)
+      {:ok, _del} = Delegations.grant("sa_idem_replay_ctx", "del_idem_replay_ctx")
+
+      {:ok, {:created, original}} =
+        Decisions.request_manual_execution_with_key(
+          envelope.id,
+          "sa_idem_replay_ctx",
+          "k-replay-ctx",
+          body_hash: "hash-replay",
+          reason: "manual_confirm"
+        )
+
+      count_before =
+        Bank.Repo.aggregate(
+          from(p in Bank.Decisions.ExecutionPlan, where: p.decision_id == ^envelope.id),
+          :count
+        )
+
+      assert {:ok, {:replayed, replayed}} =
+               Decisions.request_manual_execution_with_key(
+                 envelope.id,
+                 "sa_idem_replay_ctx",
+                 "k-replay-ctx",
+                 body_hash: "hash-replay",
+                 reason: "manual_confirm"
+               )
+
+      assert replayed.id == original.id
+
+      count_after =
+        Bank.Repo.aggregate(
+          from(p in Bank.Decisions.ExecutionPlan, where: p.decision_id == ^envelope.id),
+          :count
+        )
+
+      assert count_after == count_before
+    end
+
+    test "same key + different body returns :idempotency_conflict" do
+      envelope = decision_envelope(outcome: :auto_exec, current: true)
+      {:ok, _del} = Delegations.grant("sa_idem_conf_ctx", "del_idem_conf_ctx")
+
+      {:ok, {:created, _plan}} =
+        Decisions.request_manual_execution_with_key(
+          envelope.id,
+          "sa_idem_conf_ctx",
+          "k-conflict-ctx",
+          body_hash: "hash-original",
+          reason: "manual_confirm"
+        )
+
+      assert {:error, :idempotency_conflict} =
+               Decisions.request_manual_execution_with_key(
+                 envelope.id,
+                 "sa_idem_conf_ctx",
+                 "k-conflict-ctx",
+                 body_hash: "hash-different",
+                 reason: "manual_confirm"
+               )
+    end
+
+    test "key is scoped to (decision_id, idempotency_key) — same key on a sibling decision works" do
+      envelope_a = decision_envelope(outcome: :auto_exec, current: true)
+      envelope_b = decision_envelope(outcome: :auto_exec, current: true)
+      {:ok, _del_a} = Delegations.grant("sa_idem_scope_a", "del_idem_scope_a")
+      {:ok, _del_b} = Delegations.grant("sa_idem_scope_b", "del_idem_scope_b")
+
+      assert {:ok, {:created, plan_a}} =
+               Decisions.request_manual_execution_with_key(
+                 envelope_a.id,
+                 "sa_idem_scope_a",
+                 "shared-key",
+                 body_hash: "hash-a",
+                 reason: "manual_confirm"
+               )
+
+      assert {:ok, {:created, plan_b}} =
+               Decisions.request_manual_execution_with_key(
+                 envelope_b.id,
+                 "sa_idem_scope_b",
+                 "shared-key",
+                 body_hash: "hash-b",
+                 reason: "manual_confirm"
+               )
+
+      assert plan_a.decision_id == envelope_a.id
+      assert plan_b.decision_id == envelope_b.id
+      refute plan_a.id == plan_b.id
+    end
+
+    test "gate failures still surface their atom (key is not stored on a failed first call)" do
+      # No active delegation -> pre-write gate rejects. The
+      # idempotency record is only persisted on success, so the
+      # caller can retry with the same key once the gate clears.
+      envelope = decision_envelope(outcome: :auto_exec, current: true)
+
+      assert {:error, :delegation_not_active} =
+               Decisions.request_manual_execution_with_key(
+                 envelope.id,
+                 "sa_idem_no_del",
+                 "k-no-del",
+                 body_hash: "hash-no-del",
+                 reason: "manual_confirm"
+               )
+
+      # Now grant the delegation and retry with the same key — the
+      # request should succeed since no idempotency record was
+      # persisted.
+      {:ok, _del} = Delegations.grant("sa_idem_no_del", "del_idem_no_del")
+
+      assert {:ok, {:created, _plan}} =
+               Decisions.request_manual_execution_with_key(
+                 envelope.id,
+                 "sa_idem_no_del",
+                 "k-no-del",
+                 body_hash: "hash-no-del",
+                 reason: "manual_confirm"
+               )
+    end
+  end
+
   describe "dispatch_auto_exec/3" do
     test "creates a plan, audits as auto_dispatched, and enqueues RunExecution" do
       envelope = decision_envelope(outcome: :auto_exec, current: true)
