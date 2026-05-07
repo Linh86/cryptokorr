@@ -207,21 +207,31 @@ documented escape hatch.
   [`docs/runbooks/browser-signed-install-smoke.md`](runbooks/browser-signed-install-smoke.md).
   Architecture: [`docs/design/browser-signed-install.md`](design/browser-signed-install.md).
   (Closes the #43 / #169 / #171 / #172 lineage.)
-- **Browser-signed install launch lane (#471 follow-on).** Three
-  open issues finalise the user-signed install path: #500
-  (Phoenix browser-session-authenticated install routes +
-  server-side `Bank.Runtime.Workers.PollInstallUserOpReceipt` so
+- **Browser-signed install launch (#471 follow-on) shipped on `main`.**
+  Three issues finalised the user-signed install path and are now
+  closed: #500 (Phoenix browser-session-authenticated install routes
+  + server-side `Bank.Runtime.Workers.PollInstallUserOpReceipt` so
   the row survives a tab-close), #501 (frontend ZeroDev SDK +
-  bundler submission replacing the #473 scaffold), and this
-  issue's docs/smoke (#502). When all three merge on `main`,
-  Path A in
+  bundler submission replacing the prior #473 scaffold), and #502
+  (reviewer-ready smoke runbook + docs hygiene + preflight Mix
+  task). Path A in
   [`docs/runbooks/browser-signed-install-smoke.md`](runbooks/browser-signed-install-smoke.md)
-  is the launch reviewer flow. **Until then**, the reviewer
-  escape hatch is Path B (manual `cast` UserOp or dev-console SDK
-  injection) — the Phoenix-side state machine, audit lifecycle,
-  failure-category allowlist, and on-chain verifier worker are
-  fully shipped today and accept attestations from either path
-  identically.
+  is the launch reviewer flow today. Path B (manual `cast` UserOp
+  or dev-console SDK injection) is preserved as the
+  fallback / debug / escape-hatch route — useful for debugging a
+  malfunctioning Path A run, exercising the Phoenix API directly,
+  or unblocking partners whose browser environment is not yet
+  wired. Post-MVP hardening tracked separately:
+  - browser-signed cryptographic revoke (currently sentinel
+    audit-anchor for `:user`-rooted rows per #475);
+  - per-policy on-chain ZeroDev policy encoding instead of the v0.1
+    sudo plugin (Phoenix's outer decision pipeline gates every
+    transfer regardless);
+  - wallet-provider fixture corpus (MetaMask / Rabby / Frame are
+    smoke-tested; Coinbase Wallet + Phantom-EVM are reported
+    working but not yet pinned by fixtures);
+  - optional split of the bundler RPC and the verifier read RPC if
+    the operator changes provider.
 - **Cloud staging blocked on credentials.** `docs/staging.md`:
   code-side ready, but provider, Postgres, bundler keys, paymaster
   keys, DNS, smoke run all manual. (Was #35 remainder.)

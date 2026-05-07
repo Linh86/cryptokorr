@@ -17,11 +17,11 @@ and references the launch-track child issues:
   reviewer-ready smoke runbook
 - [#500](https://github.com/Linh86/cryptobank/issues/500) — browser
   session-authenticated install routes + server-side receipt
-  recovery (backend launch lane)
+  recovery (shipped on `main`)
 - [#501](https://github.com/Linh86/cryptobank/issues/501) — frontend
-  ZeroDev SDK + bundler submission (frontend launch lane)
+  ZeroDev SDK + bundler submission (shipped on `main`)
 - [#502](https://github.com/Linh86/cryptobank/issues/502) — this
-  runbook + docs hygiene + preflight Mix task
+  runbook + docs hygiene + preflight Mix task (shipped on `main`)
 
 **Hard guarantees this runbook exercises:**
 
@@ -38,17 +38,20 @@ and references the launch-track child issues:
 - No server / operator private key signs the normal install. No
   secrets in audit, logs, UI, or fixtures.
 
-> **Implementation status (read this first).** Path A below assumes
-> the launch-lane PRs from [#500](https://github.com/Linh86/cryptobank/issues/500)
-> (backend browser-session install routes + server-side receipt
-> recovery) and [#501](https://github.com/Linh86/cryptobank/issues/501)
-> (frontend ZeroDev SDK + bundler submission) are merged on `main`.
-> If either is still open, the JS hook ships the #473 scaffold and
-> the only path to a real `:active` row is **Path B** (manual
-> reviewer escape hatch). The shipped Phoenix-side state machine
-> (#474) is the same regardless of which path drives the
-> attestations — that is by design: the runbook's audit / recovery /
-> failure-mode contract holds end-to-end.
+> **Implementation status (read this first).** Path A is **shipped
+> on `main`** as the launch reviewer flow. The backend
+> browser-session install routes + server-side receipt poller
+> ([#500](https://github.com/Linh86/cryptobank/issues/500)) and the
+> frontend ZeroDev SDK + bundler submission
+> ([#501](https://github.com/Linh86/cryptobank/issues/501)) merged
+> together with this runbook ([#502](https://github.com/Linh86/cryptobank/issues/502)).
+> Path B is the **manual / debug / escape-hatch** route — useful for
+> debugging a malfunctioning Path A run, exercising the API directly
+> from `curl`, or unblocking a partner whose browser environment is
+> not yet wired. The shipped Phoenix-side state machine (#474) is
+> the same regardless of which path drives the attestations — by
+> design: the runbook's audit / recovery / failure-mode contract
+> holds end-to-end.
 
 ---
 
@@ -130,9 +133,10 @@ existence leak; pinned by controller tests).
 
 ## Path A — Real automated browser install
 
-This is the launch path. Requires the merged PRs for
-[#500](https://github.com/Linh86/cryptobank/issues/500) and
-[#501](https://github.com/Linh86/cryptobank/issues/501).
+This is the launch path, shipped on `main` via
+[#500](https://github.com/Linh86/cryptobank/issues/500) +
+[#501](https://github.com/Linh86/cryptobank/issues/501) +
+[#502](https://github.com/Linh86/cryptobank/issues/502).
 End-to-end the reviewer never leaves the browser; the wallet pop-up
 for the EIP-712 install signature is the only manual moment.
 
@@ -342,12 +346,20 @@ share that path.
 
 ## Path B — Manual on-chain end-to-end (escape hatch)
 
-Path B is the manual reviewer route to a real `:active` outcome. It
-is the **only** path to a real on-chain pass while
-[#500](https://github.com/Linh86/cryptobank/issues/500) /
-[#501](https://github.com/Linh86/cryptobank/issues/501) are still
-open, and it remains the documented fallback after they land
-(useful for debugging, integration tests, or unblocking partners).
+Path B is the **manual / debug / escape-hatch** route to a real
+`:active` outcome. Path A is the shipped automated launch path; Path
+B remains documented as the fallback for:
+
+- **Debugging** a malfunctioning Path A run (e.g., the JS bundle
+  refuses to load, the wallet provider is misbehaving, or the
+  bundler-tier API key has been rotated mid-session).
+- **Integration tests** that need to exercise the Phoenix API
+  surface directly without a real browser.
+- **Unblocking partners** whose browser environment is not yet
+  wired (e.g., a wallet provider Path A has not yet been
+  smoke-tested against).
+
+It is **not** the primary reviewer flow.
 
 ### B.1 Inject a real bundler call from the JS console
 
