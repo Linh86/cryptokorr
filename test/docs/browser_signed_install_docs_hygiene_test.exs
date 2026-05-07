@@ -223,6 +223,60 @@ defmodule Docs.BrowserSignedInstallDocsHygieneTest do
       end
     end
 
+    test "no longer carries the conditional 'if either is still open' launch-lane language (#506)" do
+      # #500 and #501 closed before #506; the runbook MUST NOT
+      # carry conditional language that frames Path A as
+      # contingent on those issues. Path A is the shipped path on
+      # `main`; Path B is the fallback / debug / escape hatch.
+      source = File.read!(@runbook)
+
+      stale_phrases = [
+        "if either is still open",
+        "#500/#501 are still open",
+        "#500 / #501 are still open",
+        "three open issues finalise",
+        "only path to a real `:active` row is Path B",
+        "only path to a real :active row is Path B",
+        "JS hook ships the #473 scaffold",
+        "(backend launch lane)",
+        "(frontend launch lane)"
+      ]
+
+      for phrase <- stale_phrases do
+        refute String.contains?(source, phrase),
+               "runbook still carries stale conditional launch-lane phrase: #{inspect(phrase)}"
+      end
+    end
+
+    test "frames Path B as fallback / debug / escape hatch, not the only real path (#506)" do
+      source = File.read!(@runbook)
+
+      # Pin that Path B is described as the fallback / debug
+      # route. A future regression that re-promotes Path B to
+      # "only real path" must fail this test.
+      refute source =~ ~r/Path B[^\n]{0,40}only[^\n]{0,40}real/i,
+             "runbook re-promotes Path B as the 'only real' path"
+
+      assert source =~ ~r/Path B[^\n]{0,80}(escape[- ]hatch|fallback|debug|manual)/i,
+             "runbook does not describe Path B as fallback / debug / manual / escape hatch"
+    end
+
+    test "Path A is described as shipped on `main`, not as a future / pending merge (#506)" do
+      source = File.read!(@runbook)
+
+      # Look for explicit "shipped on `main`" or equivalent
+      # current-state language near the Path A heading.
+      assert source =~ ~r/Path A[^\n]{0,400}shipped|shipped[^\n]{0,400}Path A/i or
+               source =~ ~r/launch path[^\n]{0,200}shipped on `main`/i,
+             "runbook does not describe Path A as shipped on `main`"
+
+      # Defense-in-depth: refuse "Requires the merged PRs for"
+      # which previously framed Path A as conditional on open
+      # dependencies.
+      refute source =~ ~r/Requires the merged PRs for #500 and #501/,
+             "runbook still frames Path A as 'requires the merged PRs for #500 and #501'"
+    end
+
     test "has a Recovery guidance section operators can act on" do
       source = File.read!(@runbook)
 
@@ -307,6 +361,49 @@ defmodule Docs.BrowserSignedInstallDocsHygieneTest do
       for issue <- ["#500", "#501", "#502"] do
         assert source =~ issue,
                "mvp-readiness.md does not reference launch-track issue #{issue}"
+      end
+    end
+
+    test "no longer carries the 'three open issues finalise' conditional language (#506)" do
+      # By #506 close, all three (#500/#501/#502) are merged on
+      # `main`. The MVP readiness doc must reflect shipped state,
+      # not pending-launch language.
+      source = File.read!(@mvp_readiness)
+
+      stale_phrases = [
+        "Three\n  open issues finalise",
+        "Three open issues finalise",
+        "three open issues finalise",
+        "When all three merge on `main`",
+        "Until then, the reviewer escape hatch is Path B"
+      ]
+
+      for phrase <- stale_phrases do
+        refute String.contains?(source, phrase),
+               "mvp-readiness.md still carries stale launch-lane phrase: #{inspect(phrase)}"
+      end
+    end
+
+    test "frames the browser-signed install as shipped on `main` (#506)" do
+      source = File.read!(@mvp_readiness)
+
+      assert source =~ ~r/(shipped|launched)[^\n]{0,80}on `main`/i or
+               source =~ ~r/launch[^\n]{0,80}shipped on `main`/i,
+             "mvp-readiness.md does not state the browser-signed install is shipped on `main`"
+    end
+
+    test "preserves post-MVP hardening caveats (#506)" do
+      # Post-MVP follow-ups must remain visible so the readiness
+      # doc stays honest.
+      source = File.read!(@mvp_readiness)
+
+      for cue <- [
+            "browser-signed cryptographic revoke",
+            "per-policy on-chain",
+            "wallet-provider"
+          ] do
+        assert String.contains?(source, cue),
+               "mvp-readiness.md missing post-MVP caveat cue: #{inspect(cue)}"
       end
     end
   end
