@@ -618,6 +618,47 @@ defmodule Bank.Audit.Events do
   defp decimal_string(other), do: other
 
   @doc """
+  `execution.dispatch_aborted_paused` — `RunExecution`'s pre-adapter
+  re-check (audit C3) caught a pause that was activated *after* the
+  pre-claim gate already cleared the plan and the worker had moved
+  it `:prepared → :signing`. The dispatch was aborted before the
+  adapter HTTP request left the BEAM and the plan was reverted to
+  `:prepared` so a retry after the operator resumes can re-claim.
+
+  The `after_ref` carries:
+    * `prior_status` — the plan's `execution_status` at the moment
+      of abort (always `:signing` in the production path).
+    * `scope` — the active pause that tripped the gate. `kind` is
+      `"global"` or `"chain"`; for chain scope, `value` is the chain
+      and `workspace_id` is the workspace.
+  """
+  @spec execution_dispatch_aborted_paused(ExecutionPlan.t(), atom(), map(), keyword()) :: attrs()
+  def execution_dispatch_aborted_paused(%ExecutionPlan{} = plan, prior_status, scope, opts \\ [])
+      when is_atom(prior_status) and is_map(scope) do
+    %{
+      actor: Keyword.get(opts, :actor, :runtime),
+      actor_id: Keyword.get(opts, :actor_id),
+      event_type: "execution.dispatch_aborted_paused",
+      subject_type: "execution_plan",
+      subject_id: plan.id,
+      correlation_id: plan.intent_id,
+      after_ref: %{
+        plan_id: plan.id,
+        prior_status: atom_or_nil(prior_status),
+        scope: stringify_scope(scope)
+      },
+      workspace_id: plan.workspace_id
+    }
+  end
+
+  defp stringify_scope(scope) when is_map(scope) do
+    Map.new(scope, fn
+      {k, v} when is_atom(v) -> {to_string(k), Atom.to_string(v)}
+      {k, v} -> {to_string(k), v}
+    end)
+  end
+
+  @doc """
   `ops.stuck_plan_detected` — periodic detector flagged an
   execution plan as stuck past its per-status threshold (#230-b).
 

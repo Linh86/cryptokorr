@@ -756,4 +756,221 @@ defmodule Bank.Runtime.Workers.RunExecutionTest do
                Decisions.claim_plan_for_dispatch(plan)
     end
   end
+
+  # --- C3: pause re-check between claim and adapter dispatch ----------------
+  #
+  # The pre-claim `verify_not_paused/1` runs once at job pick-up while the
+  # plan is still `:prepared`. Between the claim transition (`:prepared →
+  # :signing`) and the actual `AdapterClient.dispatch_*` call there was no
+  # second pause check, so an operator hitting the kill-switch *after* the
+  # claim committed but *before* the adapter HTTP request left the BEAM
+  # would not stop that dispatch. The fix re-checks the same pause scopes
+  # (global + workspace+chain) immediately before the adapter request and
+  # aborts cleanly.
+
+  describe "C3 — pause re-check before adapter dispatch" do
+    alias Bank.Decisions
+
+    test "global pause activated between claim and dispatch aborts cleanly without contacting the adapter" do
+      %{plan: plan, intent: intent} = scenario()
+
+      Req.Test.stub(Bank.AdapterClient, fn _conn ->
+        flunk("AdapterClient must not be contacted when pause is on at re-check time")
+      end)
+
+      # Manually run the claim phase: plan moves :prepared → :signing.
+      assert {:ok, %ExecutionPlan{execution_status: :signing} = claimed} =
+               Decisions.claim_plan_for_dispatch(plan)
+
+      # Operator hits the kill-switch AFTER the claim landed.
+      {:ok, :paused} = Security.pause(:global)
+
+      # Now simulate the dispatch step that the worker would run next.
+      # The new gate must abort cleanly: no adapter call, plan reverted to
+      # :prepared so a retry after resume can re-claim, and a fresh audit
+      # row of category `execution.dispatch_aborted_paused` is written.
+      assert {:error, {:dispatch_aborted_paused, _scope}} =
+               RunExecution.adapter_dispatch(claimed)
+
+      reloaded = Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :prepared
+      assert reloaded.final_outcome == nil
+
+      # Intent stays where pre-dispatch had it (:decided). The plan
+      # bounced back so the parent intent must NOT be transitioned to
+      # :blocked or :executing.
+      reloaded_intent = Repo.get!(AgentIntent, intent.id)
+      assert reloaded_intent.state == :decided
+
+      # New audit category emitted, carrying the plan id and the active
+      # pause scope.
+      events =
+        Repo.all(
+          from(e in AuditEvent,
+            where:
+              e.subject_id == ^plan.id and
+                e.event_type == "execution.dispatch_aborted_paused"
+          )
+        )
+
+      assert length(events) == 1
+      [event] = events
+      assert event.actor == :runtime
+      assert event.subject_type == "execution_plan"
+      assert event.after_ref["scope"]["kind"] == "global"
+      assert event.after_ref["prior_status"] == "signing"
+    end
+
+    test "chain pause activated between claim and dispatch aborts cleanly without contacting the adapter" do
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "c3-chain-#{System.unique_integer([:positive])}",
+          name: "C3 chain",
+          mainnet_enabled: true
+        })
+
+      %{plan: plan, intent: intent} = scenario_for_workspace(ws.id)
+
+      Req.Test.stub(Bank.AdapterClient, fn _conn ->
+        flunk("AdapterClient must not be contacted when chain pause is on at re-check time")
+      end)
+
+      assert {:ok, %ExecutionPlan{execution_status: :signing} = claimed} =
+               Decisions.claim_plan_for_dispatch(plan)
+
+      # Workspace+chain pause activated AFTER the claim landed.
+      {:ok, :paused, _} = Bank.Security.pause(ws.id, {:chain, "base"}, [])
+
+      assert {:error, {:dispatch_aborted_paused, _scope}} =
+               RunExecution.adapter_dispatch(claimed)
+
+      reloaded = Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :prepared
+
+      reloaded_intent = Repo.get!(AgentIntent, intent.id)
+      assert reloaded_intent.state == :decided
+
+      events =
+        Repo.all(
+          from(e in AuditEvent,
+            where:
+              e.subject_id == ^plan.id and
+                e.event_type == "execution.dispatch_aborted_paused"
+          )
+        )
+
+      assert length(events) == 1
+      [event] = events
+      assert event.after_ref["scope"]["kind"] == "chain"
+      assert event.after_ref["scope"]["value"] == "base"
+      assert event.after_ref["scope"]["workspace_id"] == ws.id
+      assert event.after_ref["prior_status"] == "signing"
+    end
+
+    test "happy path: with no pause the dispatch step proceeds to the adapter as before" do
+      # Smoke check that the new gate doesn't break the regular flow when
+      # no pause is active.
+      %{decision: decision, plan: plan} = scenario()
+
+      stub_adapter_response(202, %{"accepted" => true, "execution_plan_id" => plan.id})
+
+      assert :ok = perform_job(RunExecution, %{"decision_id" => decision.id})
+
+      assert %ExecutionPlan{execution_status: :signing} = Repo.get!(ExecutionPlan, plan.id)
+
+      # No `execution.dispatch_aborted_paused` audit row should be
+      # emitted on the happy path.
+      events =
+        Repo.all(
+          from(e in AuditEvent,
+            where:
+              e.subject_id == ^plan.id and
+                e.event_type == "execution.dispatch_aborted_paused"
+          )
+        )
+
+      assert events == []
+    end
+
+    test "double-audit suppression: pre-claim gate fires alone when pause is on before perform" do
+      # When the pause is on BEFORE the worker starts, the existing
+      # pre-claim `verify_not_paused/1` catches it and aborts the plan.
+      # The re-check gate must not fire (the plan never reached the
+      # claim step, so `adapter_dispatch` was never called) and so no
+      # `execution.dispatch_aborted_paused` row is written. Only the
+      # original `execution.aborted` row from the pre-claim path
+      # remains — alert spam from a double-audit is avoided.
+      %{decision: decision, plan: plan} = scenario()
+
+      Req.Test.stub(Bank.AdapterClient, fn _conn ->
+        flunk("AdapterClient must not be called when pre-claim pause gate fires")
+      end)
+
+      {:ok, :paused} = Security.pause(:global)
+
+      assert {:cancel, :runtime_paused} =
+               perform_job(RunExecution, %{"decision_id" => decision.id})
+
+      # Only one audit row of either pause-related category — the
+      # pre-claim `execution.aborted` row. The new `dispatch_aborted_paused`
+      # category is NOT written.
+      aborted_rows =
+        Repo.all(
+          from(e in AuditEvent,
+            where: e.subject_id == ^plan.id and e.event_type == "execution.aborted"
+          )
+        )
+
+      assert length(aborted_rows) == 1
+
+      dispatch_aborted_rows =
+        Repo.all(
+          from(e in AuditEvent,
+            where:
+              e.subject_id == ^plan.id and
+                e.event_type == "execution.dispatch_aborted_paused"
+          )
+        )
+
+      assert dispatch_aborted_rows == []
+    end
+
+    test "scope parity: re-check covers the same scopes as pre-claim verify_not_paused/1 (chain isolation)" do
+      # `verify_not_paused/1` checks `:global` and workspace+chain. The
+      # re-check must check the same scopes — a sibling workspace's
+      # chain pause must NOT halt this plan.
+      {:ok, ws_a} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "c3-iso-a-#{System.unique_integer([:positive])}",
+          name: "C3 iso A",
+          mainnet_enabled: true
+        })
+
+      {:ok, ws_b} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "c3-iso-b-#{System.unique_integer([:positive])}",
+          name: "C3 iso B",
+          mainnet_enabled: true
+        })
+
+      %{plan: plan} = scenario_for_workspace(ws_b.id)
+
+      assert {:ok, %ExecutionPlan{execution_status: :signing} = claimed} =
+               Decisions.claim_plan_for_dispatch(plan)
+
+      # Workspace A's chain pause must NOT trip the re-check for ws B.
+      {:ok, :paused, _} = Bank.Security.pause(ws_a.id, {:chain, "base"}, [])
+
+      # The adapter is hit normally on the happy path.
+      stub_adapter_response(202, %{"accepted" => true, "execution_plan_id" => plan.id})
+
+      # The dispatch step proceeds — re-check sees no pause for this plan.
+      assert {:ok, _} = RunExecution.adapter_dispatch(claimed)
+
+      # Plan stays at :signing (we exercised the dispatch step in
+      # isolation; we did NOT run the post-dispatch progress step).
+      reloaded = Repo.get!(ExecutionPlan, plan.id)
+      assert reloaded.execution_status == :signing
+    end
+  end
 end

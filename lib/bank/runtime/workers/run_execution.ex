@@ -371,6 +371,22 @@ defmodule Bank.Runtime.Workers.RunExecution do
         )
 
         abort_for_swap_safety(claimed, cause)
+
+      {:error, {:dispatch_aborted_paused, scope}} ->
+        # Pause re-check (audit C3) tripped between claim and adapter
+        # dispatch. `recheck_pause_before_dispatch/1` already reverted
+        # the claim and emitted the `execution.dispatch_aborted_paused`
+        # audit row. Snooze the Oban job so the next attempt re-runs
+        # the full pause gate after the operator resumes — typical
+        # operator response window is on the order of tens of seconds,
+        # so 30 s avoids retry-storming while staying within the
+        # bounded `max_attempts: 5` budget.
+        Logger.info(
+          "RunExecution: pause activated between claim and dispatch for plan #{claimed.id} " <>
+            "(scope=#{inspect(scope)}); claim reverted, snoozing"
+        )
+
+        {:snooze, 30}
     end
   end
 
@@ -383,7 +399,40 @@ defmodule Bank.Runtime.Workers.RunExecution do
   # plans (#206, `:defi_yield_deposit`) go through their own
   # `MorphoDispatchSafety.validate/2` gate (vault allowlist,
   # snapshot freshness, material drift) before the adapter call.
-  defp adapter_dispatch(%ExecutionPlan{steps: %{"kind" => "swap"} = steps} = plan) do
+  #
+  # ## Pause re-check (audit C3)
+  #
+  # The pre-claim `verify_not_paused/1` runs once at job pick-up
+  # while the plan is still `:prepared`. Between the claim
+  # (`:prepared → :signing`) and the actual `AdapterClient.dispatch_*`
+  # call there used to be no second check, so an operator hitting
+  # the kill-switch after the claim landed but before the adapter
+  # HTTP request left the BEAM would not stop that dispatch. We
+  # re-check the same scopes (`:global` + workspace+chain) one more
+  # time as the very first action of `adapter_dispatch/1`. On hit:
+  # the adapter is NOT contacted, the plan is reverted to
+  # `:prepared` via `Decisions.revert_claim/1` so a retry after
+  # resume can re-claim, an `execution.dispatch_aborted_paused`
+  # audit row is written, and the worker snoozes the Oban job.
+  #
+  # Exposed as `def`/`@doc false` so the runtime test suite can
+  # exercise the re-check timing race deterministically: the test
+  # claims the plan via `Decisions.claim_plan_for_dispatch/1`,
+  # activates a pause, and calls `adapter_dispatch/1` directly to
+  # reproduce the exact "after claim, before adapter" window.
+  @doc false
+  @spec adapter_dispatch(ExecutionPlan.t()) ::
+          {:ok, term()}
+          | {:error, term()}
+          | {:error, {:dispatch_aborted_paused, map()}}
+  def adapter_dispatch(%ExecutionPlan{} = plan) do
+    case recheck_pause_before_dispatch(plan) do
+      :ok -> do_adapter_dispatch(plan)
+      {:error, _} = err -> err
+    end
+  end
+
+  defp do_adapter_dispatch(%ExecutionPlan{steps: %{"kind" => "swap"} = steps} = plan) do
     case SwapRouteArtifacts.route_from_steps(steps) do
       {:ok, route} ->
         context = %{intent: plan.intent, workspace_id: plan.workspace_id}
@@ -407,14 +456,55 @@ defmodule Bank.Runtime.Workers.RunExecution do
     end
   end
 
-  defp adapter_dispatch(%ExecutionPlan{intent: %AgentIntent{kind: :defi_yield_deposit}} = plan) do
+  defp do_adapter_dispatch(%ExecutionPlan{intent: %AgentIntent{kind: :defi_yield_deposit}} = plan) do
     case MorphoDispatchSafety.validate(plan) do
       :ok -> AdapterClient.dispatch_morpho_deposit(plan)
       {:error, reason} -> {:error, {:morpho_safety, reason}}
     end
   end
 
-  defp adapter_dispatch(%ExecutionPlan{} = plan), do: AdapterClient.dispatch_transfer(plan)
+  defp do_adapter_dispatch(%ExecutionPlan{} = plan), do: AdapterClient.dispatch_transfer(plan)
+
+  # Mirrors `verify_not_paused/1`'s scope coverage exactly so a future
+  # change to either gate is forced to update both. Returns `:ok` when
+  # no covering pause is active; on hit, performs the abort side
+  # effects (revert claim + audit emit) and returns the new
+  # `{:dispatch_aborted_paused, scope}` error tuple that
+  # `dispatch_and_progress/2` translates into a `{:snooze, _}` Oban
+  # signal.
+  defp recheck_pause_before_dispatch(%ExecutionPlan{} = plan) do
+    cond do
+      Security.paused?(:global) ->
+        abort_dispatch_for_pause(plan, %{kind: :global})
+
+      is_binary(plan.workspace_id) and is_binary(plan.chain) and
+          Security.paused?(plan.workspace_id, {:chain, plan.chain}) ->
+        abort_dispatch_for_pause(plan, %{
+          kind: :chain,
+          value: plan.chain,
+          workspace_id: plan.workspace_id
+        })
+
+      true ->
+        :ok
+    end
+  end
+
+  defp abort_dispatch_for_pause(%ExecutionPlan{} = plan, scope) when is_map(scope) do
+    prior_status = plan.execution_status
+
+    # Revert the claim so a retry after resume can re-claim. Terminal
+    # rows are not resurrected — `Decisions.revert_claim/1` is guarded
+    # `:signing → :prepared` only.
+    _ = Decisions.revert_claim(plan)
+
+    _ =
+      Runtime.emit_audit(
+        Events.execution_dispatch_aborted_paused(plan, prior_status, scope, actor: :runtime)
+      )
+
+    {:error, {:dispatch_aborted_paused, scope}}
+  end
 
   defp abort_for_swap_safety(%ExecutionPlan{} = plan, reason_atom) do
     reason = "swap_safety:#{Atom.to_string(reason_atom)}"
