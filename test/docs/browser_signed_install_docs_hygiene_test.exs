@@ -223,6 +223,16 @@ defmodule Docs.BrowserSignedInstallDocsHygieneTest do
       end
     end
 
+    test "names the receipt poller using the implementation module name, not the design-note name" do
+      source = File.read!(@runbook)
+
+      assert source =~ "Bank.Runtime.Workers.PollInstallReceipt",
+             "runbook does not reference the actual receipt-poller worker module"
+
+      refute source =~ "Bank.Runtime.Workers.PollInstallUserOpReceipt",
+             "runbook still carries the design-note worker name `PollInstallUserOpReceipt`; the implementation module is `PollInstallReceipt` (lib/bank/runtime/workers/poll_install_receipt.ex)"
+    end
+
     test "no longer carries the conditional 'if either is still open' launch-lane language (#506)" do
       # #500 and #501 closed before #506; the runbook MUST NOT
       # carry conditional language that frames Path A as
@@ -362,6 +372,16 @@ defmodule Docs.BrowserSignedInstallDocsHygieneTest do
         assert source =~ issue,
                "mvp-readiness.md does not reference launch-track issue #{issue}"
       end
+    end
+
+    test "names the receipt poller using the implementation module name" do
+      source = File.read!(@mvp_readiness)
+
+      assert source =~ "Bank.Runtime.Workers.PollInstallReceipt",
+             "mvp-readiness.md does not name the actual receipt-poller worker"
+
+      refute source =~ "Bank.Runtime.Workers.PollInstallUserOpReceipt",
+             "mvp-readiness.md still carries the design-note worker name `PollInstallUserOpReceipt`; the implementation module is `PollInstallReceipt`"
     end
 
     test "no longer carries the 'three open issues finalise' conditional language (#506)" do

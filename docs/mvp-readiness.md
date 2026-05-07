@@ -210,7 +210,7 @@ documented escape hatch.
 - **Browser-signed install launch (#471 follow-on) shipped on `main`.**
   Three issues finalised the user-signed install path and are now
   closed: #500 (Phoenix browser-session-authenticated install routes
-  + server-side `Bank.Runtime.Workers.PollInstallUserOpReceipt` so
+  + server-side `Bank.Runtime.Workers.PollInstallReceipt` so
   the row survives a tab-close), #501 (frontend ZeroDev SDK +
   bundler submission replacing the prior #473 scaffold), and #502
   (reviewer-ready smoke runbook + docs hygiene + preflight Mix

@@ -229,7 +229,7 @@ these match the operator-consent UI string before approving.
    `delegation.install_signed_by_user`.
 3. Phoenix simultaneously enqueues the receipt poller from
    [#500](https://github.com/Linh86/cryptobank/issues/500)
-   (`Bank.Runtime.Workers.PollInstallUserOpReceipt`). The poller
+   (`Bank.Runtime.Workers.PollInstallReceipt`). The poller
    carries the row to a verdict regardless of browser tab state —
    if the operator closes the tab here, the install still
    completes (or terminates with an honest reason) on its own.
@@ -423,7 +423,7 @@ Free-form upstream strings collapse to `unknown`.
 | Bundler 5xx / unreachable                | `sendUserOperation` throws fetch error                                                         | POST `bundler_unavailable` → audit `delegation.install_failed reason: "bundler_unavailable"`; pending row (if any) → `:install_failed`. |
 | UserOp accepted, receipt reverts on chain| `waitForUserOperationReceipt` returns `success: false`                                         | POST `reverted` with `reason: "userop_reverted"` → row → `:install_failed reason: "userop_reverted"`.                            |
 | Hook timeout (45 s)                      | Hook wall-clock                                                                                | POST `reverted` with `reason: "attestation_timeout"` → row → `:install_failed reason: "attestation_timeout"`.                    |
-| Tab closed mid-poll                      | Server-side `Bank.Runtime.Workers.PollInstallUserOpReceipt` (#500)                             | Poller advances the row to `:install_failed reason: "attestation_timeout"` after the wall-clock deadline OR enqueues the verifier on a real receipt. Browser is non-critical-path. |
+| Tab closed mid-poll                      | Server-side `Bank.Runtime.Workers.PollInstallReceipt` (#500)                             | Poller advances the row to `:install_failed reason: "attestation_timeout"` after the wall-clock deadline OR enqueues the verifier on a real receipt. Browser is non-critical-path. |
 | On-chain validator not installed         | Verifier worker (`Bank.Chains.KernelVerifier`)                                                 | Maps `:not_installed` → `:install_failed`, `last_reason: "install_failed:onchain_state_mismatch"`.                                |
 | Smart account never deployed             | Verifier worker                                                                                | Maps `:not_deployed` → `last_reason: "install_failed:smart_account_not_deployed"`.                                                |
 | Phoenix RPC not configured               | Verifier worker                                                                                | Maps `:rpc_not_configured` → `last_reason: "install_failed:onchain_verification_unreachable"`.                                    |
