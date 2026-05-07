@@ -1,7 +1,7 @@
 # Common ops for the Bank control plane.
 # Run `make help` for the full list.
 
-.PHONY: help setup test precommit adapter-check run release image staging-up staging-down staging-logs migrate seed
+.PHONY: help setup test precommit adapter-check run release image staging-up staging-down staging-logs migrate seed hooks-install secret-guard
 
 help:
 	@echo "Bank — common make targets"
@@ -18,6 +18,8 @@ help:
 	@echo "  staging-logs  Follow phoenix logs from the local stack."
 	@echo "  migrate       Run ecto migrations against the current env."
 	@echo "  seed          Run priv/repo/seeds.exs."
+	@echo "  hooks-install Install the local pre-commit secret-guard hook."
+	@echo "  secret-guard  Run the secret-guard against currently staged files."
 
 setup:
 	mix setup
@@ -57,3 +59,17 @@ migrate:
 
 seed:
 	mix run priv/repo/seeds.exs
+
+# Install the pre-commit secret-guard hook into the local clone. Idempotent.
+# See docs/runbooks/secrets-rotation.md (audit finding C1) for what the hook
+# blocks and how to bypass it for audited test fixtures.
+hooks-install:
+	@mkdir -p .git/hooks
+	@ln -sf ../../scripts/secret-guard.sh .git/hooks/pre-commit
+	@chmod +x scripts/secret-guard.sh
+	@echo "secret-guard installed at .git/hooks/pre-commit"
+
+# Run the guard against staged changes without committing. Useful for CI or
+# `git stash; make secret-guard; git stash pop` style audits.
+secret-guard:
+	@./scripts/secret-guard.sh
