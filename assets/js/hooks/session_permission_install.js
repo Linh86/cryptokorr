@@ -180,8 +180,10 @@ export const SessionPermissionInstall = {
       smart_account_address: result.smart_account_address,
     })
 
-    // 9. Wait for the real bundler receipt — replaces the
-    //    synthetic-confirmation stand-in that #501 closes.
+    // 9. Wait for the real bundler receipt. The synthetic
+    //    confirmation stand-in from the original scaffold was
+    //    removed under #501; the hook-safety test pins its
+    //    absence so a future regression cannot reintroduce it.
     const receipt = await result.waitForReceipt()
     if (!receipt.success) {
       const reason = receipt.reason || "userop_reverted"
