@@ -6,6 +6,14 @@ defmodule Bank.CounterpartiesTest do
   alias Bank.Counterparties.{AddressLabel, Counterparty, EvidenceArtifact, TrustAssertion}
   alias Bank.Fixtures
 
+  # Canonical 40-hex test addresses. The AddressLabel changeset's
+  # `validate_format` (audit H7) requires `^0x[0-9a-fA-F]{40}$`.
+  @addr_a "0x000000000000000000000000000000000000aaaa"
+  @addr_b "0x000000000000000000000000000000000000bbbb"
+  @addr_dead "0x000000000000000000000000000000000000dead"
+  @addr_feed_mixed "0x000000000000000000000000000000000000FeEd"
+  @addr_feed_lower "0x000000000000000000000000000000000000feed"
+
   # ---------------------------------------------------------------------
   # list / search / get
   # ---------------------------------------------------------------------
@@ -190,7 +198,7 @@ defmodule Bank.CounterpartiesTest do
   describe "attach_address/3" do
     test "creates a label and emits address_label.attached" do
       cp = Fixtures.counterparty()
-      attrs = %{"chain" => "base", "address" => "0xabc", "role" => "payout"}
+      attrs = %{"chain" => "base", "address" => @addr_a, "role" => "payout"}
 
       assert {:ok, %AddressLabel{} = label} = Counterparties.attach_address(cp, attrs)
       assert label.counterparty_id == cp.id
@@ -208,15 +216,15 @@ defmodule Bank.CounterpartiesTest do
       cp = Fixtures.counterparty(active: false)
 
       assert {:error, :archived} =
-               Counterparties.attach_address(cp, %{chain: "base", address: "0x1"})
+               Counterparties.attach_address(cp, %{chain: "base", address: @addr_a})
     end
 
     test "rejects duplicate active (chain, address)" do
       cp = Fixtures.counterparty()
-      {:ok, _} = Counterparties.attach_address(cp, %{chain: "base", address: "0xDEAD"})
+      {:ok, _} = Counterparties.attach_address(cp, %{chain: "base", address: @addr_dead})
 
       assert {:error, %Ecto.Changeset{} = cs} =
-               Counterparties.attach_address(cp, %{chain: "base", address: "0xDEAD"})
+               Counterparties.attach_address(cp, %{chain: "base", address: @addr_dead})
 
       errors = Keyword.keys(cs.errors)
       assert :chain in errors or :address in errors
@@ -240,17 +248,17 @@ defmodule Bank.CounterpartiesTest do
     end
 
     test "silently drops address/chain edits" do
-      label = Fixtures.address_label(chain: "base", address: "0xAAA")
+      label = Fixtures.address_label(chain: "base", address: @addr_a)
 
       assert {:ok, updated} =
                Counterparties.update_address_label(label, %{
                  "chain" => "ethereum",
-                 "address" => "0xBBB",
+                 "address" => @addr_b,
                  "alias" => "renamed"
                })
 
       assert updated.chain == "base"
-      assert updated.address == "0xAAA"
+      assert updated.address == @addr_a
       assert updated.alias == "renamed"
     end
 
@@ -290,10 +298,12 @@ defmodule Bank.CounterpartiesTest do
   describe "resolve_address/2" do
     test "finds an active label by (chain, address) and preloads cp" do
       cp = Fixtures.counterparty()
-      {:ok, label} = Counterparties.attach_address(cp, %{chain: "base", address: "0xFeEd"})
+
+      {:ok, label} =
+        Counterparties.attach_address(cp, %{chain: "base", address: @addr_feed_mixed})
 
       assert {:ok, %{label: resolved_label, counterparty: resolved_cp}} =
-               Counterparties.resolve_address("base", "0xfeed")
+               Counterparties.resolve_address("base", @addr_feed_lower)
 
       assert resolved_label.id == label.id
       assert resolved_cp.id == cp.id
@@ -301,10 +311,13 @@ defmodule Bank.CounterpartiesTest do
 
     test "ignores retired labels" do
       cp = Fixtures.counterparty()
-      {:ok, label} = Counterparties.attach_address(cp, %{chain: "base", address: "0xfeed"})
+
+      {:ok, label} =
+        Counterparties.attach_address(cp, %{chain: "base", address: @addr_feed_lower})
+
       {:ok, _} = Counterparties.retire_address_label(label)
 
-      assert {:error, :not_found} = Counterparties.resolve_address("base", "0xfeed")
+      assert {:error, :not_found} = Counterparties.resolve_address("base", @addr_feed_lower)
     end
   end
 

@@ -120,22 +120,25 @@ defmodule BankWeb.CounterpartyDetailLiveTest do
 
       view |> element("#add-address-btn") |> render_click()
 
+      address = "0x00000000000000000000000000000000000abc12"
+
       view
       |> form("#add-address-form form",
-        address_label: %{chain: "base", address: "0xabc123", role: "payout"}
+        address_label: %{chain: "base", address: address, role: "payout"}
       )
       |> render_submit()
 
       html = render(view)
-      assert html =~ "0xabc123"
+      assert html =~ address
       assert html =~ "base"
     end
 
     test "retires an address label", %{conn: conn, counterparty: cp} do
-      label = address_label(counterparty: cp, chain: "base", address: "0xretire")
+      address = "0x0000000000000000000000000000000000ABCDEF"
+      label = address_label(counterparty: cp, chain: "base", address: address)
 
       {:ok, view, html} = live(conn, "/counterparties/#{cp.id}")
-      assert html =~ "0xretire"
+      assert html =~ address
 
       view
       |> element("#addr-#{label.id} button", "Retire")
@@ -143,7 +146,7 @@ defmodule BankWeb.CounterpartyDetailLiveTest do
 
       html = render(view)
       # The retired address should disappear from the active list
-      refute html =~ "0xretire"
+      refute html =~ address
     end
   end
 

@@ -17,6 +17,18 @@ defmodule Bank.Counterparties.AddressLabel do
 
   @roles [:payout, :funding, :contract, :other]
 
+  # Allowlist mirrors `Bank.Chains.mainnet_chains/0` and
+  # `Bank.Chains.testnet_chains/0` for the chain identifiers the
+  # AddressLabel surface actually uses (base, base-sepolia, ethereum).
+  # Counterparties may carry an `ethereum` label even though v0.1
+  # intents only execute on `base` — see
+  # test/bank/wallet_screening/evidence_test.exs and
+  # test/bank/autonomy_screening_test.exs for the cross-chain
+  # screening flows that depend on this. Must match the DB CHECK
+  # constraint added in
+  # 20260507000000_constrain_address_label_chain.exs.
+  @allowed_chains ~w(base base-sepolia ethereum)
+
   @type t :: %__MODULE__{}
 
   schema "address_labels" do
@@ -60,7 +72,11 @@ defmodule Bank.Counterparties.AddressLabel do
     ])
     |> validate_required([:counterparty_id, :chain, :address, :role])
     |> validate_length(:chain, min: 1, max: 64)
+    |> validate_inclusion(:chain, @allowed_chains)
     |> validate_length(:address, min: 1, max: 128)
+    |> validate_format(:address, ~r/^0x[0-9a-fA-F]{40}$/,
+      message: "must be a 0x-prefixed 20-byte hex address"
+    )
     |> foreign_key_constraint(:counterparty_id)
     |> unique_constraint([:chain, :address],
       name: :address_labels_chain_address_active_idx,

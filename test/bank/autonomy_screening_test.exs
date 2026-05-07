@@ -227,11 +227,15 @@ defmodule Bank.AutonomyScreeningTest do
       cp = Fixtures.counterparty()
 
       label =
-        Fixtures.address_label(counterparty: cp, chain: "ethereum", address: "0xLabelTarget007")
+        Fixtures.address_label(
+          counterparty: cp,
+          chain: "ethereum",
+          address: "0x000000000000000000000000000000000ab17a07"
+        )
 
       insert_screening!(%{
         chain: "ethereum",
-        address: "0xLabelTarget007",
+        address: "0x000000000000000000000000000000000ab17a07",
         control_tier: :hard_block,
         source: "opensanctions",
         source_record_id: "os-auto-007",
@@ -257,11 +261,15 @@ defmodule Bank.AutonomyScreeningTest do
       cp = Fixtures.counterparty()
 
       _label =
-        Fixtures.address_label(counterparty: cp, chain: "base", address: "0xCounterpartyOnly008")
+        Fixtures.address_label(
+          counterparty: cp,
+          chain: "base",
+          address: "0x000000000000000000000000000000000c019008"
+        )
 
       insert_screening!(%{
         chain: "base",
-        address: "0xCounterpartyOnly008",
+        address: "0x000000000000000000000000000000000c019008",
         control_tier: :challenge,
         source: "scamsniffer",
         source_record_id: "ss-auto-008",
@@ -275,7 +283,7 @@ defmodule Bank.AutonomyScreeningTest do
 
       assert decision.outcome == :approval_required
       assert decision.reason_code == :wallet_screening_challenge
-      assert decision.rationale.screening.address == "0xCounterpartyOnly008"
+      assert decision.rationale.screening.address == "0x000000000000000000000000000000000c019008"
     end
 
     test "counterparty-only intent with no active label gets explicit unresolved screening" do

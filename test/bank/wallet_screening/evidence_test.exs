@@ -165,11 +165,15 @@ defmodule Bank.WalletScreening.EvidenceTest do
       cp = Fixtures.counterparty()
 
       label =
-        Fixtures.address_label(counterparty: cp, chain: "ethereum", address: "0xLabelAddr001")
+        Fixtures.address_label(
+          counterparty: cp,
+          chain: "ethereum",
+          address: "0x000000000000000000000000000000000abe1001"
+        )
 
       insert_record!(%{
         chain: "ethereum",
-        address: "0xLabelAddr001",
+        address: "0x000000000000000000000000000000000abe1001",
         control_tier: :context,
         source: "graphsense",
         source_record_id: "gs-label-001",
@@ -193,11 +197,17 @@ defmodule Bank.WalletScreening.EvidenceTest do
 
     test "screens counterparty-only intent using its single active label on the intent chain" do
       cp = Fixtures.counterparty()
-      _label = Fixtures.address_label(counterparty: cp, chain: "base", address: "0xEvidenceCp001")
+
+      _label =
+        Fixtures.address_label(
+          counterparty: cp,
+          chain: "base",
+          address: "0x000000000000000000000000000000000ed1de01"
+        )
 
       insert_record!(%{
         chain: "base",
-        address: "0xEvidenceCp001",
+        address: "0x000000000000000000000000000000000ed1de01",
         control_tier: :challenge,
         source: "scamsniffer",
         source_record_id: "ss-evidence-cp-001",
@@ -210,7 +220,7 @@ defmodule Bank.WalletScreening.EvidenceTest do
       evidence = Evidence.for_intent(intent)
 
       assert evidence.outcome == "challenge"
-      assert evidence.screened_address == "0xEvidenceCp001"
+      assert evidence.screened_address == "0x000000000000000000000000000000000ed1de01"
       assert evidence.total_records == 1
     end
 

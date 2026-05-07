@@ -122,7 +122,7 @@ defmodule BankWeb.API.V1.CounterpartyControllerTest do
       conn =
         post(conn, ~p"/v1/counterparties/#{cp.id}/addresses", %{
           "chain" => "base",
-          "address" => "0x1111",
+          "address" => "0x0000000000000000000000000000000000001111",
           "alias" => "main",
           "role" => "payout",
           "verified" => true
@@ -139,7 +139,7 @@ defmodule BankWeb.API.V1.CounterpartyControllerTest do
 
     test "returns screening evidence on attached address labels", %{conn: conn} do
       cp = Fixtures.counterparty()
-      address = "0xCounterpartyScreening001"
+      address = "0x000000000000000000000000000000000ABCD001"
 
       {:ok, _record} =
         WalletScreening.upsert_record(%{
@@ -169,12 +169,18 @@ defmodule BankWeb.API.V1.CounterpartyControllerTest do
 
     test "409 on duplicate active (chain, address)", %{conn: conn} do
       cp = Fixtures.counterparty()
-      _first = Fixtures.address_label(counterparty: cp, chain: "base", address: "0xDEAD")
+
+      _first =
+        Fixtures.address_label(
+          counterparty: cp,
+          chain: "base",
+          address: "0x000000000000000000000000000000000000DEAD"
+        )
 
       conn =
         post(conn, ~p"/v1/counterparties/#{cp.id}/addresses", %{
           "chain" => "base",
-          "address" => "0xDEAD"
+          "address" => "0x000000000000000000000000000000000000DEAD"
         })
 
       body = json_response(conn, 409)
@@ -187,7 +193,7 @@ defmodule BankWeb.API.V1.CounterpartyControllerTest do
       conn =
         post(conn, ~p"/v1/counterparties/#{cp.id}/addresses", %{
           "chain" => "base",
-          "address" => "0xFFFF"
+          "address" => "0x000000000000000000000000000000000000FFFF"
         })
 
       body = json_response(conn, 409)
@@ -198,7 +204,7 @@ defmodule BankWeb.API.V1.CounterpartyControllerTest do
       conn =
         post(conn, ~p"/v1/counterparties/#{Ecto.UUID.generate()}/addresses", %{
           "chain" => "base",
-          "address" => "0x1"
+          "address" => "0x0000000000000000000000000000000000000001"
         })
 
       body = json_response(conn, 404)
