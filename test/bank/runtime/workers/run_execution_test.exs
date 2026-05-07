@@ -346,6 +346,53 @@ defmodule Bank.Runtime.Workers.RunExecutionTest do
 
       assert %AgentIntent{state: :blocked} = Repo.get!(AgentIntent, intent.id)
     end
+
+    # MVP-test-plan Phase 4 (browser wallet + delegation safety lane):
+    # explicitly pin that a `:revoked` delegation refuses dispatch the
+    # same way a `:revoking` one does. The `executable?/1` predicate
+    # already returns `false` for any non-`:active` state, so the
+    # in-flight `:revoking` test exercises the same code path — but
+    # operators reading the demo will ask "what about a fully revoked
+    # delegation?" and the answer is in this test. No production code
+    # change.
+    test "delegation in :revoked aborts the plan before any HTTP call" do
+      %{decision: decision, plan: plan, intent: intent} = scenario(delegation_state: :revoked)
+
+      Req.Test.stub(Bank.AdapterClient, fn _ ->
+        flunk("AdapterClient called despite revoked delegation")
+      end)
+
+      assert {:cancel, :delegation_not_active} =
+               perform_job(RunExecution, %{"decision_id" => decision.id})
+
+      assert %ExecutionPlan{
+               execution_status: :aborted,
+               final_reason: "delegation_not_active"
+             } = Repo.get!(ExecutionPlan, plan.id)
+
+      assert %AgentIntent{state: :blocked} = Repo.get!(AgentIntent, intent.id)
+    end
+
+    # Same MVP-lane reasoning as :revoked. Pin that an `:expired`
+    # delegation refuses dispatch — the time-based terminal state
+    # behaves identically to the revoked terminal state.
+    test "delegation in :expired aborts the plan before any HTTP call" do
+      %{decision: decision, plan: plan, intent: intent} = scenario(delegation_state: :expired)
+
+      Req.Test.stub(Bank.AdapterClient, fn _ ->
+        flunk("AdapterClient called despite expired delegation")
+      end)
+
+      assert {:cancel, :delegation_not_active} =
+               perform_job(RunExecution, %{"decision_id" => decision.id})
+
+      assert %ExecutionPlan{
+               execution_status: :aborted,
+               final_reason: "delegation_not_active"
+             } = Repo.get!(ExecutionPlan, plan.id)
+
+      assert %AgentIntent{state: :blocked} = Repo.get!(AgentIntent, intent.id)
+    end
   end
 
   describe "pause gate" do
