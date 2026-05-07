@@ -1,7 +1,8 @@
 # MVP Test Report
 
 Date: 2026-05-07
-Commit: `7f2ec79` (`Pin public intent kind vocabulary at /v1/intents (MVP test plan) (#509)`)
+Commit: `fd1da6f` (`Render swap route evidence on intent replay (#510)`).
+Initial baseline run was on `7f2ec79` (`Pin public intent kind vocabulary at /v1/intents (MVP test plan) (#509)`); Worker C's [#510](https://github.com/Linh86/cryptobank/pull/510) and Worker D's [#511](https://github.com/Linh86/cryptobank/pull/511) landed in parallel and this report's final commit reference covers both.
 Branch: `main` (verified from isolated worktree at `/private/tmp/cryptobank-d-mvp-baseline-docs`)
 
 ## Summary Recommendation
@@ -89,25 +90,43 @@ The honesty grep confirmed no `production-ready` / `full CCTP` / `full 1inch` / 
 
 ### Allowlisted Morpho USDC deposit (Phase 9)
 
-Pinned by `morpho_dispatch_safety_test.exs`, `execution_plan_morpho_test.exs`, the `Bank.SessionPermissions.Scope.default/0` `morpho_4626_deposit` capability, and `chain_adapter/test/dispatch-morpho.test.ts`:
+Audited end-to-end by Worker C's MVP test lane (`control-tower/worker-reports/worker-c.md`). 205 focused tests pass across `test/bank/defi_venues/morpho/`, `test/bank/decisions/morpho_deposit_artifacts_test.exs`, `morpho_deposit_plan_test.exs`, `morpho_dispatch_safety_test.exs`, `evaluate_intent_morpho_test.exs`. Every Phase 9 acceptance was already LANDED before the audit:
 
-- Single allowlisted Morpho USDC vault per workspace; `:morpho_vault_not_allowlisted` on unknown vault.
-- Deposit calldata pinned in adapter; deposit-only (withdraw via session signer is **not** wired and is operator-emergency only).
-- `mix bank.morpho.smoke` and `mix bank.morpho.deposit_smoke` ship green.
+- Allowlisted vault config via `Bank.Policies.PolicyRule` `:allowed_vault` rule type → `Bank.Policies.Morpho.RulesCompiler` → `PolicyInput.vault_allowlist`.
+- Risk evaluator `Bank.DefiVenues.Morpho.RiskExplanation.explain/3` produces `decision: "auto_exec" | "approval_required" | "hold" | "block"` + `risk_tier: "low" | "moderate" | "elevated" | "severe"`.
+- Snapshot persistence via `Bank.DefiVenues.Morpho.Snapshots` + `PersistedVaultSnapshot` schema with three-state freshness (`:fresh | :stale | :expired`) per (identity 86_400 s, allocation 300 s, warnings 300 s, apy 3 600 s).
+- Deposit artifact generation: `Bank.Decisions.MorphoDepositArtifacts.from_intent/6` builds `kind: "morpho_deposit"` execution-plan steps with `vault_address`, `chain_id`, `asset`, `receiver`, `snapshot_id`, `snapshot_payload_hash`, `policy_rule_ids`, `decision_id`.
+- Adapter dispatch on both sides: `Bank.AdapterClient.dispatch_morpho_deposit/2` (Elixir) + `chain_adapter/src/dispatch/morpho_deposit.ts` `handleMorphoDepositDispatch/2` validates `DispatchMorphoDepositSchema`; `chain_adapter/src/chains/base/morpho_deposit.ts` `executeMorphoDeposit` performs the on-chain `IERC4626.deposit(assets, receiver)` UserOp.
+- Five Morpho audit event types fire from Phoenix (`morpho.risk_explained`, `morpho.policy_blocked`, `morpho.snapshot_stale`, `morpho.deposit_dispatched`, `morpho.deposit_aborted`); replay surface projects `morpho_evidence` and renders a `<.morpho_evidence_card>` with stable id `replay-morpho-evidence`.
+- Smoke tasks: `mix bank.morpho.smoke` (read-only stub mode, no chain RPC) and `mix bank.morpho.deposit_smoke --confirm` (live Base Sepolia with explicit-confirmation broadcast).
 
 ### Morpho withdraw boundary (Phase 10)
 
-Withdraw is intentionally NOT a session-permitted capability for v0.1: `Bank.SessionPermissions.Scope.default/0` documents it under denied actions, and the chain adapter's session-permission install does not encode it on chain. Operator-emergency withdraw goes through the legacy operator-rooted cryptographic path; user-rooted browser-signed delegations cannot withdraw via session signer. Pinned by `Bank.SessionPermissions.ScopeTest`'s denied-actions assertions.
+Audited by Worker C; classification confirmed as **operator-only preview / planning** with on-chain dispatch explicitly deferred to issue #207. Withdraw is intentionally NOT a session-permitted capability for v0.1: `Bank.SessionPermissions.Scope.default/0` documents it under denied actions, and the chain adapter's session-permission install does not encode it on chain.
+
+What's wired today (operator-only, preview/planning):
+
+- `Bank.DefiVenues.Morpho.WithdrawPreview.preview/3` returns `{chain, chain_id, vault_address, requested_assets, max_withdrawable, would_block?, would_partial?, snapshot_id, snapshot_payload_hash, snapshot_fetched_at}`. `:max_withdrawable` is treated as an UPPER bound (the on-chain `IERC4626.maxWithdraw(owner)` may be lower).
+- `Bank.DefiVenues.Morpho.OperatorWithdraw.preview/1` and `request_withdraw/4` gate on operator role + workspace `:allowed_vault` + snapshot freshness + zero-shares + would-block / would-partial signals. Emits `morpho.withdraw_previewed`, `withdraw_planned`, `withdraw_blocked` audit events with stable `correlation_id`.
+- Tests pinning the boundary: `withdraw_preview_test.exs`, `operator_withdraw_test.exs`, and `agent_no_withdraw_test.exs` (which confirms agents have **no** callable withdraw path).
+
+What's deferred to a follow-up:
+
+- No `Bank.AdapterClient.dispatch_morpho_withdraw/2`, no `chain_adapter/src/dispatch/morpho_withdraw.ts`. The audit chain emitted today is forward-compatible — when the dispatch slice lands, `morpho.withdraw_dispatched` / `withdraw_confirmed` / `withdraw_failed` thread the same `correlation_id` through the existing `morpho_evidence` replay slice.
+- `docs/runbooks/morpho-deposits.md` § "Operator-only Morpho withdraw safety path (#207)" lines 196-258 spells this out: "**This issue closes the safety path: operator-only preview + planning + audit + replay. Adapter-side dispatch (the actual on-chain `IERC4626.withdraw(assets, receiver, owner)` UserOperation broadcast) is the next slice.**" `docs/mvp-demo-script.md:111` reaffirms agents are explicitly forbidden from withdraw.
 
 ### Operator console + audit + replay (Phase 11)
 
-Pinned by the LiveView test suite under `test/bank_web/live/`:
+Audited by Worker C. 143 LiveView tests pass across `queue_live_test.exs`, `intent_replay_live_test.exs`, `control_live_test.exs`, `queue_live_format_hygiene_test.exs`. Every Phase 11 acceptance was LANDED before the audit, plus one real gap closed under PR [#510](https://github.com/Linh86/cryptobank/pull/510) (squash-merged `fd1da6f`).
 
-- `BankWeb.ControlLive` (`/`) — wallet binding + session-permission install card with full state machine: `idle → awaiting_signature → signing → submitted → verifying → active | failed`.
+LiveViews present and tested with stable DOM ids:
+
+- `BankWeb.ControlLive` (`/`) — wallet binding + session-permission install card with full state machine: `idle → awaiting_signature → signing → submitted → verifying → active | failed`. Wallet-status / session-permission-install / delegation cards.
 - `BankWeb.DashboardLive` (`/dashboard`) — runtime / delegation / approvals / executions stat cards, recent decisions, execution-readiness checklist.
-- `BankWeb.QueueLive` (`/queue`) — pending approvals, active executions, held actions, blocked actions; approve/reject is wire-tested.
+- `BankWeb.QueueLive` (`/queue`) — pending approvals, active executions, held actions, blocked actions; approve/reject is wire-tested via `Decisions.approve/2`.
 - `BankWeb.SecurityLive` (`/security`) — pause/resume + delegation revoke (sentinel for `:user`-rooted, cryptographic for `:operator`-rooted).
-- `BankWeb.AuditLive` (`/audit`) + `BankWeb.IntentReplayLive` (`/audit/replay/:intent_id`) — append-only log + per-intent replay bundle (intent → trust → simulation → decision → execution → policy snapshot → swap/Morpho route evidence).
+- `BankWeb.AuditLive` (`/audit`) + `BankWeb.IntentReplayLive` (`/audit/replay/:intent_id`) — append-only log + per-intent replay bundle.
+- Replay cards: `<.morpho_evidence_card>` (`#replay-morpho-evidence`), and **`<.swap_route_card>` (`#replay-swap-routes`) added by [#510](https://github.com/Linh86/cryptobank/pull/510)** with per-route `replay-swap-route-<idx>` ids and empty-state copy. Renders source/destination asset, input/expected/minimum/actual output, slippage_bps, route_hash, block_number, plan_id, final_outcome, final_reason.
 - Telegram operator alerts + signed-button approval (alerting only; no command dispatch beyond pause/resume).
 
 ### SDK / MCP surface (Phase 12)
@@ -135,9 +154,12 @@ P2 follow-ups carried over from prior worker reports + this lane's audit. None b
 - **Bundler RPC key rotation is not documented in `docs/operator-secrets-checklist.md`** (Worker D audit, this run). The checklist covers initial acquisition of `BUNDLER_RPC_URL` (lines 150-157 EN, mirrored in `-cs.md`) but does not name a rotation cadence or operator responsibility for refreshing the public-tier API key. The bundler URL is a low-trust credential surfaced viewer-tier on the install envelope — acceptable for private alpha, but worth a one-paragraph rotation note.
 - **Browser-signed cryptographic revoke** (Worker A's report; design note `docs/design/browser-signed-install.md` § 6) — v0.1 ships the sentinel audit anchor for `:user`-rooted rows; the user-signed cryptographic revoke flow is a v0.2 follow-up.
 - **Per-policy on-chain ZeroDev policy encoding** (Worker A's report, Worker C's #501 closeout) — v0.1 ships `toSudoPolicy({})` to mirror the legacy adapter; encoding `Bank.SessionPermissions.Scope.default()` as a real policy array is a v0.2 follow-up.
-- **Wallet-provider error-code corpus** (Worker C's report) — `classifySendError` and `classifyReceiptError` cover EIP-1193 4001 plus viem's typical message shapes; per-provider fixture corpora (Coinbase Wallet, Phantom-EVM) are a v0.2 hardening pass. MetaMask, Rabby, and Frame are smoke-tested.
-- **`bundler_rpc_url` doubles as the read RPC** (Worker C's report) — Pimlico endpoints serve generic JSON-RPC alongside bundler-specific methods so this works today; if a bundler without generic-RPC support is ever swapped in, Phoenix would need to expose a separate `read_rpc_url` in the envelope.
-- **Test-isolation flake exposed in #500** (Worker C's report) — a one-line `Bank.Security.PauseState.reset/0` setup landed in `wallet_bindings_install_controller_test.exs` to fix `runtime_paused` bleed from a sibling test. A more complete fix (eliminating any test that mutates global PauseState without an `on_exit` reset) is worth a pass when someone next rotates onto the install lane.
+- **Wallet-provider error-code corpus** (Worker C's #501 closeout) — `classifySendError` and `classifyReceiptError` cover EIP-1193 4001 plus viem's typical message shapes; per-provider fixture corpora (Coinbase Wallet, Phantom-EVM) are a v0.2 hardening pass. MetaMask, Rabby, and Frame are smoke-tested.
+- **`bundler_rpc_url` doubles as the read RPC** (Worker C's #501 closeout) — Pimlico endpoints serve generic JSON-RPC alongside bundler-specific methods so this works today; if a bundler without generic-RPC support is ever swapped in, Phoenix would need to expose a separate `read_rpc_url` in the envelope.
+- **Test-isolation flake exposed in #500** (Worker C's #501 closeout) — a one-line `Bank.Security.PauseState.reset/0` setup landed in `wallet_bindings_install_controller_test.exs` to fix `runtime_paused` bleed from a sibling test. A more complete fix (eliminating any test that mutates global PauseState without an `on_exit` reset) is worth a pass when someone next rotates onto the install lane.
+- **Morpho withdraw on-chain dispatch is deferred** (Worker C's MVP test lane; tracked under #207). The audit chain is forward-compatible — when the dispatch slice lands, `morpho.withdraw_dispatched` / `withdraw_confirmed` / `withdraw_failed` events flow into the existing `morpho_evidence` replay slice automatically. Not blocking the demo since the agent surface deliberately omits withdraw.
+- **`Bank.DefiVenues.Morpho.WithdrawPreview` doesn't do an on-chain `maxWithdraw(owner)` read** (Worker C's MVP test lane). Preview uses the snapshot's `state.total_assets` as an upper bound; actual chain `maxWithdraw` may be lower (other withdrawals, cap reductions). Documented at `docs/runbooks/morpho-deposits.md:219-223` and treated as fail-closed safety. Worth tightening to a real chain read when a chain client is wired for that path.
+- **`mix bank.morpho.deposit_smoke` is `--confirm`-gated and not run in this verification** (Worker C's MVP test lane). That's by design (the test plan forbids live transaction claims) but worth flagging that the deepest end-to-end Morpho path remains operator-driven only.
 - **Python SDK has no `tests/` directory.** `sdks/python/pyproject.toml` lists `pytest>=7.0` as a dev-extra but the directory is empty. The SDK code is exercised indirectly through the MCP server's HTTP-client tests and the examples hygiene. Adding even a small mocked-transport test scaffold would close the parity gap with the TypeScript SDK's 80-test suite.
 
 ## Docs And Code Mismatches
@@ -173,7 +195,8 @@ These are the only items left where a human must drive a real wallet on Base Sep
 - `mix bank.browser_install.smoke` is the env / config preflight a reviewer can run before walking the manual steps. It refuses to sign or broadcast under any flag.
 - No private keys, seed phrases, or signed transactions were used in any phase of this verification. No real funds were moved. No claim of manual-only-pass is made — those steps are owner work.
 - Worker reports synthesized into this report:
-  - `control-tower/worker-reports/worker-a.md` — Worker A's #506 (launch docs cleanup) + #508 (MVP test lane delegation gate pin) closeouts.
-  - `control-tower/worker-reports/worker-b.md` — Worker B's MVP test lane (Phases 5–8) + #509 (intent-kind controller pins) closeout.
-  - `control-tower/worker-reports/worker-c.md` — Worker C's #501 (frontend ZeroDev SDK + bundler) closeout. **No standalone Worker C MVP-test-lane report file** for Phases 9–11 is present; Phase 9–11 surfaces are covered by the existing test suites which pass under `mix precommit` (4070 / 4070).
-- The shared worktree at `/Users/linhnguyen/dev/CryptoBank` carries five tracked dirty files plus several untracked `docs/` and `control-tower/` paths. None were modified by this lane — the verification ran from an isolated worktree at `/private/tmp/cryptobank-d-mvp-baseline-docs` per the test plan's safety rule.
+  - `control-tower/worker-reports/worker-a.md` — Worker A's #506 (launch docs cleanup) + #508 (MVP test lane: delegation gate pinning `:revoking` + `:revoked` + `:expired`) closeouts.
+  - `control-tower/worker-reports/worker-b.md` — Worker B's MVP test lane (Phases 5–8: agent intent API + USDC transfer + MVP 0x swap + provider claims) + #509 (intent-kind controller pins) closeout.
+  - `control-tower/worker-reports/worker-c.md` — Worker C's MVP test lane (Phases 9–11: Morpho deposit + withdraw boundary + operator console) + #510 (`<.swap_route_card>` rendering on `BankWeb.IntentReplayLive`, squash-merged `fd1da6f`) closeout, plus their prior #501 (frontend ZeroDev SDK + bundler) closeout context.
+- All four lanes (A baseline-delegation, B intent/transfer/swap/provider, C Morpho/withdraw/console, D baseline+SDK/MCP+docs+GH+report) merged green on `main` between `1e75e05` and `fd1da6f` on 2026-05-07, in five test-plan PRs (#508, #509, #510, #511) plus this update.
+- The shared worktree at `/Users/linhnguyen/dev/CryptoBank` carries tracked dirty files plus several untracked `docs/` and `control-tower/` paths from parallel work. None were modified by this lane — the verification ran from an isolated worktree at `/private/tmp/cryptobank-d-mvp-baseline-docs` per the test plan's safety rule.
