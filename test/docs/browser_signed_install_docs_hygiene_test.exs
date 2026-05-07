@@ -1,24 +1,15 @@
 defmodule Docs.BrowserSignedInstallDocsHygieneTest do
   @moduledoc """
-  Regression guard for issue #476.
+  Regression guard for the browser-signed install smoke runbook +
+  surrounding user-facing docs.
 
-  Pins the browser-signed install smoke runbook + the user-facing
-  docs hygiene the epic #471 closeout requires:
-
-    * The smoke runbook exists at the documented path and is
-      reviewer-ready (named sections present).
-    * No user-facing doc claims the install UserOp is signed
-      server-side by `OPERATOR_PRIVATE_KEY`. The legacy mention is
-      preserved only on the deeper architecture context that
-      explains *why* `OPERATOR_PRIVATE_KEY` exists for legacy
-      cryptographic revoke (`docs/security.md`,
-      `docs/zerodev-permissions-integration.md`).
-    * No doc enables Base mainnet (`chain_id = 8453`) for the
-      browser-signed install path. Mainnet readiness runbooks
-      (`docs/runbooks/base-mainnet-*`) are intentionally outside
-      this guard — they're future planning, not user-facing
-      install instructions.
-    * The smoke runbook itself does not introduce mainnet language.
+  Originally landed under #476; extended under #502 with explicit
+  anti-stale-language assertions so the launch-track wire-up
+  (#500 backend session-auth + receipt poller, #501 frontend
+  ZeroDev SDK + bundler) cannot leave behind stale "synthetic
+  setTimeout" / "v0.2 follow-up" / "fake bundler confirmation" /
+  server-signed-normal-install language in the runbook or in the
+  docs operators read first.
 
   This test does NOT enforce code-level invariants — those live
   on the controller / context / worker test suites. It enforces
@@ -46,10 +37,12 @@ defmodule Docs.BrowserSignedInstallDocsHygieneTest do
       for heading <- [
             "# Browser-signed install smoke — Base Sepolia",
             "## Prereqs",
-            "## Path A — Phoenix-side state machine smoke",
-            "## Path B — Real on-chain end-to-end",
+            "## Path A — Real automated browser install",
+            "## Path B — Manual on-chain end-to-end (escape hatch)",
             "## Failure modes the smoke MUST surface",
+            "## Recovery guidance",
             "## Audit / replay evidence checklist",
+            "## Preflight task",
             "## Out of scope"
           ] do
         assert String.contains?(source, heading),
@@ -126,8 +119,121 @@ defmodule Docs.BrowserSignedInstallDocsHygieneTest do
              "smoke runbook does not name the on-chain verifier worker"
 
       assert source =~ ~r/(NOT|never).*\bmark.*:active\b/i or
-               source =~ ~r/Phoenix.*only.*marks.*\bactive\b.*after/i,
+               source =~ ~r/Phoenix.*only.*marks.*\bactive\b.*after/i or
+               source =~ ~r/sole writer of the .:active. transition/i,
              "smoke runbook does not pin that Phoenix marks :active only after on-chain verification"
+    end
+
+    test "Path B remains documented as the manual reviewer escape hatch" do
+      source = File.read!(@runbook)
+
+      assert source =~ ~r/Path B.*Manual on-chain end-to-end/i,
+             "smoke runbook lost the Path B manual reviewer escape hatch heading"
+
+      assert source =~ "cast send" or source =~ "dev tools console",
+             "Path B no longer documents either the cast or the dev-console reviewer route"
+    end
+
+    test "names the preflight Mix task" do
+      source = File.read!(@runbook)
+
+      assert source =~ "mix bank.browser_install.smoke",
+             "smoke runbook does not name the mix bank.browser_install.smoke preflight task"
+
+      assert source =~ ~r/preflight[- ]only|does not sign|does not broadcast|never.*broadcast/i,
+             "smoke runbook does not state the preflight task is preflight-only / non-signing"
+    end
+
+    test "describes a real automated browser install on the Path A success path (#502)" do
+      source = File.read!(@runbook)
+
+      # Path A's success path must describe the real automated
+      # flow, not the deliberate-failure walk-through that #476
+      # shipped while the JS hook was still synthetic. The
+      # presence of any of these phrases anywhere in the runbook
+      # would be a regression to the pre-#502 state.
+      stale_phrases = [
+        "synthetic confirmation",
+        "synthesises the bundler",
+        "synthesises the .submitted",
+        "stand-in for the bundler",
+        ~r/window\.setTimeout.*synthet/i,
+        ~r/Real ZeroDev SDK.*v0\.2 follow-up/i,
+        ~r/v0\.2 follow-up.*ZeroDev SDK/i,
+        ~r/SDK.*deferred/i
+      ]
+
+      for phrase <- stale_phrases do
+        case phrase do
+          %Regex{} = re ->
+            refute Regex.match?(re, source),
+                   "runbook still carries stale Path A synthetic-confirmation language matching #{inspect(re)}"
+
+          str when is_binary(str) ->
+            refute String.contains?(source, str),
+                   "runbook still carries stale Path A synthetic-confirmation phrase: #{inspect(str)}"
+        end
+      end
+
+      # Pin the new Path A wording explicitly.
+      assert source =~ ~r/^## Path A — Real automated browser install/m,
+             "Path A heading does not describe the real automated browser install"
+
+      assert source =~ "ZeroDev SDK",
+             "Path A no longer references the ZeroDev SDK as the browser-side signer"
+
+      assert source =~ "wallet popup" or source =~ "wallet pop-up",
+             "Path A no longer describes the wallet pop-up moment"
+    end
+
+    test "anti-stale-claim assertions for the install path (#502)" do
+      source = File.read!(@runbook)
+
+      # No production claim that setTimeout drives the install
+      # confirmation. Hard refuse — even the legacy mention must
+      # be reframed as historical / non-launch.
+      refute source =~ ~r/window\.setTimeout.*confirm/i,
+             "runbook claims `window.setTimeout` is the install-confirmation path; that contradicts the launch posture"
+
+      # No claim that any server / operator key signs the normal
+      # install. Mentions of OPERATOR_PRIVATE_KEY must be scoped
+      # to legacy-revoke / Path B `cast` callouts.
+      refute source =~
+               ~r/OPERATOR_PRIVATE_KEY[^\n]{0,80}(install|sign[^\n]{0,40}install)/i,
+             "runbook attributes install signing to OPERATOR_PRIVATE_KEY"
+
+      # No claim that the install confirmation is fake / mocked /
+      # simulated as the launch path.
+      refute source =~ ~r/(fake|mock|simulated)\s+(bundler|confirmation|userop|receipt)/i,
+             "runbook claims the launch path uses a fake/mock/simulated bundler confirmation"
+
+      # Defense-in-depth: refuse the literal v0.2 phrasing about
+      # the install-signing path. Other v0.2 callouts (cryptographic
+      # revoke, per-policy encoding) live in 'Out of scope'.
+      refute source =~ ~r/install[^\n]{0,80}v0\.2 follow-up/i,
+             "runbook describes the install signing path as a v0.2 follow-up"
+    end
+
+    test "names the launch-track issues #500, #501, #502" do
+      source = File.read!(@runbook)
+
+      for issue <- ["#500", "#501", "#502"] do
+        assert source =~ issue,
+               "runbook does not reference launch-track issue #{issue}"
+      end
+    end
+
+    test "has a Recovery guidance section operators can act on" do
+      source = File.read!(@runbook)
+
+      for cue <- [
+            "Recovery guidance",
+            ":install_failed",
+            ":pending"
+          ] do
+        assert String.contains?(source, cue),
+               "runbook recovery section missing cue: #{inspect(cue)}"
+      end
     end
   end
 
@@ -140,6 +246,16 @@ defmodule Docs.BrowserSignedInstallDocsHygieneTest do
 
       refute source =~ ~r/install[^\n]{0,80}signed.*OPERATOR_PRIVATE_KEY/i,
              "wallet-quickstart.md still attributes install signing to OPERATOR_PRIVATE_KEY"
+    end
+
+    test "wallet-quickstart.md no longer carries the v0.2 setTimeout 'Honest gap' callout (#502)" do
+      source = File.read!(@wallet_quickstart)
+
+      refute source =~ ~r/Honest gap.*v0\.2 follow-up/i,
+             "wallet-quickstart.md still carries the pre-#502 'Honest gap (v0.2 follow-up)' callout"
+
+      refute source =~ ~r/setTimeout[^\n]{0,80}stand[- ]in/i,
+             "wallet-quickstart.md still describes the install confirmation as a setTimeout stand-in"
     end
 
     test "README.md does not say install UserOp is server-signed" do
@@ -173,6 +289,25 @@ defmodule Docs.BrowserSignedInstallDocsHygieneTest do
 
       assert source =~ "sentinel" and source =~ "#475",
              "mvp-readiness.md does not document the #475 sentinel revoke posture for browser-signed delegations"
+    end
+
+    test "no longer carries the pre-#502 setTimeout 'Honest gap inside #471' bullet" do
+      source = File.read!(@mvp_readiness)
+
+      refute source =~ ~r/Honest gap inside #471/,
+             "mvp-readiness.md still carries the pre-#502 'Honest gap inside #471' bullet"
+
+      refute source =~ ~r/setTimeout[^\n]{0,200}v0\.2 follow-up/i,
+             "mvp-readiness.md still describes the install confirmation as a v0.2 setTimeout follow-up"
+    end
+
+    test "names the launch-track issues #500, #501, #502 (#502)" do
+      source = File.read!(@mvp_readiness)
+
+      for issue <- ["#500", "#501", "#502"] do
+        assert source =~ issue,
+               "mvp-readiness.md does not reference launch-track issue #{issue}"
+      end
     end
   end
 end
