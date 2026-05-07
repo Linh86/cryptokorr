@@ -1,0 +1,23 @@
+{
+  "name": "cryptobank-assets",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Phoenix-side asset bundle for CryptoBank — pins ZeroDev SDK + viem for the browser-driven session permission install flow (#501).",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run --config vitest.config.js",
+    "test:watch": "vitest --config vitest.config.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@zerodev/ecdsa-validator": "5.4.9",
+    "@zerodev/permissions": "5.6.3",
+    "@zerodev/sdk": "5.5.10",
+    "viem": "2.31.3"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.1"
+  }
+}
