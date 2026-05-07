@@ -210,6 +210,82 @@ defmodule BankWeb.API.V1.IntentControllerTest do
     end
   end
 
+  describe "POST /v1/intents — public kind vocabulary" do
+    # MVP test plan Phase 5 — pin every public-facing `kind` string
+    # the contract documents (`transfer`, `swap`, `scheduled_transfer`,
+    # `allocate_idle_capital`) and confirm an unknown kind 422s. The
+    # transfer happy-path lives above; allocate_idle_capital lives in
+    # its own block below.
+
+    test "creates a swap intent and renders kind=\"swap\" back",
+         %{conn: conn} do
+      raw = "0x1234567890abcdef1234567890abcdef12345678"
+
+      payload =
+        valid_payload(%{
+          "agent_id" => "agent-swap",
+          "idempotency_key" => "k-swap-#{System.unique_integer([:positive])}",
+          "kind" => "swap",
+          "chain" => "base-sepolia",
+          "target" => %{"raw_address" => raw}
+        })
+
+      conn = post(conn, ~p"/v1/intents", payload)
+      body = json_response(conn, 202)
+
+      assert body["state"] == "submitted"
+      assert body["intent"]["kind"] == "swap"
+      assert body["intent"]["chain"] == "base-sepolia"
+
+      intent = Repo.get!(AgentIntent, body["intent_id"])
+      assert intent.kind == :swap
+      assert intent.chain == "base-sepolia"
+    end
+
+    test "creates a scheduled_transfer intent and renders kind=\"scheduled_transfer\" back",
+         %{conn: conn} do
+      raw = "0x1234567890abcdef1234567890abcdef12345678"
+
+      payload =
+        valid_payload(%{
+          "agent_id" => "agent-sched",
+          "idempotency_key" => "k-sched-#{System.unique_integer([:positive])}",
+          "kind" => "scheduled_transfer",
+          "target" => %{"raw_address" => raw}
+        })
+
+      conn = post(conn, ~p"/v1/intents", payload)
+      body = json_response(conn, 202)
+
+      assert body["state"] == "submitted"
+      assert body["intent"]["kind"] == "scheduled_transfer"
+
+      intent = Repo.get!(AgentIntent, body["intent_id"])
+      assert intent.kind == :scheduled_transfer
+    end
+
+    test "rejects an unrecognized public kind with 422 invalid_body",
+         %{conn: conn} do
+      payload =
+        valid_payload(%{
+          "agent_id" => "agent-bad-kind",
+          "idempotency_key" => "k-bad-kind",
+          "kind" => "buy_token"
+        })
+
+      conn = post(conn, ~p"/v1/intents", payload)
+      body = json_response(conn, 422)
+
+      # Public surface vocabulary is closed: only the four documented
+      # public kinds (transfer / swap / scheduled_transfer /
+      # allocate_idle_capital) are accepted; any other string fails
+      # at the normalize boundary.
+      assert body["error"]["code"] in ["invalid_body", "invalid_kind"]
+
+      refute_enqueued(worker: EvaluateIntent)
+    end
+  end
+
   describe "POST /v1/intents — allocate_idle_capital (#203 P2)" do
     test "creates a Morpho deposit intent and renders the public kind back",
          %{conn: conn} do
