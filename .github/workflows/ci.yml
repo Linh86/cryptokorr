@@ -33,7 +33,7 @@ jobs:
           --health-retries 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: erlef/setup-beam@v1
         with:
@@ -62,7 +62,7 @@ jobs:
         working-directory: chain_adapter
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: actions/setup-node@v4
         with:
@@ -84,7 +84,7 @@ jobs:
         working-directory: sdks/mcp
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: actions/setup-python@v5
         with:
