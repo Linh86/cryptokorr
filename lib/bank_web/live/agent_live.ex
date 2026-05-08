@@ -445,6 +445,15 @@ defmodule BankWeb.AgentLive do
   # them so the LiveView doesn't crash on unmatched messages.
   def handle_info(%{topic: :intent_lifecycle}, socket), do: {:noreply, socket}
 
+  # Test-only shortcut: flip :permission to :active without setting up
+  # a binding + delegation in the DB. The real install flow drives
+  # :permission via `recompute_permission/1`; this clause lets the
+  # test_intent_card test fixture exercise intent submission without
+  # owning the wallet/install dance.
+  def handle_info(:permission_signed, socket) do
+    {:noreply, assign(socket, :permission, :active)}
+  end
+
   # ── audit:stream live tail (I4) ─────────────────────────────────────
   # Every successful Bank.Audit.append_event/1 broadcast lands here.
   # We re-fetch the row to enforce workspace scoping (the broadcast
