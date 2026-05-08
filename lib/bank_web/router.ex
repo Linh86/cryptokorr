@@ -405,6 +405,17 @@ defmodule BankWeb.Router do
       live "/inbox", OperatorInboxLive
     end
 
+    # Plynn redesign — three-screen private-alpha UI (Agent / Activity
+    # / Advanced) at the root. The old operator console moved to
+    # `/legacy/control`; phase 2 wires real wallet/permission/intent
+    # state and ports the remaining operator surfaces under Advanced.
+    live_session :agent_alpha,
+      on_mount: {BankWeb.LiveAuth, {:require_role, :viewer}} do
+      live "/", AgentLive
+      live "/activity", AgentActivityLive
+      live "/advanced", AgentAdvancedLive
+    end
+
     # Browser-session-authenticated decision report download
     # (#251 P2). The `/v1/intents/:id/report` API endpoint (#250)
     # is API-key-gated and so a logged-in browser user clicking a
@@ -423,9 +434,16 @@ defmodule BankWeb.Router do
     # `:operator` minimum; admin-only individual handle_event
     # callbacks (pause/resume/revoke, archive) check role inside the
     # callback.
+    #
+    # Plynn redesign cutover: ControlLive moved from `/` to
+    # `/legacy/control` so the redesigned AgentLive can claim the
+    # root path. The old operator screens stay reachable at their
+    # existing paths for backwards compatibility, but the new design's
+    # NavRail no longer links to them — phase 2 wires equivalents
+    # under the Advanced screen and drops the legacy routes.
     live_session :workspace_operator,
       on_mount: {BankWeb.LiveAuth, {:require_role, :operator}} do
-      live "/", ControlLive
+      live "/legacy/control", ControlLive
       live "/queue", QueueLive
       live "/counterparties", CounterpartiesLive
       live "/counterparties/:id", CounterpartyDetailLive

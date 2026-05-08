@@ -38,7 +38,7 @@ defmodule BankWeb.ControlLiveTest do
 
   describe "initial render — no delegation" do
     test "renders the page with disconnected state", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/legacy/control")
 
       assert html =~ "Connection"
       assert html =~ "No delegation connected"
@@ -47,7 +47,7 @@ defmodule BankWeb.ControlLiveTest do
     end
 
     test "contains expected DOM IDs", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/legacy/control")
 
       assert html =~ ~s(id="page-title")
       assert html =~ ~s(id="delegation-card")
@@ -62,7 +62,7 @@ defmodule BankWeb.ControlLiveTest do
     test "shows next step guidance walking the operator through Connect → Bind → Install", %{
       conn: conn
     } do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/legacy/control")
 
       assert html =~ "Connect a Base Sepolia wallet"
       assert html =~ "Install session permission"
@@ -71,7 +71,7 @@ defmodule BankWeb.ControlLiveTest do
     end
 
     test "shows navigation sidebar with Connection active", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/legacy/control")
 
       assert html =~ "Bank v0.1"
       assert html =~ "Control Tower"
@@ -85,7 +85,7 @@ defmodule BankWeb.ControlLiveTest do
     end
 
     test "shows architecture info panel", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/legacy/control")
 
       assert html =~ "Non-custodial architecture"
       assert html =~ "Control plane"
@@ -108,7 +108,7 @@ defmodule BankWeb.ControlLiveTest do
     end
 
     test "renders the delegation card with details", %{conn: conn, delegation: del} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/legacy/control")
 
       assert html =~ "Smart Account Delegation"
       assert html =~ "sa_main"
@@ -119,21 +119,21 @@ defmodule BankWeb.ControlLiveTest do
     end
 
     test "shows execution-ready indicator", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/legacy/control")
 
       assert html =~ "Execution ready"
       assert html =~ ~s(id="execution-ready-indicator")
     end
 
     test "shows revoke button", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/legacy/control")
 
       assert html =~ ~s(id="revoke-btn")
       assert html =~ "Revoke delegation"
     end
 
     test "shows next step: delegation active and execution ready", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/legacy/control")
 
       assert html =~ "Delegation active and execution ready"
     end
@@ -159,14 +159,14 @@ defmodule BankWeb.ControlLiveTest do
     end
 
     test "renders pending state", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/legacy/control")
 
       assert html =~ "Pending"
       assert html =~ "Session permission install in flight"
     end
 
     test "shows execution blocked", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/legacy/control")
 
       assert html =~ "Execution blocked"
     end
@@ -182,14 +182,14 @@ defmodule BankWeb.ControlLiveTest do
     end
 
     test "renders revoking state", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/legacy/control")
 
       assert html =~ "Revoking"
       assert html =~ "Revocation in flight"
     end
 
     test "does not show revoke button in revoking state", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/legacy/control")
 
       refute html =~ ~s(id="revoke-btn")
     end
@@ -212,14 +212,14 @@ defmodule BankWeb.ControlLiveTest do
     end
 
     test "shows the retry button with #revoke-retry-btn", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/legacy/control")
 
       assert html =~ ~s(id="revoke-retry-btn")
       assert html =~ "Retry revoke"
     end
 
     test "surfaces last_reason in the delegation card and a banner", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/legacy/control")
 
       assert html =~ ~s(id="delegation-revoke-failure-banner")
       assert html =~ "send_rejected_by_bundler"
@@ -227,7 +227,7 @@ defmodule BankWeb.ControlLiveTest do
     end
 
     test "next steps still asks the operator to retry", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/legacy/control")
 
       assert html =~ "Previous revoke attempt failed on-chain"
     end
@@ -239,7 +239,7 @@ defmodule BankWeb.ControlLiveTest do
     test "shows pause indicator and resume button", %{conn: conn} do
       {:ok, :paused} = Security.pause(:global)
 
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/legacy/control")
 
       assert html =~ "Runtime paused"
       assert html =~ ~s(id="pause-indicator")
@@ -251,7 +251,7 @@ defmodule BankWeb.ControlLiveTest do
       {:ok, _del} = grant_delegation("sa_paused", "del_paused")
       {:ok, :paused} = Security.pause(:global)
 
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/legacy/control")
 
       assert html =~ "Resume the runtime to enable execution"
     end
@@ -261,7 +261,7 @@ defmodule BankWeb.ControlLiveTest do
 
   describe "refresh event" do
     test "reloads state and shows flash", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       html = view |> element("button", "Refresh status") |> render_click()
 
@@ -276,7 +276,7 @@ defmodule BankWeb.ControlLiveTest do
     end
 
     test "submits revocation and reloads state", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       # Click the revoke button (it has phx-value-smart-account-id)
       html =
@@ -291,7 +291,7 @@ defmodule BankWeb.ControlLiveTest do
 
   describe "pause/resume events" do
     test "pause_runtime pauses and shows indicator", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       html = view |> element("#pause-btn") |> render_click()
 
@@ -302,7 +302,7 @@ defmodule BankWeb.ControlLiveTest do
     test "resume_runtime resumes and shows running", %{conn: conn} do
       {:ok, :paused} = Security.pause(:global)
 
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       html = view |> element("#resume-btn") |> render_click()
 
@@ -315,7 +315,7 @@ defmodule BankWeb.ControlLiveTest do
 
   describe "PubSub security events" do
     test "security event triggers re-render", %{conn: conn} do
-      {:ok, view, html} = live(conn, "/")
+      {:ok, view, html} = live(conn, "/legacy/control")
       refute html =~ "Runtime paused"
 
       # Pause externally (e.g. from API)
@@ -332,7 +332,7 @@ defmodule BankWeb.ControlLiveTest do
 
   describe "chain and asset badges" do
     test "shows Base and USDC badges in top bar", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/legacy/control")
 
       assert html =~ "Base"
       assert html =~ "USDC"
@@ -349,7 +349,7 @@ defmodule BankWeb.ControlLiveTest do
     end
 
     test "renders account selector when more than one delegation exists", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/legacy/control")
 
       assert html =~ ~s(id="account-selector")
       assert html =~ ~s(id="account-tab-sa_primary")
@@ -357,14 +357,14 @@ defmodule BankWeb.ControlLiveTest do
     end
 
     test "defaults to the first delegation from list_active", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/legacy/control")
 
       # list_active orders by desc inserted_at, so sa_secondary is first.
       assert html =~ "sa_secondary"
     end
 
     test "select_account switches the rendered delegation", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       html =
         view
@@ -376,7 +376,7 @@ defmodule BankWeb.ControlLiveTest do
     end
 
     test "revoke uses the selected account id", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       _ = view |> element("#account-tab-sa_primary") |> render_click()
       html = view |> element("#revoke-btn") |> render_click()
@@ -387,7 +387,7 @@ defmodule BankWeb.ControlLiveTest do
     end
 
     test "selecting an unknown account id is ignored", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       render_hook(view, "select_account", %{"smart-account-id" => "sa_not_real"})
 
@@ -403,7 +403,7 @@ defmodule BankWeb.ControlLiveTest do
     end
 
     test "no selector when there is only one delegation", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/legacy/control")
 
       refute html =~ ~s(id="account-selector")
       assert html =~ "sa_solo"
@@ -421,7 +421,7 @@ defmodule BankWeb.ControlLiveTest do
 
   describe "wallet status region — initial render" do
     test "shows disconnected state with Connect button", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/legacy/control")
 
       assert html =~ ~s(id="wallet-status-card")
       assert html =~ ~s(id="wallet-status")
@@ -436,14 +436,14 @@ defmodule BankWeb.ControlLiveTest do
     end
 
     test "wallet card mounts the WalletConnect hook", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/legacy/control")
       assert html =~ ~s(phx-hook="WalletConnect")
     end
   end
 
   describe "wallet status region — unavailable provider" do
     test "wallet_connect:unavailable shows install guidance", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       html = render_hook(view, "wallet_connect:unavailable", %{"reason" => "no_provider"})
 
@@ -457,7 +457,7 @@ defmodule BankWeb.ControlLiveTest do
 
   describe "wallet status region — connecting" do
     test "wallet_connect:connecting shows in-flight state", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       html = render_hook(view, "wallet_connect:connecting", %{})
 
@@ -471,7 +471,7 @@ defmodule BankWeb.ControlLiveTest do
       conn: conn,
       wallet_address: address
     } do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       html =
         render_hook(view, "wallet_connect:connected", %{
@@ -494,7 +494,7 @@ defmodule BankWeb.ControlLiveTest do
       conn: conn,
       wallet_address: address
     } do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       _ =
         render_hook(view, "wallet_connect:connected", %{
@@ -521,7 +521,7 @@ defmodule BankWeb.ControlLiveTest do
       conn: conn,
       wallet_address: address
     } do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       # Defense-in-depth: the JS hook shouldn't push connected with
       # 8453 (P2 fix), but if a stale build does, the server rejects
@@ -542,7 +542,7 @@ defmodule BankWeb.ControlLiveTest do
       conn: conn,
       wallet_address: address
     } do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       _ =
         render_hook(view, "wallet_connect:connected", %{
@@ -572,7 +572,7 @@ defmodule BankWeb.ControlLiveTest do
       conn: conn,
       wallet_address: address
     } do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       _ =
         render_hook(view, "wallet_connect:connected", %{
@@ -591,7 +591,7 @@ defmodule BankWeb.ControlLiveTest do
 
       # Re-mount the LiveView; the binding row in the DB drives the
       # bound state without requiring the browser to re-sign.
-      {:ok, _view2, html2} = live(conn, "/")
+      {:ok, _view2, html2} = live(conn, "/legacy/control")
 
       assert html2 =~ ~s(id="wallet-status-bound")
       assert html2 =~ address
@@ -603,7 +603,7 @@ defmodule BankWeb.ControlLiveTest do
       conn: conn,
       wallet_address: address
     } do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       _ =
         render_hook(view, "wallet_connect:connected", %{
@@ -635,7 +635,7 @@ defmodule BankWeb.ControlLiveTest do
       conn: conn,
       wallet_address: address
     } do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       _ =
         render_hook(view, "wallet_connect:connected", %{
@@ -666,7 +666,7 @@ defmodule BankWeb.ControlLiveTest do
       conn: conn,
       wallet_address: address
     } do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       _ =
         render_hook(view, "wallet_connect:connected", %{
@@ -691,7 +691,7 @@ defmodule BankWeb.ControlLiveTest do
       conn: conn,
       wallet_address: address
     } do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       _ =
         render_hook(view, "wallet_connect:connected", %{
@@ -715,7 +715,7 @@ defmodule BankWeb.ControlLiveTest do
       conn: conn,
       wallet_address: address
     } do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       _ =
         render_hook(view, "wallet_connect:connected", %{
@@ -736,7 +736,7 @@ defmodule BankWeb.ControlLiveTest do
 
   describe "wallet status region — wrong chain (Base mainnet)" do
     test "wallet_connect:wrong_chain on Base mainnet surfaces wrong_chain UI", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       html =
         render_hook(view, "wallet_connect:wrong_chain", %{
@@ -755,7 +755,7 @@ defmodule BankWeb.ControlLiveTest do
     end
 
     test "wallet_connect:wrong_chain on Ethereum mainnet (chain 1)", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       html =
         render_hook(view, "wallet_connect:wrong_chain", %{
@@ -772,7 +772,7 @@ defmodule BankWeb.ControlLiveTest do
       conn: conn,
       wallet_address: address
     } do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       _ =
         render_hook(view, "wallet_connect:connected", %{
@@ -799,7 +799,7 @@ defmodule BankWeb.ControlLiveTest do
     end
 
     test "wallet_connect:cancelled resets to disconnected state", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       _ = render_hook(view, "wallet_connect:connecting", %{})
       html = render_hook(view, "wallet_connect:cancelled", %{})
@@ -810,7 +810,7 @@ defmodule BankWeb.ControlLiveTest do
 
   describe "wallet status region — error (browser-side)" do
     test "wallet_connect:error shows the browser-reported message", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       html =
         render_hook(view, "wallet_connect:error", %{"message" => "Provider unreachable"})
@@ -827,7 +827,7 @@ defmodule BankWeb.ControlLiveTest do
       conn: conn,
       wallet_address: address
     } do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       _ =
         render_hook(view, "wallet_connect:connected", %{
@@ -854,7 +854,7 @@ defmodule BankWeb.ControlLiveTest do
 
   describe "session permission install panel" do
     test "is hidden until the wallet is bound", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/legacy/control")
 
       refute html =~ ~s(id="session-permission-card")
       refute html =~ ~s(id="install-session-permission-btn")
@@ -864,7 +864,7 @@ defmodule BankWeb.ControlLiveTest do
       conn: conn,
       wallet_address: address
     } do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       bind_wallet!(view, address)
 
@@ -887,7 +887,7 @@ defmodule BankWeb.ControlLiveTest do
       conn: conn,
       wallet_address: address
     } do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       bind_wallet!(view, address)
 
@@ -909,7 +909,7 @@ defmodule BankWeb.ControlLiveTest do
       conn: conn,
       wallet_address: address
     } do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       bind_wallet!(view, address)
 
@@ -947,7 +947,7 @@ defmodule BankWeb.ControlLiveTest do
       conn: conn,
       wallet_address: address
     } do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       bind_wallet!(view, address)
       {:ok, :paused} = Security.pause(:global)
@@ -969,7 +969,7 @@ defmodule BankWeb.ControlLiveTest do
   describe "session permission install in flight" do
     test "renders #session-permission-installing when a pending delegation exists for the bound wallet",
          %{conn: conn, wallet_address: address} do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       bind_wallet!(view, address)
 
@@ -1003,7 +1003,7 @@ defmodule BankWeb.ControlLiveTest do
   describe "connection page copy guard" do
     test "initial render does not imply mainnet, multi-account, unlimited, or arbitrary-calldata support",
          %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/legacy/control")
 
       # The banned phrasings are anything that would *imply* the agent
       # can do these things. The wrong-chain warning explicitly calls
@@ -1022,7 +1022,7 @@ defmodule BankWeb.ControlLiveTest do
 
     test "bound state lists the denied scope items as explicit denials, not implications",
          %{conn: conn, wallet_address: address} do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
 
       bind_wallet!(view, address)
 
@@ -1051,7 +1051,7 @@ defmodule BankWeb.ControlLiveTest do
 
   describe "session permission browser install card — wallet not bound" do
     test "card is not rendered when the wallet is not bound", %{conn: conn} do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, _view, html} = live(conn, "/legacy/control")
 
       refute html =~ ~s(id="session-permission-install-card"),
              "browser install card must not render before wallet is bound"
@@ -1064,7 +1064,7 @@ defmodule BankWeb.ControlLiveTest do
   describe "session permission browser install card — idle state" do
     test "renders the install card with safety copy + idle button after bind",
          %{conn: conn, wallet_address: address} do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
       _ = bind_wallet!(view, address)
 
       html = render(view)
@@ -1091,7 +1091,7 @@ defmodule BankWeb.ControlLiveTest do
   describe "session permission browser install card — state transitions" do
     test "requested → awaiting_signature renders the awaiting state",
          %{conn: conn, wallet_address: address} do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
       _ = bind_wallet!(view, address)
 
       html =
@@ -1105,7 +1105,7 @@ defmodule BankWeb.ControlLiveTest do
 
     test "signed → signing renders the signing state",
          %{conn: conn, wallet_address: address} do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
       _ = bind_wallet!(view, address)
       _ = render_hook(view, "session_permission_install:requested", %{"chain_id" => 84_532})
 
@@ -1118,7 +1118,7 @@ defmodule BankWeb.ControlLiveTest do
 
     test "submitted renders the submitted state",
          %{conn: conn, wallet_address: address} do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
       _ = bind_wallet!(view, address)
       _ = render_hook(view, "session_permission_install:requested", %{"chain_id" => 84_532})
       _ = render_hook(view, "session_permission_install:signed", %{"signature" => "0xdeadbeef"})
@@ -1131,7 +1131,7 @@ defmodule BankWeb.ControlLiveTest do
 
     test "confirmed renders the success state",
          %{conn: conn, wallet_address: address} do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
       _ = bind_wallet!(view, address)
 
       html = render_hook(view, "session_permission_install:confirmed", %{})
@@ -1144,7 +1144,7 @@ defmodule BankWeb.ControlLiveTest do
   describe "session permission browser install card — failure copy" do
     test "user_rejected failure surfaces the documented copy + retry button",
          %{conn: conn, wallet_address: address} do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
       _ = bind_wallet!(view, address)
 
       html =
@@ -1160,7 +1160,7 @@ defmodule BankWeb.ControlLiveTest do
 
     test "wrong_chain failure surfaces the Base Sepolia copy",
          %{conn: conn, wallet_address: address} do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
       _ = bind_wallet!(view, address)
 
       html =
@@ -1174,7 +1174,7 @@ defmodule BankWeb.ControlLiveTest do
 
     test "insufficient_gas failure surfaces the documented copy",
          %{conn: conn, wallet_address: address} do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
       _ = bind_wallet!(view, address)
 
       html =
@@ -1187,7 +1187,7 @@ defmodule BankWeb.ControlLiveTest do
 
     test "bundler_rejected failure surfaces the documented copy",
          %{conn: conn, wallet_address: address} do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
       _ = bind_wallet!(view, address)
 
       html =
@@ -1200,7 +1200,7 @@ defmodule BankWeb.ControlLiveTest do
 
     test "network_error failure surfaces the documented copy",
          %{conn: conn, wallet_address: address} do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
       _ = bind_wallet!(view, address)
 
       html =
@@ -1211,7 +1211,7 @@ defmodule BankWeb.ControlLiveTest do
 
     test "unknown reason falls through to the generic copy",
          %{conn: conn, wallet_address: address} do
-      {:ok, view, _html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/legacy/control")
       _ = bind_wallet!(view, address)
 
       html =

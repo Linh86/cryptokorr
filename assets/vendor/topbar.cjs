@@ -3,6 +3,7 @@
  * topbar 3.0.0
  * http://buunguyen.github.io/topbar
  * Copyright (c) 2024 Buu Nguyen
+ * Bundled as CommonJS so esbuild can import it from the ESM app bundle.
  */
 (function (window, document) {
   "use strict";

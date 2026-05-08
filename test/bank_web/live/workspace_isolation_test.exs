@@ -149,7 +149,7 @@ defmodule BankWeb.WorkspaceIsolationTest do
     end
   end
 
-  describe "/" do
+  describe "/legacy/control" do
     test "operator only sees their workspace's delegations on the connection page",
          %{conn: conn} do
       {user_a, ws_a} = build_user_in("iso-c-a-#{System.unique_integer([:positive])}")
@@ -158,7 +158,7 @@ defmodule BankWeb.WorkspaceIsolationTest do
       del_a = delegation(workspace_id: ws_a.id, smart_account_id: "sa-iso-a")
       del_b = delegation(workspace_id: ws_b.id, smart_account_id: "sa-iso-b")
 
-      {:ok, _view, html} = conn |> signed_in(user_a) |> live("/")
+      {:ok, _view, html} = conn |> signed_in(user_a) |> live("/legacy/control")
 
       assert html =~ del_a.smart_account_id
       refute html =~ del_b.smart_account_id

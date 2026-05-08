@@ -2,6 +2,7 @@
  *  @license MIT
  *  daisyUI bundle
  *  https://daisyui.com/
+ *  Bundled as CommonJS so Tailwind can load it from the ESM assets package.
  */
 
 var __defProp = Object.defineProperty;
@@ -1029,3 +1030,10 @@ var daisyui_default = plugin.withOptions((options) => {
   SOFTWARE.
 
 */
+
+// Tailwind v4 expects a plugin function or { handler } object, but the
+// ESM-style bundle above exposes the plugin under `.default`. Unwrapping
+// at the top of the file fails because `daisyui_default` is hoisted but
+// only assigned around line 970, so we unwrap here at the bottom — by
+// this point all module-scope vars are initialised.
+module.exports = module.exports.default;
