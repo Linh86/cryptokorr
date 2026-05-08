@@ -111,3 +111,11 @@ config :bank, Bank.Telegram.Config,
   bot_token: nil,
   webhook_secret: nil,
   operators: []
+
+# Base Sepolia public RPC endpoint for the redesigned wallet card's
+# USDC balance reader. The Coinbase-operated `sepolia.base.org`
+# requires no auth and is fine for local testing; production should
+# override via env. Bank.Chains.KernelVerifier reads the same env in
+# `config/runtime.exs` for the on-chain install verifier.
+config :bank, Bank.Chains.BalanceReader,
+  rpc_url: System.get_env("BASE_SEPOLIA_RPC_URL") || "https://sepolia.base.org/"

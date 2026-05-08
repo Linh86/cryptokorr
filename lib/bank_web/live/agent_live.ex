@@ -111,12 +111,10 @@ defmodule BankWeb.AgentLive do
       # don't stomp each other.
       |> assign_new(:wallet, fn -> :disconnected end)
       |> assign_new(:address, fn -> nil end)
-      # Real USDC balance lookup is deferred — neither Bank.AdapterClient
-      # nor the TS chain_adapter exposes a balanceOf endpoint today.
-      # Tracked: build `Bank.ChainReader.get_erc20_balance/3` (Base
-      # Sepolia, USDC contract 0x036C...DCF7e) or add a chain_adapter
-      # `GET /balance/{chain}/{address}/{token}` route. Until then
-      # `format_usdc(nil)` renders "— USDC" gracefully.
+      # USDC balance is loaded after the binding lands via
+      # `refresh_balance/2` (called from `apply_binding/2` and
+      # `load_wallet_binding/1`). When no binding exists yet, `nil`
+      # → `format_usdc/1` renders "— USDC".
       |> assign_new(:balance_usdc, fn -> nil end)
       |> assign_new(:mode, fn -> "hold" end)
       |> assign_new(:settings, fn ->
@@ -903,6 +901,7 @@ defmodule BankWeb.AgentLive do
     |> assign(:wallet, derive_wallet_state(binding))
     |> assign(:address, short_address(binding.address))
     |> assign(:wallet_binding, binding)
+    |> refresh_balance(binding)
   end
 
   defp reset_wallet(socket) do
@@ -910,7 +909,22 @@ defmodule BankWeb.AgentLive do
     |> assign(:wallet, :disconnected)
     |> assign(:address, nil)
     |> assign(:wallet_binding, nil)
+    |> assign(:balance_usdc, nil)
   end
+
+  # Read live USDC balance from Base Sepolia for the bound EOA. Best
+  # effort: any RPC failure (timeout, misconfig, malformed response)
+  # falls back to `nil`, which `format_usdc/1` renders as "— USDC".
+  # We never surface RPC noise to the user — the wallet card simply
+  # shows "—" until the next refresh succeeds.
+  defp refresh_balance(socket, %WalletBinding{address: address}) when is_binary(address) do
+    case Bank.Chains.BalanceReader.get_erc20_balance("base-sepolia", address, :usdc) do
+      {:ok, %Decimal{} = balance} -> assign(socket, :balance_usdc, balance)
+      {:error, _} -> assign(socket, :balance_usdc, nil)
+    end
+  end
+
+  defp refresh_balance(socket, _), do: assign(socket, :balance_usdc, nil)
 
   # When the wallet disconnects (either auto via the hook's
   # `wallet_connect:disconnected` event or operator-initiated via
