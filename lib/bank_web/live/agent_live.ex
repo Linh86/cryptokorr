@@ -80,6 +80,16 @@ defmodule BankWeb.AgentLive do
   @install_poll_max_ms 32_000
   @install_poll_base_ms 2_000
 
+  # ── Intent run timeout ──────────────────────────────────────────────
+  #
+  # If neither `:decision_updated` nor `:execution_updated` lands within
+  # 30s of `intent:run` we flip the IntentResult into a non-terminal
+  # `:slow` variant so the operator stops staring at the spinner. The
+  # `:slow` state isn't a terminal — a real PubSub event arriving later
+  # still overwrites `:intent` + `:last_result` via the existing
+  # `handle_decision_updated` / `handle_execution_updated` helpers.
+  @intent_timeout_ms 30_000
+
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
@@ -419,8 +429,19 @@ defmodule BankWeb.AgentLive do
 
   # ── Intent ───────────────────────────────────────────────────────────
 
+  # Defense-in-depth preconditions guard. The Run button is disabled
+  # in render whenever `permission != :active`, but a stale browser
+  # tab / scripted click / keyboard shortcut can still fire this
+  # event. Re-check every gate before submitting so an out-of-sync
+  # UI cannot bypass the role model, the active wallet binding, the
+  # active delegation, or the binding↔delegation correspondence.
   def handle_event("intent:run", _, socket) do
-    if socket.assigns.permission == :active do
+    with :ok <- LiveAuth.authorize_action(socket, :operator),
+         %WalletBinding{} = binding <- socket.assigns[:wallet_binding],
+         %Delegation{state: :active, smart_account_id: sa_id} <-
+           socket.assigns[:delegation],
+         ^sa_id <- SessionPermissions.compute_smart_account_id(binding),
+         :base_sepolia <- intent_chain_check() do
       workspace_id = intent_workspace_id(socket)
       payload = intent_payload(socket.assigns.mode)
 
@@ -431,6 +452,11 @@ defmodule BankWeb.AgentLive do
           # process. The decision pipeline broadcasts on
           # `Bank.Runtime.PubSub.intent(intent.id)` for every transition.
           RuntimePubSub.subscribe(RuntimePubSub.intent(intent.id))
+          # Schedule the spinner-timeout watchdog. Cancellation is
+          # implicit: the watchdog re-checks `:active_intent_id` +
+          # `:intent` before flipping state, so if a real event has
+          # already arrived the timeout becomes a no-op.
+          Process.send_after(self(), {:intent_timeout, intent.id}, @intent_timeout_ms)
 
           {:noreply,
            socket
@@ -449,7 +475,10 @@ defmodule BankWeb.AgentLive do
            })}
       end
     else
-      {:noreply, socket}
+      # Any precondition failure — silently no-op so a stale UI click
+      # can't bypass the gates. Defense-in-depth on top of the role
+      # model and the rendered button state.
+      _ -> {:noreply, socket}
     end
   end
 
@@ -465,8 +494,18 @@ defmodule BankWeb.AgentLive do
           {:noreply, socket}
 
         {:ok, _envelope, {:held, reason}} ->
+          # Approval succeeded server-side, but dispatch is held —
+          # surface that as an amber IntentResult so the UI never
+          # implies success. The intent is no longer "needs-approval"
+          # (the operator has approved) but it is also not executed.
           {:noreply,
-           put_flash(socket, :info, "Approved, but dispatch held: #{inspect(reason)}")}
+           socket
+           |> assign(:intent, :needs_approval)
+           |> assign(:last_result, %{
+             state: "held",
+             reason: "Approved · awaiting dispatch (#{reason})",
+             tx_hash: nil
+           })}
 
         {:error, reason} ->
           {:noreply, put_flash(socket, :error, "Approve failed: #{inspect(reason)}")}
@@ -521,8 +560,47 @@ defmodule BankWeb.AgentLive do
   # :permission via `recompute_permission/1`; this clause lets the
   # test_intent_card test fixture exercise intent submission without
   # owning the wallet/install dance.
+  #
+  # NOTE: this only flips the `:permission` assign. The hardened
+  # `intent:run` preconditions check the `:wallet_binding` and
+  # `:delegation` assigns directly, so tests that exercise the
+  # `intent:run` path must seed real DB rows and use
+  # `:_test_reload_state` (below) instead of `:permission_signed`.
   def handle_info(:permission_signed, socket) do
     {:noreply, assign(socket, :permission, :active)}
+  end
+
+  # Test-only shortcut: re-read the wallet binding + delegation from
+  # the DB and recompute the permission state. Tests seed the rows
+  # AFTER `live(conn, "/")` (mount has already run by then), so they
+  # need a way to make the LiveView pick the rows up without forcing
+  # a full re-mount. Mirrors what `wallet_connect:verify` and
+  # `session_permission_install:confirmed` would do on the real path.
+  def handle_info(:_test_reload_state, socket) do
+    {:noreply,
+     socket
+     |> load_wallet_binding()
+     |> refresh_delegation()
+     |> recompute_permission()}
+  end
+
+  # 30s spinner-timeout watchdog scheduled by `intent:run`. Only flip
+  # to `:slow` if we're still waiting on the same intent — a real
+  # decision/execution event that landed earlier would have advanced
+  # `:intent` past `:executing`, so the watchdog becomes a silent
+  # no-op. `:slow` is non-terminal: a late `:decision_updated` /
+  # `:execution_updated` event will overwrite it via the existing
+  # handlers.
+  def handle_info({:intent_timeout, intent_id}, socket) do
+    if socket.assigns[:active_intent_id] == intent_id and
+         socket.assigns[:intent] == :executing do
+      {:noreply,
+       socket
+       |> assign(:intent, :slow)
+       |> assign(:last_result, %{state: "slow", reason: nil, tx_hash: nil})}
+    else
+      {:noreply, socket}
+    end
   end
 
   # Install-status poll. Re-reads the delegation row from the DB and
@@ -581,6 +659,11 @@ defmodule BankWeb.AgentLive do
   end
 
   # ── Intent helpers ────────────────────────────────────────────────────
+
+  # Today the agent only submits to base-sepolia (sandbox-only). The
+  # placeholder lets a future toggle flip the runtime onto mainnet
+  # without touching the call site (return `{:error, :mainnet}` then).
+  defp intent_chain_check, do: :base_sepolia
 
   # Always force `chain: "base-sepolia"` regardless of mode/settings.
   # Sandbox-only safety: this LiveView must never submit a mainnet

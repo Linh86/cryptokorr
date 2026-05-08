@@ -25,14 +25,18 @@ defmodule BankWeb.AgentLive.TestIntentCard do
   alias Bank.Workspaces.Membership
 
   attr :mode, :string, required: true
-  attr :intent, :atom, required: true, doc: ":idle | :executing | :executed | :blocked | :needs_approval | :failed"
+  attr :intent, :atom, required: true, doc: ":idle | :executing | :slow | :executed | :blocked | :needs_approval | :failed"
   attr :last_result, :map, default: nil
   attr :permission, :atom, required: true
   attr :user_role, :atom, default: :viewer
 
   def test_intent_card(assigns) do
     ex = intent_example(assigns.mode)
-    running? = assigns.intent == :executing
+    # `:slow` keeps the Run button disabled because there's still an
+    # in-flight intent — the decision/execution events just haven't
+    # arrived yet, and a fresh `intent:run` would race the late
+    # event handlers.
+    running? = assigns.intent in [:executing, :slow]
     locked? = assigns.permission != :active
     approve_allowed? = approve_allowed?(assigns.user_role)
     assigns = assign(assigns, ex: ex, running?: running?, locked?: locked?, approve_allowed?: approve_allowed?)
@@ -156,6 +160,33 @@ defmodule BankWeb.AgentLive.TestIntentCard do
       body:
         result[:reason] ||
           "The runtime returned an error. No funds moved. We logged the trace under Activity."
+    }
+  end
+
+  # Spinner-timeout variant: the LiveView's 30s watchdog fired without
+  # a decision/execution event arriving. Non-terminal — a real event
+  # arriving later overwrites this state.
+  defp result_cfg(%{state: "slow"}) do
+    %{
+      kind: "warn",
+      icon: "info",
+      title: "Still processing",
+      body: "The agent is still working on this intent. Check Activity for the final outcome — or come back in a moment."
+    }
+  end
+
+  # Approved-but-held variant: operator approval succeeded but
+  # `Bank.Decisions.approve/2` returned `{:held, reason}` (e.g.
+  # runtime paused, no executable account). Render amber so the UI
+  # never implies success.
+  defp result_cfg(%{state: "held"} = result) do
+    %{
+      kind: "warn",
+      icon: "info",
+      title: "Approved · dispatch held",
+      body:
+        result[:reason] ||
+          "Dispatch is held. Check the Advanced screen's policy queue or runtime status."
     }
   end
 end
