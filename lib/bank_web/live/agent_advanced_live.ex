@@ -149,7 +149,10 @@ defmodule BankWeb.AgentAdvancedLive do
               <span class="adv__sub">{s.sub}</span>
             </span>
             <span class="adv__chev">
-              <.cb_icon name={if(@open_id == s.id, do: "chevron-down", else: "chevron-right")} size={14} />
+              <.cb_icon
+                name={if(@open_id == s.id, do: "chevron-down", else: "chevron-right")}
+                size={14}
+              />
             </span>
           </button>
           <div :if={@open_id == s.id} class="adv__body">
@@ -171,14 +174,38 @@ defmodule BankWeb.AgentAdvancedLive do
     ~H"""
     <table class="adv-table">
       <thead>
-        <tr><th>Rule</th><th>Behaviour</th><th></th></tr>
+        <tr>
+          <th>Rule</th>
+          <th>Behaviour</th>
+          <th></th>
+        </tr>
       </thead>
       <tbody>
-        <tr><td>Hold mode</td><td class="ink-2">Allow no movement</td><td><span class="tag tag--mute">default</span></td></tr>
-        <tr><td>Swap mode</td><td class="ink-2">Allow 0x quotes ≤ 0.5% slippage, ≤ 100 USDC</td><td><span class="tag tag--mute">default</span></td></tr>
-        <tr><td>Earn mode</td><td class="ink-2">Allow Morpho deposits to allowlisted vaults</td><td><span class="tag tag--mute">default</span></td></tr>
-        <tr><td>Counterparty allowlist</td><td class="ink-2">Re7, Gauntlet, Moonwell</td><td><span class="tag tag--mute">default</span></td></tr>
-        <tr><td>Daily ceiling</td><td class="ink-2">500 USDC across all intents</td><td><span class="tag tag--mute">default</span></td></tr>
+        <tr>
+          <td>Hold mode</td>
+          <td class="ink-2">Allow no movement</td>
+          <td><span class="tag tag--mute">default</span></td>
+        </tr>
+        <tr>
+          <td>Swap mode</td>
+          <td class="ink-2">Allow 0x quotes ≤ 0.5% slippage, ≤ 100 USDC</td>
+          <td><span class="tag tag--mute">default</span></td>
+        </tr>
+        <tr>
+          <td>Earn mode</td>
+          <td class="ink-2">Allow Morpho deposits to allowlisted vaults</td>
+          <td><span class="tag tag--mute">default</span></td>
+        </tr>
+        <tr>
+          <td>Counterparty allowlist</td>
+          <td class="ink-2">Re7, Gauntlet, Moonwell</td>
+          <td><span class="tag tag--mute">default</span></td>
+        </tr>
+        <tr>
+          <td>Daily ceiling</td>
+          <td class="ink-2">500 USDC across all intents</td>
+          <td><span class="tag tag--mute">default</span></td>
+        </tr>
       </tbody>
     </table>
     """
@@ -188,14 +215,38 @@ defmodule BankWeb.AgentAdvancedLive do
     ~H"""
     <table class="adv-table">
       <thead>
-        <tr><th>Counterparty</th><th>Role</th><th>Status</th></tr>
+        <tr>
+          <th>Counterparty</th>
+          <th>Role</th>
+          <th>Status</th>
+        </tr>
       </thead>
       <tbody>
-        <tr><td class="mono">0x Aggregator</td><td class="ink-2">Routing</td><td><span class="tag tag--ok">allow</span></td></tr>
-        <tr><td class="mono">Morpho · Re7 USDC</td><td class="ink-2">Vault</td><td><span class="tag tag--ok">allow</span></td></tr>
-        <tr><td class="mono">Morpho · Gauntlet Prime</td><td class="ink-2">Vault</td><td><span class="tag tag--ok">allow</span></td></tr>
-        <tr><td class="mono">Morpho · Moonwell Flagship</td><td class="ink-2">Vault</td><td><span class="tag tag--ok">allow</span></td></tr>
-        <tr><td class="mono">Coinbase RPC</td><td class="ink-2">Read</td><td><span class="tag tag--ok">allow</span></td></tr>
+        <tr>
+          <td class="mono">0x Aggregator</td>
+          <td class="ink-2">Routing</td>
+          <td><span class="tag tag--ok">allow</span></td>
+        </tr>
+        <tr>
+          <td class="mono">Morpho · Re7 USDC</td>
+          <td class="ink-2">Vault</td>
+          <td><span class="tag tag--ok">allow</span></td>
+        </tr>
+        <tr>
+          <td class="mono">Morpho · Gauntlet Prime</td>
+          <td class="ink-2">Vault</td>
+          <td><span class="tag tag--ok">allow</span></td>
+        </tr>
+        <tr>
+          <td class="mono">Morpho · Moonwell Flagship</td>
+          <td class="ink-2">Vault</td>
+          <td><span class="tag tag--ok">allow</span></td>
+        </tr>
+        <tr>
+          <td class="mono">Coinbase RPC</td>
+          <td class="ink-2">Read</td>
+          <td><span class="tag tag--ok">allow</span></td>
+        </tr>
       </tbody>
     </table>
     """
@@ -205,7 +256,11 @@ defmodule BankWeb.AgentAdvancedLive do
     ~H"""
     <table class="adv-table">
       <thead>
-        <tr><th>Intent</th><th>State</th><th>Age</th></tr>
+        <tr>
+          <th>Intent</th>
+          <th>State</th>
+          <th>Age</th>
+        </tr>
       </thead>
       <tbody>
         <tr>
@@ -213,7 +268,9 @@ defmodule BankWeb.AgentAdvancedLive do
           <td><.status_pill kind="needs-approval" size="sm" /></td>
           <td class="mono">2 min</td>
         </tr>
-        <tr><td colspan="3" class="adv-empty">— Queue is otherwise clear —</td></tr>
+        <tr>
+          <td colspan="3" class="adv-empty">— Queue is otherwise clear —</td>
+        </tr>
       </tbody>
     </table>
     """
@@ -222,9 +279,13 @@ defmodule BankWeb.AgentAdvancedLive do
   defp section_body(%{id: "audit"} = assigns) do
     ~H"""
     <div class="audit">
-      <div class="audit__step"><span class="mono">01</span> intent received · swap 10 USDC → USDbC</div>
+      <div class="audit__step">
+        <span class="mono">01</span> intent received · swap 10 USDC → USDbC
+      </div>
       <div class="audit__step"><span class="mono">02</span> policy: scope check · pass</div>
-      <div class="audit__step"><span class="mono">03</span> simulation: 0x quote 0.4% slippage · pass</div>
+      <div class="audit__step">
+        <span class="mono">03</span> simulation: 0x quote 0.4% slippage · pass
+      </div>
       <div class="audit__step audit__step--ok">
         <span class="mono">04</span> bundler accepted · settled in 2.1s
       </div>

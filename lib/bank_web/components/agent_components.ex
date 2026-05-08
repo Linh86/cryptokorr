@@ -51,8 +51,7 @@ defmodule BankWeb.AgentComponents do
   end
 
   defp icon_path("brand"),
-    do:
-      ~s(<path d="M4 7.5 12 4l8 3.5v9L12 20l-8-3.5v-9Z"/><path d="M12 4v16M4 7.5l8 3.5 8-3.5"/>)
+    do: ~s(<path d="M4 7.5 12 4l8 3.5v9L12 20l-8-3.5v-9Z"/><path d="M12 4v16M4 7.5l8 3.5 8-3.5"/>)
 
   defp icon_path("wallet"),
     do:
@@ -80,8 +79,7 @@ defmodule BankWeb.AgentComponents do
   defp icon_path("chevron-down"), do: ~s(<path d="m6 9 6 6 6-6"/>)
 
   defp icon_path("lock"),
-    do:
-      ~s(<rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>)
+    do: ~s(<rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>)
 
   defp icon_path("stop"), do: ~s(<rect x="6" y="6" width="12" height="12" rx="1.5"/>)
 
@@ -99,8 +97,7 @@ defmodule BankWeb.AgentComponents do
       ~s(<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="14" cy="12" r="3"/><path d="M14 12h3M5 9v6"/>)
 
   defp icon_path("hold"),
-    do:
-      ~s(<circle cx="12" cy="12" r="9"/><path d="M9 9h2v6M14 9h.01M14 12v3"/>)
+    do: ~s(<circle cx="12" cy="12" r="9"/><path d="M9 9h2v6M14 9h.01M14 12v3"/>)
 
   defp icon_path("play"), do: ~s(<path d="M7 5v14l12-7Z"/>)
 
@@ -109,8 +106,7 @@ defmodule BankWeb.AgentComponents do
       ~s(<path d="M14 4h6v6M20 4l-9 9M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/>)
 
   defp icon_path("history"),
-    do:
-      ~s(<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 4v4h4M12 8v4l3 2"/>)
+    do: ~s(<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 4v4h4M12 8v4l3 2"/>)
 
   defp icon_path("queue"), do: ~s(<path d="M4 6h12M4 12h16M4 18h10"/>)
   defp icon_path("health"), do: ~s(<path d="M3 12h3l2-5 4 10 2-5h7"/>)
@@ -119,8 +115,7 @@ defmodule BankWeb.AgentComponents do
     do: ~s(<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m4 7 8 6 8-6"/>)
 
   defp icon_path("doc"),
-    do:
-      ~s(<path d="M6 3h8l4 4v14H6Z"/><path d="M14 3v4h4M9 13h6M9 17h6M9 9h2"/>)
+    do: ~s(<path d="M6 3h8l4 4v14H6Z"/><path d="M14 3v4h4M9 13h6M9 17h6M9 9h2"/>)
 
   defp icon_path("sun"),
     do:
@@ -130,8 +125,7 @@ defmodule BankWeb.AgentComponents do
     do: ~s(<path d="M20 14.5A8 8 0 1 1 9.5 4a7 7 0 0 0 10.5 10.5Z"/>)
 
   defp icon_path("desktop"),
-    do:
-      ~s(<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M9 20h6M12 16v4"/>)
+    do: ~s(<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M9 20h6M12 16v4"/>)
 
   defp icon_path(_), do: ""
 

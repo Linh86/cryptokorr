@@ -89,8 +89,10 @@ defmodule BankWeb.AgentLive.WalletCardTest do
       assert html =~ "Base Sepolia · chain 84532"
       assert html =~ "USDC balance"
       # short-form rendered inline as `0x` + 4 + ellipsis + 4
-      short = "0x" <> String.slice(String.downcase(address), 2, 4) <>
-                "…" <> String.slice(String.downcase(address), -4, 4)
+      short =
+        "0x" <>
+          String.slice(String.downcase(address), 2, 4) <>
+          "…" <> String.slice(String.downcase(address), -4, 4)
 
       assert html =~ short
       # Connected kind renders with colour class `ok`.

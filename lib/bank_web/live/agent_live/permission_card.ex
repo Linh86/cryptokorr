@@ -19,6 +19,7 @@ defmodule BankWeb.AgentLive.PermissionCard do
   alias Bank.WalletBindings.WalletBinding
 
   attr :wallet, :atom, required: true
+
   attr :permission, :atom,
     required: true,
     doc: ":not_installed | :installing | :active | :revoked | :expired | :failed"
@@ -48,10 +49,22 @@ defmodule BankWeb.AgentLive.PermissionCard do
           <.banner :if={@permission == :failed and revoke_failed?(@delegation)} kind="danger">
             Last revoke attempt failed: {revoke_failure_reason(@delegation)}. The delegation is still live; retry from the Stop button above.
           </.banner>
-          <.banner :if={@permission == :failed and not revoke_failed?(@delegation) and @install_failure_reason != nil} kind="danger">
+          <.banner
+            :if={
+              @permission == :failed and not revoke_failed?(@delegation) and
+                @install_failure_reason != nil
+            }
+            kind="danger"
+          >
             Last install failed: {failure_reason_label(@install_failure_reason)}. No permission is in place.
           </.banner>
-          <.banner :if={@permission == :failed and not revoke_failed?(@delegation) and @install_failure_reason == nil} kind="danger">
+          <.banner
+            :if={
+              @permission == :failed and not revoke_failed?(@delegation) and
+                @install_failure_reason == nil
+            }
+            kind="danger"
+          >
             Last install failed. No permission is in place.
           </.banner>
           <.banner :if={@wrong_chain_id != nil} kind="warn">
@@ -83,7 +96,11 @@ defmodule BankWeb.AgentLive.PermissionCard do
               <span>Waiting for signature in your wallet…</span>
             </div>
           </div>
-          <div :if={@permission == :active and is_struct(@delegation, Delegation)} class="card__body--rows" style="margin-top: 6px;">
+          <div
+            :if={@permission == :active and is_struct(@delegation, Delegation)}
+            class="card__body--rows"
+            style="margin-top: 6px;"
+          >
             <.data_row label="Installed">{installed_at_label(@delegation)}</.data_row>
             <.data_row label="Smart account">
               <span class="mono">{short_smart_account(@delegation)}</span>
@@ -114,7 +131,10 @@ defmodule BankWeb.AgentLive.PermissionCard do
   end
 
   defp show_install?(_p, true), do: false
-  defp show_install?(p, _ambiguous?) when p in [:not_installed, :revoked, :expired, :failed], do: true
+
+  defp show_install?(p, _ambiguous?) when p in [:not_installed, :revoked, :expired, :failed],
+    do: true
+
   defp show_install?(_p, _), do: false
 
   defp pill_kind(:not_installed), do: "not-installed"

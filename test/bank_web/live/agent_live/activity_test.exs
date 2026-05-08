@@ -338,7 +338,10 @@ defmodule BankWeb.AgentLive.ActivityTest do
         event_type: "intent.state_changed",
         subject_type: "agent_intent",
         subject_id: "i-2",
-        after_ref: %{"state" => "executed", "tx_hash" => "0xdeadbeef0011223344556677889900aabbccddee"}
+        after_ref: %{
+          "state" => "executed",
+          "tx_hash" => "0xdeadbeef0011223344556677889900aabbccddee"
+        }
       }
 
       assert %{

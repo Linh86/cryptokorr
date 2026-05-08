@@ -25,7 +25,11 @@ defmodule BankWeb.AgentLive.TestIntentCard do
   alias Bank.Workspaces.Membership
 
   attr :mode, :string, required: true
-  attr :intent, :atom, required: true, doc: ":idle | :executing | :slow | :executed | :blocked | :needs_approval | :failed"
+
+  attr :intent, :atom,
+    required: true,
+    doc: ":idle | :executing | :slow | :executed | :blocked | :needs_approval | :failed"
+
   attr :last_result, :map, default: nil
   attr :permission, :atom, required: true
   attr :user_role, :atom, default: :viewer
@@ -39,7 +43,14 @@ defmodule BankWeb.AgentLive.TestIntentCard do
     running? = assigns.intent in [:executing, :slow]
     locked? = assigns.permission != :active
     approve_allowed? = approve_allowed?(assigns.user_role)
-    assigns = assign(assigns, ex: ex, running?: running?, locked?: locked?, approve_allowed?: approve_allowed?)
+
+    assigns =
+      assign(assigns,
+        ex: ex,
+        running?: running?,
+        locked?: locked?,
+        approve_allowed?: approve_allowed?
+      )
 
     ~H"""
     <.card>
@@ -171,7 +182,8 @@ defmodule BankWeb.AgentLive.TestIntentCard do
       kind: "warn",
       icon: "info",
       title: "Still processing",
-      body: "The agent is still working on this intent. Check Activity for the final outcome — or come back in a moment."
+      body:
+        "The agent is still working on this intent. Check Activity for the final outcome — or come back in a moment."
     }
   end
 

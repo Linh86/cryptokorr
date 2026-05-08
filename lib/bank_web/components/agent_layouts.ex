@@ -12,6 +12,7 @@ defmodule BankWeb.AgentLayouts do
   shell can be retired.
   """
   use Phoenix.Component
+
   use Phoenix.VerifiedRoutes,
     endpoint: BankWeb.Endpoint,
     router: BankWeb.Router,
@@ -102,7 +103,11 @@ defmodule BankWeb.AgentLayouts do
         <%!-- When the wallet is on the wrong chain, keep the warn
         affordance in the topbar — the WalletConnect hook listens
         for the message and prompts the wallet to switch. --%>
-        <span :if={@wallet == :wrong_network} class="btn btn--warn is-disabled" title="Switch your wallet to Base Sepolia">
+        <span
+          :if={@wallet == :wrong_network}
+          class="btn btn--warn is-disabled"
+          title="Switch your wallet to Base Sepolia"
+        >
           <.cb_icon name="warning" size={14} /> Wrong network
         </span>
         <div :if={@wallet == :connected} class="wallet-chip">
@@ -117,9 +122,7 @@ defmodule BankWeb.AgentLayouts do
           class={["btn btn--ghost-danger", not @can_stop? && "is-disabled"]}
           disabled={not @can_stop?}
           phx-click={JS.push("topbar:stop_agent")}
-          title={
-            if(@can_stop?, do: "Revoke agent permission", else: "No active agent to stop")
-          }
+          title={if(@can_stop?, do: "Revoke agent permission", else: "No active agent to stop")}
         >
           <.cb_icon name="stop" size={14} /> Stop agent
         </button>

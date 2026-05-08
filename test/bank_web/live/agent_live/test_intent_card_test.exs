@@ -297,7 +297,8 @@ defmodule BankWeb.AgentLive.TestIntentCardTest do
       assert successor.current == true
     end
 
-    test "Approve once landing on :held renders an amber 'Approved · dispatch held' result, not a success", %{conn: conn} do
+    test "Approve once landing on :held renders an amber 'Approved · dispatch held' result, not a success",
+         %{conn: conn} do
       {:ok, view, _} = live(conn, "/")
       activate_permission!(view)
 
@@ -549,8 +550,7 @@ defmodule BankWeb.AgentLive.TestIntentCardTest do
       workspace_id: workspace_id,
       binding_id: binding_id,
       root_validator_owner: "user",
-      install_userop_hash:
-        "0x" <> Base.encode16(:crypto.strong_rand_bytes(32), case: :lower)
+      install_userop_hash: "0x" <> Base.encode16(:crypto.strong_rand_bytes(32), case: :lower)
     }
 
     {:ok, delegation} =

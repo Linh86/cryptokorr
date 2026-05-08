@@ -301,7 +301,8 @@ defmodule BankWeb.AgentLive do
   # screen-readers may still fire it. Treat it as a hint to flip into
   # the awaiting state if the wallet looks ready.
   def handle_event("permission:install", _, socket) do
-    if socket.assigns.wallet == :connected and is_struct(socket.assigns.wallet_binding, WalletBinding) do
+    if socket.assigns.wallet == :connected and
+         is_struct(socket.assigns.wallet_binding, WalletBinding) do
       {:noreply,
        socket
        |> assign(:browser_install_state, :awaiting)
@@ -510,7 +511,12 @@ defmodule BankWeb.AgentLive do
   end
 
   def handle_info(
-        %{topic: :intent_lifecycle, event: :decision_updated, intent_id: intent_id, payload: payload},
+        %{
+          topic: :intent_lifecycle,
+          event: :decision_updated,
+          intent_id: intent_id,
+          payload: payload
+        },
         socket
       ) do
     if socket.assigns[:active_intent_id] == intent_id do
@@ -521,7 +527,12 @@ defmodule BankWeb.AgentLive do
   end
 
   def handle_info(
-        %{topic: :intent_lifecycle, event: :execution_updated, intent_id: intent_id, payload: payload},
+        %{
+          topic: :intent_lifecycle,
+          event: :execution_updated,
+          intent_id: intent_id,
+          payload: payload
+        },
         socket
       ) do
     if socket.assigns[:active_intent_id] == intent_id do
@@ -1188,7 +1199,11 @@ defmodule BankWeb.AgentLive do
   # `smart_account_id` so an unrelated revoke in the workspace doesn't
   # noisily refresh this view.
   defp handle_security_event(%{event: event, payload: payload} = _msg, socket)
-       when event in [:delegation_revoke_requested, :delegation_revoked, :delegation_state_changed] do
+       when event in [
+              :delegation_revoke_requested,
+              :delegation_revoked,
+              :delegation_state_changed
+            ] do
     sa_id = Map.get(payload, :smart_account_id) || Map.get(payload, "smart_account_id")
     current_sa = current_smart_account_id(socket.assigns.delegation)
 
@@ -1299,7 +1314,9 @@ defmodule BankWeb.AgentLive do
     <.card>
       <.card_header eyebrow="03 — Mode" title="Agent mode">
         <:right>
-          <span class="hint">{if @locked?, do: "Locked — install permission first", else: "Live"}</span>
+          <span class="hint">
+            {if @locked?, do: "Locked — install permission first", else: "Live"}
+          </span>
         </:right>
       </.card_header>
       <div class={["card__body", @locked? && "is-locked"]}>
@@ -1382,7 +1399,12 @@ defmodule BankWeb.AgentLive do
       </.field>
       <.field :if={"slippage" in @fields} label="Slippage limit" hint="Block swaps above this">
         <div class="num-input num-input--row">
-          <input type="text" name="settings[slippage]" value={@settings["slippage"]} class="mono tnum" />
+          <input
+            type="text"
+            name="settings[slippage]"
+            value={@settings["slippage"]}
+            class="mono tnum"
+          />
           <span class="num-input__suffix">%</span>
         </div>
       </.field>
@@ -1453,5 +1475,4 @@ defmodule BankWeb.AgentLive do
        do: true
 
   defp stop_blocked_by_delegation?(_), do: false
-
 end

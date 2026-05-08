@@ -214,9 +214,12 @@ defmodule Bank.Audit.ActivityView do
   defp outcome_field(%AuditEvent{after_ref: %{"outcome" => o}}) when is_binary(o), do: o
   defp outcome_field(_), do: nil
 
-  defp amount_field(%AuditEvent{after_ref: %{"amount" => a}}) when is_binary(a), do: format_amount(a)
+  defp amount_field(%AuditEvent{after_ref: %{"amount" => a}}) when is_binary(a),
+    do: format_amount(a)
+
   defp amount_field(%AuditEvent{after_ref: %{"amount" => a}}) when is_number(a),
     do: format_amount(to_string(a))
+
   defp amount_field(_), do: nil
 
   defp format_amount(amount) when is_binary(amount) do
