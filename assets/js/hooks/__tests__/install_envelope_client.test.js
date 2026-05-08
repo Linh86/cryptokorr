@@ -10,6 +10,7 @@ import {
   postSubmittedAttestation,
   postConfirmedAttestation,
   postFailureAttestation,
+  mapBeFailureCode,
 } from "../install_envelope_client.js"
 
 function jsonResponse(body, init = {}) {
@@ -82,11 +83,11 @@ describe("fetchInstallEnvelope", () => {
 })
 
 describe("postSubmittedAttestation", () => {
-  it("POSTs the canonical body with CSRF + same-origin credentials", async () => {
+  it("POSTs the canonical body with CSRF + same-origin credentials and returns parsed body on ok", async () => {
     const calls = []
     const fetchImpl = vi.fn(async (url, init) => {
       calls.push({url, init})
-      return jsonResponse(null, {status: 202})
+      return jsonResponse({state: "pending", delegation_id: "deleg-1"}, {status: 202})
     })
 
     const result = await postSubmittedAttestation(
@@ -100,7 +101,7 @@ describe("postSubmittedAttestation", () => {
       {fetch: fetchImpl},
     )
 
-    expect(result).toEqual({ok: true, status: 202})
+    expect(result).toEqual({state: "pending", delegation_id: "deleg-1"})
     expect(calls[0].url).toBe("/wallet_bindings/b1/install_attestation")
     expect(calls[0].init.method).toBe("POST")
     expect(calls[0].init.headers["x-csrf-token"]).toBe("csrf-token-fixture")
@@ -165,5 +166,232 @@ describe("postFailureAttestation", () => {
     })
     const result = await postFailureAttestation("b1", "user_rejected", {fetch: fetchImpl})
     expect(result.ok).toBe(false)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────
+// P2 hardening: STRICT failure handling on the submitted/confirmed
+// attestation POSTs. These two POSTs are the BE's "ack" for the
+// install state machine. If the BE returns non-2xx, the hook must
+// NOT push `:submitted` / `:confirmed` to the LiveView — otherwise
+// the UI advances past `:installing` while the DB has no anchored
+// row to back it.
+//
+// The strict contract:
+//   * `response.ok === true`  → resolve with the parsed JSON body
+//                                (or `{}` if the body isn't JSON).
+//   * `response.ok === false` → throw an Error with `status` (HTTP
+//                                status) and `code` (BE-supplied
+//                                error.code or generic
+//                                `attestation_rejected` fallback).
+//   * fetch() throws          → throw an Error with
+//                                `code: "network_error"`.
+// ─────────────────────────────────────────────────────────────────────
+
+describe("postSubmittedAttestation — strict failure handling", () => {
+  it("throws with BE-supplied error.code on 403", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({error: {code: "binding_revoked"}}, {status: 403}),
+    )
+    await expect(
+      postSubmittedAttestation(
+        "b1",
+        {
+          install_userop_hash: "0xhash",
+          permission_id: "0xperm",
+          validation_id: "0xvalid",
+        },
+        {fetch: fetchImpl},
+      ),
+    ).rejects.toMatchObject({status: 403, code: "binding_revoked"})
+  })
+
+  it("throws with BE-supplied error.code on 422", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({error: {code: "workspace_paused", message: "paused"}}, {status: 422}),
+    )
+    await expect(
+      postSubmittedAttestation(
+        "b1",
+        {
+          install_userop_hash: "0xhash",
+          permission_id: "0xperm",
+          validation_id: "0xvalid",
+        },
+        {fetch: fetchImpl},
+      ),
+    ).rejects.toMatchObject({status: 422, code: "workspace_paused"})
+  })
+
+  it("throws with code='attestation_rejected' fallback on 500 with empty body", async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response("", {status: 500, headers: {"content-type": "text/plain"}}),
+    )
+    await expect(
+      postSubmittedAttestation(
+        "b1",
+        {
+          install_userop_hash: "0xhash",
+          permission_id: "0xperm",
+          validation_id: "0xvalid",
+        },
+        {fetch: fetchImpl},
+      ),
+    ).rejects.toMatchObject({status: 500, code: "attestation_rejected"})
+  })
+
+  it("throws with code='attestation_rejected' on 4xx with malformed body", async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response("not-json-at-all", {
+          status: 422,
+          headers: {"content-type": "text/plain"},
+        }),
+    )
+    await expect(
+      postSubmittedAttestation(
+        "b1",
+        {
+          install_userop_hash: "0xhash",
+          permission_id: "0xperm",
+          validation_id: "0xvalid",
+        },
+        {fetch: fetchImpl},
+      ),
+    ).rejects.toMatchObject({status: 422, code: "attestation_rejected"})
+  })
+
+  it("throws with code='network_error' when fetch itself throws", async () => {
+    const fetchImpl = vi.fn(async () => {
+      throw new TypeError("Failed to fetch")
+    })
+    await expect(
+      postSubmittedAttestation(
+        "b1",
+        {
+          install_userop_hash: "0xhash",
+          permission_id: "0xperm",
+          validation_id: "0xvalid",
+        },
+        {fetch: fetchImpl},
+      ),
+    ).rejects.toMatchObject({code: "network_error", status: 0})
+  })
+
+  it("accepts a top-level `code` field as the fallback shape", async () => {
+    // Some auxiliary error responders use `{code: "..."}` directly
+    // rather than `{error: {code: "..."}}`. Both shapes are
+    // accepted by the strict mapper.
+    const fetchImpl = vi.fn(async () => jsonResponse({code: "runtime_paused"}, {status: 422}))
+    await expect(
+      postSubmittedAttestation(
+        "b1",
+        {
+          install_userop_hash: "0xhash",
+          permission_id: "0xperm",
+          validation_id: "0xvalid",
+        },
+        {fetch: fetchImpl},
+      ),
+    ).rejects.toMatchObject({status: 422, code: "runtime_paused"})
+  })
+})
+
+describe("postConfirmedAttestation — strict failure handling", () => {
+  it("throws with BE-supplied error.code on 403", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({error: {code: "binding_revoked"}}, {status: 403}),
+    )
+    await expect(
+      postConfirmedAttestation(
+        "b1",
+        {install_userop_hash: "0xhash", tx_hash: "0xtx", block_number: 1},
+        {fetch: fetchImpl},
+      ),
+    ).rejects.toMatchObject({status: 403, code: "binding_revoked"})
+  })
+
+  it("throws with code='attestation_rejected' on 422 with empty body", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse(undefined, {status: 422, headers: {"content-type": "text/plain"}}),
+    )
+    await expect(
+      postConfirmedAttestation(
+        "b1",
+        {install_userop_hash: "0xhash", tx_hash: "0xtx", block_number: 1},
+        {fetch: fetchImpl},
+      ),
+    ).rejects.toMatchObject({status: 422, code: "attestation_rejected"})
+  })
+
+  it("throws with code='attestation_rejected' on a 5xx with no body", async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response("", {status: 502, headers: {"content-type": "text/plain"}}),
+    )
+    await expect(
+      postConfirmedAttestation(
+        "b1",
+        {install_userop_hash: "0xhash", tx_hash: "0xtx", block_number: 1},
+        {fetch: fetchImpl},
+      ),
+    ).rejects.toMatchObject({status: 502, code: "attestation_rejected"})
+  })
+})
+
+describe("postSubmittedAttestation — strict success path", () => {
+  it("resolves with the parsed body on a 200 response", async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({state: "pending", delegation_id: "del-7"}, {status: 200}),
+    )
+    const result = await postSubmittedAttestation(
+      "b1",
+      {install_userop_hash: "0xhash", permission_id: "0xperm", validation_id: "0xvalid"},
+      {fetch: fetchImpl},
+    )
+    expect(result).toEqual({state: "pending", delegation_id: "del-7"})
+  })
+
+  it("resolves with `{}` on a 202 with empty body", async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response("", {status: 202, headers: {"content-type": "text/plain"}}),
+    )
+    const result = await postSubmittedAttestation(
+      "b1",
+      {install_userop_hash: "0xhash", permission_id: "0xperm", validation_id: "0xvalid"},
+      {fetch: fetchImpl},
+    )
+    expect(result).toEqual({})
+  })
+})
+
+describe("mapBeFailureCode — BE error code → JS failure-category atom", () => {
+  it.each([
+    // BE refusal codes → bundler_rejected
+    ["binding_revoked", "bundler_rejected"],
+    ["binding_not_verified", "bundler_rejected"],
+    ["workspace_paused", "bundler_rejected"],
+    ["runtime_paused", "bundler_rejected"],
+    ["invalid_attestation", "bundler_rejected"],
+    ["invalid_status", "bundler_rejected"],
+    ["duplicate_install", "bundler_rejected"],
+    ["attestation_rejected", "bundler_rejected"],
+    // Chain mismatch is its own category
+    ["unsupported_chain", "chain_id_mismatch"],
+    // Network-layer issues map to bundler_unavailable
+    ["network_error", "bundler_unavailable"],
+    // Auth-layer issues collapse to unknown — operator must
+    // re-auth, not retry; the failure-category vocabulary doesn't
+    // distinguish these and they're rare on a logged-in session
+    ["forbidden", "unknown"],
+    ["unauthenticated", "unknown"],
+    ["not_found", "unknown"],
+  ])("maps %s → %s", (code, expected) => {
+    expect(mapBeFailureCode(code)).toBe(expected)
+  })
+
+  it("returns null for an unrecognised code so the caller falls back", () => {
+    expect(mapBeFailureCode("totally-novel-code")).toBeNull()
+    expect(mapBeFailureCode(null)).toBeNull()
+    expect(mapBeFailureCode(undefined)).toBeNull()
   })
 })

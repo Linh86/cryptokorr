@@ -51,6 +51,33 @@ defmodule BankWeb.AgentLive do
   # leaking memory on long-lived sockets.
   @activity_cap 50
 
+  # ── Permission install polling ──────────────────────────────────────
+  #
+  # Defense-in-depth for the install confirmation path. After the JS
+  # hook reports `:confirmed`, the BE has scheduled
+  # `Bank.Runtime.Workers.VerifyInstallOnchain` which flips
+  # `delegation.state` from `:pending` to `:active`. That worker
+  # broadcasts on `audit:stream` + `security:events` and we already
+  # subscribe to both — so under normal conditions the LiveView
+  # picks up the flip via PubSub.
+  #
+  # Polling backstops three failure modes:
+  #
+  #   1. The PubSub broadcast is missed (process restart between
+  #      the worker write and the LiveView mount).
+  #   2. The worker takes longer than usual (chain reorg, slow
+  #      receipt) and the operator stares at "Installing…" wondering
+  #      whether the page is wedged.
+  #   3. The browser tab was backgrounded and the WebSocket
+  #      reconnected with a stale assigns snapshot.
+  #
+  # Exponential backoff (2s, 4s, 8s, 16s, 32s, 32s) capped at 32s
+  # per attempt; max 6 attempts ≈ 94s wall-clock. We stop early as
+  # soon as `permission == :active`.
+  @install_poll_attempts 6
+  @install_poll_max_ms 32_000
+  @install_poll_base_ms 2_000
+
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
@@ -294,13 +321,25 @@ defmodule BankWeb.AgentLive do
   end
 
   def handle_event("session_permission_install:confirmed", _params, socket) do
-    {:noreply,
-     socket
-     |> assign(:browser_install_state, :confirmed)
-     |> assign(:install_failure_reason, nil)
-     |> assign(:wrong_chain_id, nil)
-     |> refresh_delegation()
-     |> recompute_permission()}
+    socket =
+      socket
+      |> assign(:browser_install_state, :confirmed)
+      |> assign(:install_failure_reason, nil)
+      |> assign(:wrong_chain_id, nil)
+      |> refresh_delegation()
+      |> recompute_permission()
+
+    # If `recompute_permission/1` saw the worker already flipped the
+    # row to :active (rare, but possible if the worker raced ahead of
+    # the JS hook's `:confirmed` event) we don't need to poll. Otherwise
+    # schedule the first attempt; subsequent attempts self-schedule via
+    # `handle_info({:poll_install_status, _}, _)` until either
+    # `:active` lands in the DB or we exhaust the attempt budget.
+    if needs_install_polling?(socket) do
+      Process.send_after(self(), {:poll_install_status, 0}, @install_poll_base_ms)
+    end
+
+    {:noreply, socket}
   end
 
   def handle_event("session_permission_install:failed", params, socket) do
@@ -482,6 +521,37 @@ defmodule BankWeb.AgentLive do
   # owning the wallet/install dance.
   def handle_info(:permission_signed, socket) do
     {:noreply, assign(socket, :permission, :active)}
+  end
+
+  # Install-status poll. Re-reads the delegation row from the DB and
+  # recomputes `:permission`. Stops as soon as `:active` lands or
+  # the attempt budget is exhausted. Runs in addition to (not in
+  # place of) the security:events / audit:stream PubSub
+  # subscriptions — see the @install_poll_attempts comment for the
+  # three failure modes this backstops.
+  def handle_info({:poll_install_status, attempt}, socket) do
+    socket =
+      socket
+      |> refresh_delegation()
+      |> recompute_permission()
+
+    cond do
+      socket.assigns[:permission] == :active ->
+        # DB flipped to :active — UI is now caught up. Stop polling.
+        {:noreply, socket}
+
+      attempt >= @install_poll_attempts - 1 ->
+        # Out of attempts. Leave the UI in :installing; the operator
+        # can refresh manually or let security:events catch up if
+        # the worker eventually completes.
+        {:noreply, socket}
+
+      true ->
+        next = attempt + 1
+        delay = install_poll_delay_ms(next)
+        Process.send_after(self(), {:poll_install_status, next}, delay)
+        {:noreply, socket}
+    end
   end
 
   # ── audit:stream live tail (I4) ─────────────────────────────────────
@@ -962,6 +1032,28 @@ defmodule BankWeb.AgentLive do
 
     perm = permission_state(binding, delegation, install_state)
     assign(socket, :permission, perm)
+  end
+
+  # Polling is only meaningful when the JS hook has reported
+  # `:confirmed` (the BE has been told the userop landed) but the
+  # delegation row hasn't yet flipped to `:active`. The JS hook
+  # NEVER pushes `:confirmed` past `postConfirmedAttestation` — and
+  # that POST returns ok ONLY when `BrowserInstall.record_attestation/3`
+  # accepted the row write. So `:browser_install_state == :confirmed`
+  # already implies "the BE persisted the attestation"; what we're
+  # waiting for here is the on-chain verifier worker.
+  @doc false
+  def needs_install_polling?(socket) do
+    socket.assigns[:browser_install_state] == :confirmed and
+      socket.assigns[:permission] != :active
+  end
+
+  # Exponential backoff: 2s · 2^attempt, clamped to @install_poll_max_ms.
+  # Attempts: 0 → 2s, 1 → 4s, 2 → 8s, 3 → 16s, 4 → 32s, 5 → 32s.
+  @doc false
+  def install_poll_delay_ms(attempt) when is_integer(attempt) and attempt >= 0 do
+    raw = @install_poll_base_ms * round(:math.pow(2, attempt))
+    min(raw, @install_poll_max_ms)
   end
 
   # `:ambiguous` is a sentinel we stash in the assign instead of a

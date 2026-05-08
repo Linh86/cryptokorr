@@ -138,6 +138,194 @@ defmodule BankWeb.AgentLive.PermissionCardTest do
     end
   end
 
+  describe "DB-truth gating — UI never advances past :installing without a :active delegation row" do
+    setup %{workspace: workspace, current_user: user} do
+      binding = verified_binding(workspace.id, user.id)
+      %{binding: binding}
+    end
+
+    test ":confirmed event with a :pending delegation row keeps permission at :installing", %{
+      conn: conn,
+      workspace: workspace,
+      binding: binding
+    } do
+      sa_id = SessionPermissions.compute_smart_account_id(binding)
+      _pending = insert_delegation!(workspace.id, binding.id, sa_id, :pending)
+
+      {:ok, view, _html} = live(conn, "/")
+
+      render_hook(view, "session_permission_install:confirmed", %{
+        "install_userop_hash" => "0xabc",
+        "tx_hash" => "0xdef",
+        "block_number" => 42
+      })
+
+      html = render(view)
+      assert html =~ "Installing"
+      # The Active pill must NOT render — that's the lie we're guarding
+      # against. Match the data-row label with class="hint" to avoid
+      # collision with "Active" inside any narrative copy.
+      refute html =~ ~s(class="status status--active)
+    end
+
+    test ":confirmed → DB flips to :active → poll picks it up and renders Active", %{
+      conn: conn,
+      workspace: workspace,
+      binding: binding
+    } do
+      sa_id = SessionPermissions.compute_smart_account_id(binding)
+      pending = insert_delegation!(workspace.id, binding.id, sa_id, :pending)
+
+      {:ok, view, _html} = live(conn, "/")
+
+      render_hook(view, "session_permission_install:confirmed", %{
+        "install_userop_hash" => "0xabc",
+        "tx_hash" => "0xdef",
+        "block_number" => 42
+      })
+
+      # Still :installing — the row is :pending in the DB.
+      assert render(view) =~ "Installing"
+
+      # The on-chain verifier worker would normally flip this row;
+      # we simulate the flip by direct DB update, then send the next
+      # poll message and expect the LiveView to re-read and render
+      # the Active pill.
+      {:ok, _updated} =
+        pending
+        |> Ecto.Changeset.change(state: :active)
+        |> Repo.update()
+
+      send(view.pid, {:poll_install_status, 0})
+
+      html = render(view)
+      assert html =~ "Active"
+      assert html =~ "Revoke permission"
+    end
+
+    test ":confirmed schedules a poll only when permission != :active", %{
+      conn: conn,
+      workspace: workspace,
+      binding: binding
+    } do
+      # Pre-create an :active row so `recompute_permission/1` lands
+      # on :active immediately on the :confirmed event. The handler
+      # should detect that and NOT schedule a poll.
+      sa_id = SessionPermissions.compute_smart_account_id(binding)
+      _active = insert_delegation!(workspace.id, binding.id, sa_id, :active)
+
+      {:ok, view, _html} = live(conn, "/")
+
+      render_hook(view, "session_permission_install:confirmed", %{
+        "install_userop_hash" => "0xabc",
+        "tx_hash" => "0xdef",
+        "block_number" => 42
+      })
+
+      assert render(view) =~ "Active"
+
+      # No poll should be in the mailbox — the :active short-circuit
+      # in `handle_event` skipped the `Process.send_after/3` call.
+      refute_received {:poll_install_status, _}
+      {:messages, msgs} = :erlang.process_info(view.pid, :messages)
+
+      refute Enum.any?(msgs, fn
+               {:poll_install_status, _} -> true
+               _ -> false
+             end),
+             "expected no :poll_install_status messages in the LiveView mailbox after a :confirmed that lands on :active"
+    end
+
+    test ":poll_install_status with a non-:active delegation does not lift permission to :active",
+         %{
+           conn: conn,
+           workspace: workspace,
+           binding: binding
+         } do
+      # `:revoking` is non-terminal so it shows up in
+      # `Delegations.list_active/1`, but it's not `:active`. The
+      # poll handler must NOT misread a `:revoking` row as a
+      # successful install.
+      sa_id = SessionPermissions.compute_smart_account_id(binding)
+      _revoking = insert_delegation!(workspace.id, binding.id, sa_id, :revoking)
+
+      {:ok, view, _html} = live(conn, "/")
+
+      send(view.pid, {:poll_install_status, 0})
+
+      html = render(view)
+      # The Active pill must not render.
+      refute html =~ ~s(class="status status--active)
+      # And the active-delegation card body must not render either.
+      refute html =~ "ZeroDev / Kernel v3"
+    end
+
+    test ":poll_install_status at terminal attempt does not schedule another", %{
+      conn: conn,
+      workspace: workspace,
+      binding: binding
+    } do
+      sa_id = SessionPermissions.compute_smart_account_id(binding)
+      _pending = insert_delegation!(workspace.id, binding.id, sa_id, :pending)
+
+      {:ok, view, _html} = live(conn, "/")
+
+      # Fire the final attempt directly — the LiveView should NOT
+      # schedule attempt 6.
+      send(view.pid, {:poll_install_status, 5})
+      # Force a render to ensure the message has been processed.
+      _ = render(view)
+
+      # No follow-up poll message should be queued.
+      {:messages, msgs} = :erlang.process_info(view.pid, :messages)
+
+      refute Enum.any?(msgs, fn
+               {:poll_install_status, _} -> true
+               _ -> false
+             end),
+             "expected no further :poll_install_status messages after the terminal attempt; got: #{inspect(msgs)}"
+    end
+
+    test "install_poll_delay_ms/1 returns exponential backoff capped at @install_poll_max_ms" do
+      # 2_000 * 2^attempt, clamped at 32_000.
+      assert BankWeb.AgentLive.install_poll_delay_ms(0) == 2_000
+      assert BankWeb.AgentLive.install_poll_delay_ms(1) == 4_000
+      assert BankWeb.AgentLive.install_poll_delay_ms(2) == 8_000
+      assert BankWeb.AgentLive.install_poll_delay_ms(3) == 16_000
+      assert BankWeb.AgentLive.install_poll_delay_ms(4) == 32_000
+      assert BankWeb.AgentLive.install_poll_delay_ms(5) == 32_000
+      assert BankWeb.AgentLive.install_poll_delay_ms(8) == 32_000
+    end
+  end
+
+  describe "session_permission_install:failed — every BrowserInstall.failure_categories/0 atom" do
+    setup %{workspace: workspace, current_user: user} do
+      binding = verified_binding(workspace.id, user.id)
+      %{binding: binding}
+    end
+
+    test "every published failure category atom flips :permission to :failed and renders the banner",
+         %{conn: conn} do
+      reasons = Bank.SessionPermissions.BrowserInstall.failure_categories()
+
+      for reason <- reasons do
+        {:ok, view, _html} = live(conn, "/")
+
+        render_hook(view, "session_permission_install:failed", %{
+          "reason" => Atom.to_string(reason)
+        })
+
+        html = render(view)
+
+        assert html =~ "Failed",
+               "expected the Failed pill for reason #{inspect(reason)}; got: #{html}"
+
+        assert html =~ "No permission is in place",
+               "expected the failure banner for reason #{inspect(reason)}"
+      end
+    end
+  end
+
   describe "render with active delegation" do
     setup %{workspace: workspace, current_user: user} do
       {binding, delegation} = active_delegation_for_workspace(workspace.id, user.id)

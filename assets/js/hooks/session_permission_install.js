@@ -44,7 +44,7 @@
 //   * Failure reasons are restricted to the wire allowlist
 //     `Bank.SessionPermissions.BrowserInstall.failure_categories/0`.
 
-import {fetchInstallEnvelope, postSubmittedAttestation, postConfirmedAttestation, postFailureAttestation} from "./install_envelope_client.js"
+import {fetchInstallEnvelope, postSubmittedAttestation, postConfirmedAttestation, postFailureAttestation, mapBeFailureCode} from "./install_envelope_client.js"
 import {submitInstall, classifySendError} from "./install_zerodev_client.js"
 
 const SUPPORTED_CHAIN_IDS = [84_532]
@@ -166,12 +166,25 @@ export const SessionPermissionInstall = {
     // 8. POST submitted attestation BEFORE awaiting receipt — this
     //    guarantees Phoenix has an anchored `:pending` row before
     //    the receipt arrives (or the tab closes).
-    await postSubmittedAttestation(bindingId, {
-      install_userop_hash: result.install_userop_hash,
-      permission_id: result.permission_id,
-      validation_id: result.validation_id,
-      smart_account_address: result.smart_account_address,
-    })
+    //
+    //    STRICT GATE: if Phoenix rejects the attestation
+    //    (workspace paused, binding revoked, invalid payload, …)
+    //    the hook MUST NOT push `:submitted`. Otherwise the UI
+    //    would advance past `:installing` while the DB has no
+    //    `:pending` row to anchor it. We push `:failed` instead,
+    //    mapping the BE error code to a failure-category atom.
+    try {
+      await postSubmittedAttestation(bindingId, {
+        install_userop_hash: result.install_userop_hash,
+        permission_id: result.permission_id,
+        validation_id: result.validation_id,
+        smart_account_address: result.smart_account_address,
+      })
+    } catch (err) {
+      const reason = mapBeFailureCode(err && err.code) || "bundler_rejected"
+      this.pushEvent("session_permission_install:failed", {reason})
+      return
+    }
 
     this.pushEvent("session_permission_install:submitted", {
       install_userop_hash: result.install_userop_hash,
@@ -197,11 +210,24 @@ export const SessionPermissionInstall = {
     // 10. POST confirmed attestation. Phoenix only flips the row
     //     to :active after the on-chain verifier (#474) re-checks
     //     kernel state — this attestation is the trigger.
-    await postConfirmedAttestation(bindingId, {
-      install_userop_hash: result.install_userop_hash,
-      tx_hash: receipt.tx_hash,
-      block_number: receipt.block_number,
-    })
+    //
+    //     STRICT GATE: same posture as the `:submitted` POST. If
+    //     Phoenix refuses (e.g. binding revoked between submit
+    //     and confirm, or the userop hash doesn't match the row
+    //     it expected) we push `:failed` and bail, leaving the
+    //     LiveView in `:installing` rather than advancing past
+    //     it on a lie.
+    try {
+      await postConfirmedAttestation(bindingId, {
+        install_userop_hash: result.install_userop_hash,
+        tx_hash: receipt.tx_hash,
+        block_number: receipt.block_number,
+      })
+    } catch (err) {
+      const reason = mapBeFailureCode(err && err.code) || "bundler_rejected"
+      this.pushEvent("session_permission_install:failed", {reason})
+      return
+    }
 
     this.pushEvent("session_permission_install:confirmed", {
       install_userop_hash: result.install_userop_hash,

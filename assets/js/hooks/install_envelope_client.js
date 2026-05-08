@@ -80,6 +80,13 @@ export async function fetchInstallEnvelope(bindingId, opts = {}) {
  * POST a `submitted` attestation. Body matches Phoenix's
  * `Bank.SessionPermissions.BrowserInstall.record_attestation/3`
  * required keys for status `submitted`.
+ *
+ * STRICT: throws on any non-2xx response. The thrown error has a
+ * structured `code` mapped to the failure-category allowlist (or
+ * the BE-supplied `error.code` when present) and a `status`
+ * carrying the HTTP status. Callers MUST treat a thrown error as
+ * "the BE did NOT accept the attestation" and refuse to advance
+ * the UI past `:installing` on the back of it.
  */
 export async function postSubmittedAttestation(bindingId, payload, opts = {}) {
   const body = {
@@ -89,13 +96,16 @@ export async function postSubmittedAttestation(bindingId, payload, opts = {}) {
     validation_id: payload.validation_id,
   }
   if (payload.smart_account_address) body.smart_account_address = payload.smart_account_address
-  return postAttestation(bindingId, body, opts)
+  return postAttestationStrict(bindingId, body, opts)
 }
 
 /**
  * POST a `confirmed` attestation. Phoenix flips the row to
  * `:active` only after the on-chain verifier (#474) re-checks
  * kernel state.
+ *
+ * STRICT: throws on any non-2xx response (see
+ * `postSubmittedAttestation`).
  */
 export async function postConfirmedAttestation(bindingId, payload, opts = {}) {
   const body = {
@@ -104,7 +114,7 @@ export async function postConfirmedAttestation(bindingId, payload, opts = {}) {
     tx_hash: payload.tx_hash,
     block_number: payload.block_number,
   }
-  return postAttestation(bindingId, body, opts)
+  return postAttestationStrict(bindingId, body, opts)
 }
 
 /**
@@ -112,15 +122,74 @@ export async function postConfirmedAttestation(bindingId, payload, opts = {}) {
  * `Bank.SessionPermissions.BrowserInstall.failure_categories/0`.
  * Pass the failure category atom as a string (e.g.
  * `"user_rejected"`).
+ *
+ * LENIENT: never throws. The hook is already on a failure path
+ * when this fires; we don't want a Phoenix outage to mask the
+ * original failure reason in the UI. Returns `{ok, status}` so
+ * callers can log if they want, but no caller is required to.
  */
 export async function postFailureAttestation(bindingId, reason, opts = {}) {
   const status = mapReasonToStatus(reason)
   const body = {status, reason}
   if (opts.install_userop_hash) body.install_userop_hash = opts.install_userop_hash
-  return postAttestation(bindingId, body, {...opts, install_userop_hash: undefined})
+  return postAttestationLenient(bindingId, body, {...opts, install_userop_hash: undefined})
 }
 
-async function postAttestation(bindingId, body, opts) {
+/**
+ * STRICT POST helper. On `response.ok === false`, throws an Error
+ * with `status` (HTTP status) and `code` (BE-supplied error code
+ * if the body parses as `{error: {code: ...}}` or `{code: ...}`,
+ * otherwise `"attestation_rejected"`). On a network failure
+ * (fetch throws), throws an Error with `code: "network_error"`.
+ */
+async function postAttestationStrict(bindingId, body, opts = {}) {
+  const fetchImpl = opts.fetch || globalThis.fetch
+  const url = buildUrl(ENVELOPE_PATH_PREFIX, bindingId, ATTESTATION_PATH_SUFFIX)
+
+  let response
+  try {
+    response = await fetchImpl(url, {
+      method: "POST",
+      headers: buildHeaders("POST"),
+      credentials: "same-origin",
+      body: JSON.stringify(body),
+    })
+  } catch (err) {
+    const wrapped = new Error("attestation_network_error")
+    wrapped.cause = err
+    wrapped.code = "network_error"
+    wrapped.status = 0
+    throw wrapped
+  }
+
+  if (!response.ok) {
+    let code = "attestation_rejected"
+    try {
+      const parsed = await response.json()
+      const beCode = (parsed && parsed.error && parsed.error.code) || (parsed && parsed.code)
+      if (typeof beCode === "string" && beCode.length > 0) code = beCode
+    } catch {
+      // Body wasn't JSON; fall through with the generic code.
+    }
+    const err = new Error("attestation POST failed: " + response.status)
+    err.status = response.status
+    err.code = code
+    throw err
+  }
+
+  try {
+    return await response.json()
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * LENIENT POST helper used for failure attestations. Never throws
+ * — returns `{ok, status}` so the hook can keep walking the
+ * failure path even if Phoenix is briefly unreachable.
+ */
+async function postAttestationLenient(bindingId, body, opts) {
   const fetchImpl = opts.fetch || globalThis.fetch
   const url = buildUrl(ENVELOPE_PATH_PREFIX, bindingId, ATTESTATION_PATH_SUFFIX)
   try {
@@ -132,10 +201,40 @@ async function postAttestation(bindingId, body, opts) {
     })
     return {ok: response.ok, status: response.status}
   } catch (err) {
-    // Attestation post failures must not crash the hook — surface
-    // them so the caller can still update the local UI even if
-    // Phoenix is briefly unreachable.
     return {ok: false, status: 0, error: err && err.message ? err.message : String(err)}
+  }
+}
+
+/**
+ * Map a BE-supplied error code (or generic fallback) to a JS
+ * failure-category string compatible with
+ * `Bank.SessionPermissions.BrowserInstall.failure_categories/0`.
+ * Used by the hook when a strict attestation POST throws — the
+ * hook needs an atom-shaped reason to push to the LiveView even
+ * though the BE refusal vocabulary is wider than the
+ * failure-category allowlist.
+ */
+export function mapBeFailureCode(code) {
+  switch (code) {
+    case "binding_revoked":
+    case "binding_not_verified":
+    case "workspace_paused":
+    case "runtime_paused":
+    case "invalid_attestation":
+    case "invalid_status":
+    case "duplicate_install":
+    case "attestation_rejected":
+      return "bundler_rejected"
+    case "unsupported_chain":
+      return "chain_id_mismatch"
+    case "network_error":
+      return "bundler_unavailable"
+    case "forbidden":
+    case "unauthenticated":
+    case "not_found":
+      return "unknown"
+    default:
+      return null
   }
 }
 
