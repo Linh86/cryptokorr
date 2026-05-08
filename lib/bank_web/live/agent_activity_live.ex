@@ -2,55 +2,46 @@ defmodule BankWeb.AgentActivityLive do
   @moduledoc """
   Activity screen — full audit log with filter chips.
 
-  Mirrors `ActivityScreen` from `reference/screens.jsx`. Phase 1 reuses
-  the same dummy seed list AgentLive shows; phase 2 will subscribe to
-  the real activity PubSub topic and read from the audit context.
+  Reads the workspace's audit slice via `Bank.Audit.list_events/2`
+  (newest first, capped at 50 entries) and subscribes to
+  `Bank.Runtime.PubSub.audit_stream/0` to keep the timeline live.
+  Rows are transformed through `Bank.Audit.ActivityView` so the
+  agent strip and this screen render identically.
+
+  Filter chips operate on the cached raw events so toggling between
+  "All", "Executed", "Blocked & failed", and "Permission & wallet"
+  doesn't re-hit the database.
   """
   use BankWeb, :live_view
 
   import BankWeb.AgentComponents
+  alias Bank.Audit
+  alias Bank.Audit.{ActivityView, AuditEvent}
+  alias Bank.Repo
   alias BankWeb.AgentLayouts
 
-  @seed_activity [
-    %{
-      id: "a3",
-      t: "2 min ago",
-      kind: "permission",
-      status: "pending",
-      title: "Permission ready to install",
-      reason: "Waiting for your signature.",
-      amount: nil
-    },
-    %{
-      id: "a2",
-      t: "14 min ago",
-      kind: "wallet",
-      status: "note",
-      title: "Wallet connected",
-      reason: "Base Sepolia · 0x7a2f…d31c",
-      amount: nil
-    },
-    %{
-      id: "a1",
-      t: "Yesterday",
-      kind: "wallet",
-      status: "note",
-      title: "Faucet drip received",
-      reason: "Test funds added to your smart account.",
-      amount: "+ 25 USDC"
-    }
-  ]
+  # Same cap as `BankWeb.AgentLive` — 50 entries is plenty for the
+  # full screen (the Audit reader handles deeper history; the chips
+  # filter in-memory).
+  @activity_cap 50
 
   @impl true
   def mount(_params, _session, socket) do
+    if connected?(socket) do
+      Bank.Runtime.PubSub.subscribe(Bank.Runtime.PubSub.audit_stream())
+    end
+
+    raw_events = load_events(socket)
+
     {:ok,
      socket
      |> assign(:page_title, "Activity")
      |> assign(:filter, "all")
-     |> assign(:activity, @seed_activity)
+     |> assign(:raw_events, raw_events)
+     |> assign(:activity, ActivityView.render(raw_events))
      # Topbar state lives on the redesigned shell; carry placeholders
-     # so the nav rail and topbar render correctly until phase 2 wires
-     # global state via PubSub.
+     # so the nav rail and topbar render correctly until phase 3
+     # introduces a global wallet/permission session.
      |> assign(:wallet, :disconnected)
      |> assign(:permission, :not_installed)
      |> assign(:address, nil)}
@@ -59,17 +50,45 @@ defmodule BankWeb.AgentActivityLive do
   @impl true
   def handle_event("filter:set", %{"id" => id}, socket)
       when id in ~w(all executed blocked permission) do
-    {:noreply, assign(socket, :filter, id)}
+    filtered = filter_events(socket.assigns.raw_events, id)
+
+    {:noreply,
+     socket
+     |> assign(:filter, id)
+     |> assign(:activity, ActivityView.render(filtered))}
   end
 
   def handle_event("topbar:" <> _, _, socket), do: {:noreply, socket}
   def handle_event("confirm_stop:" <> _, _, socket), do: {:noreply, socket}
 
   @impl true
-  def render(assigns) do
-    filtered = filter(assigns.activity, assigns.filter)
-    assigns = assign(assigns, :filtered, filtered)
+  def handle_info(%{topic: :audit_stream, event: :appended, payload: %{id: event_id}}, socket) do
+    workspace_id = workspace_id(socket)
 
+    case Repo.get(AuditEvent, event_id) do
+      %AuditEvent{workspace_id: ^workspace_id} = event ->
+        if visible_event?(event) do
+          raw_events =
+            [event | socket.assigns.raw_events]
+            |> Enum.take(@activity_cap)
+
+          filtered = filter_events(raw_events, socket.assigns.filter)
+
+          {:noreply,
+           socket
+           |> assign(:raw_events, raw_events)
+           |> assign(:activity, ActivityView.render(filtered))}
+        else
+          {:noreply, socket}
+        end
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  @impl true
+  def render(assigns) do
     ~H"""
     <AgentLayouts.app
       flash={@flash}
@@ -104,8 +123,8 @@ defmodule BankWeb.AgentActivityLive do
 
       <.card>
         <ol class="timeline timeline--full">
-          <li :if={@filtered == []} class="timeline__empty">Nothing here yet.</li>
-          <.activity_row :for={item <- @filtered} item={item} />
+          <li :if={@activity == []} class="timeline__empty">Nothing here yet.</li>
+          <.activity_row :for={item <- @activity} item={item} />
         </ol>
       </.card>
     </AgentLayouts.app>
@@ -121,14 +140,76 @@ defmodule BankWeb.AgentActivityLive do
     ]
   end
 
-  defp filter(activity, "all"), do: activity
+  # --- private helpers --------------------------------------------------
 
-  defp filter(activity, "executed"),
-    do: Enum.filter(activity, &(&1.status == "executed"))
+  defp load_events(socket) do
+    case workspace_id(socket) do
+      nil ->
+        []
 
-  defp filter(activity, "blocked"),
-    do: Enum.filter(activity, &(&1.status in ~w(blocked failed)))
+      ws_id ->
+        %{events: events} =
+          Audit.list_events(%{workspace_id: ws_id}, limit: @activity_cap, order: :desc)
 
-  defp filter(activity, "permission"),
-    do: Enum.filter(activity, &(&1.kind in ~w(permission wallet)))
+        Enum.filter(events, &visible_event?/1)
+    end
+  end
+
+  defp workspace_id(socket) do
+    case socket.assigns[:current_scope] do
+      %{workspace: %{id: id}} -> id
+      _ -> nil
+    end
+  end
+
+  defp visible_event?(%AuditEvent{event_type: "auth." <> _}), do: false
+  defp visible_event?(%AuditEvent{event_type: "api_key." <> _}), do: false
+  defp visible_event?(%AuditEvent{}), do: true
+
+  # --- chip filtering ---------------------------------------------------
+
+  defp filter_events(events, "all"), do: events
+
+  defp filter_events(events, "executed"), do: Enum.filter(events, &executed_event?/1)
+
+  defp filter_events(events, "blocked"), do: Enum.filter(events, &blocked_event?/1)
+
+  defp filter_events(events, "permission"),
+    do: Enum.filter(events, &(&1.subject_type in ["wallet_binding", "delegation"]))
+
+  defp executed_event?(%AuditEvent{event_type: type})
+       when type in [
+              "execution.confirmed",
+              "execution.dispatched",
+              "delegation.install_confirmed_onchain",
+              "wallet_binding.confirmed",
+              "wallet_binding.verified",
+              "approval.granted"
+            ],
+       do: true
+
+  defp executed_event?(%AuditEvent{
+         event_type: "intent.state_changed",
+         after_ref: %{"state" => "executed"}
+       }),
+       do: true
+
+  defp executed_event?(_), do: false
+
+  defp blocked_event?(%AuditEvent{event_type: type})
+       when type in [
+              "execution.reverted",
+              "execution.aborted",
+              "wallet_binding.failed",
+              "delegation.install_failed"
+            ],
+       do: true
+
+  defp blocked_event?(%AuditEvent{
+         event_type: "intent.state_changed",
+         after_ref: %{"state" => "blocked"}
+       }),
+       do: true
+
+  defp blocked_event?(_), do: false
 end

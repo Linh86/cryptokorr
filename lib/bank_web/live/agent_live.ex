@@ -32,64 +32,44 @@ defmodule BankWeb.AgentLive do
   import BankWeb.AgentLive.PermissionCard
   import BankWeb.AgentLive.TestIntentCard
   import BankWeb.AgentLive.ActivityStrip
+  alias Bank.Audit
+  alias Bank.Audit.{ActivityView, AuditEvent}
   alias Bank.Delegations
   alias Bank.Delegations.Delegation
+  alias Bank.Repo
+  alias Bank.Runtime.PubSub, as: RuntimePubSub
   alias Bank.SessionPermissions
   alias Bank.SessionPermissions.BrowserInstall
   alias Bank.WalletBindings
   alias Bank.WalletBindings.WalletBinding
   alias BankWeb.AgentLayouts
   alias BankWeb.LiveAuth
-  alias Bank.Runtime.PubSub, as: RuntimePubSub
 
-  @seed_activity [
-    %{
-      id: "a3",
-      t: "2 min ago",
-      kind: "permission",
-      status: "pending",
-      title: "Permission ready to install",
-      reason: "Waiting for your signature.",
-      amount: nil
-    },
-    %{
-      id: "a2",
-      t: "14 min ago",
-      kind: "wallet",
-      status: "note",
-      title: "Wallet connected",
-      reason: "Base Sepolia · 0x7a2f…d31c",
-      amount: nil
-    },
-    %{
-      id: "a1",
-      t: "Yesterday",
-      kind: "wallet",
-      status: "note",
-      title: "Faucet drip received",
-      reason: "Test funds added to your smart account.",
-      amount: "+ 25 USDC"
-    }
-  ]
+  # Cap the in-memory activity list. AgentActivityLive paginates
+  # cleanly via the Audit reader; the strip itself only renders the
+  # top 5, so 50 is plenty of headroom for live prepends without
+  # leaking memory on long-lived sockets.
+  @activity_cap 50
 
   @impl true
   def mount(_params, _session, socket) do
     if connected?(socket) do
-      Bank.Runtime.PubSub.subscribe(Bank.Runtime.PubSub.security_events())
+      # I2 — delegation state transitions (revoke flow + on-chain
+      # confirmation flips :pending → :active).
+      RuntimePubSub.subscribe(RuntimePubSub.security_events())
+      # I4 — audit:stream feeds the activity strip + AgentActivityLive.
+      RuntimePubSub.subscribe(RuntimePubSub.audit_stream())
     end
 
     socket =
       socket
       |> assign(:page_title, "Agent")
-      # I1 wallet — loads active binding + sets :wallet, :address,
+      # I1 — loads active binding + sets :wallet, :address,
       # :wallet_binding via assign/3. Done first so the permission
       # card's `refresh_delegation` can read :wallet_binding.
       |> load_wallet_binding()
       # I2 / I3 / I4 — `assign_new/3` so parallel-agent mount paths
-      # don't stomp each other. I1 already set :wallet, :address,
-      # :wallet_binding via assign/3 above; the defaults below only
-      # fire when those weren't set (e.g. unauthenticated path or
-      # an early test render).
+      # don't stomp each other.
       |> assign_new(:wallet, fn -> :disconnected end)
       |> assign_new(:address, fn -> nil end)
       |> assign_new(:balance_usdc, fn -> Decimal.new("124.50") end)
@@ -107,7 +87,9 @@ defmodule BankWeb.AgentLive do
       |> assign_new(:intent, fn -> :idle end)
       |> assign_new(:last_result, fn -> nil end)
       |> assign_new(:active_intent_id, fn -> nil end)
-      |> assign_new(:activity, fn -> @seed_activity end)
+      # I4 — load_activity reads workspace audit slice via
+      # Bank.Audit.list_events; falls back to [] when no scope.
+      |> assign_new(:activity, fn -> load_activity(socket) end)
       |> assign_new(:stop_open, fn -> false end)
       # I2 permission-card-owned assigns.
       |> assign_new(:browser_install_state, fn -> :idle end)
@@ -463,6 +445,30 @@ defmodule BankWeb.AgentLive do
   # them so the LiveView doesn't crash on unmatched messages.
   def handle_info(%{topic: :intent_lifecycle}, socket), do: {:noreply, socket}
 
+  # ── audit:stream live tail (I4) ─────────────────────────────────────
+  # Every successful Bank.Audit.append_event/1 broadcast lands here.
+  # We re-fetch the row to enforce workspace scoping (the broadcast
+  # payload doesn't carry workspace_id) and to access before_ref /
+  # after_ref for the ActivityView mapping. Cross-workspace events
+  # and admin-tier event types (auth.*, api_key.*) are skipped.
+  def handle_info(%{topic: :audit_stream, event: :appended, payload: %{id: event_id}}, socket) do
+    ws_id = activity_workspace_id(socket)
+
+    case Repo.get(AuditEvent, event_id) do
+      %AuditEvent{workspace_id: ^ws_id} = event ->
+        if visible_audit_event?(event) do
+          entry = ActivityView.render(event)
+          activity = [entry | socket.assigns.activity] |> Enum.take(@activity_cap)
+          {:noreply, assign(socket, :activity, activity)}
+        else
+          {:noreply, socket}
+        end
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
   # ── Intent helpers ────────────────────────────────────────────────────
 
   # Always force `chain: "base-sepolia"` regardless of mode/settings.
@@ -761,6 +767,35 @@ defmodule BankWeb.AgentLive do
   defp short_address(other) when is_binary(other), do: other
   defp short_address(_), do: nil
 
+  # ── Activity helpers (I4) ────────────────────────────────────────────
+
+  # Load the workspace's recent audit slice, transformed for the strip.
+  # Empty list when no scope (anonymous test render).
+  defp load_activity(socket) do
+    case activity_workspace_id(socket) do
+      nil ->
+        []
+
+      ws_id ->
+        %{events: events} =
+          Audit.list_events(%{workspace_id: ws_id}, limit: @activity_cap, order: :desc)
+
+        events
+        |> Enum.filter(&visible_audit_event?/1)
+        |> ActivityView.render()
+    end
+  end
+
+  defp activity_workspace_id(socket) do
+    case socket.assigns[:current_scope] do
+      %{workspace: %{id: id}} -> id
+      _ -> nil
+    end
+  end
+
+  defp visible_audit_event?(%AuditEvent{event_type: "auth." <> _}), do: false
+  defp visible_audit_event?(%AuditEvent{event_type: "api_key." <> _}), do: false
+  defp visible_audit_event?(%AuditEvent{}), do: true
 
   # ── Permission helpers (I2) ──────────────────────────────────────────
 
