@@ -14,7 +14,10 @@ defmodule BankWeb.AgentLive.WalletCard do
 
   import BankWeb.AgentComponents
 
-  attr :wallet, :atom, required: true, doc: ":disconnected | :wrong_network | :connected"
+  attr :wallet, :atom,
+    required: true,
+    doc: ":disconnected | :connecting | :wrong_network | :connected"
+
   attr :address, :string, default: nil
   attr :balance, :any, required: true
 
@@ -37,6 +40,30 @@ defmodule BankWeb.AgentLive.WalletCard do
               <.cb_icon name="wallet" size={14} /> Connect wallet
             </button>
             <span class="hint">MetaMask, Rabby, Coinbase Wallet</span>
+          </div>
+        </div>
+        <%!--
+          `:connecting` — the JS hook called `eth_requestAccounts` and is
+          waiting on the wallet popup. Render an explicit "check your
+          wallet popup" affordance so the user knows where to look. If
+          the popup is dismissed or another popup hijacks focus, the
+          hook surfaces `:cancelled` / `:error` and we fall back to
+          `:disconnected` (with the Connect button reappearing).
+        --%>
+        <div :if={@wallet == :connecting} class="card__body">
+          <p class="lede">
+            Open your wallet to approve the connection. Check the MetaMask /
+            Rabby / Coinbase Wallet icon in your browser toolbar — the popup
+            may be queued behind another window.
+          </p>
+          <div class="card__actions">
+            <div class="installing-row">
+              <div class="spinner"></div>
+              <span>Waiting for wallet approval…</span>
+            </div>
+            <button id="wallet-connect-btn" type="button" class="link-btn">
+              Cancel and retry
+            </button>
           </div>
         </div>
         <div :if={@wallet == :wrong_network} class="card__body">
@@ -71,6 +98,7 @@ defmodule BankWeb.AgentLive.WalletCard do
 
   defp pill_kind(:connected), do: "connected"
   defp pill_kind(:wrong_network), do: "wrong-network"
+  defp pill_kind(:connecting), do: "pending"
   defp pill_kind(_), do: "disconnected"
 
   defp format_usdc(%Decimal{} = d) do

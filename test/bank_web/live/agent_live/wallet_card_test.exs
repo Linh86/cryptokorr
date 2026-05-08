@@ -107,6 +107,41 @@ defmodule BankWeb.AgentLive.WalletCardTest do
     end
   end
 
+  # `:connecting` is the explicit "wallet popup is queued" UI state.
+  # The JS hook fires `wallet_connect:connecting` synchronously before
+  # awaiting `eth_requestAccounts`, so the LiveView must flip to a
+  # spinner + "Open your wallet to approve…" affordance immediately.
+  # Without it the click looks like a no-op while MetaMask's popup is
+  # queued behind another window.
+  describe "wallet_connect:connecting event flow" do
+    test "flips the wallet card into the :connecting variant", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      html = render_hook(view, "wallet_connect:connecting", %{})
+
+      # Pending pill maps to `pill--warn` per AgentComponents.pill_config/1
+      # (see "Pending" mapping). The status text is "Pending".
+      assert html =~ "pill--warn"
+      assert html =~ "Pending"
+      # The spinner + the explicit "Open your wallet to approve" copy
+      # must render so the user knows where to look.
+      assert html =~ ~s(class="spinner")
+      assert html =~ "Open your wallet to approve"
+      assert html =~ "Waiting for wallet approval"
+    end
+
+    test ":connecting clears back to :disconnected on cancel", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      _ = render_hook(view, "wallet_connect:connecting", %{})
+      html = render_hook(view, "wallet_connect:cancelled", %{})
+
+      assert html =~ "Connect a browser wallet to begin"
+      refute html =~ "Waiting for wallet approval"
+      refute html =~ ~s(class="spinner")
+    end
+  end
+
   describe "wallet_connect:connected event flow" do
     test "issues a challenge, pushes it back, and renders pending state", %{
       conn: conn,

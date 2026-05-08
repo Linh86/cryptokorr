@@ -168,15 +168,23 @@ defmodule BankWeb.AgentLive do
   # browser, the wallet signs via `personal_sign`, the hook returns
   # `:verify{challenge_id, signature}`, and Phoenix verifies the
   # signature recovers the connected EOA. The agent design exposes
-  # only three wallet states so we collapse the richer ControlLive
-  # state machine into `:disconnected | :wrong_network | :connected`.
+  # four wallet states (`:disconnected | :connecting | :wrong_network
+  # | :connected`) — we add `:connecting` so the user sees an explicit
+  # "check your wallet popup" affordance once the hook has fired
+  # `eth_requestAccounts` and is waiting on MetaMask. Without that
+  # transition the click looked like it did nothing — the popup may
+  # be queued behind other windows.
 
   def handle_event("wallet_connect:unavailable", _params, socket) do
     {:noreply, reset_wallet(socket)}
   end
 
   def handle_event("wallet_connect:connecting", _params, socket) do
-    {:noreply, socket}
+    # Flip the card into the `:connecting` variant so the user has a
+    # visual cue to look for the wallet popup. Cleared by the
+    # downstream `:connected` / `:wrong_chain` / `:cancelled` /
+    # `:error` events the hook always emits afterwards.
+    {:noreply, assign(socket, :wallet, :connecting)}
   end
 
   def handle_event(
