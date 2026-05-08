@@ -121,6 +121,7 @@ defmodule BankWeb.AgentActivityLive do
       permission={@permission}
       address={@address}
       active={:activity}
+      delegation={@delegation}
     >
       <header class="ac__hero">
         <div>

@@ -391,6 +391,228 @@ defmodule BankWeb.AgentLive.PermissionCardTest do
     end
   end
 
+  # The agent_alpha live_session already gates mount on `:operator`+,
+  # so a viewer can't reach the page through the router. But
+  # `GlobalState.revoke/1` is also called inline by AgentActivityLive
+  # and AgentAdvancedLive's `confirm_stop:revoke` handlers, and a
+  # future routing change or a manually-pushed event must not
+  # escalate a viewer-tier socket into a delegation revoke. The gate
+  # inside `revoke/1` is defense-in-depth.
+  describe "GlobalState.revoke/1 — operator gate (P5 fail-closed)" do
+    test "viewer-role socket is refused with a flash and the delegation row is unchanged",
+         %{workspace: workspace, current_user: user} do
+      {_binding, delegation} = active_delegation_for_workspace(workspace.id, user.id)
+
+      socket = %Phoenix.LiveView.Socket{
+        assigns: %{
+          __changed__: %{},
+          flash: %{},
+          delegation: delegation,
+          current_scope: %{user: user, workspace: workspace, role: :viewer},
+          stop_open: true
+        }
+      }
+
+      result = BankWeb.AgentLive.GlobalState.revoke(socket)
+
+      # Flash carries the role-required copy.
+      assert get_in(result.assigns, [:flash, "error"]) =~ "Operator role required"
+      # Stop modal is force-closed.
+      assert result.assigns.stop_open == false
+
+      # The delegation row is not touched.
+      reloaded = Repo.get!(Delegation, delegation.id)
+      assert reloaded.state == :active
+    end
+
+    test "operator-role socket proceeds and flips the delegation row to :revoking",
+         %{workspace: workspace, current_user: user} do
+      {_binding, delegation} = active_delegation_for_workspace(workspace.id, user.id)
+
+      socket = %Phoenix.LiveView.Socket{
+        assigns: %{
+          __changed__: %{},
+          flash: %{},
+          delegation: delegation,
+          current_scope: %{user: user, workspace: workspace, role: :operator},
+          stop_open: true,
+          # GlobalState.refresh/1 is called on success; it expects
+          # these assigns to be readable.
+          wallet_binding: nil,
+          wallet: :disconnected,
+          address: nil,
+          permission: :active
+        }
+      }
+
+      _result = BankWeb.AgentLive.GlobalState.revoke(socket)
+
+      reloaded = Repo.get!(Delegation, delegation.id)
+      assert reloaded.state == :revoking
+    end
+  end
+
+  describe "permission card :revoke_failed banner (P5 fail-closed)" do
+    test "renders the danger banner with the persisted last_reason", %{
+      conn: conn,
+      workspace: workspace,
+      current_user: user
+    } do
+      binding = verified_binding(workspace.id, user.id)
+      sa_id = SessionPermissions.compute_smart_account_id(binding)
+
+      _ =
+        insert_delegation_with_attrs!(workspace.id, binding.id, sa_id, %{
+          state: :revoke_failed,
+          last_reason: "bundler unavailable"
+        })
+
+      {:ok, _view, html} = live(conn, "/")
+
+      assert html =~ "Last revoke attempt failed: bundler unavailable"
+      assert html =~ "delegation is still live"
+      # The install-failed banner must NOT also render — they're
+      # mutually exclusive once the row is :revoke_failed.
+      refute html =~ "Last install failed"
+    end
+
+    test "falls back to \"unknown\" when last_reason is nil", %{
+      conn: conn,
+      workspace: workspace,
+      current_user: user
+    } do
+      binding = verified_binding(workspace.id, user.id)
+      sa_id = SessionPermissions.compute_smart_account_id(binding)
+
+      _ =
+        insert_delegation_with_attrs!(workspace.id, binding.id, sa_id, %{
+          state: :revoke_failed,
+          last_reason: nil
+        })
+
+      {:ok, _view, html} = live(conn, "/")
+
+      assert html =~ "Last revoke attempt failed: unknown"
+    end
+  end
+
+  # The design enum maps `:revoking` → `:installing`, so naively
+  # gating Stop on `permission in [:active, :installing]` would
+  # re-enable the button while the revoke is already in flight. The
+  # topbar must look at the raw delegation state and disable Stop
+  # when the delegation is mid-revoke or in any failed/terminal state.
+  describe "TopBar Stop button gating (P5 fail-closed)" do
+    test "Stop is disabled when delegation is :revoking", %{
+      conn: conn,
+      workspace: workspace,
+      current_user: user
+    } do
+      binding = verified_binding(workspace.id, user.id)
+      sa_id = SessionPermissions.compute_smart_account_id(binding)
+      _ = insert_delegation!(workspace.id, binding.id, sa_id, :revoking)
+
+      {:ok, _view, html} = live(conn, "/")
+
+      topbar_btn = topbar_stop_button!(html)
+      assert topbar_btn =~ "is-disabled"
+      assert topbar_btn =~ "disabled"
+    end
+
+    test "Stop is disabled when delegation is :revoke_failed", %{
+      conn: conn,
+      workspace: workspace,
+      current_user: user
+    } do
+      binding = verified_binding(workspace.id, user.id)
+      sa_id = SessionPermissions.compute_smart_account_id(binding)
+      _ = insert_delegation!(workspace.id, binding.id, sa_id, :revoke_failed)
+
+      {:ok, _view, html} = live(conn, "/")
+
+      assert topbar_stop_button!(html) =~ "is-disabled"
+    end
+
+    test "StopCard's Revoke button is disabled when delegation is :revoking",
+         %{
+           conn: conn,
+           workspace: workspace,
+           current_user: user
+         } do
+      binding = verified_binding(workspace.id, user.id)
+      sa_id = SessionPermissions.compute_smart_account_id(binding)
+      _ = insert_delegation!(workspace.id, binding.id, sa_id, :revoking)
+
+      {:ok, _view, html} = live(conn, "/")
+
+      btn = stop_card_revoke_button!(html)
+      assert btn =~ "is-disabled"
+      assert btn =~ "disabled"
+    end
+
+    test "Stop is enabled when delegation is :active", %{
+      conn: conn,
+      workspace: workspace,
+      current_user: user
+    } do
+      _ = active_delegation_for_workspace(workspace.id, user.id)
+
+      {:ok, _view, html} = live(conn, "/")
+
+      refute topbar_stop_button!(html) =~ "is-disabled"
+    end
+  end
+
+  # P4 also enforces `delegation.state == :active` as a precondition;
+  # this set of tests pins the same fail-closed posture so dropping
+  # the design-enum `:permission == :active` check doesn't lose the
+  # guard.
+  describe "intent:run defense-in-depth (P5 fail-closed)" do
+    setup %{workspace: workspace, current_user: user} do
+      binding = verified_binding(workspace.id, user.id)
+      %{binding: binding}
+    end
+
+    test "intent:run is a no-op when the delegation is :revoking", %{
+      conn: conn,
+      workspace: workspace,
+      binding: binding
+    } do
+      sa_id = SessionPermissions.compute_smart_account_id(binding)
+      _ = insert_delegation!(workspace.id, binding.id, sa_id, :revoking)
+
+      {:ok, view, _html} = live(conn, "/")
+
+      # Push the event directly — no Bank.Intents.submit/2 should run,
+      # so the :intent assign stays at its mount default :idle.
+      render_hook(view, "intent:run", %{})
+
+      # The IntentResult card surfaces the latest run; absence of an
+      # "executing" / "executed" / "blocked" / "failed" copy means
+      # intent:run was a no-op.
+      html = render(view)
+      refute html =~ "Running"
+      refute html =~ "Executed"
+      refute html =~ "executed"
+    end
+
+    test "intent:run is a no-op when the delegation is :revoke_failed", %{
+      conn: conn,
+      workspace: workspace,
+      binding: binding
+    } do
+      sa_id = SessionPermissions.compute_smart_account_id(binding)
+      _ = insert_delegation!(workspace.id, binding.id, sa_id, :revoke_failed)
+
+      {:ok, view, _html} = live(conn, "/")
+
+      render_hook(view, "intent:run", %{})
+
+      html = render(view)
+      refute html =~ "Running"
+      refute html =~ "Executed"
+    end
+  end
+
   describe "find_active_delegation/2 — fail-closed on ambiguity" do
     test "single :active row returns ok", %{workspace: workspace, current_user: user} do
       binding = verified_binding(workspace.id, user.id)
@@ -426,6 +648,30 @@ defmodule BankWeb.AgentLive.PermissionCardTest do
 
   # --- helpers -----------------------------------------------------------
 
+  # Pulls the topbar Stop button (which carries
+  # `phx-click="topbar:stop_agent"`) out of a rendered HTML string.
+  # Phoenix encodes the phx-click value as a JS-encoded JSON token,
+  # so we match on the literal `topbar:stop_agent` substring.
+  defp topbar_stop_button!(html) do
+    matches = Regex.scan(~r/<button[^>]*topbar:stop_agent[^>]*>/, html)
+
+    case matches do
+      [[btn] | _] -> btn
+      _ -> flunk("topbar Stop button not found in rendered HTML: #{inspect(matches)}")
+    end
+  end
+
+  # Pulls the StopCard's Revoke button (the one that carries
+  # `phx-click="permission:revoke"`).
+  defp stop_card_revoke_button!(html) do
+    matches = Regex.scan(~r/<button[^>]*permission:revoke[^>]*>/, html)
+
+    case matches do
+      [[btn] | _] -> btn
+      _ -> flunk("StopCard Revoke button not found in rendered HTML: #{inspect(matches)}")
+    end
+  end
+
   defp active_delegation_for_workspace(workspace_id, user_id) do
     binding = verified_binding(workspace_id, user_id)
     sa_id = SessionPermissions.compute_smart_account_id(binding)
@@ -455,10 +701,14 @@ defmodule BankWeb.AgentLive.PermissionCardTest do
   end
 
   defp insert_delegation!(workspace_id, binding_id, smart_account_id, state) do
-    attrs = %{
+    insert_delegation_with_attrs!(workspace_id, binding_id, smart_account_id, %{state: state})
+  end
+
+  defp insert_delegation_with_attrs!(workspace_id, binding_id, smart_account_id, extra_attrs) do
+    base = %{
       smart_account_id: smart_account_id,
       delegation_id: "del-#{System.unique_integer([:positive])}",
-      state: state,
+      state: :active,
       chain: "base-sepolia",
       scope: Bank.SessionPermissions.Scope.default(),
       workspace_id: workspace_id,
@@ -466,6 +716,8 @@ defmodule BankWeb.AgentLive.PermissionCardTest do
       root_validator_owner: "user",
       install_userop_hash: "0x" <> Base.encode16(:crypto.strong_rand_bytes(32), case: :lower)
     }
+
+    attrs = Map.merge(base, extra_attrs)
 
     {:ok, delegation} =
       %Delegation{}

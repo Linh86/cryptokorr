@@ -45,10 +45,13 @@ defmodule BankWeb.AgentLive.PermissionCard do
           <.banner :if={@permission == :expired} kind="warn">
             The previous permission expired. Reinstall to bring the agent back online.
           </.banner>
-          <.banner :if={@permission == :failed and @install_failure_reason != nil} kind="danger">
+          <.banner :if={@permission == :failed and revoke_failed?(@delegation)} kind="danger">
+            Last revoke attempt failed: {revoke_failure_reason(@delegation)}. The delegation is still live; retry from the Stop button above.
+          </.banner>
+          <.banner :if={@permission == :failed and not revoke_failed?(@delegation) and @install_failure_reason != nil} kind="danger">
             Last install failed: {failure_reason_label(@install_failure_reason)}. No permission is in place.
           </.banner>
-          <.banner :if={@permission == :failed and @install_failure_reason == nil} kind="danger">
+          <.banner :if={@permission == :failed and not revoke_failed?(@delegation) and @install_failure_reason == nil} kind="danger">
             Last install failed. No permission is in place.
           </.banner>
           <.banner :if={@wrong_chain_id != nil} kind="warn">
@@ -176,6 +179,13 @@ defmodule BankWeb.AgentLive.PermissionCard do
   end
 
   defp session_limit_label(_), do: nil
+
+  defp revoke_failed?(%Delegation{state: :revoke_failed}), do: true
+  defp revoke_failed?(_), do: false
+
+  defp revoke_failure_reason(%Delegation{last_reason: nil}), do: "unknown"
+  defp revoke_failure_reason(%Delegation{last_reason: reason}) when is_binary(reason), do: reason
+  defp revoke_failure_reason(_), do: "unknown"
 
   defp failure_reason_label(:user_rejected), do: "user rejected signature"
   defp failure_reason_label(:bundler_rejected), do: "bundler rejected the userop"

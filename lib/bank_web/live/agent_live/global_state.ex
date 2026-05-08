@@ -26,6 +26,7 @@ defmodule BankWeb.AgentLive.GlobalState do
   alias Bank.Security
   alias Bank.WalletBindings
   alias Bank.WalletBindings.WalletBinding
+  alias BankWeb.LiveAuth
 
   @doc """
   Subscribe to the runtime's `security:events` PubSub topic. Call
@@ -75,8 +76,25 @@ defmodule BankWeb.AgentLive.GlobalState do
   @doc """
   Perform the revoke initiated from the confirm-stop modal. Returns
   the updated socket regardless of outcome — failures land in flash.
+
+  Defense-in-depth role gate (P5): even though the agent_alpha
+  live_session already gates mount on `:operator`+, re-check here so
+  a future routing change or a manually-pushed event can't escalate
+  a viewer-tier socket into a revoke.
   """
   def revoke(socket) do
+    case LiveAuth.authorize_action(socket, :operator) do
+      :ok ->
+        do_revoke(socket)
+
+      {:error, {:insufficient_role, _}} ->
+        socket
+        |> assign(:stop_open, false)
+        |> Phoenix.LiveView.put_flash(:error, "Operator role required to revoke.")
+    end
+  end
+
+  defp do_revoke(socket) do
     case socket.assigns[:delegation] do
       %{smart_account_id: sa_id} ->
         user_id = socket.assigns.current_scope.user.id

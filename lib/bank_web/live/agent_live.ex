@@ -382,32 +382,18 @@ defmodule BankWeb.AgentLive do
     do: {:noreply, assign(socket, :stop_open, false)}
 
   def handle_event("confirm_stop:revoke", _, socket) do
-    case socket.assigns.delegation do
-      %Delegation{smart_account_id: sa_id} when is_binary(sa_id) ->
-        scope = socket.assigns[:current_scope]
-        actor_id = scope && scope.user && scope.user.id
+    case LiveAuth.authorize_action(socket, :operator) do
+      :ok ->
+        do_confirm_stop_revoke(socket)
 
-        case Bank.Security.revoke_delegation(sa_id,
-               reason: :operator_requested,
-               actor: :user,
-               actor_id: actor_id
-             ) do
-          {:ok, _job} ->
-            {:noreply,
-             socket
-             |> assign(:stop_open, false)
-             |> refresh_delegation()
-             |> recompute_permission()}
-
-          {:error, reason} ->
-            {:noreply,
-             socket
-             |> assign(:stop_open, false)
-             |> put_flash(:error, "Revoke failed: #{inspect(reason)}")}
-        end
-
-      _ ->
-        {:noreply, assign(socket, :stop_open, false)}
+      {:error, {:insufficient_role, _}} ->
+        # Defense-in-depth: the agent_alpha live_session already gates
+        # mount on `:operator`+, but a future routing change or a
+        # manually-pushed event mustn't escalate viewer-tier sockets.
+        {:noreply,
+         socket
+         |> assign(:stop_open, false)
+         |> put_flash(:error, "Operator role required to revoke.")}
     end
   end
 
@@ -436,6 +422,11 @@ defmodule BankWeb.AgentLive do
   # UI cannot bypass the role model, the active wallet binding, the
   # active delegation, or the binding↔delegation correspondence.
   def handle_event("intent:run", _, socket) do
+    # P4's `with` guard already excludes any non-:active delegation state
+    # (the `%Delegation{state: :active, ...}` pattern fails on :revoking,
+    # :revoke_failed, :revoked, :expired, :install_failed). P5's separate
+    # cond-clause revoke-blocking guard is therefore subsumed; this
+    # single guard covers role + binding + delegation + binding↔SA + chain.
     with :ok <- LiveAuth.authorize_action(socket, :operator),
          %WalletBinding{} = binding <- socket.assigns[:wallet_binding],
          %Delegation{state: :active, smart_account_id: sa_id} <-
@@ -447,15 +438,7 @@ defmodule BankWeb.AgentLive do
 
       case Bank.Intents.submit(payload, workspace_id: workspace_id, actor: :user) do
         {:ok, %{intent: intent}} ->
-          # `handle_event` only runs after the LiveView has connected, so
-          # `Phoenix.PubSub.subscribe/2` here always lands on a real
-          # process. The decision pipeline broadcasts on
-          # `Bank.Runtime.PubSub.intent(intent.id)` for every transition.
           RuntimePubSub.subscribe(RuntimePubSub.intent(intent.id))
-          # Schedule the spinner-timeout watchdog. Cancellation is
-          # implicit: the watchdog re-checks `:active_intent_id` +
-          # `:intent` before flipping state, so if a real event has
-          # already arrived the timeout becomes a no-op.
           Process.send_after(self(), {:intent_timeout, intent.id}, @intent_timeout_ms)
 
           {:noreply,
@@ -1010,6 +993,36 @@ defmodule BankWeb.AgentLive do
 
   # ── Permission helpers (I2) ──────────────────────────────────────────
 
+  defp do_confirm_stop_revoke(socket) do
+    case socket.assigns.delegation do
+      %Delegation{smart_account_id: sa_id} when is_binary(sa_id) ->
+        scope = socket.assigns[:current_scope]
+        actor_id = scope && scope.user && scope.user.id
+
+        case Bank.Security.revoke_delegation(sa_id,
+               reason: :operator_requested,
+               actor: :user,
+               actor_id: actor_id
+             ) do
+          {:ok, _job} ->
+            {:noreply,
+             socket
+             |> assign(:stop_open, false)
+             |> refresh_delegation()
+             |> recompute_permission()}
+
+          {:error, reason} ->
+            {:noreply,
+             socket
+             |> assign(:stop_open, false)
+             |> put_flash(:error, "Revoke failed: #{inspect(reason)}")}
+        end
+
+      _ ->
+        {:noreply, assign(socket, :stop_open, false)}
+    end
+  end
+
   # Re-load the active delegation for the bound wallet from the DB. If
   # multiple `:active` rows match the same binding's smart_account_id
   # (cannot happen on the happy path because of the partial-unique
@@ -1207,6 +1220,7 @@ defmodule BankWeb.AgentLive do
       permission={@permission}
       address={@address}
       active={:agent}
+      delegation={delegation_for_card(@delegation)}
     >
       <header class="ac__hero">
         <div>
@@ -1244,7 +1258,7 @@ defmodule BankWeb.AgentLive do
           user_role={intent_user_role(assigns)}
         />
         <.activity_strip activity={@activity} />
-        <.stop_card permission={@permission} />
+        <.stop_card permission={@permission} delegation={delegation_for_card(@delegation)} />
       </div>
 
       <AgentLayouts.confirm_stop_modal open={@stop_open} />
@@ -1392,9 +1406,18 @@ defmodule BankWeb.AgentLive do
   # ── Section 6: Emergency stop ─────────────────────────────────────
 
   attr :permission, :atom, required: true
+  attr :delegation, :any, default: nil
 
   defp stop_card(assigns) do
-    active? = assigns.permission in [:active, :installing]
+    # Defense-in-depth (P5): the design's permission enum collapses
+    # `:revoking` → `:installing`, so naively gating on `:installing`
+    # would re-enable Stop while a revoke is already in flight. Look
+    # at the raw delegation row state directly so a half-revoked
+    # row doesn't let the user double-click Stop.
+    active? =
+      assigns.permission in [:active, :installing] and
+        not stop_blocked_by_delegation?(assigns.delegation)
+
     assigns = assign(assigns, :active?, active?)
 
     ~H"""
@@ -1414,7 +1437,7 @@ defmodule BankWeb.AgentLive do
         </div>
         <button
           type="button"
-          class="btn btn--danger"
+          class={["btn btn--danger", not @active? && "is-disabled"]}
           disabled={not @active?}
           phx-click="permission:revoke"
         >
@@ -1424,5 +1447,11 @@ defmodule BankWeb.AgentLive do
     </.card>
     """
   end
+
+  defp stop_blocked_by_delegation?(%Delegation{state: state})
+       when state in [:revoking, :revoke_failed, :revoked, :expired, :install_failed],
+       do: true
+
+  defp stop_blocked_by_delegation?(_), do: false
 
 end

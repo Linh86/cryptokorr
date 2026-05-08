@@ -122,6 +122,7 @@ defmodule BankWeb.AgentAdvancedLive do
       permission={@permission}
       address={@address}
       active={:advanced}
+      delegation={@delegation}
     >
       <header class="ac__hero">
         <div>

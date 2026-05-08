@@ -18,6 +18,7 @@ defmodule BankWeb.AgentLayouts do
     statics: BankWeb.static_paths()
 
   import BankWeb.AgentComponents
+  alias Bank.Delegations.Delegation
   alias Phoenix.LiveView.JS
 
   @doc """
@@ -35,13 +36,20 @@ defmodule BankWeb.AgentLayouts do
   attr :permission, :atom, required: true
   attr :address, :string, default: nil
   attr :active, :atom, required: true
+  attr :delegation, :any, default: nil
+
   slot :inner_block, required: true
 
   def app(assigns) do
     ~H"""
     <div class="cb">
       <div class="app">
-        <.top_bar wallet={@wallet} permission={@permission} address={@address} />
+        <.top_bar
+          wallet={@wallet}
+          permission={@permission}
+          address={@address}
+          delegation={@delegation}
+        />
         <div class="layout">
           <.nav_rail active={@active} permission={@permission} />
           <main class="main">
@@ -57,13 +65,23 @@ defmodule BankWeb.AgentLayouts do
   @doc """
   TopBar: brand + testnet badge on the left; wallet/network CTAs +
   Stop agent button on the right.
+
+  `delegation` (P5): the design enum collapses `:revoking` →
+  `:installing`, which would falsely re-enable the Stop button while
+  a revoke is in flight. When the live raw-state delegation is
+  available, we gate Stop on it directly so a half-revoked row
+  blocks Stop until the row settles or the revoke fails.
   """
   attr :wallet, :atom, required: true
   attr :permission, :atom, required: true
   attr :address, :string, default: nil
+  attr :delegation, :any, default: nil
 
   def top_bar(assigns) do
-    can_stop? = assigns.permission in [:active, :installing]
+    can_stop? =
+      assigns.permission in [:active, :installing] and
+        not stop_blocked_by_delegation?(assigns.delegation)
+
     assigns = assign(assigns, :can_stop?, can_stop?)
 
     ~H"""
@@ -188,6 +206,12 @@ defmodule BankWeb.AgentLayouts do
     </div>
     """
   end
+
+  defp stop_blocked_by_delegation?(%Delegation{state: state})
+       when state in [:revoking, :revoke_failed, :revoked, :expired, :install_failed],
+       do: true
+
+  defp stop_blocked_by_delegation?(_), do: false
 
   attr :id, :string, required: true
   attr :label, :string, required: true
