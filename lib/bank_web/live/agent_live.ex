@@ -183,8 +183,20 @@ defmodule BankWeb.AgentLive do
       )
       when is_binary(challenge_id) and is_binary(signature) do
     case WalletBindings.verify_and_bind(challenge_id, signature) do
-      {:ok, binding} ->
-        {:noreply, apply_binding(socket, binding)}
+      {:ok, _binding} ->
+        # Reload from DB after a successful verify so the in-memory
+        # assigns match what a fresh page load would see. This pins
+        # the LiveView to the persisted truth — if a parallel
+        # revoke landed between verify_and_bind and now, the
+        # reloaded binding will be `nil` and the card flips back
+        # to disconnected rather than showing stale "connected".
+        ws_id = workspace_id_from_socket(socket)
+        reloaded = ws_id && WalletBindings.get_active_binding(ws_id)
+
+        case reloaded do
+          %WalletBinding{} = b -> {:noreply, apply_binding(socket, b)}
+          _ -> {:noreply, reset_wallet(socket)}
+        end
 
       {:error, _reason} ->
         {:noreply, reset_wallet(socket)}
@@ -214,11 +226,23 @@ defmodule BankWeb.AgentLive do
   end
 
   def handle_event("wallet_connect:disconnected", _params, socket) do
-    {:noreply, socket |> revoke_active_binding(:wallet_disconnected) |> reset_wallet()}
+    socket =
+      socket
+      |> revoke_active_binding(:wallet_disconnected)
+      |> reset_wallet()
+      |> fail_close_permission_after_disconnect()
+
+    {:noreply, socket}
   end
 
   def handle_event("wallet_connect:disconnect", _params, socket) do
-    {:noreply, socket |> revoke_active_binding(:operator_requested) |> reset_wallet()}
+    socket =
+      socket
+      |> revoke_active_binding(:operator_requested)
+      |> reset_wallet()
+      |> fail_close_permission_after_disconnect()
+
+    {:noreply, socket}
   end
 
   def handle_event("wallet_connect:error", _params, socket) do
@@ -737,6 +761,23 @@ defmodule BankWeb.AgentLive do
     |> assign(:wallet, :disconnected)
     |> assign(:address, nil)
     |> assign(:wallet_binding, nil)
+  end
+
+  # When the wallet disconnects (either auto via the hook's
+  # `wallet_connect:disconnected` event or operator-initiated via
+  # `wallet_connect:disconnect`), the DB delegation row is left
+  # alone — the `:active` row is the back-end's truth and only
+  # `Bank.Security.revoke_delegation/2` may flip it. But the agent
+  # cannot run without a current wallet context, so the visible
+  # permission state must fail-closed: we force `:permission` to
+  # `:not_installed` and reset the install-state side channels so
+  # the UI doesn't claim the agent is runnable. The next
+  # `refresh_delegation` after a re-bind will re-read the row.
+  defp fail_close_permission_after_disconnect(socket) do
+    socket
+    |> assign(:permission, :not_installed)
+    |> assign(:browser_install_state, :idle)
+    |> assign(:install_failure_reason, nil)
   end
 
   # Best-effort revoke for the currently-active binding. The wallet
