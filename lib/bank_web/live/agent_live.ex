@@ -10,12 +10,10 @@ defmodule BankWeb.AgentLive do
     5. Recent activity (top 5 strip)
     6. Emergency stop
 
-  Phase 1: static dummy state. The wallet/permission/intent state
-  machines render every variant the design covers, but actions only
-  cycle local socket state — no chain calls, no real wallet hook.
-  Phase 2 will wire the existing `WalletConnect` /
-  `SessionPermissionInstall` JS hooks and the
-  `Bank.SessionPermissions` / `Bank.Delegations` contexts.
+  Phase 2 (wallet section): the wallet card now drives the real
+  EIP-1193 `WalletConnect` JS hook + `Bank.WalletBindings`
+  challenge / verify flow. Permission, mode, intent, and activity
+  remain on dummy state pending sibling phase 2 worktrees.
   """
   use BankWeb, :live_view
 
@@ -24,6 +22,7 @@ defmodule BankWeb.AgentLive do
   import BankWeb.AgentLive.PermissionCard
   import BankWeb.AgentLive.TestIntentCard
   import BankWeb.AgentLive.ActivityStrip
+  alias Bank.WalletBindings
   alias BankWeb.AgentLayouts
 
   @seed_activity [
@@ -61,8 +60,6 @@ defmodule BankWeb.AgentLive do
     socket =
       socket
       |> assign(:page_title, "Agent")
-      |> assign(:wallet, :disconnected)
-      |> assign(:address, nil)
       |> assign(:balance_usdc, Decimal.new("124.50"))
       |> assign(:permission, :not_installed)
       |> assign(:mode, "hold")
@@ -79,21 +76,126 @@ defmodule BankWeb.AgentLive do
       |> assign(:intent_counter, 0)
       |> assign(:activity, @seed_activity)
       |> assign(:stop_open, false)
+      |> load_wallet_binding()
 
     {:ok, socket}
   end
 
   # ── Topbar / global events ───────────────────────────────────────────
 
+  # The WalletConnect JS hook intercepts clicks on `#wallet-connect-btn`
+  # and drives the connect flow itself, so the wallet card's button
+  # has no `phx-click`. The topbar still has a Connect button but its
+  # phase 3 wiring is out of scope here — accept and ignore the event
+  # so an accidental click doesn't crash the LiveView.
   @impl true
-  def handle_event("topbar:connect_wallet", _, socket), do: connect_wallet(socket)
-  def handle_event("wallet:connect", _, socket), do: connect_wallet(socket)
-
-  def handle_event("topbar:switch_network", _, socket), do: switch_network(socket)
-  def handle_event("wallet:switch_network", _, socket), do: switch_network(socket)
+  def handle_event("topbar:connect_wallet", _, socket), do: {:noreply, socket}
+  def handle_event("topbar:switch_network", _, socket), do: {:noreply, socket}
 
   def handle_event("topbar:stop_agent", _, socket),
     do: {:noreply, assign(socket, :stop_open, true)}
+
+  # ── Wallet (real WalletConnect hook + Bank.WalletBindings) ───────────
+  #
+  # The EIP-1193 `WalletConnect` JS hook drives the connect flow:
+  # request accounts → push `:connected{account, chain_id}`. Phoenix
+  # issues a short-lived signed challenge, pushes it back to the
+  # browser, the wallet signs via `personal_sign`, the hook returns
+  # `:verify{challenge_id, signature}`, and Phoenix verifies the
+  # signature recovers the connected EOA. The agent design exposes
+  # only three wallet states so we collapse the richer ControlLive
+  # state machine into `:disconnected | :wrong_network | :connected`.
+
+  def handle_event("wallet_connect:unavailable", _params, socket) do
+    {:noreply, reset_wallet(socket)}
+  end
+
+  def handle_event("wallet_connect:connecting", _params, socket) do
+    {:noreply, socket}
+  end
+
+  def handle_event(
+        "wallet_connect:connected",
+        %{"account" => account, "chain_id" => chain_id},
+        socket
+      ) do
+    workspace_id = socket.assigns.current_scope.workspace.id
+    user_id = socket.assigns.current_scope.user.id
+
+    case WalletBindings.issue_challenge(workspace_id, user_id, %{
+           address: account,
+           chain_id: chain_id
+         }) do
+      {:ok, binding} ->
+        {:noreply,
+         socket
+         |> apply_binding(binding)
+         |> push_event("wallet_connect:challenge", %{
+           challenge_id: binding.id,
+           message: binding.challenge_message,
+           address: binding.address
+         })}
+
+      {:error, :chain_not_supported} ->
+        {:noreply,
+         socket
+         |> assign(:wallet, :wrong_network)
+         |> assign(:address, short_address(account))
+         |> assign(:wallet_binding, nil)}
+
+      {:error, _other} ->
+        {:noreply, reset_wallet(socket)}
+    end
+  end
+
+  def handle_event(
+        "wallet_connect:verify",
+        %{"challenge_id" => challenge_id, "signature" => signature},
+        socket
+      )
+      when is_binary(challenge_id) and is_binary(signature) do
+    case WalletBindings.verify_and_bind(challenge_id, signature) do
+      {:ok, binding} ->
+        {:noreply, apply_binding(socket, binding)}
+
+      {:error, _reason} ->
+        {:noreply, reset_wallet(socket)}
+    end
+  end
+
+  def handle_event("wallet_connect:verify_error", _params, socket) do
+    {:noreply, reset_wallet(socket)}
+  end
+
+  def handle_event(
+        "wallet_connect:wrong_chain",
+        %{"chain_id" => _chain_id} = params,
+        socket
+      ) do
+    account = Map.get(params, "account")
+
+    {:noreply,
+     socket
+     |> assign(:wallet, :wrong_network)
+     |> assign(:address, account && short_address(account))
+     |> assign(:wallet_binding, nil)}
+  end
+
+  def handle_event("wallet_connect:cancelled", _params, socket) do
+    {:noreply, reset_wallet(socket)}
+  end
+
+  def handle_event("wallet_connect:disconnected", _params, socket) do
+    {:noreply, socket |> revoke_active_binding(:wallet_disconnected) |> reset_wallet()}
+  end
+
+  def handle_event("wallet_connect:disconnect", _params, socket) do
+    {:noreply, socket |> revoke_active_binding(:operator_requested) |> reset_wallet()}
+  end
+
+  def handle_event("wallet_connect:error", _params, socket) do
+    {:noreply, reset_wallet(socket)}
+  end
 
   # ── Permission ───────────────────────────────────────────────────────
 
@@ -242,24 +344,6 @@ defmodule BankWeb.AgentLive do
      |> update(:activity, &[Map.merge(%{id: new_id(socket), t: "just now"}, entry) | &1])}
   end
 
-  def handle_info(:wallet_connected, socket) do
-    activity =
-      [
-        %{
-          id: new_id(socket),
-          t: "just now",
-          kind: "wallet",
-          status: "note",
-          title: "Wallet connected",
-          reason: "Base Sepolia · #{socket.assigns.address}",
-          amount: nil
-        }
-        | socket.assigns.activity
-      ]
-
-    {:noreply, socket |> assign(:wallet, :connected) |> assign(:activity, activity)}
-  end
-
   defp build_intent_outcome("executed", "swap") do
     {%{
        kind: "intent",
@@ -326,19 +410,84 @@ defmodule BankWeb.AgentLive do
 
   # ── Helpers ──────────────────────────────────────────────────────────
 
-  defp connect_wallet(socket) do
-    address = "0x7a2f…d31c"
-    Process.send_after(self(), :wallet_connected, 350)
+  # Mount-time loader: pull any active verified binding from the DB so
+  # a refresh / reconnect lands directly in the connected state without
+  # forcing the operator to re-sign. Returns the socket with the wallet
+  # assigns populated (or set to disconnected when no binding exists).
+  defp load_wallet_binding(socket) do
+    case socket.assigns[:current_scope] do
+      %{workspace: %{id: workspace_id}} when is_binary(workspace_id) ->
+        case WalletBindings.get_active_binding(workspace_id) do
+          nil -> reset_wallet(socket)
+          %_{} = binding -> apply_binding(socket, binding)
+        end
 
-    {:noreply,
-     socket
-     |> assign(:wallet, :wrong_network)
-     |> assign(:address, address)}
+      _ ->
+        reset_wallet(socket)
+    end
   end
 
-  defp switch_network(socket) do
-    {:noreply, assign(socket, :wallet, :connected)}
+  # Map a `%WalletBinding{}` row onto the design's three-state wallet
+  # enum. The card renders one of these three; we collapse pending,
+  # bound, and revoked into them. Pending = challenge issued but not
+  # yet verified — the card stays on `:disconnected` until the
+  # signature lands and `verified_at` is stamped.
+  defp apply_binding(socket, binding) do
+    socket
+    |> assign(:wallet, derive_wallet_state(binding))
+    |> assign(:address, short_address(binding.address))
+    |> assign(:wallet_binding, binding)
   end
+
+  defp reset_wallet(socket) do
+    socket
+    |> assign(:wallet, :disconnected)
+    |> assign(:address, nil)
+    |> assign(:wallet_binding, nil)
+  end
+
+  # Best-effort revoke for the currently-active binding. The wallet
+  # disconnect event isn't load-bearing for state — we always reset
+  # afterwards — so we tolerate revoke errors silently.
+  defp revoke_active_binding(socket, reason) do
+    case socket.assigns[:wallet_binding] do
+      %_{id: id} when is_binary(id) ->
+        _ = WalletBindings.revoke_binding(id, reason)
+        socket
+
+      _ ->
+        socket
+    end
+  end
+
+  # Derive the three-state agent design enum from a binding row.
+  defp derive_wallet_state(nil), do: :disconnected
+
+  defp derive_wallet_state(%{revoked_at: revoked_at}) when not is_nil(revoked_at),
+    do: :disconnected
+
+  defp derive_wallet_state(%{} = binding) do
+    expired? =
+      binding.expires_at &&
+        DateTime.compare(DateTime.utc_now(), binding.expires_at) == :gt
+
+    cond do
+      binding.chain_id != 84_532 -> :wrong_network
+      not is_nil(binding.verified_at) -> :connected
+      expired? -> :disconnected
+      true -> :disconnected
+    end
+  end
+
+  # Render an EIP-55ish short form: `0x` + first 4 hex + … + last 4 hex.
+  # Bank.WalletBindings already lowercases addresses, so we only have
+  # to slice. Defensive on non-strings so a stale assign doesn't crash.
+  defp short_address("0x" <> _ = address) when byte_size(address) == 42 do
+    "0x" <> binary_part(address, 2, 4) <> "…" <> binary_part(address, 38, 4)
+  end
+
+  defp short_address(other) when is_binary(other), do: other
+  defp short_address(_), do: nil
 
   defp new_id(socket), do: "a" <> Integer.to_string(length(socket.assigns.activity) + 10)
 
