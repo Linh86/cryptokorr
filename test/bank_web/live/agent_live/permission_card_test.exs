@@ -452,7 +452,16 @@ defmodule BankWeb.AgentLive.PermissionCardTest do
     end
   end
 
-  describe "permission card :revoke_failed banner (P5 fail-closed)" do
+  # `:revoke_failed` is a special-case trust surface. The on-chain
+  # delegation may still be live, so:
+  #   * Banner must be explicit that the permission may still be live.
+  #   * Stop / Retry revoke must STAY enabled so the operator can
+  #     retry the revoke userop.
+  #   * Install permission must NOT show as a primary CTA — installing
+  #     fresh while the prior delegation is still live is misleading.
+  #   * intent:run remains a no-op (covered in the dedicated suite
+  #     below).
+  describe "permission card :revoke_failed (retry trust surface)" do
     test "renders the danger banner with the persisted last_reason", %{
       conn: conn,
       workspace: workspace,
@@ -469,8 +478,9 @@ defmodule BankWeb.AgentLive.PermissionCardTest do
 
       {:ok, _view, html} = live(conn, "/")
 
-      assert html =~ "Last revoke attempt failed: bundler unavailable"
-      assert html =~ "delegation is still live"
+      assert html =~ "Revoke failed: bundler unavailable"
+      assert html =~ "on-chain permission may still be live"
+      assert html =~ "retry revoke is available"
       # The install-failed banner must NOT also render — they're
       # mutually exclusive once the row is :revoke_failed.
       refute html =~ "Last install failed"
@@ -492,7 +502,93 @@ defmodule BankWeb.AgentLive.PermissionCardTest do
 
       {:ok, _view, html} = live(conn, "/")
 
-      assert html =~ "Last revoke attempt failed: unknown"
+      assert html =~ "Revoke failed: unknown"
+    end
+
+    test "does NOT render the Install permission CTA — old delegation may still be live",
+         %{
+           conn: conn,
+           workspace: workspace,
+           current_user: user
+         } do
+      binding = verified_binding(workspace.id, user.id)
+      sa_id = SessionPermissions.compute_smart_account_id(binding)
+
+      _ =
+        insert_delegation_with_attrs!(workspace.id, binding.id, sa_id, %{
+          state: :revoke_failed,
+          last_reason: "bundler unavailable"
+        })
+
+      {:ok, _view, html} = live(conn, "/")
+
+      # The install-button id is the only deterministic anchor (every
+      # other failure variant of the card DOES render this button).
+      refute html =~ ~s(id="session-permission-browser-install-btn")
+      refute html =~ "Install permission"
+    end
+
+    test "renders the inline Retry revoke CTA wired to the existing revoke event",
+         %{
+           conn: conn,
+           workspace: workspace,
+           current_user: user
+         } do
+      binding = verified_binding(workspace.id, user.id)
+      sa_id = SessionPermissions.compute_smart_account_id(binding)
+
+      _ =
+        insert_delegation_with_attrs!(workspace.id, binding.id, sa_id, %{
+          state: :revoke_failed,
+          last_reason: "bundler unavailable"
+        })
+
+      {:ok, _view, html} = live(conn, "/")
+
+      # Stable id so future tests / E2E selectors don't drift.
+      assert html =~ ~s(id="session-permission-retry-revoke-btn")
+      # Re-uses the same `permission:revoke` event AgentLive already
+      # owns — the modal-confirm flow is the single source of truth
+      # for the actual revoke call.
+      assert html =~ "Retry revoke"
+
+      assert Regex.match?(
+               ~r/<button[^>]*id="session-permission-retry-revoke-btn"[^>]*phx-click="permission:revoke"/,
+               html
+             )
+    end
+
+    test "Retry revoke flips the delegation row from :revoke_failed to :revoking",
+         %{
+           conn: conn,
+           workspace: workspace,
+           current_user: user
+         } do
+      binding = verified_binding(workspace.id, user.id)
+      sa_id = SessionPermissions.compute_smart_account_id(binding)
+
+      delegation =
+        insert_delegation_with_attrs!(workspace.id, binding.id, sa_id, %{
+          state: :revoke_failed,
+          last_reason: "bundler unavailable"
+        })
+
+      {:ok, view, _html} = live(conn, "/")
+
+      # Click the inline Retry revoke CTA → opens the confirm-stop
+      # modal (same code path as `permission:revoke` from an :active
+      # delegation; we proved this in the "wired to the existing
+      # revoke event" test above).
+      view |> render_click("permission:revoke")
+      assert render(view) =~ "Stop the agent?"
+
+      # Confirming the revoke runs through `Bank.Security.revoke_delegation/2`
+      # which calls `Delegations.record_revoke_requested/2` — that
+      # transition accepts `:active | :pending | :revoke_failed` → `:revoking`.
+      view |> render_click("confirm_stop:revoke")
+
+      reloaded = Repo.get!(Delegation, delegation.id)
+      assert reloaded.state == :revoking
     end
   end
 
@@ -518,7 +614,14 @@ defmodule BankWeb.AgentLive.PermissionCardTest do
       assert topbar_btn =~ "disabled"
     end
 
-    test "Stop is disabled when delegation is :revoke_failed", %{
+    # Codex review found this test inverted the desired behavior. The
+    # domain says `:revoke_failed` may still be a live on-chain
+    # delegation — the operator MUST be able to retry revoke from the
+    # Stop affordance. Both the topbar Stop and the StopCard Revoke
+    # button stay enabled (and re-fire the same `permission:revoke`
+    # → confirm-stop modal → `Bank.Security.revoke_delegation/2`
+    # path that an `:active` delegation would).
+    test "Stop is ENABLED when delegation is :revoke_failed (retry path)", %{
       conn: conn,
       workspace: workspace,
       current_user: user
@@ -529,7 +632,13 @@ defmodule BankWeb.AgentLive.PermissionCardTest do
 
       {:ok, _view, html} = live(conn, "/")
 
-      assert topbar_stop_button!(html) =~ "is-disabled"
+      topbar_btn = topbar_stop_button!(html)
+      refute topbar_btn =~ "is-disabled"
+      refute topbar_btn =~ ~s(disabled=)
+
+      stop_btn = stop_card_revoke_button!(html)
+      refute stop_btn =~ "is-disabled"
+      refute stop_btn =~ ~s(disabled=)
     end
 
     test "StopCard's Revoke button is disabled when delegation is :revoking",

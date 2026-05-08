@@ -1450,24 +1450,40 @@ defmodule BankWeb.AgentLive do
     # would re-enable Stop while a revoke is already in flight. Look
     # at the raw delegation row state directly so a half-revoked
     # row doesn't let the user double-click Stop.
+    #
+    # `:revoke_failed` is a deliberate exception: the domain says the
+    # on-chain delegation may still be live and the operator must be
+    # able to retry revoke. We special-case it via
+    # `delegation_retry_revoke?/1` so the Stop CTA stays enabled even
+    # though `permission == :failed` for that state.
     active? =
-      assigns.permission in [:active, :installing] and
-        not stop_blocked_by_delegation?(assigns.delegation)
+      delegation_retry_revoke?(assigns.delegation) or
+        (assigns.permission in [:active, :installing] and
+           not stop_blocked_by_delegation?(assigns.delegation))
 
     assigns = assign(assigns, :active?, active?)
+    assigns = assign(assigns, :retry_revoke?, delegation_retry_revoke?(assigns.delegation))
 
     ~H"""
     <.card tone="danger">
       <div class="stop">
         <div>
           <div class="stop__eye ucase">06 — Emergency stop</div>
-          <div class="serif stop__title">Stop the agent</div>
-          <div class="stop__sub">
-            Revokes permission immediately.
-            <%= if @active? do %>
-              In-flight intents will be blocked. You can reinstall later.
+          <div class="serif stop__title">
+            <%= if @retry_revoke? do %>
+              Retry revoke
             <% else %>
-              No agent permission is active right now — the agent already cannot move funds.
+              Stop the agent
+            <% end %>
+          </div>
+          <div class="stop__sub">
+            <%= cond do %>
+              <% @retry_revoke? -> %>
+                Last revoke attempt failed and the on-chain permission may still be live. Retrying re-submits the revoke userop.
+              <% @active? -> %>
+                Revokes permission immediately. In-flight intents will be blocked. You can reinstall later.
+              <% true -> %>
+                Revokes permission immediately. No agent permission is active right now — the agent already cannot move funds.
             <% end %>
           </div>
         </div>
@@ -1477,16 +1493,25 @@ defmodule BankWeb.AgentLive do
           disabled={not @active?}
           phx-click="permission:revoke"
         >
-          <.cb_icon name="stop" size={14} /> Revoke permission
+          <.cb_icon name="stop" size={14} />
+          {if @retry_revoke?, do: "Retry revoke", else: "Revoke permission"}
         </button>
       </div>
     </.card>
     """
   end
 
+  # See `AgentLayouts.stop_blocked_by_delegation?/1` for the rationale.
+  # `:revoke_failed` is intentionally not blocked — the operator must
+  # be able to retry. Stop remains gated for `:revoking` (already in
+  # flight), `:revoked` / `:expired` (terminal — nothing left to do),
+  # and `:install_failed` (no permission ever installed).
   defp stop_blocked_by_delegation?(%Delegation{state: state})
-       when state in [:revoking, :revoke_failed, :revoked, :expired, :install_failed],
+       when state in [:revoking, :revoked, :expired, :install_failed],
        do: true
 
   defp stop_blocked_by_delegation?(_), do: false
+
+  defp delegation_retry_revoke?(%Delegation{state: :revoke_failed}), do: true
+  defp delegation_retry_revoke?(_), do: false
 end

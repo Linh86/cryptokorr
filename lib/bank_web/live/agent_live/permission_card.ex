@@ -47,7 +47,7 @@ defmodule BankWeb.AgentLive.PermissionCard do
             The previous permission expired. Reinstall to bring the agent back online.
           </.banner>
           <.banner :if={@permission == :failed and revoke_failed?(@delegation)} kind="danger">
-            Last revoke attempt failed: {revoke_failure_reason(@delegation)}. The delegation is still live; retry from the Stop button above.
+            Revoke failed: {revoke_failure_reason(@delegation)}. The on-chain permission may still be live — retry revoke is available.
           </.banner>
           <.banner
             :if={
@@ -74,7 +74,29 @@ defmodule BankWeb.AgentLive.PermissionCard do
             You revoked the permission. The agent cannot move funds. Reinstall when ready.
           </.banner>
           <.scope_list />
-          <div :if={show_install?(@permission, @ambiguous?)} class="card__actions">
+          <%!-- Inline Retry revoke CTA (P5 follow-up). The :revoke_failed
+          state means the on-chain permission may still be live, so the
+          operator MUST be able to retry the revoke. We surface the same
+          revoke flow here, in addition to the topbar Stop button, so the
+          retry CTA is visible alongside the failure banner. The
+          confirm-stop modal that the topbar Stop opens is the single
+          source of truth for the revoke event itself; clicking this
+          button just opens that modal via the existing
+          `permission:revoke` event. --%>
+          <div :if={revoke_failed?(@delegation)} class="card__actions">
+            <button
+              type="button"
+              id="session-permission-retry-revoke-btn"
+              class="btn btn--ghost-danger"
+              phx-click="permission:revoke"
+            >
+              <.cb_icon name="stop" size={14} /> Retry revoke
+            </button>
+            <span class="hint">
+              Re-submits the revoke userop. State will reflect the on-chain outcome.
+            </span>
+          </div>
+          <div :if={show_install?(@permission, @ambiguous?, @delegation)} class="card__actions">
             <button
               type="button"
               id="session-permission-browser-install-btn"
@@ -130,12 +152,19 @@ defmodule BankWeb.AgentLive.PermissionCard do
     """
   end
 
-  defp show_install?(_p, true), do: false
+  # `Install permission` is the primary CTA for terminal "no live
+  # delegation" states. `:revoke_failed` is explicitly NOT one of
+  # them — the on-chain permission may still be live, so installing
+  # a fresh delegation on top of it would be misleading. Operator
+  # must clear the existing one first via Retry revoke.
+  defp show_install?(_p, true, _delegation), do: false
+  defp show_install?(_p, _ambiguous?, %Delegation{state: :revoke_failed}), do: false
 
-  defp show_install?(p, _ambiguous?) when p in [:not_installed, :revoked, :expired, :failed],
-    do: true
+  defp show_install?(p, _ambiguous?, _delegation)
+       when p in [:not_installed, :revoked, :expired, :failed],
+       do: true
 
-  defp show_install?(_p, _), do: false
+  defp show_install?(_p, _, _), do: false
 
   defp pill_kind(:not_installed), do: "not-installed"
   defp pill_kind(other), do: Atom.to_string(other) |> String.replace("_", "-")

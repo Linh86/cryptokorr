@@ -79,9 +79,17 @@ defmodule BankWeb.AgentLayouts do
   attr :delegation, :any, default: nil
 
   def top_bar(assigns) do
+    # `:revoke_failed` is a special-case: the design enum collapses it
+    # to `:permission == :failed` (so the `:active`/`:installing` gate
+    # below would block Stop), but the domain semantics say the
+    # on-chain delegation may still be live and the operator MUST be
+    # able to retry revoke. So we allow Stop explicitly when the raw
+    # delegation row is `:revoke_failed`, in addition to the normal
+    # active/installing path.
     can_stop? =
-      assigns.permission in [:active, :installing] and
-        not stop_blocked_by_delegation?(assigns.delegation)
+      delegation_retry_revoke?(assigns.delegation) or
+        (assigns.permission in [:active, :installing] and
+           not stop_blocked_by_delegation?(assigns.delegation))
 
     assigns = assign(assigns, :can_stop?, can_stop?)
 
@@ -210,11 +218,22 @@ defmodule BankWeb.AgentLayouts do
     """
   end
 
+  # `:revoke_failed` is intentionally NOT in the blocked list. The
+  # domain state machine says a `:revoke_failed` row may still be a
+  # live on-chain delegation, so the operator must be able to retry
+  # revoke. The Stop button stays enabled for that state via
+  # `delegation_retry_revoke?/1`. Other terminal states (`:revoked`,
+  # `:expired`, `:install_failed`) and in-flight `:revoking` block
+  # Stop because there's nothing left to revoke or the request is
+  # already inbound.
   defp stop_blocked_by_delegation?(%Delegation{state: state})
-       when state in [:revoking, :revoke_failed, :revoked, :expired, :install_failed],
+       when state in [:revoking, :revoked, :expired, :install_failed],
        do: true
 
   defp stop_blocked_by_delegation?(_), do: false
+
+  defp delegation_retry_revoke?(%Delegation{state: :revoke_failed}), do: true
+  defp delegation_retry_revoke?(_), do: false
 
   attr :id, :string, required: true
   attr :label, :string, required: true
