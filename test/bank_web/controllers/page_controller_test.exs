@@ -3,12 +3,13 @@ defmodule BankWeb.PageControllerTest do
 
   setup :register_and_log_in_user
 
-  test "GET / serves the control tower LiveView for an authenticated workspace member",
+  test "GET / serves the redesigned Agent LiveView for an authenticated workspace member",
        %{conn: conn} do
     conn = get(conn, ~p"/")
-    # The route now serves a LiveView; a non-websocket GET returns
-    # the static render (the LiveView mount HTML).
-    assert html_response(conn, 200) =~ "Connection"
+    # The route serves AgentLive (Plynn redesign). A non-websocket GET
+    # returns the static mount HTML; "Agent Control" is the always-on
+    # eyebrow above the hero, regardless of wallet/permission state.
+    assert html_response(conn, 200) =~ "Agent Control"
   end
 
   test "GET / redirects an anonymous user to /login", %{} do
