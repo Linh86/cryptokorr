@@ -21,7 +21,34 @@ defmodule BankWeb.AgentLive.ActivityTest do
       {:ok, _view, html} = live(conn, "/")
 
       assert html =~ "05 — Activity"
-      assert html =~ "No activity yet"
+      assert html =~ "No activity yet. Run a test intent to populate this."
+      # Lock in: the strip must not fall back to the old hardcoded
+      # `@seed_activity` rows when there are no audit events.
+      refute html =~ "Permission ready to install"
+      refute html =~ "Faucet drip received"
+    end
+
+    test "another workspace's audit rows do not appear at mount", %{conn: conn} do
+      {:ok, other_ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "other-mount-#{System.unique_integer([:positive])}",
+          name: "Other workspace at mount"
+        })
+
+      _foreign =
+        audit_event(
+          event_type: "wallet_binding.verified",
+          subject_type: "wallet_binding",
+          subject_id: Ecto.UUID.generate(),
+          actor: :user,
+          workspace_id: other_ws.id,
+          after_ref: %{"address" => "0xfeed00112233445566778899aabbccddeeff1122"}
+        )
+
+      {:ok, _view, html} = live(conn, "/")
+
+      assert html =~ "No activity yet. Run a test intent to populate this."
+      refute html =~ "Wallet connected"
     end
 
     test "renders the most recent audit rows transformed via ActivityView",
@@ -124,6 +151,19 @@ defmodule BankWeb.AgentLive.ActivityTest do
       )
 
       refute render(view) =~ "Wallet connected"
+    end
+  end
+
+  describe "BankWeb.AgentActivityLive empty state" do
+    test "renders 'Nothing here yet.' when the workspace has no audit rows",
+         %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/activity")
+
+      assert html =~ "Nothing here yet."
+      # Same negative lock as the strip — full timeline must not show
+      # any of the old hardcoded seed rows.
+      refute html =~ "Permission ready to install"
+      refute html =~ "Faucet drip received"
     end
   end
 

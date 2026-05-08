@@ -22,8 +22,10 @@ defmodule BankWeb.AgentLive do
       maps decision/execution events to the four IntentResult
       variants (executed / blocked / needs-approval / failed). All
       payloads pinned to `chain: "base-sepolia"`.
-    * Activity feed (section 5) — phase 3 wires the audit:stream
-      subscription; today still uses seed data when no wiring yet.
+    * Activity feed (section 5) — subscribed to `audit:stream` and
+      backed by `Bank.Audit.list_events/2` scoped to the workspace.
+      Empty workspaces render the empty-state copy in
+      `BankWeb.AgentLive.ActivityStrip`; no seed data.
   """
   use BankWeb, :live_view
 
