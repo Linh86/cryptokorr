@@ -238,7 +238,9 @@ defmodule BankWeb.AgentLive.PermissionCard do
 
   defp failure_reason_label(:user_rejected), do: "user rejected signature"
   defp failure_reason_label(:bundler_rejected), do: "bundler rejected the userop"
-  defp failure_reason_label(:bundler_unavailable), do: "bundler unavailable"
+  defp failure_reason_label(:bundler_unavailable),
+    do:
+      "bundler unavailable — set BASE_SEPOLIA_BUNDLER_RPC (or BUNDLER_URL) in the dev env"
   defp failure_reason_label(:chain_id_mismatch), do: "wallet on wrong chain"
   defp failure_reason_label(:insufficient_funds), do: "insufficient funds for gas"
   defp failure_reason_label(:userop_reverted), do: "userop reverted on-chain"

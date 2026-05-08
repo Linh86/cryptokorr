@@ -2,18 +2,22 @@
 //
 // Attached to `#wallet-card`. The hook:
 //
-//   * Discovers all browser-injected wallet providers via EIP-6963
-//     (`eip6963:announceProvider` events). Pushes the list to the
-//     LiveView so the picker can render when multiple wallets are
-//     installed (e.g. Trust + MetaMask both fight over `window.ethereum`).
-//   * Delegates clicks on `#wallet-connect-btn` to start the flow with
-//     the legacy `window.ethereum` provider — used when only one wallet
-//     is announced.
-//   * Listens for `wallet_connect:select_provider` events pushed FROM
-//     the server when the user picks a wallet from the picker — that
-//     selects the matching provider and immediately starts connect.
+//   * Boots the shared EIP-6963 wallet registry (see
+//     `assets/js/wallet_provider.js`) so this hook AND the sibling
+//     `SessionPermissionInstall` hook always read the same selected
+//     provider — no more drift where the user picks MetaMask but the
+//     install flow keeps asking Trust.
+//   * Pushes the announced wallet list to the LiveView so the picker
+//     can render when multiple wallets are installed.
+//   * Delegates clicks on `#wallet-connect-btn` to start the connect
+//     flow with the active provider (selected wallet, or fallback).
+//   * Listens for `wallet_connect:use_provider` server events (fired
+//     after the user clicks an entry in the multi-wallet picker) and
+//     sets the selection in the shared registry, then immediately
+//     starts the connect flow.
 //   * Listens for the EIP-1193 `accountsChanged` and `chainChanged`
-//     events so the LiveView reflects the wallet's live state.
+//     events on the active provider so the LiveView reflects live
+//     state.
 //
 // Two interactions touch the wallet, both gated behind explicit user
 // actions:
@@ -31,115 +35,84 @@
 // and never invokes any other signing JSON-RPC method. Those
 // invariants are pinned by `wallet_connect_hook_safety_test.exs`.
 
+import {
+  startDiscovery,
+  subscribe,
+  listInfos,
+  selectByUuid,
+  getProvider,
+  autoSelectActive,
+} from "../wallet_provider.js"
+
 // Base Sepolia is the only enabled chain for the MVP wallet binding
 // flow. Base mainnet (8453) must surface as wrong-chain so the operator
 // switches before we ever issue a binding challenge.
 const SUPPORTED_CHAIN_IDS = [84_532]
-
-// EIP-6963 announce window — wallets fire `eip6963:announceProvider`
-// in response to our `eip6963:requestProvider`. Most fire synchronously
-// or within a tick, but we wait 250ms for slower wallets / extension
-// startup races.
-const EIP6963_DISCOVER_MS = 250
 
 export const WalletConnect = {
   mounted() {
     this.handleClick = this.handleClick.bind(this)
     this.handleAccountsChanged = this.handleAccountsChanged.bind(this)
     this.handleChainChanged = this.handleChainChanged.bind(this)
-    this.handleEip6963Announce = this.handleEip6963Announce.bind(this)
 
-    // EIP-6963 provider registry. Map keyed by `info.uuid` → { info, provider }.
-    this.providers = new Map()
-    // The provider the user picked from the LiveView picker (or the
-    // single discovered provider). Falls back to `window.ethereum`
-    // for legacy single-injection wallets that don't speak EIP-6963.
-    this.selectedProvider = null
     // The provider we currently have `accountsChanged` / `chainChanged`
-    // listeners on, so we can detach them on `destroyed()` or before
-    // re-attaching to a different selection.
+    // listeners on. We re-attach whenever the shared registry tells us
+    // the selection changed.
     this.activeListenerProvider = null
 
     this.el.addEventListener("click", this.handleClick)
-    window.addEventListener("eip6963:announceProvider", this.handleEip6963Announce)
 
     // Server-pushed binding challenge — sign it and push the signature
     // back to the LiveView for verification.
     this.handleEvent("wallet_connect:challenge", (payload) => this.signChallenge(payload))
 
     // Server pushes this when the user clicks a wallet entry in the
-    // multi-wallet picker. Payload `{ uuid }` matches an info.uuid we
-    // already announced via `wallet_connect:providers_discovered`.
+    // multi-wallet picker. Sets the registry's selection and runs
+    // `beginConnect` against that provider only.
     this.handleEvent("wallet_connect:use_provider", (payload) => {
       const uuid = payload && payload.uuid
-      const entry = this.providers.get(uuid)
-      if (!entry) {
+      const provider = selectByUuid(uuid)
+      if (!provider) {
         this.pushEvent("wallet_connect:error", {message: `Unknown wallet: ${uuid}`})
         return
       }
-      this.selectedProvider = entry.provider
-      this.attachListenersTo(entry.provider)
       this.beginConnect()
     })
 
-    // Kick off EIP-6963 discovery. Wallets that already announced before
-    // the listener attached miss the event; the spec requires them to
-    // re-announce when we dispatch the request below.
-    window.dispatchEvent(new Event("eip6963:requestProvider"))
+    // Boot EIP-6963 discovery (idempotent across hook lifecycles).
+    startDiscovery()
 
-    setTimeout(() => this.publishProviders(), EIP6963_DISCOVER_MS)
+    // Subscribe to registry changes — the picker stays in sync with
+    // late wallet announcements, and listener attachment follows the
+    // active provider. Every announcement triggers an
+    // `autoSelectActive` retry: if no wallet was persisted from a
+    // previous session, scan the announced providers for one that
+    // already has authorized accounts (the user previously connected
+    // it to this origin). Stops the install flow from defaulting to
+    // whichever wallet won the `window.ethereum` last-write race
+    // after a page reload. `autoSelectActive` is idempotent — once a
+    // selection lands, subsequent calls no-op.
+    this.unsubscribe = subscribe((infos, selected) => {
+      this.pushEvent("wallet_connect:providers_discovered", {providers: infos})
+      const provider = getProvider()
+      if (provider) this.attachListenersTo(provider)
 
-    // Attach legacy listeners as a fallback so single-injection wallets
-    // (no EIP-6963) still surface accountsChanged / chainChanged.
-    if (this.providers.size === 0 && window.ethereum) {
-      this.attachListenersTo(window.ethereum)
-    }
+      if (!selected && infos.length > 0) {
+        autoSelectActive().catch(() => {})
+      }
+    })
   },
 
   destroyed() {
     this.el.removeEventListener("click", this.handleClick)
-    window.removeEventListener("eip6963:announceProvider", this.handleEip6963Announce)
     this.detachListeners()
-  },
-
-  // EIP-6963 provider announcement. Each event represents one wallet
-  // installed in the browser; the spec says any number of wallets can
-  // coexist. We index by uuid (stable per browser session) so the
-  // server-side picker can later say "use this uuid".
-  handleEip6963Announce(event) {
-    const detail = event && event.detail
-    if (!detail || !detail.info || !detail.provider) return
-    const info = detail.info
-    if (!info.uuid) return
-    this.providers.set(info.uuid, {info, provider: detail.provider})
-    // Re-publish the list so the LiveView picker stays in sync as more
-    // wallets announce (e.g. extension that woke up late).
-    this.publishProviders()
-  },
-
-  publishProviders() {
-    const list = []
-    for (const {info} of this.providers.values()) {
-      list.push({uuid: info.uuid, name: info.name, rdns: info.rdns, icon: info.icon})
-    }
-    this.pushEvent("wallet_connect:providers_discovered", {providers: list})
+    if (typeof this.unsubscribe === "function") this.unsubscribe()
   },
 
   handleClick(event) {
     if (!event.target.closest("#wallet-connect-btn")) return
     event.preventDefault()
-    // The single-button path uses the first announced provider, OR
-    // the legacy `window.ethereum` if no EIP-6963 wallets answered.
-    if (!this.selectedProvider) {
-      this.selectedProvider = this.firstAnnouncedProvider() || window.ethereum
-      if (this.selectedProvider) this.attachListenersTo(this.selectedProvider)
-    }
     this.beginConnect()
-  },
-
-  firstAnnouncedProvider() {
-    for (const {provider} of this.providers.values()) return provider
-    return null
   },
 
   attachListenersTo(provider) {
@@ -161,15 +134,8 @@ export const WalletConnect = {
     this.activeListenerProvider = null
   },
 
-  // Returns the provider the user picked, falling back to whichever
-  // wallet won `window.ethereum`. Always check non-null before use —
-  // e.g. an operator with NO wallet at all gets `:unavailable`.
-  provider() {
-    return this.selectedProvider || window.ethereum || null
-  },
-
   async beginConnect() {
-    const provider = this.provider()
+    const provider = getProvider()
     if (!provider) {
       this.pushEvent("wallet_connect:unavailable", {reason: "no_provider"})
       return
@@ -209,7 +175,7 @@ export const WalletConnect = {
   },
 
   handleChainChanged(_chainIdHex) {
-    const provider = this.provider()
+    const provider = getProvider()
     if (!provider) return
 
     provider
@@ -227,7 +193,7 @@ export const WalletConnect = {
   },
 
   async refreshState(account) {
-    const provider = this.provider()
+    const provider = getProvider()
     if (!provider) return
 
     try {
@@ -261,7 +227,7 @@ export const WalletConnect = {
       return
     }
 
-    const provider = this.provider()
+    const provider = getProvider()
     if (!provider) {
       this.pushEvent("wallet_connect:verify_error", {
         challenge_id: challengeId,

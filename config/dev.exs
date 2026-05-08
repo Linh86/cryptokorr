@@ -119,3 +119,17 @@ config :bank, Bank.Telegram.Config,
 # `config/runtime.exs` for the on-chain install verifier.
 config :bank, Bank.Chains.BalanceReader,
   rpc_url: System.get_env("BASE_SEPOLIA_RPC_URL") || "https://sepolia.base.org/"
+
+# Browser-signed install bundler URL — required for the ZeroDev SDK
+# in the browser to submit the install UserOperation against an
+# ERC-4337 bundler. No public unauthenticated bundler exists for
+# Base Sepolia, so set BASE_SEPOLIA_BUNDLER_RPC in your local env to
+# a paid bundler (Pimlico / ZeroDev / Stackup / Alchemy / Coinbase
+# CDP). The envelope endpoint falls back to a documented dummy URL
+# when unset so the dev server still boots, but the ZeroDev SDK will
+# fail loudly when it tries to hit `dev-no-bundler-configured` —
+# that's the signal to set the env var.
+config :bank, Bank.SessionPermissions.BrowserInstall,
+  bundler_rpc_url:
+    System.get_env("BASE_SEPOLIA_BUNDLER_RPC") ||
+      System.get_env("BUNDLER_URL")

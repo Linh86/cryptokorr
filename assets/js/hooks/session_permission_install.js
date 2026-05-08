@@ -2,8 +2,12 @@
 //
 // Drives the operator-facing flow for installing a Kernel session
 // permission with the user's wallet as the kernel root signer. The
-// signer of record is `window.ethereum` — never Phoenix, never
-// the chain adapter, never an operator/server private key.
+// signer of record is the EIP-6963 wallet the user picked from the
+// shared wallet registry (or, for single-wallet browsers, whichever
+// EIP-1193 provider answered the EIP-6963 broadcast — falling back
+// to `window.ethereum` on legacy single-injection wallets). It is
+// never Phoenix, never the chain adapter, never an operator/server
+// private key.
 //
 // ## State machine
 //
@@ -46,6 +50,7 @@
 
 import {fetchInstallEnvelope, postSubmittedAttestation, postConfirmedAttestation, postFailureAttestation, mapBeFailureCode} from "./install_envelope_client.js"
 import {submitInstall, classifySendError} from "./install_zerodev_client.js"
+import {startDiscovery, getProvider} from "../wallet_provider.js"
 
 const SUPPORTED_CHAIN_IDS = [84_532]
 // Pre-flight gas floor — refuse to construct SDK objects below
@@ -58,6 +63,11 @@ export const SessionPermissionInstall = {
   mounted() {
     this.handleClick = this.handleClick.bind(this)
     this.el.addEventListener("click", this.handleClick)
+    // Boot the shared EIP-6963 registry. Idempotent — the WalletConnect
+    // hook may have already started discovery; either way we'll see
+    // the same announced wallets and the user's selection via
+    // `getProvider()` once they pick from the wallet picker.
+    startDiscovery()
   },
 
   destroyed() {
@@ -74,7 +84,13 @@ export const SessionPermissionInstall = {
   },
 
   async beginInstall() {
-    const provider = window.ethereum
+    // Read the wallet the user picked from the multi-wallet picker
+    // (or the lone announced wallet, or legacy `window.ethereum`).
+    // The shared registry is updated synchronously from the server's
+    // `wallet_connect:use_provider` event handler in WalletConnect,
+    // so by the time the user clicks Install the right wallet is
+    // here.
+    const provider = getProvider()
     if (!provider) {
       this.pushEvent("session_permission_install:failed", {reason: "unknown"})
       return
@@ -109,6 +125,17 @@ export const SessionPermissionInstall = {
     // 4. Envelope chain check — defense in depth.
     if (envelope.chain_id !== SUPPORTED_CHAIN_IDS[0]) {
       this.pushEvent("session_permission_install:wrong_chain", {chain_id: envelope.chain_id})
+      return
+    }
+
+    // 4b. Bundler URL check — the ZeroDev SDK needs a real ERC-4337
+    //     bundler to submit the install UserOp. Phoenix returns null
+    //     when `BASE_SEPOLIA_BUNDLER_RPC` (or `BUNDLER_URL`) isn't set
+    //     in the environment; without it the SDK call would either
+    //     hang or fail with a cryptic network error. Fail fast here
+    //     with a categorised reason the UI can show instead.
+    if (!envelope.bundler_rpc_url || typeof envelope.bundler_rpc_url !== "string") {
+      this.pushEvent("session_permission_install:failed", {reason: "bundler_unavailable"})
       return
     }
 
