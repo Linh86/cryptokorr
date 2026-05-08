@@ -130,6 +130,11 @@ defmodule BankWeb.AgentLive do
       |> assign_new(:intent, fn -> :idle end)
       |> assign_new(:last_result, fn -> nil end)
       |> assign_new(:active_intent_id, fn -> nil end)
+      # EIP-6963 multi-wallet picker. The JS hook publishes the
+      # browser's announced provider list; we render a wallet picker
+      # when `length > 1`. Empty / single-entry list → fall back to
+      # the legacy "Connect wallet" button driving `window.ethereum`.
+      |> assign_new(:wallet_providers, fn -> [] end)
       # I4 — load_activity reads workspace audit slice via
       # Bank.Audit.list_events; falls back to [] when no scope.
       |> assign_new(:activity, fn -> load_activity(socket) end)
@@ -177,6 +182,41 @@ defmodule BankWeb.AgentLive do
 
   def handle_event("wallet_connect:unavailable", _params, socket) do
     {:noreply, reset_wallet(socket)}
+  end
+
+  # EIP-6963 wallet discovery — the hook reports every browser wallet
+  # that announced itself. We persist the list on the socket so the
+  # picker can render. The list is sanitised: only `uuid` (server uses
+  # this to dispatch back), `name`, `rdns`, and `icon` (data URL set
+  # by the wallet) cross the trust boundary.
+  def handle_event("wallet_connect:providers_discovered", %{"providers" => providers}, socket)
+      when is_list(providers) do
+    sanitised =
+      providers
+      |> Enum.map(fn p ->
+        %{
+          "uuid" => to_string_or_nil(Map.get(p, "uuid")),
+          "name" => to_string_or_nil(Map.get(p, "name")),
+          "rdns" => to_string_or_nil(Map.get(p, "rdns")),
+          "icon" => to_string_or_nil(Map.get(p, "icon"))
+        }
+      end)
+      |> Enum.filter(fn p -> p["uuid"] && p["name"] end)
+
+    {:noreply, assign(socket, :wallet_providers, sanitised)}
+  end
+
+  # The user clicked a wallet entry in the multi-wallet picker. We
+  # push back to the hook with the chosen `uuid`; the hook resolves it
+  # to the matching provider and starts `beginConnect` against that
+  # provider only. This is the entire dispatch — the hook owns the
+  # wallet object, the server only sees the resulting state events.
+  def handle_event("wallet_connect:select_provider", %{"uuid" => uuid}, socket)
+      when is_binary(uuid) do
+    case Enum.find(socket.assigns[:wallet_providers] || [], &(&1["uuid"] == uuid)) do
+      nil -> {:noreply, socket}
+      _entry -> {:noreply, push_event(socket, "wallet_connect:use_provider", %{uuid: uuid})}
+    end
   end
 
   def handle_event("wallet_connect:connecting", _params, socket) do
@@ -1276,7 +1316,12 @@ defmodule BankWeb.AgentLive do
       </header>
 
       <div class="ac__col">
-        <.wallet_card wallet={@wallet} address={@address} balance={@balance_usdc} />
+        <.wallet_card
+          wallet={@wallet}
+          address={@address}
+          balance={@balance_usdc}
+          providers={@wallet_providers}
+        />
         <.permission_card
           wallet={@wallet}
           permission={@permission}
@@ -1522,4 +1567,11 @@ defmodule BankWeb.AgentLive do
 
   defp delegation_retry_revoke?(%Delegation{state: :revoke_failed}), do: true
   defp delegation_retry_revoke?(_), do: false
+
+  # EIP-6963 wallet picker payloads cross the JS↔server boundary as
+  # plain maps. Coerce non-string fields to nil so the LiveView never
+  # propagates a non-binary value into HTML attributes (where it would
+  # fail HEEx attribute encoding).
+  defp to_string_or_nil(value) when is_binary(value), do: value
+  defp to_string_or_nil(_), do: nil
 end

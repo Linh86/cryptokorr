@@ -113,6 +113,119 @@ defmodule BankWeb.AgentLive.WalletCardTest do
   # spinner + "Open your wallet to approve…" affordance immediately.
   # Without it the click looks like a no-op while MetaMask's popup is
   # queued behind another window.
+  # EIP-6963 wallet picker. When the JS hook reports >1 announced
+  # wallet, the card MUST render a per-wallet button instead of the
+  # single "Connect wallet" CTA — Trust + MetaMask installed together
+  # used to silently hijack `window.ethereum` based on injection
+  # order. The picker breaks the tie by asking the user.
+  describe "EIP-6963 wallet picker" do
+    test "single announced provider renders single Connect button labeled with the wallet name",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      html =
+        render_hook(view, "wallet_connect:providers_discovered", %{
+          "providers" => [
+            %{
+              "uuid" => "uuid-1",
+              "name" => "MetaMask",
+              "rdns" => "io.metamask",
+              "icon" => "data:image/svg+xml,..."
+            }
+          ]
+        })
+
+      assert html =~ ~s(id="wallet-connect-btn")
+      assert html =~ "Connect MetaMask"
+      refute html =~ "cb-wallet-picker"
+    end
+
+    test "multiple announced providers render the wallet picker, no single button", %{
+      conn: conn
+    } do
+      {:ok, view, _html} = live(conn, "/")
+
+      html =
+        render_hook(view, "wallet_connect:providers_discovered", %{
+          "providers" => [
+            %{
+              "uuid" => "uuid-mm",
+              "name" => "MetaMask",
+              "rdns" => "io.metamask",
+              "icon" => nil
+            },
+            %{
+              "uuid" => "uuid-tw",
+              "name" => "Trust Wallet",
+              "rdns" => "com.trustwallet.app",
+              "icon" => nil
+            }
+          ]
+        })
+
+      assert html =~ "cb-wallet-picker"
+      assert html =~ "MetaMask"
+      assert html =~ "Trust Wallet"
+      # `phx-click="wallet_connect:select_provider"` + the uuid for
+      # each wallet — server's select_provider handler needs the uuid
+      # to dispatch back to the hook.
+      assert html =~ ~s(phx-value-uuid="uuid-mm")
+      assert html =~ ~s(phx-value-uuid="uuid-tw")
+      # Single-button path is suppressed when picker shows.
+      refute html =~ ~s(id="wallet-connect-btn")
+    end
+
+    test "select_provider event pushes wallet_connect:use_provider back to the hook", %{
+      conn: conn
+    } do
+      {:ok, view, _html} = live(conn, "/")
+
+      _ =
+        render_hook(view, "wallet_connect:providers_discovered", %{
+          "providers" => [
+            %{"uuid" => "uuid-mm", "name" => "MetaMask", "rdns" => "io.metamask", "icon" => nil},
+            %{
+              "uuid" => "uuid-tw",
+              "name" => "Trust Wallet",
+              "rdns" => "com.trustwallet.app",
+              "icon" => nil
+            }
+          ]
+        })
+
+      # `render_click` walks the picker button in the rendered HTML and
+      # fires its phx-click event with the embedded phx-value-uuid.
+      view |> element(~s([phx-value-uuid="uuid-mm"])) |> render_click()
+
+      # Phoenix.LiveViewTest stores server-pushed events in the
+      # rendered output; assert the hook will receive the
+      # use_provider directive with the chosen uuid.
+      assert_push_event(view, "wallet_connect:use_provider", %{uuid: "uuid-mm"})
+    end
+
+    test "non-string fields in providers payload are coerced to nil and dropped", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      html =
+        render_hook(view, "wallet_connect:providers_discovered", %{
+          "providers" => [
+            # Valid entry passes through.
+            %{"uuid" => "ok", "name" => "Real", "rdns" => "io.real", "icon" => nil},
+            # Missing uuid → dropped.
+            %{"uuid" => nil, "name" => "NoUUID", "rdns" => "x", "icon" => nil},
+            # Missing name → dropped.
+            %{"uuid" => "u", "name" => nil, "rdns" => "x", "icon" => nil},
+            # Non-binary uuid → coerced to nil → dropped.
+            %{"uuid" => 42, "name" => "BadUUID", "rdns" => "x", "icon" => nil}
+          ]
+        })
+
+      assert html =~ "Real"
+      refute html =~ "NoUUID"
+      refute html =~ "BadUUID"
+    end
+  end
+
   describe "wallet_connect:connecting event flow" do
     test "flips the wallet card into the :connecting variant", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/")

@@ -21,6 +21,10 @@ defmodule BankWeb.AgentLive.WalletCard do
   attr :address, :string, default: nil
   attr :balance, :any, required: true
 
+  attr :providers, :list,
+    default: [],
+    doc: "EIP-6963 announced providers (each %{\"uuid\", \"name\", \"rdns\", \"icon\"})"
+
   def wallet_card(assigns) do
     ~H"""
     <div id="wallet-card" phx-hook="WalletConnect">
@@ -35,9 +39,45 @@ defmodule BankWeb.AgentLive.WalletCard do
             Connect a browser wallet to begin. The agent never holds keys — it only acts under
             a permission you install.
           </p>
-          <div class="card__actions">
+          <%!--
+            Multi-wallet picker (EIP-6963). When more than one browser
+            wallet announces itself (e.g. Trust + MetaMask both fight
+            over `window.ethereum`), pick which one to use explicitly
+            instead of letting whichever wallet won the last-write
+            race silently hijack the connect flow.
+          --%>
+          <div :if={length(@providers) > 1} class="cb-wallet-picker">
+            <div class="cb-wallet-picker__head">Choose a wallet</div>
+            <ul class="cb-wallet-picker__list">
+              <li :for={provider <- @providers}>
+                <button
+                  type="button"
+                  class="cb-wallet-picker__btn"
+                  phx-click="wallet_connect:select_provider"
+                  phx-value-uuid={provider["uuid"]}
+                >
+                  <img
+                    :if={provider["icon"]}
+                    src={provider["icon"]}
+                    alt=""
+                    class="cb-wallet-picker__icon"
+                    width="20"
+                    height="20"
+                  />
+                  <span class="cb-wallet-picker__name">{provider["name"]}</span>
+                </button>
+              </li>
+            </ul>
+          </div>
+          <div :if={length(@providers) <= 1} class="card__actions">
             <button id="wallet-connect-btn" type="button" class="btn btn--primary">
-              <.cb_icon name="wallet" size={14} /> Connect wallet
+              <.cb_icon name="wallet" size={14} />
+              <%= case @providers do %>
+                <% [%{"name" => name}] -> %>
+                  Connect {name}
+                <% _ -> %>
+                  Connect wallet
+              <% end %>
             </button>
             <span class="hint">MetaMask, Rabby, Coinbase Wallet</span>
           </div>
