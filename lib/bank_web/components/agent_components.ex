@@ -260,36 +260,26 @@ defmodule BankWeb.AgentComponents do
   end
 
   # ── Scope list ─────────────────────────────────────────────────────
-  # Default permission scope copy. Matches `PERMS_ALLOW` / `PERMS_DENY`
-  # in agent-control.jsx. Ship `list` only per README handoff.
-
-  @perms_allow [
-    %{
-      icon: "swap",
-      label: "Swap USDC through 0x",
-      detail: "Aggregator quotes only · slippage you choose"
-    },
-    %{
-      icon: "vault",
-      label: "Deposit USDC into allowlisted Morpho vaults",
-      detail: "Curated allowlist · withdrawal stays with you"
-    },
-    %{
-      icon: "arrow-right",
-      label: "Transfer USDC within configured limits",
-      detail: "Per-intent and daily caps you set"
-    }
-  ]
-
-  @perms_deny [
-    %{label: "Withdraw from Morpho"},
-    %{label: "Call arbitrary contracts"},
-    %{label: "Move unsupported tokens"},
-    %{label: "Exceed configured limits"}
-  ]
+  # Reads from `Bank.SessionPermissions.Scope.default/0` so the on-screen
+  # copy stays in lockstep with the canonical scope persisted on the
+  # delegation row and audited at install time.
 
   def scope_list(assigns) do
-    assigns = assign(assigns, allow: @perms_allow, deny: @perms_deny)
+    scope = Bank.SessionPermissions.Scope.default()
+
+    allow =
+      Enum.map(scope["allowed"], fn entry ->
+        %{
+          icon: icon_for_kind(entry["kind"]),
+          label: entry["label"],
+          detail: entry["rationale"]
+        }
+      end)
+
+    deny =
+      Enum.map(scope["denied"], fn entry -> %{label: entry["label"]} end)
+
+    assigns = assign(assigns, allow: allow, deny: deny)
 
     ~H"""
     <div class="scope">
@@ -316,6 +306,11 @@ defmodule BankWeb.AgentComponents do
     </div>
     """
   end
+
+  defp icon_for_kind("zero_x_swap"), do: "swap"
+  defp icon_for_kind("morpho_4626_deposit"), do: "vault"
+  defp icon_for_kind("usdc_transfer"), do: "arrow-right"
+  defp icon_for_kind(_), do: "check"
 
   # ── Activity row ───────────────────────────────────────────────────
   # Used by both the compact strip on Agent Control and the full
