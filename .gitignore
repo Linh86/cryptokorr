@@ -58,3 +58,9 @@ dist/
 /chain_adapter/.env
 /chain_adapter/.env.*
 !/chain_adapter/.env.*.example
+
+# Claude Code session data + temp worktrees. Not part of the app.
+/.claude/
+
+# Local-only ops scratch (worker prompts/reports/backups). Not shipped.
+/control-tower/
