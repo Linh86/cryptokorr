@@ -245,35 +245,12 @@ defmodule BankWeb.AgentLive.TestIntentCardTest do
     end
   end
 
-  describe "approve flow — role gating" do
-    test "Approve once is disabled for viewer-tier users" do
-      {:ok, ctx} = register_and_log_in_user_with_role(%{conn: build_conn()}, :viewer)
-      conn = ctx[:conn]
-
-      {:ok, view, _} = live(conn, "/")
-      activate_permission!(view)
-
-      view |> element("button", "Run test intent") |> render_click()
-      intent = latest_intent()
-
-      envelope =
-        decision_envelope(
-          intent: intent,
-          outcome: :approval_required,
-          state: :pending_decision,
-          current: true,
-          approval_expires_at: ~U[2030-01-01 00:00:00Z]
-        )
-
-      broadcast_decision(intent.id, envelope.id, :approval_required)
-
-      html = render(view)
-
-      assert html =~ "Approve once"
-      assert html =~ "is-disabled"
-      assert html =~ "Operator role required to approve"
-    end
-  end
+  # Role gate moved up to the live_session: viewers redirect to
+  # /unauthorized at mount, so they never see the Approve button.
+  # The button-disabled defense-in-depth in test_intent_card.ex
+  # stays put for safety, but the dedicated test was deleted in
+  # the hardening sprint — the live_auth_rbac_test now pins viewer
+  # rejection at the router level.
 
   describe "approve flow — operator path" do
     setup :register_and_log_in_user

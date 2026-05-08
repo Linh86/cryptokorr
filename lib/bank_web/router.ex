@@ -406,11 +406,14 @@ defmodule BankWeb.Router do
     end
 
     # Plynn redesign — three-screen private-alpha UI (Agent / Activity
-    # / Advanced) at the root. The old operator console moved to
-    # `/legacy/control`; phase 2 wires real wallet/permission/intent
-    # state and ports the remaining operator surfaces under Advanced.
+    # / Advanced) at the root. Gated behind `:require_role, :operator`
+    # because every screen ships at least one mutation surface (wallet
+    # bind, install permission, run intent, revoke). The shared
+    # TopBar Stop button + GlobalState revoke flow is enabled on all
+    # three screens, so even the read-leaning Activity / Advanced
+    # screens need the operator-tier gate.
     live_session :agent_alpha,
-      on_mount: {BankWeb.LiveAuth, {:require_role, :viewer}} do
+      on_mount: {BankWeb.LiveAuth, {:require_role, :operator}} do
       live "/", AgentLive
       live "/activity", AgentActivityLive
       live "/advanced", AgentAdvancedLive

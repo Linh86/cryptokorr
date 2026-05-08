@@ -72,14 +72,23 @@ defmodule BankWeb.LiveAuthRBACTest do
 
   describe "anonymous user (no session)" do
     test "every operator-required LiveView redirects to /login", %{conn: conn} do
-      for path <- ["/legacy/control", "/queue", "/counterparties", "/policies", "/security"] do
+      for path <- [
+            "/",
+            "/activity",
+            "/advanced",
+            "/legacy/control",
+            "/queue",
+            "/counterparties",
+            "/policies",
+            "/security"
+          ] do
         assert {:error, {:redirect, %{to: "/login"}}} = live(conn, path),
                "expected #{path} to redirect anonymous to /login"
       end
     end
 
     test "viewer-readable LiveView also redirects anonymous to /login", %{conn: conn} do
-      for path <- ["/", "/dashboard", "/intents", "/audit", "/activity", "/advanced"] do
+      for path <- ["/dashboard", "/intents", "/audit"] do
         assert {:error, {:redirect, %{to: "/login"}}} = live(conn, path),
                "expected #{path} to redirect anonymous to /login"
       end
@@ -117,7 +126,7 @@ defmodule BankWeb.LiveAuthRBACTest do
     test "can mount viewer-readable explorer pages" do
       {conn, _user, _ws} = authed_conn_with_role(:viewer)
 
-      for path <- ["/", "/dashboard", "/intents", "/audit", "/activity", "/advanced"] do
+      for path <- ["/dashboard", "/intents", "/audit"] do
         assert {:ok, _view, _html} = live(conn, path), "expected viewer to mount #{path}"
       end
     end
@@ -125,7 +134,16 @@ defmodule BankWeb.LiveAuthRBACTest do
     test "is redirected from operator-required pages to /unauthorized" do
       {conn, _user, _ws} = authed_conn_with_role(:viewer)
 
-      for path <- ["/legacy/control", "/queue", "/counterparties", "/policies", "/security"] do
+      for path <- [
+            "/",
+            "/activity",
+            "/advanced",
+            "/legacy/control",
+            "/queue",
+            "/counterparties",
+            "/policies",
+            "/security"
+          ] do
         assert {:error, {:redirect, %{to: "/unauthorized"}}} = live(conn, path),
                "expected viewer at #{path} to redirect to /unauthorized"
       end
@@ -136,7 +154,16 @@ defmodule BankWeb.LiveAuthRBACTest do
     test "mounts every operator console page" do
       {conn, _user, _ws} = authed_conn_with_role(:operator)
 
-      for path <- ["/legacy/control", "/queue", "/counterparties", "/policies", "/security"] do
+      for path <- [
+            "/",
+            "/activity",
+            "/advanced",
+            "/legacy/control",
+            "/queue",
+            "/counterparties",
+            "/policies",
+            "/security"
+          ] do
         assert {:ok, _view, _html} = live(conn, path), "expected operator to mount #{path}"
       end
     end
@@ -144,7 +171,7 @@ defmodule BankWeb.LiveAuthRBACTest do
     test "also mounts viewer-readable pages (role hierarchy)" do
       {conn, _user, _ws} = authed_conn_with_role(:operator)
 
-      for path <- ["/", "/dashboard", "/intents", "/audit", "/activity", "/advanced"] do
+      for path <- ["/dashboard", "/intents", "/audit"] do
         assert {:ok, _view, _html} = live(conn, path)
       end
     end
@@ -154,7 +181,17 @@ defmodule BankWeb.LiveAuthRBACTest do
     test "admin mounts every operator and viewer page" do
       {conn, _user, _ws} = authed_conn_with_role(:admin)
 
-      for path <- ["/", "/legacy/control", "/queue", "/counterparties", "/policies", "/security", "/dashboard"] do
+      for path <- [
+            "/",
+            "/activity",
+            "/advanced",
+            "/legacy/control",
+            "/queue",
+            "/counterparties",
+            "/policies",
+            "/security",
+            "/dashboard"
+          ] do
         assert {:ok, _view, _html} = live(conn, path)
       end
     end
@@ -162,7 +199,17 @@ defmodule BankWeb.LiveAuthRBACTest do
     test "owner mounts every operator and viewer page" do
       {conn, _user, _ws} = authed_conn_with_role(:owner)
 
-      for path <- ["/", "/legacy/control", "/queue", "/counterparties", "/policies", "/security", "/dashboard"] do
+      for path <- [
+            "/",
+            "/activity",
+            "/advanced",
+            "/legacy/control",
+            "/queue",
+            "/counterparties",
+            "/policies",
+            "/security",
+            "/dashboard"
+          ] do
         assert {:ok, _view, _html} = live(conn, path)
       end
     end
