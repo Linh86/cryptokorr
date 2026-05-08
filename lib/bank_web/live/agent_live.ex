@@ -20,6 +20,10 @@ defmodule BankWeb.AgentLive do
   use BankWeb, :live_view
 
   import BankWeb.AgentComponents
+  import BankWeb.AgentLive.WalletCard
+  import BankWeb.AgentLive.PermissionCard
+  import BankWeb.AgentLive.TestIntentCard
+  import BankWeb.AgentLive.ActivityStrip
   alias BankWeb.AgentLayouts
 
   @seed_activity [
@@ -361,7 +365,7 @@ defmodule BankWeb.AgentLive do
             <span class="mono">{mode(@mode).label}</span>
           </.data_row>
           <.data_row label="Permission">
-            <.status_pill kind={permission_kind(@permission)} size="sm" />
+            <.status_pill kind={permission_pill_kind(@permission)} size="sm" />
           </.data_row>
         </div>
       </header>
@@ -394,135 +398,10 @@ defmodule BankWeb.AgentLive do
     "Non-custodial. The agent never holds your keys — it acts under a permission you install and can revoke instantly."
   end
 
-  # ── Section 1: Wallet status ──────────────────────────────────────
-
-  attr :wallet, :atom, required: true
-  attr :address, :string, default: nil
-  attr :balance, :any, required: true
-
-  defp wallet_card(assigns) do
-    ~H"""
-    <.card>
-      <.card_header eyebrow="01 — Wallet" title="Wallet status">
-        <:right>
-          <.status_pill kind={wallet_pill_kind(@wallet)} />
-        </:right>
-      </.card_header>
-      <div :if={@wallet == :disconnected} class="card__body">
-        <p class="lede">
-          Connect a browser wallet to begin. The agent never holds keys — it only acts under
-          a permission you install.
-        </p>
-        <div class="card__actions">
-          <button type="button" class="btn btn--primary" phx-click="wallet:connect">
-            <.cb_icon name="wallet" size={14} /> Connect wallet
-          </button>
-          <span class="hint">MetaMask, Rabby, Coinbase Wallet</span>
-        </div>
-      </div>
-      <div :if={@wallet == :wrong_network} class="card__body">
-        <p class="lede">
-          Your wallet is on a different network. CryptoBank only operates on Base Sepolia
-          during private alpha.
-        </p>
-        <div class="card__actions">
-          <button type="button" class="btn btn--warn" phx-click="wallet:switch_network">
-            <.cb_icon name="warning" size={14} /> Switch to Base Sepolia
-          </button>
-        </div>
-      </div>
-      <div :if={@wallet == :connected} class="card__body card__body--rows">
-        <.data_row label="Address">
-          <span class="mono">{@address}</span>
-          <a class="link-mute" href="#">
-            View on BaseScan <.cb_icon name="external" size={12} />
-          </a>
-        </.data_row>
-        <.data_row label="Network">
-          Base Sepolia · chain 84532
-        </.data_row>
-        <.data_row label="USDC balance">
-          <span class="mono tnum">{format_usdc(@balance)}</span>
-        </.data_row>
-      </div>
-    </.card>
-    """
-  end
-
-  defp wallet_pill_kind(:connected), do: "connected"
-  defp wallet_pill_kind(:wrong_network), do: "wrong-network"
-  defp wallet_pill_kind(_), do: "disconnected"
-
-  # ── Section 2: Agent permission ────────────────────────────────────
-
-  attr :wallet, :atom, required: true
-  attr :permission, :atom, required: true
-
-  defp permission_card(assigns) do
-    ~H"""
-    <.card>
-      <.card_header eyebrow="02 — Permission" title="Agent permission">
-        <:right>
-          <.status_pill kind={permission_kind(@permission)} />
-        </:right>
-      </.card_header>
-      <div class="card__body">
-        <.banner :if={@permission == :expired} kind="warn">
-          The previous permission expired. Reinstall to bring the agent back online.
-        </.banner>
-        <.banner :if={@permission == :failed} kind="danger">
-          Last install failed: user rejected signature. No permission is in place.
-        </.banner>
-        <.banner :if={@permission == :revoked} kind="info">
-          You revoked the permission. The agent cannot move funds. Reinstall when ready.
-        </.banner>
-        <.scope_list />
-        <div :if={show_install?(@permission)} class="card__actions">
-          <button
-            type="button"
-            class={["btn btn--primary", @wallet != :connected && "is-disabled"]}
-            disabled={@wallet != :connected}
-            phx-click="permission:install"
-            title={if(@wallet == :connected, do: "Install permission", else: "Connect wallet first")}
-          >
-            <.cb_icon name="lock" size={14} /> Install permission
-          </button>
-          <span class="hint">
-            You'll sign one EIP-712 message · permission is stored on-chain
-          </span>
-        </div>
-        <div :if={@permission == :installing} class="card__actions">
-          <div class="installing-row">
-            <div class="spinner"></div>
-            <span>Waiting for signature in your wallet…</span>
-          </div>
-        </div>
-        <div :if={@permission == :active} class="card__body--rows" style="margin-top: 6px;">
-          <.data_row label="Installed">Today, 14:02 · expires in 7 days</.data_row>
-          <.data_row label="Smart account">
-            <span class="mono">0xKern…91ae</span>
-            <span class="hint">ZeroDev / Kernel v3</span>
-          </.data_row>
-          <.data_row label="Session limit">
-            <span class="mono tnum">100.00 USDC</span>
-            · daily <span class="mono tnum">500.00 USDC</span>
-          </.data_row>
-          <div class="card__actions" style="padding-top: 12px;">
-            <button type="button" class="btn btn--ghost-danger" phx-click="permission:revoke">
-              <.cb_icon name="stop" size={14} /> Revoke permission
-            </button>
-          </div>
-        </div>
-      </div>
-    </.card>
-    """
-  end
-
-  defp show_install?(p) when p in [:not_installed, :revoked, :expired, :failed], do: true
-  defp show_install?(_), do: false
-
-  defp permission_kind(:not_installed), do: "not-installed"
-  defp permission_kind(other), do: Atom.to_string(other) |> String.replace("_", "-")
+  # Local copy of `permission_card/1`'s pill mapping — kept inline so
+  # the hero meta row doesn't need to import the card module.
+  defp permission_pill_kind(:not_installed), do: "not-installed"
+  defp permission_pill_kind(other), do: Atom.to_string(other) |> String.replace("_", "-")
 
   # ── Section 3: Agent mode ──────────────────────────────────────────
 
@@ -642,153 +521,6 @@ defmodule BankWeb.AgentLive do
     """
   end
 
-  # ── Section 4: Test intent ─────────────────────────────────────────
-
-  attr :mode, :string, required: true
-  attr :intent, :atom, required: true
-  attr :last_result, :map, default: nil
-  attr :permission, :atom, required: true
-
-  defp test_intent_card(assigns) do
-    ex = intent_example(assigns.mode)
-    running? = assigns.intent == :executing
-    locked? = assigns.permission != :active
-    assigns = assign(assigns, ex: ex, running?: running?, locked?: locked?)
-
-    ~H"""
-    <.card>
-      <.card_header eyebrow="04 — Test" title="Test intent">
-        <:right>
-          <span class="hint">Sandbox · stays on Base Sepolia</span>
-        </:right>
-      </.card_header>
-      <div class="card__body">
-        <div class="test__top">
-          <div>
-            <div class="test__title">{@ex.title}</div>
-            <div class="test__sub">{@ex.body}</div>
-          </div>
-          <button
-            type="button"
-            class="btn btn--primary"
-            disabled={@locked? or @running?}
-            phx-click="intent:run"
-          >
-            <span :if={@running?} class="spinner spinner--sm"></span>
-            <%= if @running? do %>
-              Running…
-            <% else %>
-              <.cb_icon name="play" size={14} /> Run test intent
-            <% end %>
-          </button>
-        </div>
-        <.intent_result :if={@last_result} result={@last_result} />
-        <div :if={@locked? and is_nil(@last_result)} class="test__locked">
-          <.cb_icon name="lock" size={14} /> Install agent permission to run a test intent.
-        </div>
-      </div>
-    </.card>
-    """
-  end
-
-  attr :result, :map, required: true
-
-  defp intent_result(assigns) do
-    cfg = intent_result_cfg(assigns.result)
-    assigns = assign(assigns, :cfg, cfg)
-
-    ~H"""
-    <div class={["intent-result", "intent-result--#{@cfg.kind}"]}>
-      <div class="intent-result__icon">
-        <.cb_icon name={@cfg.icon} size={16} stroke={2.0} />
-      </div>
-      <div class="intent-result__main">
-        <div class="intent-result__title">{@cfg.title}</div>
-        <div class="intent-result__body">{@cfg.body}</div>
-        <div class="intent-result__meta mono">
-          <span :if={@result[:tx_hash]}>tx {@result.tx_hash}</span>
-          <a class="link-mute" href="#">View details <.cb_icon name="chevron-right" size={11} /></a>
-        </div>
-      </div>
-      <button
-        :if={@result.state == "needs-approval"}
-        type="button"
-        class="btn btn--secondary"
-        phx-click="intent:approve"
-      >
-        Approve once
-      </button>
-    </div>
-    """
-  end
-
-  defp intent_result_cfg(%{state: "executed", action: action}) do
-    %{
-      kind: "ok",
-      icon: "check",
-      title: "Intent executed",
-      body: "#{action} settled on Base Sepolia. Funds remained inside permission scope."
-    }
-  end
-
-  defp intent_result_cfg(%{state: "blocked", reason: reason}) do
-    %{
-      kind: "danger",
-      icon: "x",
-      title: "Intent blocked",
-      body:
-        reason ||
-          "Slippage 1.4% exceeds your 0.5% limit. The agent did not submit the transaction."
-    }
-  end
-
-  defp intent_result_cfg(%{state: "needs-approval"}) do
-    %{
-      kind: "warn",
-      icon: "info",
-      title: "Needs your approval",
-      body:
-        "This intent is over the per-trade limit. Approve once, or raise the limit to let the agent proceed automatically next time."
-    }
-  end
-
-  defp intent_result_cfg(%{state: "failed"}) do
-    %{
-      kind: "danger",
-      icon: "warning",
-      title: "Intent failed",
-      body:
-        "The simulator returned an error from 0x. No funds moved. We logged the trace under Activity."
-    }
-  end
-
-  # ── Section 5: Recent activity (compact strip) ────────────────────
-
-  attr :activity, :list, required: true
-
-  defp activity_strip(assigns) do
-    visible = Enum.take(assigns.activity, 5)
-    assigns = assign(assigns, :visible, visible)
-
-    ~H"""
-    <.card>
-      <.card_header eyebrow="05 — Activity" title="Recent activity">
-        <:right>
-          <.link navigate={~p"/activity"} class="link-btn">
-            See all <.cb_icon name="chevron-right" size={12} />
-          </.link>
-        </:right>
-      </.card_header>
-      <ol class="timeline">
-        <li :if={@visible == []} class="timeline__empty">
-          No activity yet. Run a test intent to populate this.
-        </li>
-        <.activity_row :for={item <- @visible} item={item} />
-      </ol>
-    </.card>
-    """
-  end
-
   # ── Section 6: Emergency stop ─────────────────────────────────────
 
   attr :permission, :atom, required: true
@@ -825,13 +557,4 @@ defmodule BankWeb.AgentLive do
     """
   end
 
-  # ── Helpers ─────────────────────────────────────────────────────────
-
-  defp format_usdc(%Decimal{} = d) do
-    rounded = Decimal.round(d, 2) |> Decimal.to_string(:normal)
-    "#{rounded} USDC"
-  end
-
-  defp format_usdc(n) when is_number(n),
-    do: :erlang.float_to_binary(n / 1, decimals: 2) <> " USDC"
 end
