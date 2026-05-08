@@ -2,32 +2,40 @@ defmodule BankWeb.AgentLive.TestIntentCard do
   @moduledoc """
   Section 4 — Test intent. Render-only function component.
 
-  All state (intent, last_result, mode, permission) lives in
+  All state (intent, last_result, mode, permission, user_role) lives in
   `BankWeb.AgentLive`. Run / approve events fire on the parent.
 
-  Phase 2 will:
-  - Replace the dummy `intent:run` handler with `Bank.Intents.submit/2`
-    (workspace-scoped) using the per-mode payload
-  - Subscribe to `Bank.Runtime.PubSub.intent(intent_id)` after submit
-  - Map `:auto_exec | :hold | :approval_required | :block` outcomes
-    + execution events to the design's 4 IntentResult variants
-  - Wire `Approve once` through `Bank.Decisions.approve/2` (operator+
-    role required — disabled with tooltip otherwise)
+  Wiring (phase 2, complete):
+  - The parent `intent:run` handler calls `Bank.Intents.submit/2`
+    (workspace-scoped) using a per-mode payload that always pins
+    `chain: "base-sepolia"` for sandbox safety.
+  - The parent subscribes to `Bank.Runtime.PubSub.intent(intent_id)`
+    after submit, mapping `:auto_exec | :hold | :approval_required |
+    :block` outcomes plus execution events to the design's four
+    IntentResult variants (executed / blocked / needs-approval /
+    failed).
+  - `Approve once` routes through `Bank.Decisions.approve/2`. Operator+
+    role is required (`BankWeb.LiveAuth.authorize_action/2`); for
+    viewer-tier users the button renders as disabled with a tooltip.
   """
   use Phoenix.Component
 
   import BankWeb.AgentComponents
 
+  alias Bank.Workspaces.Membership
+
   attr :mode, :string, required: true
   attr :intent, :atom, required: true, doc: ":idle | :executing | :executed | :blocked | :needs_approval | :failed"
   attr :last_result, :map, default: nil
   attr :permission, :atom, required: true
+  attr :user_role, :atom, default: :viewer
 
   def test_intent_card(assigns) do
     ex = intent_example(assigns.mode)
     running? = assigns.intent == :executing
     locked? = assigns.permission != :active
-    assigns = assign(assigns, ex: ex, running?: running?, locked?: locked?)
+    approve_allowed? = approve_allowed?(assigns.user_role)
+    assigns = assign(assigns, ex: ex, running?: running?, locked?: locked?, approve_allowed?: approve_allowed?)
 
     ~H"""
     <.card>
@@ -56,7 +64,11 @@ defmodule BankWeb.AgentLive.TestIntentCard do
             <% end %>
           </button>
         </div>
-        <.intent_result :if={@last_result} result={@last_result} />
+        <.intent_result
+          :if={@last_result}
+          result={@last_result}
+          approve_allowed?={@approve_allowed?}
+        />
         <div :if={@locked? and is_nil(@last_result)} class="test__locked">
           <.cb_icon name="lock" size={14} /> Install agent permission to run a test intent.
         </div>
@@ -66,6 +78,7 @@ defmodule BankWeb.AgentLive.TestIntentCard do
   end
 
   attr :result, :map, required: true
+  attr :approve_allowed?, :boolean, default: false
 
   defp intent_result(assigns) do
     cfg = result_cfg(assigns.result)
@@ -87,7 +100,13 @@ defmodule BankWeb.AgentLive.TestIntentCard do
       <button
         :if={@result.state == "needs-approval"}
         type="button"
-        class="btn btn--secondary"
+        class={["btn btn--secondary", not @approve_allowed? && "is-disabled"]}
+        disabled={not @approve_allowed?}
+        title={
+          if @approve_allowed?,
+            do: "Approve this intent once",
+            else: "Operator role required to approve"
+        }
         phx-click="intent:approve"
       >
         Approve once
@@ -95,6 +114,8 @@ defmodule BankWeb.AgentLive.TestIntentCard do
     </div>
     """
   end
+
+  defp approve_allowed?(role), do: Membership.role_at_least?(role, :operator)
 
   defp result_cfg(%{state: "executed", action: action}) do
     %{
@@ -116,23 +137,25 @@ defmodule BankWeb.AgentLive.TestIntentCard do
     }
   end
 
-  defp result_cfg(%{state: "needs-approval"}) do
+  defp result_cfg(%{state: "needs-approval"} = result) do
     %{
       kind: "warn",
       icon: "info",
       title: "Needs your approval",
       body:
-        "This intent is over the per-trade limit. Approve once, or raise the limit to let the agent proceed automatically next time."
+        result[:reason] ||
+          "This intent is over the per-trade limit. Approve once, or raise the limit to let the agent proceed automatically next time."
     }
   end
 
-  defp result_cfg(%{state: "failed"}) do
+  defp result_cfg(%{state: "failed"} = result) do
     %{
       kind: "danger",
       icon: "warning",
       title: "Intent failed",
       body:
-        "The simulator returned an error from 0x. No funds moved. We logged the trace under Activity."
+        result[:reason] ||
+          "The runtime returned an error. No funds moved. We logged the trace under Activity."
     }
   end
 end

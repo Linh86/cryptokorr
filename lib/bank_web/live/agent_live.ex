@@ -10,10 +10,20 @@ defmodule BankWeb.AgentLive do
     5. Recent activity (top 5 strip)
     6. Emergency stop
 
-  Phase 2 (wallet section): the wallet card now drives the real
-  EIP-1193 `WalletConnect` JS hook + `Bank.WalletBindings`
-  challenge / verify flow. Permission, mode, intent, and activity
-  remain on dummy state pending sibling phase 2 worktrees.
+  Phase 2 (in progress):
+    * Wallet (section 1) — real `WalletConnect` JS hook + the
+      `Bank.WalletBindings` challenge/verify flow.
+    * Permission (section 2) — real `SessionPermissionInstall` JS
+      hook + `Bank.SessionPermissions.BrowserInstall` envelope /
+      attestation flow; revoke goes through `Bank.Security`.
+    * Test intent (section 4) — `Bank.Intents.submit/2` evaluation
+      pipeline + `Bank.Decisions.approve/2`. The LiveView subscribes
+      to `Bank.Runtime.PubSub.intent(intent_id)` after submit and
+      maps decision/execution events to the four IntentResult
+      variants (executed / blocked / needs-approval / failed). All
+      payloads pinned to `chain: "base-sepolia"`.
+    * Activity feed (section 5) — phase 3 wires the audit:stream
+      subscription; today still uses seed data when no wiring yet.
   """
   use BankWeb, :live_view
 
@@ -29,6 +39,8 @@ defmodule BankWeb.AgentLive do
   alias Bank.WalletBindings
   alias Bank.WalletBindings.WalletBinding
   alias BankWeb.AgentLayouts
+  alias BankWeb.LiveAuth
+  alias Bank.Runtime.PubSub, as: RuntimePubSub
 
   @seed_activity [
     %{
@@ -73,9 +85,11 @@ defmodule BankWeb.AgentLive do
       # :wallet_binding via assign/3. Done first so the permission
       # card's `refresh_delegation` can read :wallet_binding.
       |> load_wallet_binding()
-      # I2 permission + I3 intent + I4 activity — `assign_new/3` so
-      # parallel-agent mount paths don't stomp each other (e.g. I1
-      # already set :wallet, so I2's defensive default doesn't fire).
+      # I2 / I3 / I4 — `assign_new/3` so parallel-agent mount paths
+      # don't stomp each other. I1 already set :wallet, :address,
+      # :wallet_binding via assign/3 above; the defaults below only
+      # fire when those weren't set (e.g. unauthenticated path or
+      # an early test render).
       |> assign_new(:wallet, fn -> :disconnected end)
       |> assign_new(:address, fn -> nil end)
       |> assign_new(:balance_usdc, fn -> Decimal.new("124.50") end)
@@ -92,7 +106,7 @@ defmodule BankWeb.AgentLive do
       end)
       |> assign_new(:intent, fn -> :idle end)
       |> assign_new(:last_result, fn -> nil end)
-      |> assign_new(:intent_counter, fn -> 0 end)
+      |> assign_new(:active_intent_id, fn -> nil end)
       |> assign_new(:activity, fn -> @seed_activity end)
       |> assign_new(:stop_open, fn -> false end)
       # I2 permission-card-owned assigns.
@@ -354,37 +368,63 @@ defmodule BankWeb.AgentLive do
 
   def handle_event("intent:run", _, socket) do
     if socket.assigns.permission == :active do
-      Process.send_after(self(), :intent_resolved, 1100)
-      {:noreply, socket |> assign(:intent, :executing) |> assign(:last_result, nil)}
+      workspace_id = intent_workspace_id(socket)
+      payload = intent_payload(socket.assigns.mode)
+
+      case Bank.Intents.submit(payload, workspace_id: workspace_id, actor: :user) do
+        {:ok, %{intent: intent}} ->
+          # `handle_event` only runs after the LiveView has connected, so
+          # `Phoenix.PubSub.subscribe/2` here always lands on a real
+          # process. The decision pipeline broadcasts on
+          # `Bank.Runtime.PubSub.intent(intent.id)` for every transition.
+          RuntimePubSub.subscribe(RuntimePubSub.intent(intent.id))
+
+          {:noreply,
+           socket
+           |> assign(:intent, :executing)
+           |> assign(:active_intent_id, intent.id)
+           |> assign(:last_result, nil)}
+
+        {:error, reason} ->
+          {:noreply,
+           socket
+           |> assign(:intent, :failed)
+           |> assign(:last_result, %{
+             state: "failed",
+             reason: intent_format_error(reason),
+             tx_hash: nil
+           })}
+      end
     else
       {:noreply, socket}
     end
   end
 
   def handle_event("intent:approve", _, socket) do
-    activity =
-      [
-        %{
-          id: new_id(socket),
-          t: "just now",
-          kind: "intent",
-          status: "executed",
-          title: "Approved & executed",
-          reason: "You approved the over-limit intent once. Funds settled on Base Sepolia.",
-          amount: nil
-        }
-        | socket.assigns.activity
-      ]
+    with :ok <- LiveAuth.authorize_action(socket, :operator),
+         %{decision_envelope_id: env_id} when is_binary(env_id) <-
+           socket.assigns.last_result || %{} do
+      user_id = intent_actor_id(socket)
 
-    {:noreply,
-     socket
-     |> assign(:intent, :executed)
-     |> assign(:last_result, %{
-       state: "executed",
-       action: "Intent approved and executed",
-       tx_hash: "0xa2…9f"
-     })
-     |> assign(:activity, activity)}
+      case Bank.Decisions.approve(env_id, actor_id: user_id) do
+        {:ok, _envelope, {:dispatched, _plan}} ->
+          # Execution events arrive via PubSub; UI flips on :execution_updated.
+          {:noreply, socket}
+
+        {:ok, _envelope, {:held, reason}} ->
+          {:noreply,
+           put_flash(socket, :info, "Approved, but dispatch held: #{inspect(reason)}")}
+
+        {:error, reason} ->
+          {:noreply, put_flash(socket, :error, "Approve failed: #{inspect(reason)}")}
+      end
+    else
+      {:error, {:insufficient_role, _}} ->
+        {:noreply, put_flash(socket, :error, "Operator role required to approve.")}
+
+      _ ->
+        {:noreply, socket}
+    end
   end
 
   # ── Async transitions ────────────────────────────────────────────────
@@ -394,85 +434,251 @@ defmodule BankWeb.AgentLive do
     handle_security_event(payload, socket)
   end
 
-  def handle_info(:intent_resolved, socket) do
-    counter = socket.assigns.intent_counter
-    outcomes = ~w(executed blocked needs-approval)
-    out = Enum.at(outcomes, rem(counter, length(outcomes)))
-    mode = socket.assigns.mode
-
-    {entry, last_result, intent_state} = build_intent_outcome(out, mode)
-
-    {:noreply,
-     socket
-     |> assign(:intent, intent_state)
-     |> assign(:last_result, last_result)
-     |> assign(:intent_counter, counter + 1)
-     |> update(:activity, &[Map.merge(%{id: new_id(socket), t: "just now"}, entry) | &1])}
+  def handle_info(
+        %{topic: :intent_lifecycle, event: :decision_updated, intent_id: intent_id, payload: payload},
+        socket
+      ) do
+    if socket.assigns[:active_intent_id] == intent_id do
+      handle_decision_updated(socket, payload)
+    else
+      {:noreply, socket}
+    end
   end
 
-  defp build_intent_outcome("executed", "swap") do
-    {%{
-       kind: "intent",
-       status: "executed",
-       title: "Swap executed",
-       reason: "10.00 USDC → 9.96 USDbC · 0x route · 0.4% slippage",
-       amount: "− 10.00 USDC"
-     },
-     %{state: "executed", action: "Swap executed", tx_hash: "0x8c…42"}, :executed}
+  def handle_info(
+        %{topic: :intent_lifecycle, event: :execution_updated, intent_id: intent_id, payload: payload},
+        socket
+      ) do
+    if socket.assigns[:active_intent_id] == intent_id do
+      handle_execution_updated(socket, payload)
+    else
+      {:noreply, socket}
+    end
   end
 
-  defp build_intent_outcome("executed", "earn") do
-    {%{
-       kind: "intent",
-       status: "executed",
-       title: "Morpho deposit executed",
-       reason: "Deposited into Re7 USDC · earning ~5.1% APY",
-       amount: "− 25.00 USDC"
-     },
-     %{state: "executed", action: "Morpho deposit executed", tx_hash: "0x3e…7d"}, :executed}
+  # Other intent_lifecycle events (`:state_changed`, `:execution_requested`,
+  # `:evaluation_deferred`) arrive on the same topic. The UI doesn't
+  # need to react to them — `:decision_updated` and `:execution_updated`
+  # already cover every IntentResult variant — but we have to swallow
+  # them so the LiveView doesn't crash on unmatched messages.
+  def handle_info(%{topic: :intent_lifecycle}, socket), do: {:noreply, socket}
+
+  # ── Intent helpers ────────────────────────────────────────────────────
+
+  # Always force `chain: "base-sepolia"` regardless of mode/settings.
+  # Sandbox-only safety: this LiveView must never submit a mainnet
+  # payload, even if a future mode-card change accidentally exposes a
+  # chain field to the user.
+  defp intent_payload("hold") do
+    %{
+      "agent_id" => "test-agent",
+      "source" => "user",
+      "idempotency_key" => "hold-#{System.unique_integer([:positive])}",
+      "kind" => "transfer",
+      "chain" => "base-sepolia",
+      "asset" => "USDC",
+      "amount" => "1.0",
+      "target" => %{"raw_address" => "0x0000000000000000000000000000000000000000"}
+    }
   end
 
-  defp build_intent_outcome("executed", _) do
-    {%{
-       kind: "intent",
-       status: "executed",
-       title: "No-op intent executed",
-       reason: "Heartbeat OK. The agent stayed idle.",
-       amount: nil
-     },
-     %{state: "executed", action: "No-op intent executed", tx_hash: "0x1b…05"}, :executed}
+  defp intent_payload("swap") do
+    %{
+      "agent_id" => "test-agent",
+      "source" => "user",
+      "idempotency_key" => "swap-#{System.unique_integer([:positive])}",
+      "kind" => "swap",
+      "chain" => "base-sepolia",
+      "asset" => "USDC",
+      "amount" => "10.0",
+      "target" => %{"raw_address" => "0x0000000000000000000000000000000000000001"}
+    }
   end
 
-  defp build_intent_outcome("blocked", mode) do
-    reason =
-      case mode do
-        "swap" -> "Swap blocked: 0x quote slippage 1.4% exceeds your 0.5% limit."
-        "earn" -> "Deposit blocked: amount 250 USDC exceeds per-deposit cap of 50 USDC."
-        _ -> "Intent blocked: target outside permission scope."
-      end
-
-    {%{
-       kind: "intent",
-       status: "blocked",
-       title: "Intent blocked",
-       reason: reason,
-       amount: nil
-     },
-     %{state: "blocked", reason: reason, tx_hash: nil}, :blocked}
+  defp intent_payload("earn") do
+    %{
+      "agent_id" => "test-agent",
+      "source" => "user",
+      "idempotency_key" => "earn-#{System.unique_integer([:positive])}",
+      "kind" => "allocate_idle_capital",
+      "chain" => "base-sepolia",
+      "asset" => "USDC",
+      "amount" => "25.0",
+      "target" => %{"raw_address" => "0x0000000000000000000000000000000000000002"}
+    }
   end
 
-  defp build_intent_outcome("needs-approval", _) do
-    reason = "Per-trade limit would be exceeded. Approve once or raise the limit."
-
-    {%{
-       kind: "intent",
-       status: "needs-approval",
-       title: "Intent needs approval",
-       reason: reason,
-       amount: nil
-     },
-     %{state: "needs-approval", reason: reason, tx_hash: nil}, :needs_approval}
+  defp intent_workspace_id(socket) do
+    case socket.assigns[:current_scope] do
+      %{workspace: %{id: id}} -> id
+      _ -> nil
+    end
   end
+
+  defp intent_actor_id(socket) do
+    case socket.assigns[:current_scope] do
+      %{user: %{id: id}} -> id
+      _ -> nil
+    end
+  end
+
+  # Used in render/1 — only the test intent card cares about the
+  # current user's role today, so the helper lives in the parent
+  # LiveView rather than each card module re-deriving it.
+  defp intent_user_role(assigns) do
+    case assigns[:current_scope] do
+      %{role: role} when is_atom(role) -> role
+      _ -> :viewer
+    end
+  end
+
+  defp intent_format_error({:idempotency_conflict, _}),
+    do: "Intent rejected: same idempotency key, different payload."
+
+  defp intent_format_error({:unsupported_chain, chain}),
+    do: "Intent rejected: chain #{inspect(chain)} not supported."
+
+  defp intent_format_error({:unsupported_asset, asset}),
+    do: "Intent rejected: asset #{inspect(asset)} not supported."
+
+  defp intent_format_error({:morpho_chain_not_supported, chain}),
+    do: "Intent rejected: Morpho deposit not available on #{chain}."
+
+  defp intent_format_error(:mainnet_disabled),
+    do: "Intent rejected: this workspace cannot submit to mainnet."
+
+  defp intent_format_error({:invalid, %Ecto.Changeset{}}),
+    do: "Intent rejected: payload failed validation."
+
+  defp intent_format_error({:invalid, reason}) when is_atom(reason),
+    do: "Intent rejected: #{Atom.to_string(reason)}."
+
+  defp intent_format_error({:invalid, reason}),
+    do: "Intent rejected: #{inspect(reason)}."
+
+  defp intent_format_error(reason), do: "Intent rejected: #{inspect(reason)}."
+
+  defp intent_action_for("hold"), do: "No-op intent executed"
+  defp intent_action_for("swap"), do: "Swap executed"
+  defp intent_action_for("earn"), do: "Morpho deposit executed"
+  defp intent_action_for(_), do: "Intent executed"
+
+  defp intent_short_tx(nil), do: nil
+  defp intent_short_tx([]), do: nil
+
+  defp intent_short_tx([first | _]) when is_binary(first), do: intent_short_tx(first)
+
+  defp intent_short_tx(hash) when is_binary(hash) do
+    if String.length(hash) > 10 do
+      String.slice(hash, 0, 6) <> "…" <> String.slice(hash, -4, 4)
+    else
+      hash
+    end
+  end
+
+  defp intent_short_tx(_), do: nil
+
+  defp intent_reason_first(reasons) when is_map(reasons) do
+    case Map.get(reasons, "items") do
+      [first | _] -> intent_reason_message(first)
+      _ -> nil
+    end
+  end
+
+  defp intent_reason_first(_), do: nil
+
+  defp intent_reason_message(%{"message" => msg}) when is_binary(msg), do: msg
+  defp intent_reason_message(%{message: msg}) when is_binary(msg), do: msg
+  defp intent_reason_message(_), do: nil
+
+  defp handle_decision_updated(socket, %{outcome: outcome} = payload) do
+    case outcome do
+      :auto_exec ->
+        # Decision says auto-execute; execution events will follow on the
+        # same topic. Keep the running spinner visible.
+        {:noreply, socket}
+
+      :hold ->
+        {:noreply,
+         socket
+         |> assign(:intent, :blocked)
+         |> assign(:last_result, %{
+           state: "blocked",
+           reason: intent_lookup_decision_reason(payload),
+           tx_hash: nil
+         })}
+
+      :approval_required ->
+        {:noreply,
+         socket
+         |> assign(:intent, :needs_approval)
+         |> assign(:last_result, %{
+           state: "needs-approval",
+           reason: intent_lookup_decision_reason(payload),
+           decision_envelope_id: payload[:decision_envelope_id],
+           tx_hash: nil
+         })}
+
+      :block ->
+        {:noreply,
+         socket
+         |> assign(:intent, :blocked)
+         |> assign(:last_result, %{
+           state: "blocked",
+           reason: intent_lookup_decision_reason(payload),
+           tx_hash: nil
+         })}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  defp handle_decision_updated(socket, _payload), do: {:noreply, socket}
+
+  defp handle_execution_updated(socket, payload) do
+    final = payload[:final_outcome]
+    tx_refs = payload[:tx_refs] || []
+
+    case final do
+      :confirmed ->
+        {:noreply,
+         socket
+         |> assign(:intent, :executed)
+         |> assign(:last_result, %{
+           state: "executed",
+           action: intent_action_for(socket.assigns.mode),
+           tx_hash: intent_short_tx(tx_refs)
+         })}
+
+      f when f in [:reverted, :aborted] ->
+        {:noreply,
+         socket
+         |> assign(:intent, :failed)
+         |> assign(:last_result, %{
+           state: "failed",
+           reason: "Execution #{Atom.to_string(f)}.",
+           tx_hash: intent_short_tx(tx_refs)
+         })}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  # Pull the first `reasons` message off the persisted decision envelope
+  # for human-readable copy on the IntentResult card. The PubSub
+  # `:decision_updated` payload only carries the envelope id + outcome,
+  # not the full reasons list, so we read the row by id. Falls back to a
+  # generic copy when the lookup fails.
+  defp intent_lookup_decision_reason(%{decision_envelope_id: env_id}) when is_binary(env_id) do
+    case Bank.Decisions.get_envelope(env_id) do
+      {:ok, %{reasons: reasons}} -> intent_reason_first(reasons)
+      _ -> nil
+    end
+  end
+
+  defp intent_lookup_decision_reason(_), do: nil
 
   # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -555,7 +761,6 @@ defmodule BankWeb.AgentLive do
   defp short_address(other) when is_binary(other), do: other
   defp short_address(_), do: nil
 
-  defp new_id(socket), do: "a" <> Integer.to_string(length(socket.assigns.activity) + 10)
 
   # ── Permission helpers (I2) ──────────────────────────────────────────
 
@@ -763,7 +968,13 @@ defmodule BankWeb.AgentLive do
           wrong_chain_id={@wrong_chain_id}
         />
         <.mode_card mode={@mode} settings={@settings} permission={@permission} />
-        <.test_intent_card mode={@mode} intent={@intent} last_result={@last_result} permission={@permission} />
+        <.test_intent_card
+          mode={@mode}
+          intent={@intent}
+          last_result={@last_result}
+          permission={@permission}
+          user_role={intent_user_role(assigns)}
+        />
         <.activity_strip activity={@activity} />
         <.stop_card permission={@permission} />
       </div>
