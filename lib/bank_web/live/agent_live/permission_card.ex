@@ -89,6 +89,15 @@ defmodule BankWeb.AgentLive.PermissionCard do
             <.data_row :if={session_limit_label(@delegation) != nil} label="Session limit">
               <span class="mono tnum">{session_limit_label(@delegation)}</span>
             </.data_row>
+            <%!-- The browser-signed scope_snapshot doesn't yet carry
+            numeric caps; they live on policy rules and are enforced
+            by the runtime decision pipeline at dispatch time. Surface
+            that explicitly so the operator knows where the gates are. --%>
+            <.data_row :if={session_limit_label(@delegation) == nil} label="Limits">
+              <span class="hint">
+                Enforced per policy
+              </span>
+            </.data_row>
             <div class="card__actions" style="padding-top: 12px;">
               <button type="button" class="btn btn--ghost-danger" phx-click="permission:revoke">
                 <.cb_icon name="stop" size={14} /> Revoke permission

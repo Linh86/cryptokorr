@@ -72,7 +72,13 @@ defmodule BankWeb.AgentLive do
       # don't stomp each other.
       |> assign_new(:wallet, fn -> :disconnected end)
       |> assign_new(:address, fn -> nil end)
-      |> assign_new(:balance_usdc, fn -> Decimal.new("124.50") end)
+      # Real USDC balance lookup is deferred — neither Bank.AdapterClient
+      # nor the TS chain_adapter exposes a balanceOf endpoint today.
+      # Tracked: build `Bank.ChainReader.get_erc20_balance/3` (Base
+      # Sepolia, USDC contract 0x036C...DCF7e) or add a chain_adapter
+      # `GET /balance/{chain}/{address}/{token}` route. Until then
+      # `format_usdc(nil)` renders "— USDC" gracefully.
+      |> assign_new(:balance_usdc, fn -> nil end)
       |> assign_new(:mode, fn -> "hold" end)
       |> assign_new(:settings, fn ->
         %{

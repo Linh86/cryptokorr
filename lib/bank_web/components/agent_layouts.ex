@@ -81,26 +81,19 @@ defmodule BankWeb.AgentLayouts do
         </div>
       </div>
       <div class="topbar__right">
-        <button
-          :if={@wallet == :wrong_network}
-          type="button"
-          class="btn btn--warn"
-          phx-click="topbar:switch_network"
-        >
-          <.cb_icon name="warning" size={14} /> Switch to Base Sepolia
-        </button>
+        <%!-- When the wallet is on the wrong chain, keep the warn
+        affordance in the topbar — the WalletConnect hook listens
+        for the message and prompts the wallet to switch. --%>
+        <span :if={@wallet == :wrong_network} class="btn btn--warn is-disabled" title="Switch your wallet to Base Sepolia">
+          <.cb_icon name="warning" size={14} /> Wrong network
+        </span>
         <div :if={@wallet == :connected} class="wallet-chip">
           <i class="wallet-chip__dot"></i>
           <span class="mono">{@address || "0x…"}</span>
         </div>
-        <button
-          :if={@wallet != :connected and @wallet != :wrong_network}
-          type="button"
-          class="btn btn--primary"
-          phx-click="topbar:connect_wallet"
-        >
-          <.cb_icon name="wallet" size={14} /> Connect wallet
-        </button>
+        <%!-- When disconnected, the agent screen's WalletCard owns the
+        primary Connect CTA. The topbar stays quiet so we don't ship
+        two competing connect buttons. --%>
         <button
           type="button"
           class={["btn btn--ghost-danger", not @can_stop? && "is-disabled"]}

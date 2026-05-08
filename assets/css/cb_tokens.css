@@ -3,11 +3,8 @@
  * Light + dark OKLCH palette, type stack, spacing, radii, shadows.
  *
  * Type stack: Chakra Petch (display) · Space Grotesk (body) · JetBrains
- * Mono (data). Webfonts are NOT loaded yet — strict CSP forbids
- * `https://fonts.googleapis.com`. Self-host WOFF2 under priv/static/fonts
- * before flipping the cutover. Until then the stack falls back to
- * `ui-sans-serif` / `ui-monospace`, which loses the Chakra Petch
- * wordmark identity but keeps layout correct.
+ * Mono (data). Self-hosted WOFF2 under `priv/static/fonts/` so the
+ * strict CSP (`default-src 'self'`) doesn't block them.
  *
  * Design tokens live at :root because CSS custom-property names are
  * unique to this redesign and don't collide with Tailwind / DaisyUI.
@@ -15,6 +12,55 @@
  * so cb.css scopes those rules under a `.cb` wrapper that the new
  * AgentLayouts shell renders around all redesigned screens.
  */
+
+/* Chakra Petch — display font, four discrete weights. */
+@font-face {
+  font-family: "Chakra Petch";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/chakra-petch-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Chakra Petch";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/fonts/chakra-petch-500.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Chakra Petch";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/fonts/chakra-petch-600.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Chakra Petch";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/fonts/chakra-petch-700.woff2") format("woff2");
+}
+
+/* Space Grotesk — body font, Google ships a variable font that covers
+ * the 400-700 range we need; one file per family is plenty. */
+@font-face {
+  font-family: "Space Grotesk";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("/fonts/space-grotesk-var.woff2") format("woff2-variations");
+}
+
+/* JetBrains Mono — data font, same variable-font story. */
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400 600;
+  font-display: swap;
+  src: url("/fonts/jetbrains-mono-var.woff2") format("woff2-variations");
+}
 
 :root {
   --font-display: "Chakra Petch", "Space Grotesk", ui-sans-serif, sans-serif;

@@ -19,6 +19,7 @@ defmodule BankWeb.AgentActivityLive do
   alias Bank.Audit.{ActivityView, AuditEvent}
   alias Bank.Repo
   alias BankWeb.AgentLayouts
+  alias BankWeb.AgentLive.GlobalState
 
   # Same cap as `BankWeb.AgentLive` — 50 entries is plenty for the
   # full screen (the Audit reader handles deeper history; the chips
@@ -29,6 +30,7 @@ defmodule BankWeb.AgentActivityLive do
   def mount(_params, _session, socket) do
     if connected?(socket) do
       Bank.Runtime.PubSub.subscribe(Bank.Runtime.PubSub.audit_stream())
+      GlobalState.subscribe()
     end
 
     raw_events = load_events(socket)
@@ -39,12 +41,7 @@ defmodule BankWeb.AgentActivityLive do
      |> assign(:filter, "all")
      |> assign(:raw_events, raw_events)
      |> assign(:activity, ActivityView.render(raw_events))
-     # Topbar state lives on the redesigned shell; carry placeholders
-     # so the nav rail and topbar render correctly until phase 3
-     # introduces a global wallet/permission session.
-     |> assign(:wallet, :disconnected)
-     |> assign(:permission, :not_installed)
-     |> assign(:address, nil)}
+     |> GlobalState.init()}
   end
 
   @impl true
@@ -58,8 +55,20 @@ defmodule BankWeb.AgentActivityLive do
      |> assign(:activity, ActivityView.render(filtered))}
   end
 
+  # Topbar Stop button + revoke modal — delegated to GlobalState so
+  # the same flow runs on every screen.
+  def handle_event("topbar:stop_agent", _, socket),
+    do: {:noreply, assign(socket, :stop_open, true)}
+
+  def handle_event("confirm_stop:cancel", _, socket),
+    do: {:noreply, assign(socket, :stop_open, false)}
+
+  def handle_event("confirm_stop:revoke", _, socket),
+    do: {:noreply, GlobalState.revoke(socket)}
+
+  # TopBar Connect / Switch network buttons live on the agent screen
+  # only; here they're no-ops so a stale click doesn't crash.
   def handle_event("topbar:" <> _, _, socket), do: {:noreply, socket}
-  def handle_event("confirm_stop:" <> _, _, socket), do: {:noreply, socket}
 
   @impl true
   def handle_info(%{topic: :audit_stream, event: :appended, payload: %{id: event_id}}, socket) do
@@ -86,6 +95,22 @@ defmodule BankWeb.AgentActivityLive do
         {:noreply, socket}
     end
   end
+
+  # security:events broadcast → re-load wallet binding + delegation +
+  # derived states so the TopBar/NavRail track the latest revoke /
+  # install transitions.
+  def handle_info(%{topic: :security_events} = _msg, socket),
+    do: {:noreply, GlobalState.refresh(socket)}
+
+  def handle_info({event, %{smart_account_id: sa_id}}, socket)
+      when event in [:revoke_requested, :revoked, :revoke_failed] do
+    case socket.assigns[:delegation] do
+      %{smart_account_id: ^sa_id} -> {:noreply, GlobalState.refresh(socket)}
+      _ -> {:noreply, socket}
+    end
+  end
+
+  def handle_info(_other, socket), do: {:noreply, socket}
 
   @impl true
   def render(assigns) do
@@ -127,6 +152,8 @@ defmodule BankWeb.AgentActivityLive do
           <.activity_row :for={item <- @activity} item={item} />
         </ol>
       </.card>
+
+      <AgentLayouts.confirm_stop_modal open={@stop_open} />
     </AgentLayouts.app>
     """
   end

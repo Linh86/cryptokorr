@@ -13,6 +13,7 @@ defmodule BankWeb.AgentAdvancedLive do
 
   import BankWeb.AgentComponents
   alias BankWeb.AgentLayouts
+  alias BankWeb.AgentLive.GlobalState
 
   @sections [
     %{
@@ -69,13 +70,13 @@ defmodule BankWeb.AgentAdvancedLive do
 
   @impl true
   def mount(_params, _session, socket) do
+    if connected?(socket), do: GlobalState.subscribe()
+
     {:ok,
      socket
      |> assign(:page_title, "Advanced")
      |> assign(:open_id, "policies")
-     |> assign(:wallet, :disconnected)
-     |> assign(:permission, :not_installed)
-     |> assign(:address, nil)}
+     |> GlobalState.init()}
   end
 
   @impl true
@@ -84,8 +85,31 @@ defmodule BankWeb.AgentAdvancedLive do
     {:noreply, assign(socket, :open_id, new_open)}
   end
 
+  # Topbar Stop button + revoke modal — same flow as AgentLive.
+  def handle_event("topbar:stop_agent", _, socket),
+    do: {:noreply, assign(socket, :stop_open, true)}
+
+  def handle_event("confirm_stop:cancel", _, socket),
+    do: {:noreply, assign(socket, :stop_open, false)}
+
+  def handle_event("confirm_stop:revoke", _, socket),
+    do: {:noreply, GlobalState.revoke(socket)}
+
   def handle_event("topbar:" <> _, _, socket), do: {:noreply, socket}
-  def handle_event("confirm_stop:" <> _, _, socket), do: {:noreply, socket}
+
+  @impl true
+  def handle_info(%{topic: :security_events} = _msg, socket),
+    do: {:noreply, GlobalState.refresh(socket)}
+
+  def handle_info({event, %{smart_account_id: sa_id}}, socket)
+      when event in [:revoke_requested, :revoked, :revoke_failed] do
+    case socket.assigns[:delegation] do
+      %{smart_account_id: ^sa_id} -> {:noreply, GlobalState.refresh(socket)}
+      _ -> {:noreply, socket}
+    end
+  end
+
+  def handle_info(_other, socket), do: {:noreply, socket}
 
   @impl true
   def render(assigns) do
@@ -132,6 +156,8 @@ defmodule BankWeb.AgentAdvancedLive do
           </div>
         </article>
       </div>
+
+      <AgentLayouts.confirm_stop_modal open={@stop_open} />
     </AgentLayouts.app>
     """
   end
