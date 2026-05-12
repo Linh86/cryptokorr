@@ -130,7 +130,24 @@ defmodule BankWeb.SessionPermissionInstallHookSafetyTest do
   test "hook only invokes the documented allowlist of provider RPC methods", %{
     source_combined: source
   } do
-    allowed = ~w(eth_chainId eth_requestAccounts eth_getBalance)
+    # `eth_accounts` is added by the wallet-state-divergence preflight
+    # (P0). It is the PASSIVE counterpart of `eth_requestAccounts` —
+    # returns currently-exposed accounts without prompting MetaMask —
+    # and is signing-free / fund-safe. The hook uses it once, before
+    # `fetchInstallEnvelope`, to refuse early when the operator's
+    # browser provider has dropped the origin (or switched to a
+    # different account) since the DB binding was issued.
+    #
+    # `eth_maxPriorityFeePerGas` + `eth_gasPrice` are the standard
+    # EIP-1559 gas-price probes used by the bundler-agnostic
+    # `estimateFeesPerGas` fallback in `submitInstall`. ZeroDev SDK's
+    # default callback calls `zd_getUserOperationGasPrice` — a
+    # ZeroDev-bundler-only RPC method. When the operator's bundler is
+    # Pimlico / Stackup / Candide (which don't implement that method),
+    # we fall through to standard EIP-1559 via the chain RPC. Both
+    # methods are read-only and signing-free / fund-safe.
+    allowed =
+      ~w(eth_chainId eth_requestAccounts eth_accounts eth_getBalance eth_maxPriorityFeePerGas eth_gasPrice)
 
     # Match only EIP-1193 / wallet RPC method strings — anything
     # named `eth_*` / `wallet_*` / `personal_*` inside a `method:`
@@ -248,10 +265,16 @@ defmodule BankWeb.SessionPermissionInstallHookSafetyTest do
       "user_rejected",
       "bundler_rejected",
       "bundler_unavailable",
+      "bundler_not_configured",
       "chain_id_mismatch",
       "insufficient_funds",
       "userop_reverted",
       "attestation_timeout",
+      "wallet_not_connected",
+      "account_mismatch",
+      "kernel_account_collision",
+      "session_signer_unavailable",
+      "session_signer_refused",
       "unknown"
     ]
 

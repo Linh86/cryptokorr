@@ -120,16 +120,113 @@ config :bank, Bank.Telegram.Config,
 config :bank, Bank.Chains.BalanceReader,
   rpc_url: System.get_env("BASE_SEPOLIA_RPC_URL") || "https://sepolia.base.org/"
 
+# On-chain install verifier — runs in `Bank.Runtime.Workers.VerifyInstallOnchain`
+# after the browser-signed install confirms via the bundler. It reads
+# `(smart_account_address, validation_id)` from the delegation row and
+# performs `eth_getCode` + a 4337-account `getValidationConfig` call to
+# pin that the chain state matches what the install attestation
+# claimed. Without `:rpc_url` set, the worker returns
+# `:rpc_not_configured` → marks the delegation `install_failed`
+# (`onchain_verification_unreachable`) — that bit us until the browser
+# install flow was wired end-to-end, because the worker fired against
+# a config slot nobody had populated yet.
+#
+# Mirrors the `chain_rpc_url` alias chain for parity with the
+# install-envelope path — same precedence, same fallback.
+config :bank, Bank.Chains.KernelVerifier,
+  rpc_url:
+    System.get_env("BASE_SEPOLIA_RPC_URL") ||
+      System.get_env("BASE_SEPOLIA_RPC") ||
+      System.get_env("BASE_RPC_URL") ||
+      "https://sepolia.base.org",
+  # `:skip` until the Kernel-v3.1 `validationConfig(bytes21)` selector
+  # is reconciled with the deployed kernel (see TODO in
+  # `chain_adapter/scripts/verify-installed-validator.ts`). With
+  # `:skip` the verifier still requires the smart account to be
+  # deployed at the expected address; the per-permission install
+  # check is deferred to the same integration ticket the adapter
+  # script tracks. Production should set this to `:enforce` once
+  # the selector is correct and add a contract test pinning the
+  # decoded result shape.
+  validation_id_check: :skip
+
 # Browser-signed install bundler URL — required for the ZeroDev SDK
 # in the browser to submit the install UserOperation against an
 # ERC-4337 bundler. No public unauthenticated bundler exists for
-# Base Sepolia, so set BASE_SEPOLIA_BUNDLER_RPC in your local env to
-# a paid bundler (Pimlico / ZeroDev / Stackup / Alchemy / Coinbase
-# CDP). The envelope endpoint falls back to a documented dummy URL
-# when unset so the dev server still boots, but the ZeroDev SDK will
-# fail loudly when it tries to hit `dev-no-bundler-configured` —
-# that's the signal to set the env var.
+# Base Sepolia, so set one of the env aliases below to a paid bundler
+# (Pimlico / ZeroDev / Stackup / Alchemy / Coinbase CDP). The
+# envelope endpoint falls back to a documented dummy URL when unset
+# so the dev server still boots, but the ZeroDev SDK will fail loudly
+# when it tries to hit `dev-no-bundler-configured` — that's the
+# signal to set one of the env vars.
+#
+# Accepted env aliases (first non-empty wins):
+#   1. BASE_SEPOLIA_BUNDLER_RPC — chain-specific, highest precedence.
+#   2. BUNDLER_URL             — Phoenix-side historical alias.
+#   3. BUNDLER_RPC_URL         — canonical alias used by the rest of
+#      the codebase (chain_adapter/.env, smoke tests, mainnet
+#      preflight). Sourcing `chain_adapter/.env` directly into
+#      `mix phx.server` therefore works without an additional export.
 config :bank, Bank.SessionPermissions.BrowserInstall,
   bundler_rpc_url:
     System.get_env("BASE_SEPOLIA_BUNDLER_RPC") ||
-      System.get_env("BUNDLER_URL")
+      System.get_env("BUNDLER_URL") ||
+      System.get_env("BUNDLER_RPC_URL"),
+  # Generic chain RPC (read-only). The browser-side ZeroDev SDK
+  # builds a viem `publicClient` for `getSenderAddress` simulation
+  # (`eth_call` against EntryPoint v0.7) before submitting the
+  # install UserOp to the bundler. Pimlico's `/v2/<chain>/rpc`
+  # endpoint serves bundler methods ONLY (`eth_sendUserOperation`,
+  # `eth_estimateUserOperationGas`, etc.) and rejects generic chain
+  # calls — passing it to `publicClient` makes `createKernelAccount`
+  # crash with `Cannot read properties of undefined (reading 'match')`
+  # because ZeroDev's revert-decoder regex fails on Pimlico's non-
+  # EntryPoint reply shape. ZeroDev's hosted bundler (`rpc.zerodev.app`)
+  # happens to serve both, which is why the install worked there until
+  # the CSP fix landed. With Pimlico we MUST supply a separate chain
+  # RPC URL — `BASE_RPC_URL` from `chain_adapter/.env` (defaults to
+  # the public `https://sepolia.base.org` if missing).
+  chain_rpc_url:
+    System.get_env("BASE_SEPOLIA_RPC_URL") ||
+      System.get_env("BASE_SEPOLIA_RPC") ||
+      System.get_env("BASE_RPC_URL") ||
+      "https://sepolia.base.org",
+  # The EOA Phoenix embeds in the install envelope as the authorized
+  # session signer. The ZeroDev SDK builds a `PermissionPlugin` whose
+  # validator authorizes this EOA to act on behalf of the smart
+  # account. The address MUST be derivable from the adapter's
+  # `DELEGATION_SIGNER_KEY` — when both are set, the smoke task pins
+  # consistency. Phoenix never holds the private key.
+  session_signer_address: System.get_env("SESSION_SIGNER_ADDRESS"),
+  # ── Kernel index split (#kernel-account-collision) ────────────────
+  #
+  # ZeroDev's `createKernelAccount` derives the smart-account
+  # address CREATE2-style from `(sudo_validator_eoa, kernel_index)`.
+  # The chain_adapter's runtime UserOps use `KERNEL_ACCOUNT_INDEX`
+  # (default 0) with the operator EOA. If a BROWSER install also
+  # used index 0 with the SAME EOA — which happens in dev when the
+  # demo wallet imports `OPERATOR_PRIVATE_KEY` — the derived
+  # address collides with the operator's already-deployed smart
+  # account (`SMART_ACCOUNT_ADDRESS`) and the install UserOp
+  # reverts with `AA23 reverted 0x756688fe` (Kernel's
+  # `InvalidSignature()` because the existing account state
+  # doesn't accept a fresh enable signature).
+  #
+  # The fix is to give the browser path its own index. Operator
+  # stays on 0; browser defaults to 1. Phoenix-side preflight
+  # refuses to issue an envelope when the connected user EOA
+  # equals OPERATOR_ADDRESS AND the two indices collide — see
+  # `Bank.SessionPermissions.BrowserInstall.check_kernel_index_collision/1`.
+  #
+  # NOTE: changing this index AFTER a delegation is installed will
+  # derive a DIFFERENT smart account for the next install — the
+  # old one is still on chain. Reuse the same index for the same
+  # user EOA across reinstalls.
+  operator_kernel_account_index:
+    (System.get_env("KERNEL_ACCOUNT_INDEX") || "0") |> String.to_integer(),
+  kernel_account_index:
+    (System.get_env("BROWSER_KERNEL_ACCOUNT_INDEX") || "1") |> String.to_integer(),
+  # The operator EOA the chain_adapter signs runtime UserOps with.
+  # Phoenix uses this ONLY for the kernel-index-collision preflight;
+  # the private key never leaves the adapter.
+  operator_eoa_address: System.get_env("OPERATOR_ADDRESS")

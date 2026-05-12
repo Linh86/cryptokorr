@@ -19,6 +19,11 @@ import { handleSwapDispatch } from "./dispatch/swap.js";
 import { handleMorphoDepositDispatch } from "./dispatch/morpho_deposit.js";
 import { handleRevokeDispatch } from "./dispatch/revoke.js";
 import { handleGrantDispatch } from "./dispatch/grant.js";
+import {
+  InstallSignSessionPortionSchema,
+  type InstallSignSessionPortion,
+} from "./contracts/schemas.js";
+import { signInstallSessionPortion } from "./install/session_signer.js";
 import { AdapterError, ValidationError } from "./lib/errors.js";
 import { logger } from "./lib/logger.js";
 
@@ -193,6 +198,60 @@ export function buildApp(deps: AppDeps): FastifyInstance {
       });
 
       return reply.status(202).send(result);
+    },
+  );
+
+  // -----------------------------------------------------------------------
+  // POST /install/sign_session_portion
+  //
+  // Server-side signing of the install UserOp's permission-validator
+  // portion. The browser hook builds the install UserOp with viem +
+  // ZeroDev SDK, computes the UserOp hash, and the SDK then asks the
+  // permission validator's signer to `signMessage({raw: userOpHash})`.
+  // That signer is the adapter's `DELEGATION_SIGNER_KEY` — its private
+  // key MUST NOT leave this process. Phoenix proxies the hash here;
+  // the adapter signs and returns the signature; the browser hook
+  // embeds it in the UserOp.
+  //
+  // Auth: identical to `/dispatch/*` — Phoenix sends
+  // `Authorization: Bearer <ADAPTER_DISPATCH_SECRET>`. The browser
+  // NEVER hits this endpoint directly; CSRF + browser-session auth
+  // is enforced one hop earlier at Phoenix's proxy route.
+  // -----------------------------------------------------------------------
+
+  app.post(
+    "/install/sign_session_portion",
+    { preHandler: verifyDispatchAuth },
+    async (request: FastifyRequest, reply) => {
+      const parsed = InstallSignSessionPortionSchema.safeParse(request.body);
+      if (!parsed.success) {
+        throw new ValidationError(
+          "Invalid install/sign_session_portion payload",
+          parsed.error.issues,
+        );
+      }
+
+      const body: InstallSignSessionPortion = parsed.data;
+
+      // Sanitized log — never echo the hash itself (it's hash of a
+      // UserOp whose contents the operator might want kept tight)
+      // and NEVER the signature, which is the secret.
+      logger.info("install/sign_session_portion: signing requested", {
+        binding_id: body.binding_id,
+        smart_account_id: body.smart_account_id,
+        has_expected_signer:
+          typeof body.session_signer_address === "string",
+      });
+
+      const result = await signInstallSessionPortion(
+        {
+          user_op_hash: body.user_op_hash as `0x${string}`,
+          session_signer_address: body.session_signer_address,
+        },
+        { delegationSignerKey: config.delegationSignerKey as `0x${string}` },
+      );
+
+      return reply.status(200).send(result);
     },
   );
 

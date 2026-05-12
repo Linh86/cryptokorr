@@ -101,6 +101,391 @@ defmodule Bank.SessionPermissions.BrowserInstallTest do
       {:ok, e2} = BrowserInstall.build_envelope(workspace.id, binding)
       assert e1.scope_hash == e2.scope_hash
     end
+
+    # Pre-fix the dev.exs env wiring only checked
+    # BASE_SEPOLIA_BUNDLER_RPC || BUNDLER_URL, missing the canonical
+    # BUNDLER_RPC_URL alias the chain_adapter/.env (and the smoke
+    # task + mainnet preflight) already use. The envelope therefore
+    # returned `bundler_rpc_url: nil` even when a bundler URL was
+    # genuinely available, and the JS hook fail-fasted on
+    # `bundler_unavailable` before ever opening a wallet popup.
+    #
+    # The fix is in `config/dev.exs`; this test pins the contract
+    # that whatever `Application.get_env(:bank, BrowserInstall,
+    # :bundler_rpc_url)` resolves to ends up on the envelope.
+    test "envelope surfaces the configured bundler_rpc_url",
+         %{workspace: workspace, binding: binding} do
+      original = Application.get_env(:bank, BrowserInstall, [])
+
+      try do
+        Application.put_env(
+          :bank,
+          BrowserInstall,
+          Keyword.put(original, :bundler_rpc_url, "https://test-bundler.example/rpc")
+        )
+
+        assert {:ok, envelope} = BrowserInstall.build_envelope(workspace.id, binding)
+        assert envelope.bundler_rpc_url == "https://test-bundler.example/rpc"
+      after
+        Application.put_env(:bank, BrowserInstall, original)
+      end
+    end
+
+    test "envelope returns nil bundler_rpc_url when unconfigured",
+         %{workspace: workspace, binding: binding} do
+      original = Application.get_env(:bank, BrowserInstall, [])
+
+      try do
+        Application.put_env(
+          :bank,
+          BrowserInstall,
+          Keyword.put(original, :bundler_rpc_url, nil)
+        )
+
+        assert {:ok, envelope} = BrowserInstall.build_envelope(workspace.id, binding)
+        assert is_nil(envelope.bundler_rpc_url)
+      after
+        Application.put_env(:bank, BrowserInstall, original)
+      end
+    end
+
+    # The browser-side ZeroDev SDK builds a viem `publicClient` from
+    # the envelope's `chain_rpc_url` for `getSenderAddress` simulation
+    # (an `eth_call` against EntryPoint v0.7 that reverts with
+    # `SenderAddressResult(address)`). Hosted bundler endpoints
+    # (Pimlico, Stackup, Candide) don't serve generic `eth_call` —
+    # passing the bundler URL to `publicClient` makes
+    # `createKernelAccount` crash with
+    # `Cannot read properties of undefined (reading 'match')`.
+    # This test pins that whatever `Application.get_env(:bank,
+    # BrowserInstall, :chain_rpc_url)` resolves to lands on the
+    # envelope so the hook can wire the two transports separately.
+    test "envelope surfaces the configured chain_rpc_url",
+         %{workspace: workspace, binding: binding} do
+      original = Application.get_env(:bank, BrowserInstall, [])
+
+      try do
+        Application.put_env(
+          :bank,
+          BrowserInstall,
+          Keyword.put(original, :chain_rpc_url, "https://test-chain-rpc.example/rpc")
+        )
+
+        assert {:ok, envelope} = BrowserInstall.build_envelope(workspace.id, binding)
+        assert envelope.chain_rpc_url == "https://test-chain-rpc.example/rpc"
+      after
+        Application.put_env(:bank, BrowserInstall, original)
+      end
+    end
+
+    test "envelope returns nil chain_rpc_url when unconfigured",
+         %{workspace: workspace, binding: binding} do
+      original = Application.get_env(:bank, BrowserInstall, [])
+
+      try do
+        Application.put_env(
+          :bank,
+          BrowserInstall,
+          Keyword.put(original, :chain_rpc_url, nil)
+        )
+
+        assert {:ok, envelope} = BrowserInstall.build_envelope(workspace.id, binding)
+        assert is_nil(envelope.chain_rpc_url)
+      after
+        Application.put_env(:bank, BrowserInstall, original)
+      end
+    end
+
+    # ── Kernel account index (browser-vs-operator collision split) ──
+
+    test "envelope carries kernel_account_index from config (default 1)",
+         %{workspace: workspace, binding: binding} do
+      # dev.exs ships with BROWSER_KERNEL_ACCOUNT_INDEX default 1.
+      # Test runs against the live application env. The envelope
+      # MUST surface this integer to the JS hook so the SDK derives
+      # a non-operator smart account.
+      original = Application.get_env(:bank, BrowserInstall, [])
+
+      try do
+        Application.put_env(
+          :bank,
+          BrowserInstall,
+          original
+          |> Keyword.put(:kernel_account_index, 1)
+          # Disable operator collision check by clearing the operator
+          # EOA so we can exercise the envelope path in isolation.
+          |> Keyword.put(:operator_eoa_address, nil)
+        )
+
+        assert {:ok, envelope} = BrowserInstall.build_envelope(workspace.id, binding)
+        assert envelope.kernel_account_index == 1
+      after
+        Application.put_env(:bank, BrowserInstall, original)
+      end
+    end
+
+    test "kernel_account_index env override propagates to the envelope",
+         %{workspace: workspace, binding: binding} do
+      # An operator who runs multiple workspaces on the same EOA
+      # bumps the browser index per workspace (2, 3, …) so each
+      # workspace gets its own smart account. Pins the override
+      # path so a regression that hardcodes the default doesn't
+      # silently collapse all workspaces onto index 1.
+      original = Application.get_env(:bank, BrowserInstall, [])
+
+      try do
+        Application.put_env(
+          :bank,
+          BrowserInstall,
+          original
+          |> Keyword.put(:kernel_account_index, 7)
+          |> Keyword.put(:operator_eoa_address, nil)
+        )
+
+        assert {:ok, envelope} = BrowserInstall.build_envelope(workspace.id, binding)
+        assert envelope.kernel_account_index == 7
+      after
+        Application.put_env(:bank, BrowserInstall, original)
+      end
+    end
+
+    test "envelope kernel_account_index handles string-form env value",
+         %{workspace: workspace, binding: binding} do
+      # `System.get_env/1` returns strings. The accessor coerces
+      # via `String.to_integer/1`. Pin that a string-typed config
+      # value (e.g. injected by an integration test or a misconfig
+      # path) resolves to a real integer in the envelope rather
+      # than crashing or leaking the string downstream.
+      original = Application.get_env(:bank, BrowserInstall, [])
+
+      try do
+        Application.put_env(
+          :bank,
+          BrowserInstall,
+          original
+          |> Keyword.put(:kernel_account_index, "3")
+          |> Keyword.put(:operator_eoa_address, nil)
+        )
+
+        assert {:ok, envelope} = BrowserInstall.build_envelope(workspace.id, binding)
+        assert envelope.kernel_account_index == 3
+        assert is_integer(envelope.kernel_account_index)
+      after
+        Application.put_env(:bank, BrowserInstall, original)
+      end
+    end
+  end
+
+  describe "build_envelope/2 — kernel-account-collision preflight" do
+    # Uses the outer setup's `binding` + `address` (the `@privkey`-
+    # derived EOA). The collision tests flip the
+    # `:operator_eoa_address` config slot to match (or not) the
+    # binding's stored address — that's enough to trigger or skip
+    # the preflight without needing a fresh key/binding pair.
+
+    test "refuses with :kernel_account_collision when user EOA == OPERATOR_ADDRESS and indices match",
+         %{workspace: workspace, binding: binding, address: address} do
+      original = Application.get_env(:bank, BrowserInstall, [])
+
+      try do
+        Application.put_env(
+          :bank,
+          BrowserInstall,
+          original
+          |> Keyword.put(:operator_eoa_address, address)
+          |> Keyword.put(:operator_kernel_account_index, 0)
+          |> Keyword.put(:kernel_account_index, 0)
+        )
+
+        assert {:error, :kernel_account_collision} =
+                 BrowserInstall.build_envelope(workspace.id, binding)
+      after
+        Application.put_env(:bank, BrowserInstall, original)
+      end
+    end
+
+    test "passes when user EOA == OPERATOR_ADDRESS but browser index differs",
+         %{workspace: workspace, binding: binding, address: address} do
+      # Browser on index 1, operator on index 0 — derived smart
+      # accounts are different. The whole point of the split.
+      original = Application.get_env(:bank, BrowserInstall, [])
+
+      try do
+        Application.put_env(
+          :bank,
+          BrowserInstall,
+          original
+          |> Keyword.put(:operator_eoa_address, address)
+          |> Keyword.put(:operator_kernel_account_index, 0)
+          |> Keyword.put(:kernel_account_index, 1)
+        )
+
+        assert {:ok, envelope} = BrowserInstall.build_envelope(workspace.id, binding)
+        assert envelope.kernel_account_index == 1
+      after
+        Application.put_env(:bank, BrowserInstall, original)
+      end
+    end
+
+    test "passes when user EOA differs from OPERATOR_ADDRESS regardless of index",
+         %{workspace: workspace, binding: binding} do
+      # Different EOA → different derived smart account → no
+      # collision possible even if indices match.
+      different_eoa = "0x" <> String.duplicate("ab", 20)
+
+      original = Application.get_env(:bank, BrowserInstall, [])
+
+      try do
+        Application.put_env(
+          :bank,
+          BrowserInstall,
+          original
+          |> Keyword.put(:operator_eoa_address, different_eoa)
+          |> Keyword.put(:operator_kernel_account_index, 0)
+          |> Keyword.put(:kernel_account_index, 0)
+        )
+
+        assert {:ok, _envelope} = BrowserInstall.build_envelope(workspace.id, binding)
+      after
+        Application.put_env(:bank, BrowserInstall, original)
+      end
+    end
+
+    test "EOA comparison is case-insensitive (EIP-55 vs lowercase)",
+         %{workspace: workspace, binding: binding, address: address} do
+      # WalletBindings stores lowercase. Operators paste EIP-55
+      # checksummed addresses into env vars. Both representations
+      # must trigger the collision check — otherwise a checksummed
+      # env value would let the lowercase binding through and the
+      # install would fail on chain instead of preflighting.
+      checksummed = String.upcase(address)
+
+      original = Application.get_env(:bank, BrowserInstall, [])
+
+      try do
+        Application.put_env(
+          :bank,
+          BrowserInstall,
+          original
+          |> Keyword.put(:operator_eoa_address, checksummed)
+          |> Keyword.put(:operator_kernel_account_index, 0)
+          |> Keyword.put(:kernel_account_index, 0)
+        )
+
+        assert {:error, :kernel_account_collision} =
+                 BrowserInstall.build_envelope(workspace.id, binding)
+      after
+        Application.put_env(:bank, BrowserInstall, original)
+      end
+    end
+
+    test "no operator EOA configured → no collision check (test env, pre-prod, etc.)",
+         %{workspace: workspace, binding: binding} do
+      original = Application.get_env(:bank, BrowserInstall, [])
+
+      try do
+        Application.put_env(
+          :bank,
+          BrowserInstall,
+          original
+          |> Keyword.put(:operator_eoa_address, nil)
+          |> Keyword.put(:operator_kernel_account_index, 0)
+          |> Keyword.put(:kernel_account_index, 0)
+        )
+
+        # No operator EOA → we can't possibly tell whether the user
+        # EOA collides → pass through. The on-chain install would
+        # surface a real `AA23` revert if there were a problem.
+        assert {:ok, _envelope} = BrowserInstall.build_envelope(workspace.id, binding)
+      after
+        Application.put_env(:bank, BrowserInstall, original)
+      end
+    end
+  end
+
+  # The `chain_rpc_url` env-alias chain in `config/dev.exs` mirrors
+  # the bundler precedence story: multiple historical aliases feed
+  # the same config slot, and the install hook silently breaks when
+  # the wrong alias is consulted. This describe block pins the
+  # precedence order at source level so a future drift (e.g.
+  # dropping `BASE_SEPOLIA_RPC_URL` because someone "consolidates"
+  # the chain RPC variants) is caught by the test suite rather than
+  # by a failed install.
+  describe "config/dev.exs :chain_rpc_url env-alias precedence" do
+    test "BASE_SEPOLIA_RPC_URL is the FIRST alias, before BASE_SEPOLIA_RPC and BASE_RPC_URL" do
+      # Source-level pin: the precedence is resolved at compile time
+      # via `System.get_env` (chained with `||`). The unit test can
+      # only meaningfully assert this by reading the config string —
+      # at runtime the resolved value is opaque to its origin.
+      source = File.read!("config/dev.exs")
+
+      # Isolate the BrowserInstall config block so unrelated lines
+      # in the rest of the file can't accidentally satisfy the
+      # ordering check. `Regex.run` returns
+      # `[full_match, capture_1, ...]`; we want the single capture
+      # group's text.
+      [_full, browser_install_block] =
+        Regex.run(
+          ~r/config :bank, Bank\.SessionPermissions\.BrowserInstall,(.+?)(?=^config |\z)/sm,
+          source
+        ) ||
+          raise "could not locate `config :bank, Bank.SessionPermissions.BrowserInstall, …` block in config/dev.exs"
+
+      first_pos = position_of(browser_install_block, "BASE_SEPOLIA_RPC_URL")
+      second_pos = position_of(browser_install_block, "BASE_SEPOLIA_RPC")
+      third_pos = position_of(browser_install_block, "BASE_RPC_URL")
+
+      assert is_integer(first_pos),
+             "expected `BASE_SEPOLIA_RPC_URL` in the BrowserInstall config block to align with the rest-of-app convention"
+
+      # Each alias must appear AFTER `BASE_SEPOLIA_RPC_URL`. `find/2`
+      # returns the FIRST occurrence, so `BASE_SEPOLIA_RPC` will
+      # match `BASE_SEPOLIA_RPC_URL` first if we don't anchor — we
+      # search starting from `first_pos + length(first_alias)` to
+      # find the SECOND alias's standalone occurrence.
+      assert is_integer(second_pos)
+      assert is_integer(third_pos)
+
+      assert first_pos < second_pos,
+             "BASE_SEPOLIA_RPC_URL must precede BASE_SEPOLIA_RPC in the alias chain (canonical alias first)"
+
+      assert second_pos < third_pos,
+             "BASE_SEPOLIA_RPC must precede BASE_RPC_URL in the alias chain"
+    end
+
+    test "chain_rpc_url has a non-nil default (so the install hook never sees nil chain RPC)" do
+      # Defense in depth — the dev config tail (`|| "https://sepolia.base.org"`)
+      # guarantees the envelope's chain_rpc_url is never nil even
+      # when every alias is missing. The JS hook's fallback path
+      # (`envelope.chain_rpc_url || envelope.bundler_rpc_url`) would
+      # otherwise reach back to the bundler URL and trip the
+      # bundler-only `eth_call` regression all over again.
+      source = File.read!("config/dev.exs")
+
+      # Match the fallback default across the multi-line `||` chain
+      # `dev.exs` actually uses. The string must end the alias chain
+      # so the resolved config is never nil.
+      assert source =~ ~r/\|\|\s*"https:\/\/sepolia\.base\.org"/,
+             "chain_rpc_url must have a public-RPC default; current dev.exs is missing the fallback string"
+    end
+  end
+
+  # Helper for the source-level alias-precedence test. Returns the
+  # first character index where `term` appears as a quoted string
+  # literal — i.e. matches `"<term>"` not the bare token. This
+  # restricts the match to actual `System.get_env("<ALIAS>")` call
+  # sites and ignores incidental occurrences of the alias name in
+  # surrounding comments / docstrings (which would otherwise let a
+  # comment mentioning `BASE_RPC_URL` shift the apparent position
+  # earlier than the real call site and break the precedence
+  # assertion).
+  defp position_of(source, term) when is_binary(source) and is_binary(term) do
+    pattern = Regex.compile!("\"" <> Regex.escape(term) <> "\"")
+
+    case Regex.run(pattern, source, return: :index) do
+      [{index, _len}] -> index
+      _ -> nil
+    end
   end
 
   describe "build_envelope/2 — refused" do
@@ -218,6 +603,54 @@ defmodule Bank.SessionPermissions.BrowserInstallTest do
                  "permission_id" => @valid_permission_id,
                  "validation_id" => "0x1234"
                })
+    end
+
+    test "persists smart_account_address from the attestation into delegation scope",
+         %{workspace: workspace, binding: binding} do
+      # The JS hook's `submitted` attestation includes the EVM
+      # smart-account address ZeroDev derived from
+      # `(user_eoa, kernel_account_index, plugins)`. Runtime
+      # dispatch will eventually key on this address rather than
+      # the synthetic `sa_wb_<binding_id>` id Phoenix invents for
+      # its own audit + uniqueness constraints. Pin that we
+      # capture it on the row's scope JSON so a follow-up
+      # adapter-side change can read it without a schema migration.
+      sa_address = "0x" <> String.duplicate("ab", 20)
+
+      {:ok, %{state: :submitted, delegation: delegation}} =
+        BrowserInstall.record_attestation(workspace.id, binding, %{
+          "status" => "submitted",
+          "install_userop_hash" => @valid_userop_hash,
+          "permission_id" => @valid_permission_id,
+          "validation_id" => @valid_validation_id,
+          "smart_account_address" => sa_address
+        })
+
+      # Stored lowercased for canonical comparison — checksummed
+      # input does not leak into the DB unchanged.
+      assert delegation.scope["smart_account_address"] == String.downcase(sa_address)
+
+      # The synthetic id stays stable for audit / adapter callbacks;
+      # the scope field is the new source of truth for runtime.
+      assert delegation.smart_account_id == "sa_wb_" <> binding.id
+    end
+
+    test "submitted without smart_account_address still succeeds (legacy attestation)",
+         %{workspace: workspace, binding: binding} do
+      # Older browser hooks (pre-kernel-collision fix) don't send
+      # the field. Phoenix must not refuse those — graceful
+      # degradation back to `Scope.default()` is the documented
+      # behaviour, with runtime dispatch falling back to the
+      # synthetic id.
+      {:ok, %{state: :submitted, delegation: delegation}} =
+        BrowserInstall.record_attestation(workspace.id, binding, %{
+          "status" => "submitted",
+          "install_userop_hash" => @valid_userop_hash,
+          "permission_id" => @valid_permission_id,
+          "validation_id" => @valid_validation_id
+        })
+
+      refute Map.has_key?(delegation.scope, "smart_account_address")
     end
   end
 
@@ -366,10 +799,16 @@ defmodule Bank.SessionPermissions.BrowserInstallTest do
                :user_rejected,
                :bundler_rejected,
                :bundler_unavailable,
+               :bundler_not_configured,
                :chain_id_mismatch,
                :insufficient_funds,
                :userop_reverted,
                :attestation_timeout,
+               :wallet_not_connected,
+               :account_mismatch,
+               :kernel_account_collision,
+               :session_signer_unavailable,
+               :session_signer_refused,
                :unknown
              ]
     end

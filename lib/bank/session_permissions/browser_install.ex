@@ -74,10 +74,16 @@ defmodule Bank.SessionPermissions.BrowserInstall do
     user_rejected
     bundler_rejected
     bundler_unavailable
+    bundler_not_configured
     chain_id_mismatch
     insufficient_funds
     userop_reverted
     attestation_timeout
+    wallet_not_connected
+    account_mismatch
+    kernel_account_collision
+    session_signer_unavailable
+    session_signer_refused
     unknown
   )a
 
@@ -103,6 +109,7 @@ defmodule Bank.SessionPermissions.BrowserInstall do
           | :runtime_paused
           | :workspace_paused
           | :rpc_not_configured
+          | :kernel_account_collision
           | {:invalid_attestation, atom()}
           | {:invalid_status, String.t()}
           | {:invalid_reason, atom()}
@@ -124,6 +131,8 @@ defmodule Bank.SessionPermissions.BrowserInstall do
           scope: map(),
           scope_hash: String.t(),
           bundler_rpc_url: String.t() | nil,
+          chain_rpc_url: String.t() | nil,
+          kernel_account_index: non_neg_integer(),
           human_readable_summary: String.t()
         }
 
@@ -158,7 +167,8 @@ defmodule Bank.SessionPermissions.BrowserInstall do
   @spec build_envelope(Ecto.UUID.t(), WalletBinding.t()) ::
           {:ok, envelope()} | {:error, refusal()}
   def build_envelope(workspace_id, %WalletBinding{} = binding) do
-    with :ok <- check_binding(workspace_id, binding) do
+    with :ok <- check_binding(workspace_id, binding),
+         :ok <- check_kernel_index_collision(binding) do
       scope = Scope.default()
       scope_hash = scope_hash(scope)
       smart_account_id = SessionPermissions.compute_smart_account_id(binding)
@@ -175,12 +185,64 @@ defmodule Bank.SessionPermissions.BrowserInstall do
         scope: scope,
         scope_hash: scope_hash,
         bundler_rpc_url: bundler_rpc_url(),
+        chain_rpc_url: chain_rpc_url(),
+        kernel_account_index: kernel_account_index(),
         human_readable_summary: human_readable_summary(scope)
       }
 
       Audit.append_event(Events.delegation_install_envelope_issued(envelope))
 
       {:ok, envelope}
+    end
+  end
+
+  @doc """
+  Kernel-account collision preflight.
+
+  Refuses to issue an install envelope when the connected user EOA
+  equals `OPERATOR_ADDRESS` AND the browser's
+  `:kernel_account_index` equals the operator's
+  `:operator_kernel_account_index`. Without this check, the SDK
+  derives the SAME smart-account address as the already-deployed
+  operator account, and the install UserOp reverts on chain with
+  `AA23 reverted 0x756688fe` (Kernel's `InvalidSignature()`)
+  because the existing account state doesn't accept a fresh enable
+  signature.
+
+  The fix is structural: operator runs runtime UserOps on index 0,
+  browser users install on index 1+. When both happen to land on
+  the same EOA (the demo wallet imports `OPERATOR_PRIVATE_KEY`)
+  the indices MUST differ. If they match, this returns
+  `{:error, :kernel_account_collision}` which the controller
+  surfaces to the JS hook as the wire-allowlisted reason atom
+  `:kernel_account_collision`.
+  """
+  @spec check_kernel_index_collision(WalletBinding.t()) :: :ok | {:error, :kernel_account_collision}
+  def check_kernel_index_collision(%WalletBinding{address: user_eoa}) do
+    operator_eoa = operator_eoa_address()
+
+    cond do
+      is_nil(operator_eoa) ->
+        # No operator EOA configured (e.g. tests / pre-prod). No
+        # collision possible because we can't even derive the
+        # operator's smart account.
+        :ok
+
+      not is_binary(user_eoa) ->
+        :ok
+
+      String.downcase(user_eoa) != String.downcase(operator_eoa) ->
+        # Different EOA → different derived smart account → no
+        # collision regardless of index choice.
+        :ok
+
+      kernel_account_index() == operator_kernel_account_index() ->
+        # Same EOA AND same index → derived smart account is the
+        # operator's. Block.
+        {:error, :kernel_account_collision}
+
+      true ->
+        :ok
     end
   end
 
@@ -228,6 +290,27 @@ defmodule Bank.SessionPermissions.BrowserInstall do
            fetch_byte_string(params, "validation_id", 21, :validation_id_invalid) do
       smart_account_id = SessionPermissions.compute_smart_account_id(binding)
 
+      # Real EVM smart-account address the SDK derived from
+      # `(user_eoa, kernel_account_index, sudo+permission plugin
+      # config)`. Phoenix stores the synthetic `smart_account_id`
+      # (`sa_wb_<binding_id>`) as its DB key for backward
+      # compatibility with the adapter callback wiring, but the
+      # REAL address goes into `scope` so runtime dispatch
+      # eventually keys on the on-chain account rather than the
+      # synthetic id. Lowercased for canonical comparison; nil-safe
+      # for legacy attestations that pre-date the field.
+      smart_account_address =
+        case Map.get(params, "smart_account_address") do
+          addr when is_binary(addr) -> String.downcase(addr)
+          _ -> nil
+        end
+
+      scope =
+        case smart_account_address do
+          nil -> Scope.default()
+          addr -> Map.put(Scope.default(), "smart_account_address", addr)
+        end
+
       result =
         Repo.transaction(fn ->
           case existing_install_row(binding.id, userop_hash) do
@@ -243,7 +326,7 @@ defmodule Bank.SessionPermissions.BrowserInstall do
                 delegation_id: userop_hash,
                 state: :pending,
                 chain: chain_label(binding.chain_id),
-                scope: Scope.default(),
+                scope: scope,
                 workspace_id: workspace_id,
                 root_validator_owner: "user",
                 binding_id: binding.id,
@@ -571,10 +654,67 @@ defmodule Bank.SessionPermissions.BrowserInstall do
     |> Keyword.get(:bundler_rpc_url)
   end
 
-  defp configured_session_signer_address do
+  # Generic chain RPC URL used by the browser-side ZeroDev SDK for
+  # the read-only `publicClient` (which calls `eth_call` against
+  # EntryPoint v0.7 to compute `getSenderAddress`). Distinct from
+  # `bundler_rpc_url` — see config/dev.exs for the full rationale.
+  defp chain_rpc_url do
+    Application.get_env(:bank, __MODULE__, [])
+    |> Keyword.get(:chain_rpc_url)
+  end
+
+  @doc """
+  Configured operator session-signer EOA address (the EOA the
+  adapter's `DELEGATION_SIGNER_KEY` derives to). Phoenix embeds
+  this into install envelopes; the browser hook displays it for
+  consistency checking and the proxy sign-userop-hash endpoint
+  uses it to refuse stale browser sessions that point at a
+  different signer.
+  """
+  @spec configured_session_signer_address() :: String.t() | nil
+  def configured_session_signer_address do
     Application.get_env(:bank, __MODULE__, [])
     |> Keyword.get(:session_signer_address)
   end
+
+  # The ZeroDev Kernel CREATE2 deterministic-deploy salt for the
+  # BROWSER user smart-account derivation. Defaults to 1 in dev
+  # (config/dev.exs) so it doesn't collide with the operator's
+  # index 0. Override per workspace via
+  # `BROWSER_KERNEL_ACCOUNT_INDEX`.
+  @spec kernel_account_index() :: non_neg_integer()
+  def kernel_account_index do
+    Application.get_env(:bank, __MODULE__, [])
+    |> Keyword.get(:kernel_account_index, 1)
+    |> coerce_index!()
+  end
+
+  # The Kernel index the chain_adapter uses for the operator's
+  # runtime UserOps. Read from `KERNEL_ACCOUNT_INDEX` (default 0
+  # in dev). Phoenix uses this ONLY for collision detection —
+  # the actual index the adapter passes to `createKernelAccount`
+  # lives in `chain_adapter/src/...`.
+  @spec operator_kernel_account_index() :: non_neg_integer()
+  def operator_kernel_account_index do
+    Application.get_env(:bank, __MODULE__, [])
+    |> Keyword.get(:operator_kernel_account_index, 0)
+    |> coerce_index!()
+  end
+
+  # The chain_adapter's operator EOA — the one whose private key
+  # signs runtime UserOps. Phoenix never holds the key; it reads
+  # the address only for the kernel-index-collision preflight.
+  @spec operator_eoa_address() :: String.t() | nil
+  def operator_eoa_address do
+    Application.get_env(:bank, __MODULE__, [])
+    |> Keyword.get(:operator_eoa_address)
+  end
+
+  # Indices arrive as integers from config OR as `"0"`/`"1"` strings
+  # when set straight from an env var. Coerce defensively so a
+  # mis-shaped config raises at boot rather than at install time.
+  defp coerce_index!(n) when is_integer(n) and n >= 0, do: n
+  defp coerce_index!(s) when is_binary(s), do: String.to_integer(s)
 
   defp human_readable_summary(_scope) do
     "USDC transfer · 0x swap · allowlisted Morpho USDC deposit"

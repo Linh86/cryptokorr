@@ -12,6 +12,9 @@ defmodule Mix.Tasks.Bank.BrowserInstall.SmokeTest do
     saved_app_config =
       Application.get_env(:bank, Bank.SessionPermissions.BrowserInstall, [])
 
+    saved_kv_config =
+      Application.get_env(:bank, Bank.Chains.KernelVerifier, [])
+
     on_exit(fn ->
       Enum.each(saved, fn
         {key, nil} -> System.delete_env(key)
@@ -22,6 +25,12 @@ defmodule Mix.Tasks.Bank.BrowserInstall.SmokeTest do
         :bank,
         Bank.SessionPermissions.BrowserInstall,
         saved_app_config
+      )
+
+      Application.put_env(
+        :bank,
+        Bank.Chains.KernelVerifier,
+        saved_kv_config
       )
     end)
 
@@ -78,7 +87,18 @@ defmodule Mix.Tasks.Bank.BrowserInstall.SmokeTest do
       Application.put_env(
         :bank,
         Bank.SessionPermissions.BrowserInstall,
-        bundler_rpc_url: "https://api.pimlico.io/v1/base-sepolia/rpc?apikey=secret"
+        bundler_rpc_url: "https://api.pimlico.io/v1/base-sepolia/rpc?apikey=secret",
+        session_signer_address: "0x0C9C012Ee7bD4843DBB3e01054179eE7D901B8ab",
+        kernel_account_index: 1,
+        operator_kernel_account_index: 0,
+        operator_eoa_address: "0x19AB05bbDc88A11eF8E4dFE181e2F7d80eB0659A"
+      )
+
+      Application.put_env(
+        :bank,
+        Bank.Chains.KernelVerifier,
+        rpc_url: "https://sepolia.base.org",
+        validation_id_check: :skip
       )
 
       output =
@@ -103,6 +123,88 @@ defmodule Mix.Tasks.Bank.BrowserInstall.SmokeTest do
 
       refute output =~ "apikey=secret",
              "preflight task leaked the bundler URL's embedded API key"
+
+      # New checks added under Path A. The smoke task must surface each
+      # config slot so a half-configured deploy fails the checklist
+      # rather than failing the install hours later.
+      assert output =~ "KernelVerifier :rpc_url"
+      assert output =~ "KernelVerifier :validation_id_check"
+      # `:skip` mode MUST be loud — pin the DEV-ONLY warning so prod
+      # reviewers notice when it leaks past dev.exs.
+      assert output =~ "DEV ONLY"
+      assert output =~ "kernel_account_index (browser vs operator)"
+      assert output =~ "browser=1"
+      assert output =~ "operator=0"
+      assert output =~ "/install/sign_session_portion"
+    end
+
+    test "kernel_account_index collision (browser == operator) is reported as error" do
+      System.put_env("BANK_ENDPOINT", "http://localhost:4000")
+      System.put_env("OPERATOR_API_KEY", "cb_xyz")
+      System.put_env("BASE_RPC_URL", "https://example")
+      System.put_env("BUNDLER_RPC_URL", "https://example")
+
+      Application.put_env(
+        :bank,
+        Bank.SessionPermissions.BrowserInstall,
+        bundler_rpc_url: "https://example",
+        session_signer_address: "0x0C9C012Ee7bD4843DBB3e01054179eE7D901B8ab",
+        # Both 0 — collision shape — must trip the new check loudly.
+        kernel_account_index: 0,
+        operator_kernel_account_index: 0,
+        operator_eoa_address: "0x19AB05bbDc88A11eF8E4dFE181e2F7d80eB0659A"
+      )
+
+      Application.put_env(
+        :bank,
+        Bank.Chains.KernelVerifier,
+        rpc_url: "https://example",
+        validation_id_check: :enforce
+      )
+
+      output =
+        capture_io(:stdio, fn ->
+          assert catch_exit(Mix.Tasks.Bank.BrowserInstall.Smoke.run([])) == {:shutdown, 1}
+        end)
+
+      assert output =~ "kernel_account_index"
+      assert output =~ "ERROR"
+      assert output =~ "AA23",
+             "expected the collision check to name the on-chain failure mode"
+    end
+
+    test "KernelVerifier :rpc_url missing surfaces as ERROR with alias hint" do
+      System.put_env("BANK_ENDPOINT", "http://localhost:4000")
+      System.put_env("OPERATOR_API_KEY", "cb_xyz")
+      System.put_env("BASE_RPC_URL", "https://example")
+      System.put_env("BUNDLER_RPC_URL", "https://example")
+
+      Application.put_env(
+        :bank,
+        Bank.SessionPermissions.BrowserInstall,
+        bundler_rpc_url: "https://example",
+        session_signer_address: "0x0C9C012Ee7bD4843DBB3e01054179eE7D901B8ab",
+        kernel_account_index: 1,
+        operator_kernel_account_index: 0
+      )
+
+      Application.put_env(
+        :bank,
+        Bank.Chains.KernelVerifier,
+        rpc_url: nil,
+        validation_id_check: :skip
+      )
+
+      output =
+        capture_io(:stdio, fn ->
+          assert catch_exit(Mix.Tasks.Bank.BrowserInstall.Smoke.run([])) == {:shutdown, 1}
+        end)
+
+      assert output =~ "KernelVerifier :rpc_url"
+      assert output =~ "ERROR"
+      # Must name the env aliases so an operator knows what to set.
+      assert output =~ "BASE_SEPOLIA_RPC_URL"
+      assert output =~ "BASE_RPC_URL"
     end
 
     test "refuses --confirm and exits {:shutdown, 2} with a clear message" do
@@ -142,7 +244,8 @@ defmodule Mix.Tasks.Bank.BrowserInstall.SmokeTest do
       Application.put_env(
         :bank,
         Bank.SessionPermissions.BrowserInstall,
-        bundler_rpc_url: "https://example"
+        bundler_rpc_url: "https://example",
+        session_signer_address: "0x0C9C012Ee7bD4843DBB3e01054179eE7D901B8ab"
       )
 
       output =
@@ -167,7 +270,17 @@ defmodule Mix.Tasks.Bank.BrowserInstall.SmokeTest do
       Application.put_env(
         :bank,
         Bank.SessionPermissions.BrowserInstall,
-        bundler_rpc_url: "https://example"
+        bundler_rpc_url: "https://example",
+        session_signer_address: "0x0C9C012Ee7bD4843DBB3e01054179eE7D901B8ab",
+        kernel_account_index: 1,
+        operator_kernel_account_index: 0
+      )
+
+      Application.put_env(
+        :bank,
+        Bank.Chains.KernelVerifier,
+        rpc_url: "https://example",
+        validation_id_check: :skip
       )
 
       output =
@@ -189,7 +302,8 @@ defmodule Mix.Tasks.Bank.BrowserInstall.SmokeTest do
       Application.put_env(
         :bank,
         Bank.SessionPermissions.BrowserInstall,
-        bundler_rpc_url: "https://example"
+        bundler_rpc_url: "https://example",
+        session_signer_address: "0x0C9C012Ee7bD4843DBB3e01054179eE7D901B8ab"
       )
 
       output =
@@ -220,6 +334,118 @@ defmodule Mix.Tasks.Bank.BrowserInstall.SmokeTest do
       assert output =~ "BrowserInstall"
       assert output =~ "bundler_rpc_url"
       assert output =~ "ERROR"
+    end
+
+    # --- bundler alias reporting (P0 bootstrap bug fix) ---------------
+
+    test "bundler app-config check names the env alias that fed it (BUNDLER_RPC_URL)" do
+      System.put_env("BANK_ENDPOINT", "http://localhost:4000")
+      System.put_env("OPERATOR_API_KEY", "cb_xyz")
+      System.put_env("BASE_RPC_URL", "https://example")
+
+      System.put_env(
+        "BUNDLER_RPC_URL",
+        "https://api.pimlico.io/v1/base-sepolia/rpc?apikey=secret"
+      )
+
+      Application.put_env(
+        :bank,
+        Bank.SessionPermissions.BrowserInstall,
+        bundler_rpc_url: "https://api.pimlico.io/v1/base-sepolia/rpc?apikey=secret",
+        session_signer_address: "0x0C9C012Ee7bD4843DBB3e01054179eE7D901B8ab",
+        kernel_account_index: 1,
+        operator_kernel_account_index: 0
+      )
+
+      Application.put_env(
+        :bank,
+        Bank.Chains.KernelVerifier,
+        rpc_url: "https://example",
+        validation_id_check: :skip
+      )
+
+      output =
+        capture_io(:stdio, fn ->
+          assert :ok = Mix.Tasks.Bank.BrowserInstall.Smoke.run([])
+        end)
+
+      assert output =~ "from $BUNDLER_RPC_URL",
+             "expected app-config check to name the alias that fed it"
+
+      refute output =~ "apikey=secret",
+             "alias reporter must not leak the URL value"
+    end
+
+    test "bundler app-config check prefers BASE_SEPOLIA_BUNDLER_RPC when set" do
+      System.put_env("BANK_ENDPOINT", "http://localhost:4000")
+      System.put_env("OPERATOR_API_KEY", "cb_xyz")
+      System.put_env("BASE_RPC_URL", "https://example")
+      System.put_env("BUNDLER_RPC_URL", "https://wrong")
+      System.put_env("BASE_SEPOLIA_BUNDLER_RPC", "https://right?apikey=s3cret")
+
+      Application.put_env(
+        :bank,
+        Bank.SessionPermissions.BrowserInstall,
+        bundler_rpc_url: "https://right?apikey=s3cret",
+        session_signer_address: "0x0C9C012Ee7bD4843DBB3e01054179eE7D901B8ab",
+        kernel_account_index: 1,
+        operator_kernel_account_index: 0
+      )
+
+      Application.put_env(
+        :bank,
+        Bank.Chains.KernelVerifier,
+        rpc_url: "https://example",
+        validation_id_check: :skip
+      )
+
+      output =
+        capture_io(:stdio, fn ->
+          assert :ok = Mix.Tasks.Bank.BrowserInstall.Smoke.run([])
+        end)
+
+      assert output =~ "from $BASE_SEPOLIA_BUNDLER_RPC",
+             "BASE_SEPOLIA_BUNDLER_RPC must win precedence over BUNDLER_RPC_URL"
+
+      refute output =~ "s3cret",
+             "alias reporter must not leak the URL value"
+    after
+      System.delete_env("BASE_SEPOLIA_BUNDLER_RPC")
+    end
+
+    # --- adapter probe ----------------------------------------------
+
+    test "chain_adapter :4100 check is reported (non-fatal when not running)" do
+      System.put_env("BANK_ENDPOINT", "http://localhost:4000")
+      System.put_env("OPERATOR_API_KEY", "cb_xyz")
+      System.put_env("BASE_RPC_URL", "https://example")
+      System.put_env("BUNDLER_RPC_URL", "https://example")
+
+      Application.put_env(
+        :bank,
+        Bank.SessionPermissions.BrowserInstall,
+        bundler_rpc_url: "https://example",
+        session_signer_address: "0x0C9C012Ee7bD4843DBB3e01054179eE7D901B8ab",
+        kernel_account_index: 1,
+        operator_kernel_account_index: 0
+      )
+
+      Application.put_env(
+        :bank,
+        Bank.Chains.KernelVerifier,
+        rpc_url: "https://example",
+        validation_id_check: :skip
+      )
+
+      output =
+        capture_io(:stdio, fn ->
+          # Whether or not the adapter is running on :4100 during
+          # the test, the run completes ok (the probe is advisory).
+          assert :ok = Mix.Tasks.Bank.BrowserInstall.Smoke.run([])
+        end)
+
+      assert output =~ "chain_adapter :4100",
+             "expected the smoke task to print a chain_adapter health line"
     end
   end
 end

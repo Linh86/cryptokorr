@@ -389,3 +389,41 @@ export const CallbackSchemasByKind = {
   "execution.aborted": CallbackExecutionAbortedSchema,
   "delegation.state_changed": CallbackDelegationStateChangedSchema,
 } as const;
+
+// -------------------------------------------------------------------------
+// Install: session-portion signing
+// -------------------------------------------------------------------------
+
+/**
+ * `POST /install/sign_session_portion` — Phoenix asks the adapter to
+ * sign the PermissionValidator's portion of a browser-driven install
+ * UserOp.
+ *
+ * The browser-side ZeroDev SDK builds the install UserOp, computes
+ * the EIP-4337 user-operation hash, and asks the
+ * `sessionAccount.signMessage({raw: userOpHash})` for the regular
+ * validator's signature. That signer is the adapter's
+ * `DELEGATION_SIGNER_KEY` — its private key never leaves this
+ * process, so Phoenix proxies the hash here and forwards the
+ * resulting signature back to the browser.
+ *
+ * `session_signer_address` is optional and used for a sanity check
+ * — when set, the adapter refuses to sign if the key derives to a
+ * different address. Catches a misrouted Phoenix that points at a
+ * different adapter process with a different `DELEGATION_SIGNER_KEY`.
+ */
+export const InstallSignSessionPortionSchema = z.object({
+  contract_version: z.literal(1),
+  binding_id: uuid,
+  smart_account_id: z.string().min(1),
+  // 0x-prefixed 32-byte hex (66 chars total). The browser passes the
+  // exact `userOpHash` bytes ZeroDev computed; we sign it via
+  // `signMessage({message: {raw: ...}})` so the recovered address
+  // matches `DELEGATION_SIGNER_KEY`'s public address (the on-chain
+  // PermissionValidator's expected signer).
+  user_op_hash: z.string().regex(/^0x[0-9a-fA-F]{64}$/, {
+    message: "user_op_hash must be 0x-prefixed 32-byte hex",
+  }),
+  session_signer_address: hexAddress.optional(),
+});
+export type InstallSignSessionPortion = z.infer<typeof InstallSignSessionPortionSchema>;

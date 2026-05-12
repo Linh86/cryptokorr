@@ -342,6 +342,18 @@ defmodule BankWeb.Router do
     get "/:id/install_envelope", WalletBindingsInstallController, :envelope
     get "/:id/install_status", WalletBindingsInstallController, :status
     post "/:id/install_attestation", WalletBindingsInstallController, :attestation
+
+    # The install UserOp's permission-validator signature: the
+    # browser-driven install needs the operator session signer's
+    # signature over the UserOp hash. Phoenix proxies the hash to
+    # chain_adapter (which holds `DELEGATION_SIGNER_KEY`) and
+    # returns the signature. CSRF + browser-session auth come from
+    # the pipeline; ownership + binding-state checks live inside
+    # the controller action so a misrouted hash never reaches the
+    # adapter signing path.
+    post "/:id/sign_install_userop_hash",
+         WalletBindingsInstallController,
+         :sign_install_userop_hash
   end
 
   # Internal adapter callback — private network, not part of /v1/.

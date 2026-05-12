@@ -203,6 +203,16 @@ defmodule BankWeb.WalletBindingsInstallControllerTest do
 
       assert json_response(conn, 403)["error"]["code"] == "forbidden"
     end
+
+    test "viewer is FORBIDDEN to POST sign_install_userop_hash (operator+ required)",
+         %{conn: conn, binding: binding} do
+      conn =
+        post(conn, ~p"/wallet_bindings/#{binding.id}/sign_install_userop_hash", %{
+          "user_op_hash" => "0x" <> String.duplicate("aa", 32)
+        })
+
+      assert json_response(conn, 403)["error"]["code"] == "forbidden"
+    end
   end
 
   describe "auth posture — anonymous" do
@@ -263,6 +273,233 @@ defmodule BankWeb.WalletBindingsInstallControllerTest do
         })
 
       assert json_response(conn, 202)["state"] == "submitted"
+    end
+  end
+
+  describe "POST /wallet_bindings/:id/sign_install_userop_hash — auth + ownership" do
+    setup :register_and_log_in_user
+    setup :install_binding
+
+    @valid_hash "0x" <> String.duplicate("aa", 32)
+
+    test "operator can request a session-portion signature; adapter is proxied",
+         %{conn: conn, binding: binding} do
+      # Stub the chain_adapter response. The proxy must NOT echo
+      # any adapter-side secret material; only the two declared
+      # fields (`signature`, `session_signer_address`) are passed
+      # through.
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        Req.Test.json(conn, %{
+          "signature" => "0x" <> String.duplicate("be", 65),
+          "session_signer_address" => "0x" <> String.duplicate("11", 20)
+        })
+      end)
+
+      conn =
+        post(conn, ~p"/wallet_bindings/#{binding.id}/sign_install_userop_hash", %{
+          "user_op_hash" => @valid_hash
+        })
+
+      body = json_response(conn, 200)
+      assert body["signature"] == "0x" <> String.duplicate("be", 65)
+      assert body["session_signer_address"] == "0x" <> String.duplicate("11", 20)
+
+      # The adapter's bearer secret is NEVER in the response,
+      # even though the stub had access to it.
+      refute body["secret"]
+      refute Map.has_key?(body, "authorization")
+    end
+
+    test "returns 422 invalid_user_op_hash on missing hash",
+         %{conn: conn, binding: binding} do
+      conn =
+        post(conn, ~p"/wallet_bindings/#{binding.id}/sign_install_userop_hash", %{})
+
+      assert json_response(conn, 422)["error"]["code"] == "invalid_user_op_hash"
+    end
+
+    test "returns 422 invalid_user_op_hash on non-hex hash",
+         %{conn: conn, binding: binding} do
+      conn =
+        post(conn, ~p"/wallet_bindings/#{binding.id}/sign_install_userop_hash", %{
+          "user_op_hash" => "not-a-hash"
+        })
+
+      assert json_response(conn, 422)["error"]["code"] == "invalid_user_op_hash"
+    end
+
+    test "returns 422 invalid_user_op_hash on wrong-length hash",
+         %{conn: conn, binding: binding} do
+      conn =
+        post(conn, ~p"/wallet_bindings/#{binding.id}/sign_install_userop_hash", %{
+          "user_op_hash" => "0xdeadbeef"
+        })
+
+      assert json_response(conn, 422)["error"]["code"] == "invalid_user_op_hash"
+    end
+
+    test "returns 502 session_signer_unavailable when adapter is unreachable",
+         %{conn: conn, binding: binding} do
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        Req.Test.transport_error(conn, :econnrefused)
+      end)
+
+      conn =
+        post(conn, ~p"/wallet_bindings/#{binding.id}/sign_install_userop_hash", %{
+          "user_op_hash" => @valid_hash
+        })
+
+      assert json_response(conn, 502)["error"]["code"] == "session_signer_unavailable"
+    end
+
+    test "returns 422 session_signer_refused when adapter returns a 4xx",
+         %{conn: conn, binding: binding} do
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        conn
+        |> Plug.Conn.put_status(400)
+        |> Req.Test.json(%{error: %{code: "validation_error", message: "bad shape"}})
+      end)
+
+      conn =
+        post(conn, ~p"/wallet_bindings/#{binding.id}/sign_install_userop_hash", %{
+          "user_op_hash" => @valid_hash
+        })
+
+      assert json_response(conn, 422)["error"]["code"] == "session_signer_refused"
+    end
+
+    test "returns 502 session_signer_unavailable when adapter returns a 5xx",
+         %{conn: conn, binding: binding} do
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        conn
+        |> Plug.Conn.put_status(500)
+        |> Req.Test.json(%{error: "boom"})
+      end)
+
+      conn =
+        post(conn, ~p"/wallet_bindings/#{binding.id}/sign_install_userop_hash", %{
+          "user_op_hash" => @valid_hash
+        })
+
+      assert json_response(conn, 502)["error"]["code"] == "session_signer_unavailable"
+    end
+
+    test "returns 502 session_signer_unavailable when adapter response shape is malformed",
+         %{conn: conn, binding: binding} do
+      # 200 OK but missing the required keys — the controller MUST
+      # NOT pass this through to the browser as a successful
+      # signature.
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        Req.Test.json(conn, %{"unexpected" => "shape"})
+      end)
+
+      conn =
+        post(conn, ~p"/wallet_bindings/#{binding.id}/sign_install_userop_hash", %{
+          "user_op_hash" => @valid_hash
+        })
+
+      assert json_response(conn, 502)["error"]["code"] == "session_signer_unavailable"
+    end
+
+    test "validates session_signer_address against Phoenix config when provided",
+         %{conn: conn, binding: binding} do
+      original = Application.get_env(:bank, Bank.SessionPermissions.BrowserInstall, [])
+
+      try do
+        Application.put_env(
+          :bank,
+          Bank.SessionPermissions.BrowserInstall,
+          Keyword.put(original, :session_signer_address, "0x" <> String.duplicate("11", 20))
+        )
+
+        # Browser sends a mismatched address (stale cached envelope
+        # from before a SESSION_SIGNER_ADDRESS rotation). The
+        # adapter must NOT be reached — Phoenix refuses upfront.
+        Req.Test.stub(Bank.AdapterClient, fn _ ->
+          flunk("adapter must not be called on session-signer mismatch")
+        end)
+
+        conn =
+          post(conn, ~p"/wallet_bindings/#{binding.id}/sign_install_userop_hash", %{
+            "user_op_hash" => @valid_hash,
+            "session_signer_address" => "0x" <> String.duplicate("ff", 20)
+          })
+
+        assert json_response(conn, 422)["error"]["code"] == "session_signer_mismatch"
+      after
+        Application.put_env(:bank, Bank.SessionPermissions.BrowserInstall, original)
+      end
+    end
+
+    test "anonymous request is rejected (no session cookie)",
+         %{binding: binding} do
+      conn = build_conn()
+
+      result =
+        try do
+          response =
+            post(conn, ~p"/wallet_bindings/#{binding.id}/sign_install_userop_hash", %{
+              "user_op_hash" => @valid_hash
+            })
+
+          {:response, response.status, json_response(response, response.status)}
+        rescue
+          err -> {:raised, err.__struct__}
+        end
+
+      case result do
+        {:raised, Plug.CSRFProtection.InvalidCSRFTokenError} -> :ok
+        {:response, status, _body} when status in [401, 403, 422] -> :ok
+        other -> flunk("anonymous POST was not rejected: #{inspect(other)}")
+      end
+    end
+
+    test "cross-workspace binding id returns 404",
+         %{conn: conn, current_user: user} do
+      # Create a sibling workspace + binding the logged-in user is
+      # NOT a member of. The current user is set up via
+      # `register_and_log_in_user` which establishes membership on
+      # `workspace`. We need a workspace_id from a brand-new
+      # workspace so the membership lookup returns nothing.
+      suffix = System.unique_integer([:positive])
+
+      {:ok, other_user} =
+        Bank.Accounts.find_or_create_from_oauth(%{
+          provider: :google,
+          subject: "cross-#{suffix}",
+          email: "cross-#{suffix}@example.com",
+          name: "Cross"
+        })
+
+      {:ok, other_workspace} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "cross-#{suffix}",
+          name: "Cross ws",
+          mainnet_enabled: false
+        })
+
+      {:ok, _} =
+        Bank.Workspaces.create_membership(%{
+          user_id: other_user.id,
+          workspace_id: other_workspace.id,
+          role: :admin
+        })
+
+      privkey = <<7::256>>
+      {:ok, pubkey} = ExSecp256k1.create_public_key(privkey)
+      {:ok, address} = Signature.address_from_pubkey(pubkey)
+
+      sibling_binding =
+        verified_binding_with_privkey(other_workspace.id, other_user.id, address, privkey)
+
+      _ = user
+
+      conn =
+        post(conn, ~p"/wallet_bindings/#{sibling_binding.id}/sign_install_userop_hash", %{
+          "user_op_hash" => @valid_hash
+        })
+
+      assert json_response(conn, 404)["error"]["code"] == "not_found"
     end
   end
 

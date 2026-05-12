@@ -324,6 +324,54 @@ defmodule BankWeb.AgentLive.PermissionCardTest do
                "expected the failure banner for reason #{inspect(reason)}"
       end
     end
+
+    test ":bundler_not_configured renders the env-var copy", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      render_hook(view, "session_permission_install:failed", %{
+        "reason" => "bundler_not_configured"
+      })
+
+      html = render(view)
+
+      # The env-var copy is appropriate ONLY when the envelope arrived
+      # without a bundler URL — i.e. Phoenix could not find one in any
+      # of the recognised env vars. Telling the operator to set env
+      # vars when the URL IS set but the browser couldn't reach it
+      # (CORS) is what landed us in this fix.
+      assert html =~ "no bundler URL in install envelope"
+      assert html =~ "BASE_SEPOLIA_BUNDLER_RPC"
+      assert html =~ "BUNDLER_URL"
+      assert html =~ "BUNDLER_RPC_URL"
+    end
+
+    test ":bundler_unavailable renders the CORS / network copy, NOT the env-var copy",
+         %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      render_hook(view, "session_permission_install:failed", %{
+        "reason" => "bundler_unavailable"
+      })
+
+      html = render(view)
+
+      # Positive: the copy must point the operator at the actual root
+      # cause — bundler-side rejection (CORS allowlist, network
+      # failure, 5xx). It must mention CORS so they know to add the
+      # origin to ZeroDev / Pimlico instead of fiddling with env vars.
+      assert html =~ "CORS",
+             "bundler_unavailable copy must mention CORS as the most common cause"
+
+      assert html =~ "Pimlico" or html =~ "ZeroDev",
+             "bundler_unavailable copy must suggest a concrete remediation"
+
+      # Negative regression: this is the bug we just fixed. The
+      # env-var copy belongs on `bundler_not_configured` ONLY. Asking
+      # the operator to set env vars that ARE already set wastes time
+      # and obscures the real CORS issue.
+      refute html =~ "set BASE_SEPOLIA_BUNDLER_RPC",
+             "bundler_unavailable must NOT tell the operator to set env vars — that copy belongs on :bundler_not_configured"
+    end
   end
 
   describe "render with active delegation" do

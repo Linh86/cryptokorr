@@ -27,9 +27,17 @@ defmodule BankWeb.Plugs.PutCSP do
       nonce-based tightening is a follow-up gated on upstream support.
     * `img-src 'self' data:` — first-party images plus `data:` URIs
       for inline SVG / favicons embedded by build tools.
-    * `connect-src 'self'` — covers the LiveView WebSocket upgrade at
-      `/live/websocket` (same-origin) and the `/v1` fetch surface
-      hit by the operator-console install hook.
+    * `connect-src 'self' <bundler-origin>` — covers the LiveView
+      WebSocket upgrade at `/live/websocket` (same-origin), the
+      `/v1` fetch surface, AND the operator-console install hook's
+      direct call to the configured ERC-4337 bundler. The bundler
+      origin comes from `Bank.SessionPermissions.BrowserInstall`'s
+      `:bundler_rpc_url` (extracted to `scheme://host[:port]`) so
+      a config change auto-propagates to the CSP — there is no
+      hardcoded bundler URL in this plug. When that config is
+      missing, falls back to a small allowlist of known
+      browser-friendly bundler hosts so a half-configured dev env
+      doesn't break the install flow silently with `Failed to fetch`.
     * `frame-ancestors 'none'` — clickjacking defense; the operator
       console must never be embeddable.
     * `base-uri 'self'` — base-tag injection defense.
@@ -44,22 +52,96 @@ defmodule BankWeb.Plugs.PutCSP do
 
   import Plug.Conn
 
-  @csp [
-         "default-src 'self'",
-         "script-src 'self'",
-         "style-src 'self' 'unsafe-inline'",
-         "img-src 'self' data:",
-         "connect-src 'self'",
-         "frame-ancestors 'none'",
-         "base-uri 'self'",
-         "form-action 'self'",
-         "object-src 'none'"
-       ]
-       |> Enum.join("; ")
+  # Fallback hosts the install hook may need to reach when
+  # `Bank.SessionPermissions.BrowserInstall :bundler_rpc_url` is
+  # missing from the env. Kept small on purpose — any host added
+  # here becomes a permitted fetch target for the whole operator
+  # console. The deployed config should always set
+  # `:bundler_rpc_url` so this fallback is only for half-configured
+  # dev sessions.
+  @fallback_bundler_origins [
+    "https://api.pimlico.io",
+    "https://rpc.zerodev.app"
+  ]
 
   def init(opts), do: opts
 
   def call(conn, _opts) do
-    put_resp_header(conn, "content-security-policy", @csp)
+    put_resp_header(conn, "content-security-policy", build_csp())
   end
+
+  @doc false
+  def build_csp do
+    [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data:",
+      build_connect_src(),
+      "frame-ancestors 'none'",
+      "base-uri 'self'",
+      "form-action 'self'",
+      "object-src 'none'"
+    ]
+    |> Enum.join("; ")
+  end
+
+  defp build_connect_src do
+    configured =
+      [configured_bundler_origin(), configured_chain_rpc_origin()]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+
+    origins =
+      case configured do
+        [] -> @fallback_bundler_origins
+        list -> list
+      end
+
+    "connect-src 'self' " <> Enum.join(origins, " ")
+  end
+
+  @doc false
+  def configured_bundler_origin do
+    configured_origin(:bundler_rpc_url)
+  end
+
+  # Generic chain RPC origin (e.g. `https://sepolia.base.org`). The
+  # install hook builds a viem `publicClient` against this URL for
+  # `getSenderAddress` simulation — without permitting it in
+  # `connect-src`, the browser blocks the `eth_call` with
+  # `Failed to fetch` before the SDK can read the simulated revert.
+  # Always returned in addition to the bundler origin so both
+  # transports can fire.
+  @doc false
+  def configured_chain_rpc_origin do
+    configured_origin(:chain_rpc_url)
+  end
+
+  defp configured_origin(key) do
+    case Application.get_env(:bank, Bank.SessionPermissions.BrowserInstall, [])
+         |> Keyword.get(key) do
+      url when is_binary(url) and byte_size(url) > 0 ->
+        url_to_origin(url)
+
+      _ ->
+        nil
+    end
+  end
+
+  defp url_to_origin(url) do
+    case URI.parse(url) do
+      %URI{scheme: scheme, host: host, port: port}
+      when is_binary(scheme) and is_binary(host) and byte_size(host) > 0 ->
+        scheme <> "://" <> host <> port_suffix(scheme, port)
+
+      _ ->
+        nil
+    end
+  end
+
+  defp port_suffix("https", 443), do: ""
+  defp port_suffix("http", 80), do: ""
+  defp port_suffix(_, port) when is_integer(port), do: ":#{port}"
+  defp port_suffix(_, _), do: ""
 end

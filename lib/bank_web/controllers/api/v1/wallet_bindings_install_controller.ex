@@ -236,6 +236,8 @@ defmodule BankWeb.API.V1.WalletBindingsInstallController do
       :scope,
       :scope_hash,
       :bundler_rpc_url,
+      :chain_rpc_url,
+      :kernel_account_index,
       :human_readable_summary
     ])
   end
@@ -279,6 +281,11 @@ defmodule BankWeb.API.V1.WalletBindingsInstallController do
 
   defp refusal_to_http(:workspace_paused),
     do: {:unprocessable_entity, "workspace_paused", "workspace is paused"}
+
+  defp refusal_to_http(:kernel_account_collision),
+    do:
+      {:unprocessable_entity, "kernel_account_collision",
+       "this wallet would target the operator's smart account; raise BROWSER_KERNEL_ACCOUNT_INDEX or use a different EOA"}
 
   defp refusal_to_http({:invalid_attestation, detail}),
     do:

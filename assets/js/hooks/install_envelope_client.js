@@ -77,6 +77,79 @@ export async function fetchInstallEnvelope(bindingId, opts = {}) {
 }
 
 /**
+ * POST the install UserOp hash to Phoenix and receive back the
+ * permission-validator's signature. Phoenix proxies the request
+ * to chain_adapter (which holds `DELEGATION_SIGNER_KEY`); the
+ * adapter signs the EIP-191 hash and returns the signature. The
+ * adapter's private key NEVER reaches the browser.
+ *
+ * STRICT: throws on any non-2xx response or malformed body. The
+ * thrown error carries a structured `code` mapped to the failure-
+ * category allowlist via `mapBeFailureCode`, so the install hook's
+ * `sessionAccount.signMessage` can surface the precise failure
+ * reason (`session_signer_unavailable`, `session_signer_refused`,
+ * etc.) instead of collapsing to `unknown`.
+ *
+ * Returns the signature string only — never logs or returns
+ * `session_signer_address` to anywhere except the SDK call site
+ * (where the SDK uses the address for its own consistency check).
+ */
+export async function postSignInstallUserOpHash(bindingId, userOpHash, opts = {}) {
+  const fetchImpl = opts.fetch || globalThis.fetch
+  const url = buildUrl(ENVELOPE_PATH_PREFIX, bindingId, "/sign_install_userop_hash")
+
+  const body = {user_op_hash: userOpHash}
+  if (opts.sessionSignerAddress) body.session_signer_address = opts.sessionSignerAddress
+
+  let response
+  try {
+    response = await fetchImpl(url, {
+      method: "POST",
+      headers: buildHeaders("POST"),
+      credentials: "same-origin",
+      body: JSON.stringify(body),
+    })
+  } catch (err) {
+    const wrapped = new Error("session_sign_network_error")
+    wrapped.cause = err
+    wrapped.code = "session_signer_unavailable"
+    throw wrapped
+  }
+
+  let parsed = null
+  try {
+    parsed = await response.json()
+  } catch {
+    parsed = null
+  }
+
+  if (!response.ok) {
+    const wrapped = new Error("session_sign_request_failed")
+    wrapped.status = response.status
+    // Prefer Phoenix's structured `error.code`; map raw HTTP
+    // status as a defensive fallback.
+    const beCode = parsed && parsed.error && parsed.error.code
+    wrapped.code =
+      (typeof beCode === "string" && beCode) ||
+      (response.status >= 500
+        ? "session_signer_unavailable"
+        : "session_signer_refused")
+    throw wrapped
+  }
+
+  if (!parsed || typeof parsed.signature !== "string") {
+    const wrapped = new Error("session_sign_invalid_response")
+    wrapped.code = "session_signer_unavailable"
+    throw wrapped
+  }
+
+  return {
+    signature: parsed.signature,
+    session_signer_address: parsed.session_signer_address || null,
+  }
+}
+
+/**
  * POST a `submitted` attestation. Body matches Phoenix's
  * `Bank.SessionPermissions.BrowserInstall.record_attestation/3`
  * required keys for status `submitted`.
@@ -229,6 +302,23 @@ export function mapBeFailureCode(code) {
       return "chain_id_mismatch"
     case "network_error":
       return "bundler_unavailable"
+    // Kernel-account collision is wire-allowlisted (see
+    // `Bank.SessionPermissions.BrowserInstall.failure_categories/0`)
+    // — pass it through unmapped so the UI surfaces the precise
+    // operator-actionable copy ("raise BROWSER_KERNEL_ACCOUNT_INDEX
+    // or use a different wallet") instead of collapsing to
+    // `bundler_rejected`.
+    case "kernel_account_collision":
+      return "kernel_account_collision"
+    // Session-signer proxy (`/wallet_bindings/:id/sign_install_userop_hash`)
+    // failures. The browser hook's `sessionAccount.signMessage` calls
+    // Phoenix, which proxies to chain_adapter; either layer can
+    // return one of these codes. Pass through so the UI shows
+    // operator-actionable copy.
+    case "session_signer_unavailable":
+      return "session_signer_unavailable"
+    case "session_signer_refused":
+      return "session_signer_refused"
     case "forbidden":
     case "unauthenticated":
     case "not_found":

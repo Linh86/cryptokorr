@@ -295,6 +295,132 @@ defmodule Bank.AdapterClient do
     post("/dispatch/grant_delegation", payload, :grant, opts)
   end
 
+  @typedoc """
+  Result of `sign_install_session_portion/2` — the adapter signed
+  the install UserOp hash with its `DELEGATION_SIGNER_KEY` and
+  returned the EIP-191 signature. `session_signer_address` is the
+  derived address the browser hook embeds in the install envelope
+  consistency check.
+  """
+  @type session_sign_ok :: %{
+          signature: String.t(),
+          session_signer_address: String.t()
+        }
+  @type session_sign_error ::
+          :adapter_unavailable
+          | :invalid_response
+          | {:adapter_rejected, pos_integer(), map() | String.t()}
+          | {:adapter_error, pos_integer(), map() | String.t()}
+
+  @doc """
+  Ask the chain_adapter to sign the install UserOp's permission-
+  validator portion. The browser-driven install flow needs TWO
+  signatures on the install UserOp — sudo (user's MetaMask) and the
+  permission validator (operator's session signer). Only the
+  adapter holds the session signer's private key
+  (`DELEGATION_SIGNER_KEY`); Phoenix proxies the hash here so the
+  key never leaves the adapter process.
+
+  Args:
+    * `:binding_id` — UUID; surfaced in the adapter's audit log.
+    * `:smart_account_id` — synthetic Phoenix id; same purpose.
+    * `:user_op_hash` — 0x-prefixed 32-byte hex (validated upstream
+      by `BankWeb.WalletBindingsInstallController.sign_install_userop_hash/2`).
+    * `:session_signer_address` — optional. When set, the adapter
+      refuses to sign if its key doesn't derive to this address. The
+      browser's envelope carries this value, so the check pins
+      Phoenix→adapter wiring per request.
+
+  Returns the canonical envelope without ever logging or returning
+  the adapter's private key.
+  """
+  @spec sign_install_session_portion(map(), keyword()) ::
+          {:ok, session_sign_ok()} | {:error, session_sign_error()}
+  def sign_install_session_portion(
+        %{
+          binding_id: binding_id,
+          smart_account_id: smart_account_id,
+          user_op_hash: user_op_hash
+        } = args,
+        opts \\ []
+      )
+      when is_binary(binding_id) and is_binary(smart_account_id) and is_binary(user_op_hash) do
+    payload =
+      %{
+        contract_version: @contract_version,
+        binding_id: binding_id,
+        smart_account_id: smart_account_id,
+        user_op_hash: user_op_hash
+      }
+      |> maybe_put_session_signer(Map.get(args, :session_signer_address))
+
+    post_sync_json("/install/sign_session_portion", payload, :install_sign_session, opts)
+  end
+
+  defp maybe_put_session_signer(payload, nil), do: payload
+  defp maybe_put_session_signer(payload, ""), do: payload
+
+  defp maybe_put_session_signer(payload, addr) when is_binary(addr) do
+    Map.put(payload, :session_signer_address, addr)
+  end
+
+  # Synchronous JSON POST. Unlike `post/4` which expects the
+  # dispatch contract's `accepted: true` shape, this one returns
+  # the parsed JSON body verbatim under `{:ok, body}`. Caller
+  # validates the response keys it cares about.
+  defp post_sync_json(path, payload, kind, opts) do
+    config = Application.fetch_env!(:bank, __MODULE__)
+    base_url = Keyword.fetch!(config, :base_url)
+    secret = Keyword.fetch!(config, :dispatch_secret)
+    extra_req_options = Keyword.get(config, :req_options, [])
+
+    req_opts =
+      [
+        base_url: base_url,
+        url: path,
+        method: :post,
+        headers: [
+          {"authorization", "Bearer " <> secret},
+          {"content-type", "application/json"}
+        ],
+        json: payload,
+        receive_timeout: Keyword.get(opts, :timeout_ms, @default_timeout_ms),
+        retry: false
+      ]
+      |> Keyword.merge(extra_req_options)
+      |> Keyword.merge(Keyword.get(opts, :req_options, []))
+
+    case Req.request(req_opts) do
+      {:ok, %Req.Response{status: 200, body: body}} when is_map(body) ->
+        # Caller (`sign_install_session_portion`) declares the
+        # required keys — narrow here so a contract drift surfaces
+        # as `:invalid_response` rather than a key-error in the
+        # consumer.
+        case body do
+          %{"signature" => sig, "session_signer_address" => addr}
+          when is_binary(sig) and is_binary(addr) ->
+            {:ok, %{signature: sig, session_signer_address: addr}}
+
+          _ ->
+            Logger.warning("Bank.AdapterClient #{path} invalid_response (#{kind})")
+            {:error, :invalid_response}
+        end
+
+      {:ok, %Req.Response{status: status, body: body}} when status in 400..499 ->
+        {:error, {:adapter_rejected, status, body}}
+
+      {:ok, %Req.Response{status: status, body: body}} ->
+        {:error, {:adapter_error, status, body}}
+
+      {:error, reason} ->
+        Logger.warning(
+          "Bank.AdapterClient #{path} unavailable (category=#{reason_category(reason)})"
+        )
+
+        {:error, :adapter_unavailable}
+    end
+  end
+
   # --- Payload shaping ---------------------------------------------------
 
   defp build_transfer_payload(%ExecutionPlan{} = plan) do

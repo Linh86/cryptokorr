@@ -92,8 +92,51 @@ export const SessionPermissionInstall = {
     // here.
     const provider = getProvider()
     if (!provider) {
-      this.pushEvent("session_permission_install:failed", {reason: "unknown"})
+      this.pushEvent("session_permission_install:failed", {reason: "wallet_not_connected"})
       return
+    }
+
+    // 0. PASSIVE LIVENESS PREFLIGHT — the most important client-side
+    //    gate. The render-time `:wallet == :connected` guard in
+    //    `BankWeb.AgentLive` already disables the install button when
+    //    the live browser provider stopped exposing the bound account
+    //    (or the operator switched MetaMask account / chain /
+    //    revoked the site permission), but a stale tab / scripted
+    //    click / keyboard shortcut can still reach this hook. We
+    //    re-check on the trust boundary BEFORE fetching the install
+    //    envelope from Phoenix:
+    //
+    //      * `eth_accounts` is the read-only version of
+    //        `eth_requestAccounts` — it returns the currently
+    //        exposed accounts without prompting MetaMask. An empty
+    //        array means "this site is not currently permissioned",
+    //        regardless of whether a DB binding row exists.
+    //      * Comparing the exposed account against the binding's
+    //        bound address (rendered as `data-bound-address` by
+    //        Phoenix) catches the case where the operator switched
+    //        MetaMask accounts after binding — the DB row still
+    //        carries the OLD account.
+    //
+    //    Either failure exits before any envelope/bundler/sign call
+    //    so the operator never sees a half-started install.
+    let exposedAccounts
+    try {
+      exposedAccounts = await provider.request({method: "eth_accounts"})
+    } catch (_e) {
+      exposedAccounts = []
+    }
+    if (!Array.isArray(exposedAccounts) || exposedAccounts.length === 0) {
+      this.pushEvent("session_permission_install:failed", {reason: "wallet_not_connected"})
+      return
+    }
+
+    const boundAddress = readBoundAddress(this.el)
+    if (boundAddress) {
+      const exposed = exposedAccounts.map((a) => (typeof a === "string" ? a.toLowerCase() : ""))
+      if (!exposed.includes(boundAddress.toLowerCase())) {
+        this.pushEvent("session_permission_install:failed", {reason: "account_mismatch"})
+        return
+      }
     }
 
     // 1. Wallet chain check — refuse before SDK construction.
@@ -130,12 +173,19 @@ export const SessionPermissionInstall = {
 
     // 4b. Bundler URL check — the ZeroDev SDK needs a real ERC-4337
     //     bundler to submit the install UserOp. Phoenix returns null
-    //     when `BASE_SEPOLIA_BUNDLER_RPC` (or `BUNDLER_URL`) isn't set
-    //     in the environment; without it the SDK call would either
-    //     hang or fail with a cryptic network error. Fail fast here
-    //     with a categorised reason the UI can show instead.
+    //     when none of `BASE_SEPOLIA_BUNDLER_RPC` / `BUNDLER_URL` /
+    //     `BUNDLER_RPC_URL` is set in the env (see `config/dev.exs`);
+    //     without it the SDK call would either hang or fail with a
+    //     cryptic network error. Fail fast here with a categorised
+    //     reason the UI can show instead.
+    //
+    //     `bundler_not_configured` is distinct from `bundler_unavailable`:
+    //     the former means Phoenix never had a URL to send, the latter
+    //     means we tried to reach a URL and the network/origin rejected
+    //     us (CORS, DNS, 5xx). Both surface different operator-facing
+    //     copy.
     if (!envelope.bundler_rpc_url || typeof envelope.bundler_rpc_url !== "string") {
-      this.pushEvent("session_permission_install:failed", {reason: "bundler_unavailable"})
+      this.pushEvent("session_permission_install:failed", {reason: "bundler_not_configured"})
       return
     }
 
@@ -178,6 +228,13 @@ export const SessionPermissionInstall = {
     try {
       result = await submitInstall({provider, account, envelope})
     } catch (err) {
+      // The SDK chain logs each step internally, but if `submitInstall`
+      // itself throws (e.g. failed dynamic import, viem misuse) we
+      // still surface the raw error to the console so the operator
+      // can see what happened before the classifier collapses it.
+      if (typeof console !== "undefined" && console.error) {
+        console.error("[browser-install:submitInstall throw] raw error:", err)
+      }
       const reason = classifySendError(err)
       await postFailureAttestation(bindingId, reason)
       this.pushEvent("session_permission_install:failed", {reason})
@@ -267,6 +324,20 @@ export const SessionPermissionInstall = {
 async function readChainId(provider) {
   const chainIdHex = await provider.request({method: "eth_chainId"})
   return parseInt(chainIdHex, 16)
+}
+
+// Server-rendered bound EOA (lowercased upstream). Used by the
+// passive `eth_accounts` preflight to catch a stale tab whose
+// browser wallet has switched to a different account. Returns null
+// when the attribute isn't set (e.g. test fixtures without a
+// binding) — in that case the bound-address check is skipped and
+// only the empty-accounts check applies.
+function readBoundAddress(el) {
+  if (!el) return null
+  const direct = el.dataset && el.dataset.boundAddress
+  if (direct) return direct
+  const inner = el.querySelector && el.querySelector("[data-bound-address]")
+  return inner && inner.dataset && inner.dataset.boundAddress
 }
 
 function readBindingId(el) {

@@ -64,7 +64,19 @@ defmodule BankWeb.OpenApi.Schemas.InstallEnvelopeResponse do
         type: :string,
         nullable: true,
         description:
-          "Browser-tier bundler RPC URL with a public-tier API key. Operator-rotated, distinct from the adapter bundler URL."
+          "Browser-tier bundler RPC URL with a public-tier API key. Operator-rotated, distinct from the adapter bundler URL. Used by the install hook ONLY for `bundlerTransport` (ERC-4337 methods: `eth_sendUserOperation`, `eth_estimateUserOperationGas`, `eth_getUserOperationReceipt`)."
+      },
+      chain_rpc_url: %Schema{
+        type: :string,
+        nullable: true,
+        description:
+          "Generic chain RPC URL (read-only). Used by the install hook's viem `publicClient` for `getSenderAddress` simulation against EntryPoint v0.7 before submitting the install UserOp. Distinct from `bundler_rpc_url` because most hosted bundlers (Pimlico, Stackup) expose ERC-4337 methods ONLY and reject generic `eth_call`, which makes ZeroDev's `createKernelAccount` crash."
+      },
+      kernel_account_index: %Schema{
+        type: :integer,
+        minimum: 0,
+        description:
+          "ZeroDev Kernel CREATE2 salt for the BROWSER user smart-account derivation. The browser-side `createKernelAccount(... {index})` call uses this to compute the deterministic smart-account address. MUST differ from the chain_adapter's operator `KERNEL_ACCOUNT_INDEX` when the connected user EOA equals `OPERATOR_ADDRESS` — otherwise the derived address collides with the already-deployed operator smart account and the install UserOp reverts on chain. Phoenix-side preflight enforces this rule; this field documents the value the browser must use."
       },
       human_readable_summary: %Schema{type: :string, minLength: 1}
     }
