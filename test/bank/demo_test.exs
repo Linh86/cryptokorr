@@ -105,6 +105,157 @@ defmodule Bank.DemoTest do
       assert demo_owned_counts() == counts_after_first
     end
 
+    # Regression for the manual-test bug surfaced via real local run:
+    # the seed produced `autonomy_tier { tier: "guarded" }`, which
+    # fails `Bank.Policies.tier_param/1`'s allowlist
+    # (auto|manual|block) and pushed every evaluated intent into a
+    # `:block` envelope with reason `policy_malformed_params`. Pin
+    # the corrected seed shape so a regression on tier value, allowed
+    # chain, or allowed asset breaks this test instead of silently
+    # blocking the Test Intent card in dev.
+    test "policy seed allows the Test Intent path: tier is a valid value, chains include base-sepolia, assets include USDC + USDT" do
+      :ok = Demo.seed()
+
+      workspace_id = Demo.demo_workspace_id()
+
+      tier_rule =
+        Repo.one(
+          from r in PolicyRule,
+            where:
+              r.workspace_id == ^workspace_id and
+                r.rule_type == :autonomy_tier and
+                r.state == :active,
+            limit: 1
+        )
+
+      assert tier_rule, "autonomy_tier rule must be seeded"
+      assert tier_rule.params["tier"] in ["auto", "manual", "block"]
+
+      amount_limit =
+        Repo.one(
+          from r in PolicyRule,
+            where:
+              r.workspace_id == ^workspace_id and
+                r.rule_type == :amount_limit and
+                r.state == :active,
+            limit: 1
+        )
+
+      assert amount_limit, "amount_limit rule must be seeded"
+      assert amount_limit.params["max_per_tx"] == "10000"
+      assert amount_limit.params["currency"] == "USDC"
+      refute Map.has_key?(amount_limit.params, "max_amount")
+
+      allowed_chain =
+        Repo.one(
+          from r in PolicyRule,
+            where:
+              r.workspace_id == ^workspace_id and
+                r.rule_type == :allowed_chain and
+                r.state == :active,
+            limit: 1
+        )
+
+      assert "base-sepolia" in allowed_chain.params["chains"]
+
+      allowed_asset =
+        Repo.one(
+          from r in PolicyRule,
+            where:
+              r.workspace_id == ^workspace_id and
+                r.rule_type == :allowed_asset and
+                r.state == :active,
+            limit: 1
+        )
+
+      # USDC is the input asset; USDT is the destination after
+      # `Decisions.build_swap_quote_request/2` inverts the source
+      # for the v0.1 swap mode. Both must be allowed.
+      assert "USDC" in allowed_asset.params["assets"]
+      assert "USDT" in allowed_asset.params["assets"]
+    end
+
+    # The seed used to skip existing rules with the same
+    # `(rule_type, priority)` regardless of params drift, which left
+    # dev DBs on an old (bad) seed stuck even after the fix landed.
+    # The current upsert heals user-authored demo rules in place.
+    test "re-running seed heals demo-owned rules whose params drifted (e.g. legacy tier: guarded)" do
+      :ok = Demo.seed()
+
+      workspace_id = Demo.demo_workspace_id()
+
+      rule =
+        Repo.one(
+          from r in PolicyRule,
+            where:
+              r.workspace_id == ^workspace_id and
+                r.rule_type == :autonomy_tier and
+                r.state == :active,
+            limit: 1
+        )
+
+      # Manually drift the rule back to the legacy bad value.
+      {:ok, _drifted} =
+        rule
+        |> Ecto.Changeset.change(params: %{"tier" => "guarded"})
+        |> Repo.update()
+
+      :ok = Demo.seed()
+
+      healed =
+        Repo.one(
+          from r in PolicyRule,
+            where:
+              r.workspace_id == ^workspace_id and
+                r.rule_type == :autonomy_tier and
+                r.state == :active,
+            limit: 1
+        )
+
+      assert healed.params["tier"] in ["auto", "manual", "block"]
+    end
+
+    test "seed heals only sandbox-demo policy rules, not same-priority rules in another workspace" do
+      suffix = System.unique_integer([:positive])
+
+      {:ok, other_workspace} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "other-demo-seed-#{suffix}",
+          name: "Other Demo Seed #{suffix}",
+          mainnet_enabled: true
+        })
+
+      {:ok, other_rule} =
+        %PolicyRule{}
+        |> PolicyRule.changeset(%{
+          workspace_id: other_workspace.id,
+          rule_type: :amount_limit,
+          priority: 10,
+          scope: %{"asset" => "USDC"},
+          params: %{"max_amount" => "777"},
+          state: :active,
+          created_by: :user
+        })
+        |> Repo.insert()
+
+      :ok = Demo.seed()
+
+      assert Repo.get!(PolicyRule, other_rule.id).params == %{"max_amount" => "777"}
+
+      demo_workspace_id = Demo.demo_workspace_id()
+
+      assert %PolicyRule{params: %{"max_per_tx" => "10000"}} =
+               Repo.one(
+                 from r in PolicyRule,
+                   where:
+                     r.workspace_id == ^demo_workspace_id and
+                       r.rule_type == :amount_limit and
+                       r.priority == 10 and
+                       r.state == :active,
+                   limit: 1
+               )
+    end
+
     test "tags every audit event with a sandbox-demo actor_id or correlation_id" do
       :ok = Demo.seed()
 

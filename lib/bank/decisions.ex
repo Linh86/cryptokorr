@@ -423,7 +423,12 @@ defmodule Bank.Decisions do
         intent.workspace_id ->
           case Bank.Policies.Versions.snapshot_for_workspace(intent.workspace_id) do
             nil ->
-              {[], nil}
+              # No published policy version yet. Fall back to the
+              # workspace-scoped active ruleset, not the legacy global
+              # active ruleset, otherwise unrelated/global demo rules
+              # can block this workspace's manual Test Intent path.
+              {[{:rules, Bank.Policies.load_active_ruleset(workspace_id: intent.workspace_id)}],
+               nil}
 
             %{rules: rules, version_id: vid, version_number: vnum} ->
               {[{:rules, rules}], %{id: vid, number: vnum}}
@@ -439,6 +444,7 @@ defmodule Bank.Decisions do
     |> Policies.evaluate(eval_opts)
     |> maybe_pin_version(version_meta)
     |> maybe_fail_closed(version_meta)
+    |> maybe_block_on_outdated_permission(intent, opts)
   end
 
   defp maybe_pin_version(%Bank.Policies.Evaluation{} = ev, nil), do: ev
@@ -482,6 +488,124 @@ defmodule Bank.Decisions do
     else
       ev
     end
+  end
+
+  # Runtime safety gate (agent-advanced): if the workspace's
+  # currently-active delegation predates a policy publish that
+  # *expanded* the agent's authority (per
+  # `Bank.Policies.PolicyDiff`), the on-chain permission validator
+  # may no longer cover what the engine is about to authorize.
+  # Inject a synthetic `permission_outdated_reinstall_required`
+  # violation so:
+  #
+  #   1. `Bank.Autonomy.route/2`'s top-level branch catches the
+  #      violation BEFORE `policy_violations?` and emits the
+  #      stable reason code `:permission_outdated_reinstall_required`
+  #      (not the generic `:policy_*` prefix), so UI and audit
+  #      consumers can switch on a fixed code;
+  #   2. the produced `:block` decision shows up in the
+  #      DecisionEnvelope (replay can explain old decisions
+  #      pinned to old delegations), and crucially,
+  #   3. no `ExecutionPlan` is created — `maybe_dispatch_auto_exec`
+  #      only fires on `:auto_exec`, so a `:block` outcome short-
+  #      circuits dispatch entirely.
+  #
+  # `Keyword.get(opts, :skip_outdated_permission_gate?, false)` is
+  # the ONLY opt-out. It is intentionally NOT plumbed from any
+  # production controller, LiveView, or worker — `rg -l
+  # skip_outdated_permission_gate?` should show only tests and
+  # replay/simulator scaffolding. Test paths that inject
+  # `:rules` do NOT get an implicit bypass: the gate is keyed on
+  # the workspace's live delegation list, which most tests don't
+  # touch, so the gate is a no-op in those cases without needing
+  # a special branch.
+  defp maybe_block_on_outdated_permission(
+         %Bank.Policies.Evaluation{} = ev,
+         %AgentIntent{workspace_id: workspace_id},
+         opts
+       )
+       when is_binary(workspace_id) do
+    cond do
+      Keyword.get(opts, :skip_outdated_permission_gate?, false) ->
+        ev
+
+      true ->
+        Policies.workspace_permission_gate(workspace_id)
+        |> apply_permission_gate(ev, workspace_id)
+    end
+  end
+
+  defp maybe_block_on_outdated_permission(%Bank.Policies.Evaluation{} = ev, _intent, _opts),
+    do: ev
+
+  # Shared decision-pipeline reactor for the workspace permission
+  # gate state. Public so `MorphoEvaluator` can call the same
+  # function and share the violation-injection invariants — without
+  # this, drift between transfer and Morpho injection paths would
+  # be a future bug surface.
+  @doc false
+  @spec apply_permission_gate(
+          Bank.Policies.permission_gate_state(),
+          Bank.Policies.Evaluation.t(),
+          String.t()
+        ) :: Bank.Policies.Evaluation.t()
+  def apply_permission_gate(:ok, %Bank.Policies.Evaluation{} = ev, _ws), do: ev
+
+  def apply_permission_gate(:no_active_delegation, %Bank.Policies.Evaluation{} = ev, _ws),
+    do: ev
+
+  def apply_permission_gate(:legacy_nil_grant, %Bank.Policies.Evaluation{} = ev, workspace_id),
+    do: append_legacy_nil_grant_violation(ev, workspace_id)
+
+  def apply_permission_gate(
+        {:outdated, %DateTime{} = granted_at},
+        %Bank.Policies.Evaluation{} = ev,
+        workspace_id
+      ),
+      do: append_outdated_permission_violation(ev, workspace_id, granted_at)
+
+  defp append_outdated_permission_violation(
+         %Bank.Policies.Evaluation{violations: violations} = ev,
+         workspace_id,
+         %DateTime{} = granted_at
+       ) do
+    violation = %{
+      rule_id: nil,
+      rule_type: :permission_outdated_reinstall_required,
+      code: "permission_outdated_reinstall_required",
+      message:
+        "policy was expanded after the agent's permission was installed; reinstall the permission before running this intent",
+      details: %{
+        "workspace_id" => workspace_id,
+        "earliest_grant_at" => DateTime.to_iso8601(granted_at)
+      }
+    }
+
+    %{ev | pass?: false, violations: [violation | violations]}
+  end
+
+  # Legacy / unknown grant timestamp on an `:active` delegation +
+  # at least one published policy version in the workspace. The
+  # runtime cannot prove the install postdates any expansion
+  # publish, so it fails closed with the same stable reason as a
+  # known-outdated grant.
+  defp append_legacy_nil_grant_violation(
+         %Bank.Policies.Evaluation{violations: violations} = ev,
+         workspace_id
+       ) do
+    violation = %{
+      rule_id: nil,
+      rule_type: :permission_outdated_reinstall_required,
+      code: "permission_outdated_reinstall_required",
+      message:
+        "agent permission row is missing the install timestamp; reinstall the permission so the runtime can compare against current policy",
+      details: %{
+        "workspace_id" => workspace_id,
+        "reason" => "legacy_nil_grant"
+      }
+    }
+
+    %{ev | pass?: false, violations: [violation | violations]}
   end
 
   defp maybe_demote(multi, _key, nil, _fun), do: multi
@@ -679,6 +803,19 @@ defmodule Bank.Decisions do
         limit: 1
       )
     )
+  end
+
+  @doc """
+  Returns the `%DecisionEnvelope{}` currently flagged
+  `current: true` for the intent, or `nil`. Used by
+  `BankWeb.AgentLive`'s Test-Intent reconciliation polling: when the
+  `:decision_updated` PubSub broadcast races the LiveView's subscribe
+  (rare, but observed against fast in-process decisions), the
+  LiveView reads the row directly to settle the UI state.
+  """
+  @spec current_decision_envelope_for(String.t()) :: DecisionEnvelope.t() | nil
+  def current_decision_envelope_for(intent_id) when is_binary(intent_id) do
+    current_decision_for(intent_id)
   end
 
   defp emit_evaluation_audits(
@@ -1593,8 +1730,24 @@ defmodule Bank.Decisions do
         gate_opts = swap_safety_gate_opts(opts)
 
         case SwapDispatchSafety.validate(route, context, gate_opts) do
-          :ok -> {:ok, SwapRouteArtifacts.from_route(route)}
-          {:error, reason} -> {:error, reason}
+          :ok ->
+            # Thread caps onto the plan's persisted steps so the
+            # dispatch worker re-validates against the SAME caps the
+            # approve path accepted. Without this, the worker would
+            # fall back to `SwapRoute.caps/0` defaults and could
+            # reject the route here-approved with e.g.
+            # `:asset_unsupported` (USDT not in default allowed
+            # assets) even though the approval just admitted it.
+            artifacts_opts =
+              case Keyword.get(opts, :swap_route_caps) do
+                nil -> []
+                caps -> [caps: caps]
+              end
+
+            {:ok, SwapRouteArtifacts.from_route(route, artifacts_opts)}
+
+          {:error, reason} ->
+            {:error, reason}
         end
     end
   end

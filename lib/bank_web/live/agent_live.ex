@@ -38,6 +38,7 @@ defmodule BankWeb.AgentLive do
   alias Bank.Audit.{ActivityView, AuditEvent}
   alias Bank.Delegations
   alias Bank.Delegations.Delegation
+  alias Bank.Intents.AgentIntent
   alias Bank.Repo
   alias Bank.Runtime.PubSub, as: RuntimePubSub
   alias Bank.SessionPermissions
@@ -130,6 +131,24 @@ defmodule BankWeb.AgentLive do
       |> assign_new(:intent, fn -> :idle end)
       |> assign_new(:last_result, fn -> nil end)
       |> assign_new(:active_intent_id, fn -> nil end)
+      # View-details expand state for the IntentResult card. Toggled
+      # by `intent:toggle_details` from the test-intent card's "View
+      # details" button. Reset on each fresh `intent:run`.
+      |> assign_new(:details_open, fn -> false end)
+      # Preview the Test-Intent Run gate reads via
+      # `preview_blocks_run?/1`. No Quotes preview pipeline is wired
+      # in this view today; `nil` keeps Run advisory-only-clickable.
+      # `:_test_set_preview` overrides it for the preview-only Run
+      # guard tests.
+      |> assign_new(:preview, fn -> nil end)
+      |> assign_new(:preview_state, fn -> :idle end)
+      # Real 0x quote preview for swap mode. Read-only side-track:
+      # calls `Bank.Decisions.SwapRouteResolver.resolve/2` with
+      # `chain: "base"` and renders the returned route in the Test
+      # Intent card WITHOUT going through `Bank.Intents.submit/2`,
+      # `Decisions.approve/2`, or the dispatch worker. No tx ever
+      # broadcasts. Shape: `nil` | `%{state: :ok | :error, ...}`.
+      |> assign_new(:real_quote_preview, fn -> nil end)
       # EIP-6963 multi-wallet picker. The JS hook publishes the
       # browser's announced provider list; we render a wallet picker
       # when `length > 1`. Empty / single-entry list → fall back to
@@ -145,6 +164,15 @@ defmodule BankWeb.AgentLive do
       |> assign_new(:wrong_chain_id, fn -> nil end)
       |> assign_new(:delegation, fn -> nil end)
       |> assign_new(:permission_ambiguous?, fn -> false end)
+      |> assign_new(:permission_outdated?, fn -> false end)
+      # Live browser-provider probe state. The WalletConnect JS hook
+      # pushes `wallet_connect:browser_status` on mount + every
+      # accountsChanged / chainChanged. `:unknown` before any probe;
+      # `:connected` derivation requires both this AND a verified
+      # DB binding to match. See `derive_wallet_state_from_browser/2`.
+      |> assign_new(:browser_wallet_state, fn ->
+        %{status: :unknown, accounts: [], chain_id: nil, permissions_count: 0}
+      end)
       |> refresh_delegation()
       |> recompute_permission()
 
@@ -326,12 +354,42 @@ defmodule BankWeb.AgentLive do
       |> revoke_active_binding(:operator_requested)
       |> reset_wallet()
       |> fail_close_permission_after_disconnect()
+      # EIP-2255 dApp-driven revoke. The hook calls
+      # `wallet_revokePermissions` on the provider so the wallet's
+      # own "Connected sites" list drops this origin — without it
+      # MetaMask keeps the origin in its panel and silently
+      # auto-reconnects with the cached account on the next click.
+      # Best-effort on the wallet side; the DB binding revoke above
+      # is the load-bearing piece.
+      |> push_event("wallet_connect:revoke_permissions", %{})
 
     {:noreply, socket}
   end
 
   def handle_event("wallet_connect:error", _params, socket) do
     {:noreply, reset_wallet(socket)}
+  end
+
+  # Live browser-provider probe push from the WalletConnect JS hook.
+  # The hook reads `eth_accounts`, `eth_chainId`, and (when supported)
+  # `wallet_getPermissions` and forwards them here. All three are
+  # signing-free reads — see hook safety test for the allowlist.
+  #
+  # We persist the snapshot on `:browser_wallet_state` and re-derive
+  # `:wallet` so the "Connected" pill ALWAYS reflects what MetaMask is
+  # currently willing to expose for this origin, not just the DB
+  # binding row. Without this, an operator who revoked the site
+  # permission inside MetaMask (or whose tab lost its provider
+  # connection) would still see "Connected" and could click Install,
+  # which would then crash at `eth_requestAccounts` time after the
+  # server already issued an EIP-712 install envelope.
+  def handle_event("wallet_connect:browser_status", params, socket) do
+    browser = parse_browser_status(params)
+
+    {:noreply,
+     socket
+     |> assign(:browser_wallet_state, browser)
+     |> rederive_wallet()}
   end
 
   # ── Permission ───────────────────────────────────────────────────────
@@ -342,10 +400,16 @@ defmodule BankWeb.AgentLive do
   # reports back through `pushEvent`. Phoenix only listens — it never
   # calls the bundler directly.
 
-  # The bare `permission:install` event is left as a no-op: the JS hook
-  # intercepts the click before it reaches the LiveView, but tests and
-  # screen-readers may still fire it. Treat it as a hint to flip into
-  # the awaiting state if the wallet looks ready.
+  # The bare `permission:install` event is left as a no-op when the
+  # wallet isn't fully connected: the JS hook intercepts the click
+  # before it reaches the LiveView, but tests, screen-readers, and
+  # stale tabs may still fire it. The render-time gate already
+  # disables the button when `:wallet != :connected`, but this is
+  # the server-side defense-in-depth — `:wallet == :connected`
+  # already means the DB binding is verified AND the live browser
+  # provider exposes the bound account on Base Sepolia. The
+  # `is_struct(...)` check is redundant in that state but kept for
+  # clarity.
   def handle_event("permission:install", _, socket) do
     if socket.assigns.wallet == :connected and
          is_struct(socket.assigns.wallet_binding, WalletBinding) do
@@ -475,6 +539,13 @@ defmodule BankWeb.AgentLive do
     # cond-clause revoke-blocking guard is therefore subsumed; this
     # single guard covers role + binding + delegation + binding↔SA + chain.
     with :ok <- LiveAuth.authorize_action(socket, :operator),
+         # P6 — composite wallet state must be `:connected`. The DB
+         # binding + delegation can both be live while the browser
+         # provider has dropped the origin or switched chain/account.
+         # The Run button is already disabled in render in that case,
+         # but a stale tab / scripted click / keyboard shortcut must
+         # not bypass the gate.
+         :connected <- socket.assigns[:wallet],
          %WalletBinding{} = binding <- socket.assigns[:wallet_binding],
          %Delegation{state: :active, smart_account_id: sa_id} <-
            socket.assigns[:delegation],
@@ -485,14 +556,31 @@ defmodule BankWeb.AgentLive do
 
       case Bank.Intents.submit(payload, workspace_id: workspace_id, actor: :user) do
         {:ok, %{intent: intent}} ->
+          # Subscribe BEFORE scheduling any reconciliation so a
+          # PubSub broadcast landing within milliseconds of submit
+          # cannot be lost.
           RuntimePubSub.subscribe(RuntimePubSub.intent(intent.id))
+
+          # Defensive DB reconciliation. The Oban EvaluateIntent
+          # worker can finish synchronously between
+          # `Intents.submit/2` and `RuntimePubSub.subscribe/1` — the
+          # `:decision_updated` broadcast then lands before the
+          # LiveView subscribes and the UI sits on "Running…" until
+          # the 30s watchdog. Periodic `{:intent_reconcile, ...}`
+          # ticks read the current envelope directly so the UI
+          # settles within milliseconds of the worker finishing.
+          Process.send_after(self(), {:intent_reconcile, intent.id}, 250)
+          Process.send_after(self(), {:intent_reconcile, intent.id}, 1_500)
+          Process.send_after(self(), {:intent_reconcile, intent.id}, 5_000)
+          Process.send_after(self(), {:intent_reconcile, intent.id}, 12_000)
           Process.send_after(self(), {:intent_timeout, intent.id}, @intent_timeout_ms)
 
           {:noreply,
            socket
            |> assign(:intent, :executing)
            |> assign(:active_intent_id, intent.id)
-           |> assign(:last_result, nil)}
+           |> assign(:last_result, nil)
+           |> assign(:details_open, false)}
 
         {:error, reason} ->
           {:noreply,
@@ -502,7 +590,8 @@ defmodule BankWeb.AgentLive do
              state: "failed",
              reason: intent_format_error(reason),
              tx_hash: nil
-           })}
+           })
+           |> assign(:details_open, false)}
       end
     else
       # Any precondition failure — silently no-op so a stale UI click
@@ -514,31 +603,36 @@ defmodule BankWeb.AgentLive do
 
   def handle_event("intent:approve", _, socket) do
     with :ok <- LiveAuth.authorize_action(socket, :operator),
+         %WalletBinding{} = binding <- socket.assigns[:wallet_binding],
+         %Delegation{state: :active, smart_account_id: sa_id} <- socket.assigns[:delegation],
+         ^sa_id <- SessionPermissions.compute_smart_account_id(binding),
          %{decision_envelope_id: env_id} when is_binary(env_id) <-
            socket.assigns.last_result || %{} do
       user_id = intent_actor_id(socket)
 
-      case Bank.Decisions.approve(env_id, actor_id: user_id) do
-        {:ok, _envelope, {:dispatched, _plan}} ->
-          # Execution events arrive via PubSub; UI flips on :execution_updated.
-          {:noreply, socket}
+      case approve_opts_for_test_intent(socket, user_id, sa_id, binding) do
+        {:error, {:route, reason}} ->
+          # Pre-flight route resolution failed (no executable 0x
+          # quote, synthetic calldata, etc.). Surface as a terminal
+          # IntentResult failure — DO NOT call Decisions.approve/2
+          # so no envelope state changes and no plan is created.
+          reason_code = "swap_route_resolver:#{reason_atom_to_string(reason)}"
+          body = execution_failure_body(:failed, reason_code)
 
-        {:ok, _envelope, {:held, reason}} ->
-          # Approval succeeded server-side, but dispatch is held —
-          # surface that as an amber IntentResult so the UI never
-          # implies success. The intent is no longer "needs-approval"
-          # (the operator has approved) but it is also not executed.
           {:noreply,
            socket
-           |> assign(:intent, :needs_approval)
+           |> put_flash(:error, body)
+           |> assign(:intent, :failed)
            |> assign(:last_result, %{
-             state: "held",
-             reason: "Approved · awaiting dispatch (#{reason})",
+             state: "failed",
+             reason: body,
+             reason_code: reason_code,
+             decision_envelope_id: env_id,
              tx_hash: nil
            })}
 
-        {:error, reason} ->
-          {:noreply, put_flash(socket, :error, "Approve failed: #{inspect(reason)}")}
+        {:ok, approve_opts} ->
+          dispatch_approve(socket, env_id, approve_opts)
       end
     else
       {:error, {:insufficient_role, _}} ->
@@ -546,6 +640,154 @@ defmodule BankWeb.AgentLive do
 
       _ ->
         {:noreply, socket}
+    end
+  end
+
+  # Expand / collapse the inline details panel on the IntentResult
+  # card. Replaces the prior dead `href="#"` "View details" anchor.
+  def handle_event("intent:toggle_details", _, socket) do
+    {:noreply, assign(socket, :details_open, not (socket.assigns[:details_open] == true))}
+  end
+
+  # Preview real 0x quote on Base mainnet (swap mode). Read-only:
+  # calls `Bank.Decisions.SwapRouteResolver.resolve/2` directly,
+  # bypassing `Bank.Intents.submit/2` and `Decisions.approve/2`,
+  # so NO mainnet gate is triggered and NO dispatch happens. The
+  # resolver hits the live 0x v2 endpoint and returns a real route
+  # map (or a stable error atom) that we render under the Test
+  # Intent card. The wallet binding's smart-account address is the
+  # 0x `taker`; if the user has no binding yet, we accept that as
+  # a viewer-only preview and skip — the button is rendered only
+  # when the swap mode is active.
+  def handle_event("intent:preview_real_quote", _, socket) do
+    binding = socket.assigns[:wallet_binding]
+
+    cond do
+      socket.assigns[:mode] != "swap" ->
+        {:noreply, socket}
+
+      not match?(%WalletBinding{}, binding) ->
+        {:noreply,
+         assign(socket, :real_quote_preview, %{
+           state: :error,
+           reason_code: "preview:no_wallet_binding",
+           fetched_at: DateTime.utc_now()
+         })}
+
+      true ->
+        taker = swap_taker_address(socket, binding)
+
+        caps = %{
+          allowed_chains: ["base"],
+          allowed_assets: ["USDC", "USDT"],
+          max_slippage_bps: settings_slippage_bps(socket)
+        }
+
+        payload = %{
+          "chain" => "base",
+          "asset" => "USDC",
+          "amount" => "10.0"
+        }
+
+        result =
+          case Bank.Decisions.SwapRouteResolver.resolve(payload,
+                 taker_address: taker,
+                 caps: caps
+               ) do
+            {:ok, route} ->
+              %{state: :ok, route: route, fetched_at: DateTime.utc_now()}
+
+            {:error, reason} ->
+              %{
+                state: :error,
+                reason_code: preview_reason_code(reason),
+                fetched_at: DateTime.utc_now()
+              }
+          end
+
+        {:noreply, assign(socket, :real_quote_preview, result)}
+    end
+  end
+
+  # Normalise a `SwapRouteResolver.resolve/2` error reason to a
+  # stable, grep-friendly string the TestIntentCard can map to a
+  # human hint.
+  #
+  # The common UX failure is "operator forgot to export
+  # `ZEROX_API_KEY` before `mix phx.server`": RouteSelector returns
+  # `{:no_quotes, [%{provider: ..., error: {:provider_error,
+  # %{reason: "missing_api_key"}}}, ...]}` because every configured
+  # provider hits the same missing-config path. Detect that shape
+  # explicitly so the UI surfaces an actionable hint instead of the
+  # raw nested term.
+  defp preview_reason_code({:route_unavailable, {:no_quotes, errors}} = reason)
+       when is_list(errors) do
+    if Enum.all?(errors, &provider_missing_api_key?/1),
+      do: "preview:missing_api_key",
+      else: "swap_route_resolver:#{reason_atom_to_string(reason)}"
+  end
+
+  defp preview_reason_code(reason),
+    do: "swap_route_resolver:#{reason_atom_to_string(reason)}"
+
+  defp provider_missing_api_key?(%{error: {:provider_error, %{reason: "missing_api_key"}}}),
+    do: true
+
+  defp provider_missing_api_key?(_), do: false
+
+  defp dispatch_approve(socket, env_id, approve_opts) do
+    case Bank.Decisions.approve(env_id, approve_opts) do
+      {:ok, envelope, {:dispatched, plan}} ->
+        # Server-side dispatch produced an ExecutionPlan. Flip the
+        # IntentResult OFF "needs-approval" immediately so the
+        # operator stops seeing the stale Approve button + reason
+        # while waiting for the async `:execution_updated` PubSub
+        # event. A later execution event still overwrites this
+        # state (executed / failed / aborted) via the existing
+        # `handle_execution_updated/2` helpers.
+        {:noreply,
+         socket
+         |> assign(:intent, :executing)
+         |> assign(:last_result, %{
+           state: "dispatching",
+           reason: nil,
+           reason_code: nil,
+           decision_envelope_id: envelope.id,
+           execution_plan_id: plan.id,
+           tx_hash: nil
+         })}
+
+      {:ok, envelope, {:held, reason}} ->
+        # Approval succeeded server-side, but dispatch is held —
+        # surface that as an amber IntentResult so the UI never
+        # implies success.
+        {:noreply,
+         socket
+         |> assign(:intent, :blocked)
+         |> assign(:last_result, %{
+           state: "held",
+           reason: "Approved · awaiting dispatch (#{reason})",
+           reason_code: to_string(reason),
+           decision_envelope_id: envelope.id,
+           tx_hash: nil
+         })}
+
+      {:error, reason} ->
+        # Server-side approval failed (already superseded, lock
+        # contention, etc.). Flip the UI off "needs-approval" too
+        # — otherwise the operator sees the same Approve button
+        # and would click again into the same failure. Surface the
+        # reason both as a flash AND on the IntentResult card.
+        {:noreply,
+         socket
+         |> put_flash(:error, "Approve failed: #{inspect(reason)}")
+         |> assign(:intent, :failed)
+         |> assign(:last_result, %{
+           state: "failed",
+           reason: "Approve failed: #{inspect(reason)}",
+           reason_code: "approve_failed",
+           tx_hash: nil
+         })}
     end
   end
 
@@ -624,20 +866,61 @@ defmodule BankWeb.AgentLive do
      |> recompute_permission()}
   end
 
-  # 30s spinner-timeout watchdog scheduled by `intent:run`. Only flip
-  # to `:slow` if we're still waiting on the same intent — a real
-  # decision/execution event that landed earlier would have advanced
-  # `:intent` past `:executing`, so the watchdog becomes a silent
-  # no-op. `:slow` is non-terminal: a late `:decision_updated` /
-  # `:execution_updated` event will overwrite it via the existing
-  # handlers.
+  # Test-only shortcut: inject a `%Bank.Quotes.Preview{}` into the
+  # `:preview` assign without driving the debounce/Task pipeline.
+  # Used by the Test-Intent preview-only Run-guard tests.
+  def handle_info({:_test_set_preview, preview}, socket) do
+    {:noreply,
+     socket
+     |> assign(:preview, preview)
+     |> assign(:preview_state, :ready)}
+  end
+
+  # Test-only shortcut: inject a `:real_quote_preview` value directly
+  # so render tests can exercise the swap-mode quote panel without
+  # going through `Bank.Decisions.SwapRouteResolver.resolve/2`.
+  # Mirrors `:_test_set_preview` above.
+  def handle_info({:_test_set_real_quote_preview, value}, socket) do
+    {:noreply, assign(socket, :real_quote_preview, value)}
+  end
+
+  # Periodic reconciliation poll scheduled by `intent:run`. The
+  # `:decision_updated` PubSub broadcast covers the happy path, but
+  # an Oban worker that resolves synchronously between
+  # `Intents.submit/2` and `RuntimePubSub.subscribe/1` would race
+  # the subscribe and the broadcast would never reach the LiveView.
+  # Reading the row directly settles the UI without waiting for the
+  # 30s watchdog. No-op on a stale intent.
+  def handle_info({:intent_reconcile, intent_id}, socket) do
+    if socket.assigns[:active_intent_id] == intent_id and
+         socket.assigns[:intent] in [:executing, :slow] do
+      {:noreply, reconcile_intent_from_db(socket, intent_id)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  # 30s spinner-timeout watchdog scheduled by `intent:run`. Reads
+  # the current decision envelope from the DB first — `:slow`
+  # ("Still processing") only renders when the row genuinely has
+  # no decision yet. If the row already has a terminal decision the
+  # LiveView missed the broadcast for, we apply it here instead of
+  # leaving the operator on "Still processing" forever.
   def handle_info({:intent_timeout, intent_id}, socket) do
     if socket.assigns[:active_intent_id] == intent_id and
          socket.assigns[:intent] == :executing do
-      {:noreply,
-       socket
-       |> assign(:intent, :slow)
-       |> assign(:last_result, %{state: "slow", reason: nil, tx_hash: nil})}
+      socket = reconcile_intent_from_db(socket, intent_id)
+
+      # Reconcile may have advanced past `:executing`; only fall to
+      # `:slow` if we still genuinely have no decision yet.
+      if socket.assigns[:intent] == :executing do
+        {:noreply,
+         socket
+         |> assign(:intent, :slow)
+         |> assign(:last_result, %{state: "slow", reason: nil, tx_hash: nil})}
+      else
+        {:noreply, socket}
+      end
     else
       {:noreply, socket}
     end
@@ -762,6 +1045,118 @@ defmodule BankWeb.AgentLive do
     end
   end
 
+  # For swap intents, resolve a real executable route via
+  # `Bank.Decisions.SwapRouteResolver` before approving. The resolver
+  # calls the live `RouteSelector` / 0x provider and rejects any
+  # quote that doesn't carry executable `transaction.to/data` —
+  # so a successful return means the operator clicks Approve into a
+  # route the dispatch worker can actually hand to the adapter.
+  #
+  # Returns:
+  #   * `{:ok, keyword_list}` — for non-swap intents or when the
+  #     resolver returned a usable route.
+  #   * `{:error, {:route, reason}}` — pre-flight resolution failed;
+  #     the caller surfaces a terminal IntentResult and DOES NOT
+  #     call `Bank.Decisions.approve/2`.
+  defp approve_opts_for_test_intent(socket, user_id, smart_account_id, %WalletBinding{} = binding) do
+    base = [actor_id: user_id, smart_account_id: smart_account_id]
+
+    if active_test_intent_swap?(socket) do
+      caps = sandbox_swap_caps(socket)
+      taker = swap_taker_address(socket, binding)
+      payload = intent_payload(socket.assigns.mode)
+
+      case Bank.Decisions.SwapRouteResolver.resolve(payload,
+             taker_address: taker,
+             caps: caps
+           ) do
+        {:ok, route} ->
+          {:ok, Keyword.merge(base, swap_route: route, swap_route_caps: caps)}
+
+        {:error, reason} ->
+          {:error, {:route, reason}}
+      end
+    else
+      {:ok, base}
+    end
+  end
+
+  defp active_test_intent_swap?(socket) do
+    case socket.assigns[:active_intent_id] do
+      id when is_binary(id) ->
+        case Repo.get(AgentIntent, id) do
+          %AgentIntent{kind: :swap} -> true
+          _ -> false
+        end
+
+      _ ->
+        socket.assigns[:mode] == "swap"
+    end
+  end
+
+  # The on-chain address the 0x provider should quote for as
+  # `taker`. Prefer the smart-account address recorded by
+  # `Bank.Runtime.Workers.VerifyInstallOnchain` in
+  # `delegation.scope["smart_account_address"]`; fall back to the
+  # connected EOA so the resolver always has *something* to send.
+  # The resolver fails closed if neither is set.
+  defp swap_taker_address(socket, %WalletBinding{address: eoa}) do
+    case socket.assigns[:delegation] do
+      %Delegation{scope: scope} when is_map(scope) ->
+        Map.get(scope, "smart_account_address") || Map.get(scope, :smart_account_address) || eoa
+
+      _ ->
+        eoa
+    end
+  end
+
+  defp sandbox_swap_caps(socket) do
+    %{
+      allowed_chains: ["base-sepolia"],
+      allowed_assets: ["USDC", "USDT"],
+      max_slippage_bps: settings_slippage_bps(socket)
+    }
+  end
+
+  # Stable string used as the `reason_code` suffix when the swap
+  # route resolver rejects a pre-flight quote. Keeps the LiveView's
+  # failure copy switch deterministic and grep-friendly.
+  defp reason_atom_to_string(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp reason_atom_to_string({a, b}) when is_atom(a) and is_atom(b), do: "#{a}:#{b}"
+  defp reason_atom_to_string({a, b}) when is_atom(a), do: "#{a}:#{inspect(b)}"
+  defp reason_atom_to_string(other), do: inspect(other)
+
+  defp settings_slippage_bps(socket) do
+    socket.assigns
+    |> Map.get(:settings, %{})
+    |> Map.get("slippage", "0.50")
+    |> percent_string_to_bps(50)
+  end
+
+  defp percent_string_to_bps(value, fallback) when is_binary(value) do
+    case Decimal.parse(value) do
+      {%Decimal{} = percent, ""} ->
+        percent
+        |> Decimal.mult(Decimal.new(100))
+        |> Decimal.round(0)
+        |> Decimal.to_integer()
+        |> clamp_bps(fallback)
+
+      _ ->
+        fallback
+    end
+  end
+
+  defp percent_string_to_bps(_value, fallback), do: fallback
+
+  defp clamp_bps(value, fallback) when is_integer(value) do
+    cond do
+      value < 0 -> fallback
+      value > 10_000 -> 10_000
+      true -> value
+    end
+  end
+
   # Used in render/1 — only the test intent card cares about the
   # current user's role today, so the helper lives in the parent
   # LiveView rather than each card module re-deriving it.
@@ -818,10 +1213,29 @@ defmodule BankWeb.AgentLive do
 
   defp intent_short_tx(_), do: nil
 
+  # Preview-only Run gate for the Test Intent card. Returns `true`
+  # ONLY when the current preview carries an explicit
+  # `route["executable?"] == false` flag — i.e. the provider is
+  # quote-only (Odos / 1inch). `:loading` / `:idle` / `:error` /
+  # missing preview leave Run advisory-only-clickable (the
+  # PreviewCard contract); the runtime fail-closes via
+  # `Bank.Autonomy`/Decisions if dispatch isn't actually possible.
+  defp preview_blocks_run?(%Bank.Quotes.Preview{route: %{"executable?" => false}}), do: true
+  defp preview_blocks_run?(_), do: false
+
+  defp preview_route_id(%Bank.Quotes.Preview{route: %{"provider_id" => id}})
+       when is_binary(id),
+       do: id
+
+  defp preview_route_id(_), do: nil
+
   defp intent_reason_first(reasons) when is_map(reasons) do
     case Map.get(reasons, "items") do
-      [first | _] -> intent_reason_message(first)
-      _ -> nil
+      [first | _] ->
+        %{message: intent_reason_message(first), code: intent_reason_code(first)}
+
+      _ ->
+        nil
     end
   end
 
@@ -830,6 +1244,10 @@ defmodule BankWeb.AgentLive do
   defp intent_reason_message(%{"message" => msg}) when is_binary(msg), do: msg
   defp intent_reason_message(%{message: msg}) when is_binary(msg), do: msg
   defp intent_reason_message(_), do: nil
+
+  defp intent_reason_code(%{"code" => code}) when is_binary(code), do: code
+  defp intent_reason_code(%{code: code}) when is_binary(code), do: code
+  defp intent_reason_code(_), do: nil
 
   defp handle_decision_updated(socket, %{outcome: outcome} = payload) do
     case outcome do
@@ -842,32 +1260,19 @@ defmodule BankWeb.AgentLive do
         {:noreply,
          socket
          |> assign(:intent, :blocked)
-         |> assign(:last_result, %{
-           state: "blocked",
-           reason: intent_lookup_decision_reason(payload),
-           tx_hash: nil
-         })}
+         |> assign(:last_result, blocked_result(payload))}
 
       :approval_required ->
         {:noreply,
          socket
          |> assign(:intent, :needs_approval)
-         |> assign(:last_result, %{
-           state: "needs-approval",
-           reason: intent_lookup_decision_reason(payload),
-           decision_envelope_id: payload[:decision_envelope_id],
-           tx_hash: nil
-         })}
+         |> assign(:last_result, needs_approval_result(payload))}
 
       :block ->
         {:noreply,
          socket
          |> assign(:intent, :blocked)
-         |> assign(:last_result, %{
-           state: "blocked",
-           reason: intent_lookup_decision_reason(payload),
-           tx_hash: nil
-         })}
+         |> assign(:last_result, blocked_result(payload))}
 
       _ ->
         {:noreply, socket}
@@ -876,9 +1281,63 @@ defmodule BankWeb.AgentLive do
 
   defp handle_decision_updated(socket, _payload), do: {:noreply, socket}
 
+  defp blocked_result(payload) do
+    reason = intent_lookup_decision_reason(payload)
+
+    %{
+      state: "blocked",
+      reason: reason_message(reason),
+      reason_code: reason_code(reason),
+      decision_envelope_id: payload[:decision_envelope_id],
+      tx_hash: nil
+    }
+  end
+
+  defp needs_approval_result(payload) do
+    reason = intent_lookup_decision_reason(payload)
+
+    %{
+      state: "needs-approval",
+      reason: reason_message(reason),
+      reason_code: reason_code(reason),
+      decision_envelope_id: payload[:decision_envelope_id],
+      tx_hash: nil
+    }
+  end
+
+  defp reason_message(%{message: msg}) when is_binary(msg), do: msg
+  defp reason_message(msg) when is_binary(msg), do: msg
+  defp reason_message(_), do: nil
+
+  defp reason_code(%{code: code}) when is_binary(code), do: code
+  defp reason_code(_), do: nil
+
+  # Reconcile from the DB. Reads the current decision envelope and
+  # applies the same transition the `:decision_updated` PubSub
+  # broadcast would have produced. Idempotent — if `:intent` has
+  # already advanced past `:executing`/`:slow` this is a no-op via
+  # the matching helper.
+  defp reconcile_intent_from_db(socket, intent_id) do
+    case Bank.Decisions.current_decision_envelope_for(intent_id) do
+      %Bank.Decisions.DecisionEnvelope{outcome: outcome} = envelope
+      when outcome in [:block, :hold, :approval_required, :auto_exec] ->
+        {:noreply, advanced} =
+          handle_decision_updated(socket, %{
+            outcome: outcome,
+            decision_envelope_id: envelope.id
+          })
+
+        advanced
+
+      _ ->
+        socket
+    end
+  end
+
   defp handle_execution_updated(socket, payload) do
     final = payload[:final_outcome]
     tx_refs = payload[:tx_refs] || []
+    final_reason = payload[:final_reason]
 
     case final do
       :confirmed ->
@@ -888,6 +1347,7 @@ defmodule BankWeb.AgentLive do
          |> assign(:last_result, %{
            state: "executed",
            action: intent_action_for(socket.assigns.mode),
+           execution_plan_id: payload[:execution_plan_id],
            tx_hash: intent_short_tx(tx_refs)
          })}
 
@@ -897,13 +1357,112 @@ defmodule BankWeb.AgentLive do
          |> assign(:intent, :failed)
          |> assign(:last_result, %{
            state: "failed",
-           reason: "Execution #{Atom.to_string(f)}.",
+           reason: execution_failure_body(f, final_reason),
+           reason_code: final_reason || Atom.to_string(f),
+           execution_plan_id: payload[:execution_plan_id],
            tx_hash: intent_short_tx(tx_refs)
          })}
 
       _ ->
         {:noreply, socket}
     end
+  end
+
+  # Friendly body copy for a terminal execution failure. Prefer an
+  # actionable operator-facing message when we recognise the
+  # `final_reason` code; fall back to the bare code and finally to
+  # the legacy generic copy. The raw code is also stored on
+  # `:last_result.reason_code` so the View-details panel surfaces
+  # it verbatim.
+  defp execution_failure_body(_outcome, "swap_route_resolver:missing_taker_address") do
+    "Cannot resolve swap route: smart account address not yet recorded. " <>
+      "Wait for install verification to complete and retry."
+  end
+
+  defp execution_failure_body(_outcome, "swap_route_resolver:quote_request_build:" <> reason) do
+    "Cannot resolve swap route: " <>
+      reason <>
+      ". The selected chain/asset is not " <>
+      "supported by any executable quote provider (0x supports only mainnet base/ethereum/" <>
+      "arbitrum/optimism/polygon)."
+  end
+
+  defp execution_failure_body(_outcome, "swap_route_resolver:route_unavailable:" <> reason) do
+    "No executable swap route available (" <>
+      reason <>
+      "). " <>
+      "0x returned no usable quote for this pair."
+  end
+
+  defp execution_failure_body(_outcome, "swap_route_resolver:non_executable_provider") do
+    "No executable swap route: the selected provider does not expose " <>
+      "executable calldata (only 0x is executable in v0.1)."
+  end
+
+  defp execution_failure_body(_outcome, "swap_route_resolver:missing_executable_transaction") do
+    "No executable swap route: provider returned a quote without " <>
+      "executable transaction data."
+  end
+
+  defp execution_failure_body(_outcome, "swap_route_resolver:missing_calldata") do
+    "No executable swap route: provider returned an empty calldata blob."
+  end
+
+  defp execution_failure_body(_outcome, "swap_route_resolver:synthetic_calldata_rejected") do
+    "Refused synthetic placeholder calldata. The route must come from " <>
+      "a real 0x quote, not a sandbox stub."
+  end
+
+  defp execution_failure_body(_outcome, "swap_route_resolver:missing_spender") do
+    "No executable swap route: provider did not return an allowance target."
+  end
+
+  defp execution_failure_body(_outcome, "swap_route_resolver:missing_transaction_target") do
+    "No executable swap route: provider did not return a target contract."
+  end
+
+  defp execution_failure_body(_outcome, "swap_route_resolver:invalid_amount") do
+    "Cannot resolve swap route: intent amount is missing or invalid."
+  end
+
+  defp execution_failure_body(_outcome, "swap_route_resolver:invalid_chain") do
+    "Cannot resolve swap route: intent has no chain."
+  end
+
+  defp execution_failure_body(_outcome, "swap_route_resolver:invalid_source_asset") do
+    "Cannot resolve swap route: intent has no source asset."
+  end
+
+  defp execution_failure_body(_outcome, "swap_route_resolver:" <> rest) do
+    "Cannot resolve swap route (" <> rest <> ")."
+  end
+
+  defp execution_failure_body(_outcome, "adapter_exhausted:adapter_unavailable") do
+    "Adapter unavailable after retries. Start chain_adapter on localhost:4100 and retry."
+  end
+
+  defp execution_failure_body(_outcome, "adapter_exhausted:adapter_error:" <> status) do
+    "Adapter returned #{status} repeatedly. Check chain_adapter logs and retry."
+  end
+
+  defp execution_failure_body(_outcome, "adapter_rejected:" <> rest) do
+    "Adapter rejected the dispatch (#{rest}). Check the swap route or delegation."
+  end
+
+  defp execution_failure_body(_outcome, "swap_safety:" <> reason) do
+    "Swap safety gate refused the dispatch (#{reason})."
+  end
+
+  defp execution_failure_body(_outcome, "delegation_not_active") do
+    "Delegation is no longer active. Reinstall permission and retry."
+  end
+
+  defp execution_failure_body(_outcome, reason) when is_binary(reason) and reason != "" do
+    reason
+  end
+
+  defp execution_failure_body(outcome, _) do
+    "Execution #{Atom.to_string(outcome)}."
   end
 
   # Pull the first `reasons` message off the persisted decision envelope
@@ -945,8 +1504,10 @@ defmodule BankWeb.AgentLive do
   # yet verified — the card stays on `:disconnected` until the
   # signature lands and `verified_at` is stamped.
   defp apply_binding(socket, binding) do
+    browser = socket.assigns[:browser_wallet_state] || %{status: :unknown}
+
     socket
-    |> assign(:wallet, derive_wallet_state(binding))
+    |> assign(:wallet, derive_wallet_state(binding, browser))
     |> assign(:address, short_address(binding.address))
     |> assign(:wallet_binding, binding)
     |> refresh_balance(binding)
@@ -987,6 +1548,7 @@ defmodule BankWeb.AgentLive do
   defp fail_close_permission_after_disconnect(socket) do
     socket
     |> assign(:permission, :not_installed)
+    |> assign(:permission_outdated?, false)
     |> assign(:browser_install_state, :idle)
     |> assign(:install_failure_reason, nil)
   end
@@ -1005,24 +1567,156 @@ defmodule BankWeb.AgentLive do
     end
   end
 
-  # Derive the three-state agent design enum from a binding row.
-  defp derive_wallet_state(nil), do: :disconnected
+  # Composite wallet-state derivation. The "Connected" pill MUST be
+  # backed by BOTH a verified DB binding row AND the live browser
+  # provider currently exposing the same account on Base Sepolia.
+  #
+  # States:
+  #   :disconnected         — no binding row (or revoked / unverified
+  #                           / expired)
+  #   :wrong_network        — binding.chain_id != 84_532 (legacy /
+  #                           stale data; the binding itself is on
+  #                           the wrong chain)
+  #   :browser_disconnected — binding verified + on Base Sepolia, but
+  #                           the live browser provider exposes no
+  #                           account (or no provider, or we haven't
+  #                           probed yet). Includes the case where
+  #                           the operator revoked the site from
+  #                           MetaMask's "Connected sites" panel —
+  #                           the DB row survives for audit but the
+  #                           UI must not call this Connected.
+  #   :wrong_chain          — binding verified, browser exposes the
+  #                           bound account, but the wallet is on a
+  #                           different chain than 84_532. CTA:
+  #                           switch to Base Sepolia.
+  #   :account_mismatch     — binding verified, browser exposes an
+  #                           account, but it is not the one we have
+  #                           bound. CTA: reconnect with the bound
+  #                           account, or rebind.
+  #   :connected            — all three match (DB binding verified +
+  #                           browser exposes binding.address + chain
+  #                           is Base Sepolia).
+  @doc false
+  def derive_wallet_state(binding_or_nil, browser \\ %{status: :unknown})
 
-  defp derive_wallet_state(%{revoked_at: revoked_at}) when not is_nil(revoked_at),
+  def derive_wallet_state(nil, _browser), do: :disconnected
+
+  def derive_wallet_state(%{revoked_at: revoked_at}, _browser) when not is_nil(revoked_at),
     do: :disconnected
 
-  defp derive_wallet_state(%{} = binding) do
+  def derive_wallet_state(%{} = binding, browser) do
     expired? =
       binding.expires_at &&
         DateTime.compare(DateTime.utc_now(), binding.expires_at) == :gt
 
     cond do
-      binding.chain_id != 84_532 -> :wrong_network
-      not is_nil(binding.verified_at) -> :connected
-      expired? -> :disconnected
-      true -> :disconnected
+      binding.chain_id != 84_532 ->
+        :wrong_network
+
+      is_nil(binding.verified_at) ->
+        :disconnected
+
+      expired? ->
+        :disconnected
+
+      true ->
+        # Binding is verified, non-revoked, non-expired, on Base
+        # Sepolia. The remaining classification is live-browser-driven.
+        derive_browser_state(binding, browser)
     end
   end
+
+  # Compare the (verified, in-chain) binding against the live browser
+  # snapshot. Cases are mutually exclusive — the order below matters:
+  # we treat "no account at all" as the most-disconnected state, then
+  # mismatch (wrong account exposed), then wrong chain (right account,
+  # wrong network), and only return `:connected` when every signal
+  # lines up.
+  defp derive_browser_state(_binding, %{status: status})
+       when status in [:unknown, :no_provider, :no_account],
+       do: :browser_disconnected
+
+  defp derive_browser_state(%{address: bound_address}, %{
+         status: :exposed_account,
+         accounts: accounts,
+         chain_id: browser_chain_id
+       }) do
+    browser_accounts =
+      (accounts || [])
+      |> Enum.filter(&is_binary/1)
+      |> Enum.map(&String.downcase/1)
+
+    bound = String.downcase(to_string(bound_address))
+
+    cond do
+      browser_accounts == [] ->
+        :browser_disconnected
+
+      not Enum.member?(browser_accounts, bound) ->
+        :account_mismatch
+
+      browser_chain_id != 84_532 ->
+        :wrong_chain
+
+      true ->
+        :connected
+    end
+  end
+
+  # Defensive fallback — any unexpected browser-state shape collapses
+  # to the safe `:browser_disconnected` rather than `:connected`.
+  defp derive_browser_state(_binding, _browser), do: :browser_disconnected
+
+  # Re-derive `:wallet` from current `:wallet_binding` + `:browser_wallet_state`.
+  # Called from the `wallet_connect:browser_status` handler — every
+  # other assign path goes through `apply_binding` / `reset_wallet`,
+  # which already re-derive.
+  defp rederive_wallet(socket) do
+    binding = socket.assigns[:wallet_binding]
+    browser = socket.assigns[:browser_wallet_state] || %{status: :unknown}
+    assign(socket, :wallet, derive_wallet_state(binding, browser))
+  end
+
+  # Coerce the JS hook payload into our internal browser-state map.
+  # The hook is trusted (we author it), but params still arrive as
+  # strings/maps after JSON, so normalise here.
+  defp parse_browser_status(params) when is_map(params) do
+    status =
+      case Map.get(params, "status") do
+        "exposed_account" -> :exposed_account
+        "no_account" -> :no_account
+        "no_provider" -> :no_provider
+        _ -> :unknown
+      end
+
+    accounts =
+      case Map.get(params, "accounts") do
+        list when is_list(list) -> Enum.filter(list, &is_binary/1)
+        _ -> []
+      end
+
+    chain_id =
+      case Map.get(params, "chain_id") do
+        n when is_integer(n) -> n
+        _ -> nil
+      end
+
+    permissions_count =
+      case Map.get(params, "permissions_count") do
+        n when is_integer(n) and n >= 0 -> n
+        _ -> 0
+      end
+
+    %{
+      status: status,
+      accounts: accounts,
+      chain_id: chain_id,
+      permissions_count: permissions_count
+    }
+  end
+
+  defp parse_browser_status(_),
+    do: %{status: :unknown, accounts: [], chain_id: nil, permissions_count: 0}
 
   # Render an EIP-55ish short form: `0x` + first 4 hex + … + last 4 hex.
   # Bank.WalletBindings already lowercases addresses, so we only have
@@ -1202,7 +1896,32 @@ defmodule BankWeb.AgentLive do
     install_state = socket.assigns[:browser_install_state] || :idle
 
     perm = permission_state(binding, delegation, install_state)
-    assign(socket, :permission, perm)
+
+    socket
+    |> assign(:permission, perm)
+    |> assign(:permission_outdated?, compute_permission_outdated?(socket))
+  end
+
+  # Surfaces the runtime gate's "permission predates an expansion
+  # publish" signal in the UI assigns. Reads from the SAME
+  # workspace-level resolver the runtime uses
+  # (`Bank.Policies.workspace_permission_gate/1` via
+  # `permission_outdated?/1`) so the chip / banner / Run-button
+  # state cannot disagree with the dispatch-time block. In
+  # particular this covers the `:legacy_nil_grant` branch — an
+  # `:active` row with `granted_at = nil` plus any published
+  # `PolicyVersion` lands in "Reinstall required" both in the UI
+  # and in the runtime evaluation, instead of UI showing
+  # "Active / Run enabled" while the runtime silently blocks the
+  # dispatch with `permission_outdated_reinstall_required`.
+  defp compute_permission_outdated?(socket) do
+    case socket.assigns[:current_scope] do
+      %{workspace: %{id: ws_id}} when is_binary(ws_id) ->
+        Bank.Policies.permission_outdated?(ws_id)
+
+      _ ->
+        false
+    end
   end
 
   # Polling is only meaningful when the JS hook has reported
@@ -1310,7 +2029,12 @@ defmodule BankWeb.AgentLive do
             <span class="mono">{mode(@mode).label}</span>
           </.data_row>
           <.data_row label="Permission">
-            <.status_pill kind={permission_pill_kind(@permission)} size="sm" />
+            <span id="agent-hero-permission-pill">
+              <.status_pill
+                kind={permission_pill_kind(@permission, @permission_outdated?)}
+                size="sm"
+              />
+            </span>
           </.data_row>
         </div>
       </header>
@@ -1321,6 +2045,7 @@ defmodule BankWeb.AgentLive do
           address={@address}
           balance={@balance_usdc}
           providers={@wallet_providers}
+          browser_state={@browser_wallet_state}
         />
         <.permission_card
           wallet={@wallet}
@@ -1330,14 +2055,21 @@ defmodule BankWeb.AgentLive do
           ambiguous?={@permission_ambiguous?}
           install_failure_reason={@install_failure_reason}
           wrong_chain_id={@wrong_chain_id}
+          permission_outdated?={@permission_outdated?}
         />
         <.mode_card mode={@mode} settings={@settings} permission={@permission} />
         <.test_intent_card
           mode={@mode}
           intent={@intent}
           last_result={@last_result}
+          details_open={@details_open}
+          preview_blocks_run={preview_blocks_run?(@preview)}
+          preview_route={preview_route_id(@preview)}
           permission={@permission}
+          permission_outdated?={@permission_outdated?}
           user_role={intent_user_role(assigns)}
+          wallet={@wallet}
+          real_quote_preview={@real_quote_preview}
         />
         <.activity_strip activity={@activity} />
         <.stop_card permission={@permission} delegation={delegation_for_card(@delegation)} />
@@ -1364,6 +2096,14 @@ defmodule BankWeb.AgentLive do
 
   # Local copy of `permission_card/1`'s pill mapping — kept inline so
   # the hero meta row doesn't need to import the card module.
+  #
+  # The `:active + outdated` chip MUST flip to "Reinstall required"
+  # to match the permission card; without this branch the hero
+  # would read "Active" while the runtime is silently blocking
+  # dispatch.
+  defp permission_pill_kind(:active, true), do: "reinstall-required"
+  defp permission_pill_kind(state, _outdated?), do: permission_pill_kind(state)
+
   defp permission_pill_kind(:not_installed), do: "not-installed"
   defp permission_pill_kind(other), do: Atom.to_string(other) |> String.replace("_", "-")
 

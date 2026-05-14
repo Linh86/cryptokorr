@@ -66,6 +66,20 @@ export const WalletConnect = {
     // back to the LiveView for verification.
     this.handleEvent("wallet_connect:challenge", (payload) => this.signChallenge(payload))
 
+    // EIP-2255 dApp-side revoke of MetaMask's "Connected sites" entry
+    // for this origin. The server pushes this after a successful
+    // `wallet_connect:disconnect` handler so the wallet's own
+    // permissions panel reflects the same state our DB just wrote.
+    // Without this MetaMask keeps `localhost:4000` (or whatever the
+    // production origin is) in its connected-sites list, the user
+    // tries to disconnect from MM and nothing happens, and clicking
+    // Connect again silently re-uses the cached account instead of
+    // re-prompting. `wallet_revokePermissions` is a read-only,
+    // signing-free RPC — it removes site permissions, never produces
+    // a signature, never touches funds; the hook safety test
+    // allowlists it on those grounds.
+    this.handleEvent("wallet_connect:revoke_permissions", () => this.revokePermissions())
+
     // Server pushes this when the user clicks a wallet entry in the
     // multi-wallet picker. Sets the registry's selection and runs
     // `beginConnect` against that provider only.
@@ -95,11 +109,81 @@ export const WalletConnect = {
     this.unsubscribe = subscribe((infos, selected) => {
       this.pushEvent("wallet_connect:providers_discovered", {providers: infos})
       const provider = getProvider()
-      if (provider) this.attachListenersTo(provider)
+      if (provider) {
+        this.attachListenersTo(provider)
+        // On every re-attach (initial mount + after auto-select),
+        // probe the provider's exposed state and push it to the
+        // server so the UI never derives "Connected" purely from
+        // a stale DB binding when MetaMask has dropped the origin.
+        this.pushBrowserStatus(provider).catch(() => {})
+      } else {
+        // No provider yet — surface explicit `:no_provider` browser
+        // state so the LiveView can short-circuit Install UX before
+        // any envelope/UserOp request fires.
+        this.pushEvent("wallet_connect:browser_status", {
+          status: "no_provider",
+          accounts: [],
+          chain_id: null,
+          permissions_count: 0,
+        })
+      }
 
       if (!selected && infos.length > 0) {
         autoSelectActive().catch(() => {})
       }
+    })
+  },
+
+  // Read the active provider's live state (accounts + chain + EIP-2255
+  // permissions) and push a single `browser_status` event the
+  // LiveView can use as the **source of truth** for "is MetaMask
+  // actually exposing an account for this origin right now?". The
+  // server still keeps the DB `wallet_binding` row for audit/replay
+  // — the row by itself NEVER drives the "Connected" pill. The pill
+  // requires this probe to confirm the live provider state matches
+  // the bound address.
+  //
+  // Signing-free: only reads `eth_accounts`, `eth_chainId`, and
+  // `wallet_getPermissions`. None of these prompt the wallet popup
+  // or move funds. The hook safety test allowlists all three.
+  async pushBrowserStatus(provider) {
+    let accounts = []
+    let chainIdHex = null
+    let permissionsCount = 0
+
+    try {
+      accounts = await provider.request({method: "eth_accounts"})
+    } catch (_e) {
+      accounts = []
+    }
+
+    try {
+      chainIdHex = await provider.request({method: "eth_chainId"})
+    } catch (_e) {
+      chainIdHex = null
+    }
+
+    try {
+      const perms = await provider.request({method: "wallet_getPermissions"})
+      permissionsCount = Array.isArray(perms) ? perms.length : 0
+    } catch (_e) {
+      // Older / non-MM providers may not implement EIP-2255. Treat
+      // permissions_count as "unknown" by leaving it at 0; the
+      // accounts probe is the authoritative signal.
+      permissionsCount = 0
+    }
+
+    const chainId =
+      typeof chainIdHex === "string" ? parseInt(chainIdHex, 16) : null
+
+    this.pushEvent("wallet_connect:browser_status", {
+      status:
+        Array.isArray(accounts) && accounts.length > 0
+          ? "exposed_account"
+          : "no_account",
+      accounts: Array.isArray(accounts) ? accounts : [],
+      chain_id: chainId,
+      permissions_count: permissionsCount,
     })
   },
 
@@ -167,6 +251,16 @@ export const WalletConnect = {
   },
 
   handleAccountsChanged(accounts) {
+    // Every account-state transition refreshes the SERVER-VISIBLE
+    // browser status FIRST. The LiveView uses that to gate
+    // `:wallet == :connected` (and therefore Install permission)
+    // before we send any binding/install event downstream. Without
+    // this, a tab that's been open since before the user toggled
+    // MetaMask's "Disconnect this site" would keep claiming
+    // Connected on the strength of a stale DB binding row.
+    const provider = getProvider()
+    if (provider) this.pushBrowserStatus(provider).catch(() => {})
+
     if (!accounts || accounts.length === 0) {
       this.pushEvent("wallet_connect:disconnected", {})
       return
@@ -177,6 +271,11 @@ export const WalletConnect = {
   handleChainChanged(_chainIdHex) {
     const provider = getProvider()
     if (!provider) return
+
+    // Push the latest browser status so the LiveView sees the new
+    // chain id immediately — even if accounts didn't change. The
+    // `:wrong_chain` derived state needs this.
+    this.pushBrowserStatus(provider).catch(() => {})
 
     provider
       .request({method: "eth_accounts"})
@@ -208,6 +307,36 @@ export const WalletConnect = {
       this.pushEvent("wallet_connect:connected", {account, chain_id: chainId})
     } catch (err) {
       this.pushEvent("wallet_connect:error", {message: err?.message || String(err)})
+    }
+  },
+
+  // EIP-2255 — ask the wallet to drop this origin from its
+  // connected-sites list. Best-effort: older wallets and providers
+  // that don't implement EIP-2255 reject with method-not-found,
+  // which is fine — the server-side binding revoke already
+  // happened by the time we get here, and the UI is already in
+  // "Not connected" state. Logs the rejection at debug but never
+  // surfaces an error: failing to revoke a wallet-side permission
+  // must not block the dApp-side disconnect we already committed.
+  async revokePermissions() {
+    const provider = getProvider()
+    if (!provider) return
+
+    try {
+      await provider.request({
+        method: "wallet_revokePermissions",
+        params: [{eth_accounts: {}}],
+      })
+    } catch (err) {
+      // -32601 = method not found (older wallets); 4001 = user rejected.
+      // Either way the dApp-side disconnect is already done; this is
+      // only a wallet-UI sync nicety.
+      if (typeof console !== "undefined" && console.debug) {
+        console.debug(
+          "wallet_revokePermissions failed (non-fatal):",
+          err && (err.message || err.code) || err,
+        )
+      }
     }
   },
 

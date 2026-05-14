@@ -258,6 +258,22 @@ case config_env() do
     end
 end
 
+# 0x Swap API v2 — same pattern as Tenderly above. `:test` is owned
+# by `config/test.exs` (Req.Test plug); :dev / :prod read `ZEROX_API_KEY`
+# from env. Missing key → provider returns `:missing_api_key` and the
+# preview UI surfaces a clean error.
+case config_env() do
+  :test ->
+    :ok
+
+  _ ->
+    if api_key = System.get_env("ZEROX_API_KEY") do
+      config :bank, Bank.Stablecoins.Providers.ZeroX,
+        base_url: System.get_env("ZEROX_BASE_URL") || "https://api.0x.org",
+        api_key: api_key
+    end
+end
+
 # Bootstrap admin allowlist for the private-alpha approve / reject
 # flow (epic #153, issue #157). Comma-separated list of operator
 # emails — anyone in the list can hit `/admin/access` to approve or

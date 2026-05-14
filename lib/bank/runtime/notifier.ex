@@ -205,6 +205,13 @@ defmodule Bank.Runtime.Notifier do
       prior_status: prior_status,
       execution_status: plan.execution_status,
       final_outcome: plan.final_outcome,
+      # Carry the row's `final_reason` so the LiveView can surface
+      # an actionable failure copy ("Adapter unavailable after
+      # retries — start chain_adapter on localhost:4100") rather
+      # than the generic "Execution aborted." It's a small,
+      # operator-facing string (e.g. `"adapter_exhausted:adapter_unavailable"`)
+      # — not a payload, not secret material.
+      final_reason: plan.final_reason,
       tx_refs: plan.tx_refs || []
     })
   end

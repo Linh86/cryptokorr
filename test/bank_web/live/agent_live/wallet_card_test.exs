@@ -84,7 +84,15 @@ defmodule BankWeb.AgentLive.WalletCardTest do
       conn: conn,
       wallet_address: address
     } do
-      {:ok, _view, html} = live(conn, "/")
+      {:ok, view, _html} = live(conn, "/")
+
+      # Mount alone now produces `:browser_disconnected` — the new
+      # composite derive requires the WalletConnect JS hook to push
+      # `wallet_connect:browser_status` confirming the live provider
+      # exposes the bound account. Simulate that push to land on
+      # `:connected`, matching what the hook does on mount in
+      # production.
+      html = push_browser_connected(view, address)
 
       assert html =~ "Base Sepolia · chain 84532"
       assert html =~ "USDC balance"
@@ -100,10 +108,170 @@ defmodule BankWeb.AgentLive.WalletCardTest do
       assert html =~ "Connected"
     end
 
-    test "shows BaseScan link in the connected card", %{conn: conn} do
+    test "shows BaseScan link in the connected card", %{
+      conn: conn,
+      wallet_address: address
+    } do
+      {:ok, view, _html} = live(conn, "/")
+
+      html = push_browser_connected(view, address)
+      assert html =~ "View on BaseScan"
+    end
+
+    test "without a browser_status push, the card renders :browser_disconnected", %{
+      conn: conn,
+      wallet_address: address
+    } do
       {:ok, _view, html} = live(conn, "/")
 
+      # The DB binding is verified, on Base Sepolia, non-revoked.
+      # But the JS hook hasn't pushed any `browser_status` yet, so
+      # the live provider's account exposure is unknown. The
+      # composite derive lands on `:browser_disconnected` rather
+      # than `:connected` — the pill must NOT say Connected and
+      # the Reconnect/Disconnect CTAs must appear.
+      refute html =~ "pill--ok"
+      refute html =~ ">Connected<"
+      assert html =~ "pill--warn"
+      assert html =~ "Wallet disconnected"
+      assert html =~ "Reconnect wallet"
+      assert html =~ "Disconnect"
+
+      # The bound address should still be visible (audit-friendly)
+      # but the card body explains it's no longer exposed.
+      short =
+        "0x" <>
+          String.slice(String.downcase(address), 2, 4) <>
+          "…" <> String.slice(String.downcase(address), -4, 4)
+
+      assert html =~ short
+    end
+  end
+
+  # ── P0 wallet-state-divergence — composite states ──────────────────
+  describe "composite browser-state derivation" do
+    setup %{workspace: workspace, current_user: user, wallet_address: address} do
+      {:ok, binding} =
+        WalletBindings.issue_challenge(workspace.id, user.id, %{
+          address: address,
+          chain_id: 84_532
+        })
+
+      signature = sign_challenge(binding.challenge_message, @privkey)
+      {:ok, verified} = WalletBindings.verify_and_bind(binding.id, signature)
+
+      %{binding: verified}
+    end
+
+    test "exposed_account on Base Sepolia lands on :connected", %{
+      conn: conn,
+      wallet_address: address
+    } do
+      {:ok, view, _html} = live(conn, "/")
+
+      html = push_browser_connected(view, address)
+
+      assert html =~ "pill--ok"
+      assert html =~ "Connected"
       assert html =~ "View on BaseScan"
+    end
+
+    test "exposed_account on the wrong chain renders :wrong_chain", %{
+      conn: conn,
+      wallet_address: address
+    } do
+      {:ok, view, _html} = live(conn, "/")
+
+      html =
+        render_hook(view, "wallet_connect:browser_status", %{
+          "status" => "exposed_account",
+          "accounts" => [address],
+          # Ethereum mainnet — not Base Sepolia.
+          "chain_id" => 1,
+          "permissions_count" => 1
+        })
+
+      refute html =~ "pill--ok"
+      assert html =~ "pill--warn"
+      assert html =~ "Switch to Base Sepolia"
+      assert html =~ "chain 84532"
+    end
+
+    test "exposed_account different from the bound address renders :account_mismatch", %{
+      conn: conn
+    } do
+      {:ok, view, _html} = live(conn, "/")
+
+      other = "0x" <> String.duplicate("ab", 20)
+
+      html =
+        render_hook(view, "wallet_connect:browser_status", %{
+          "status" => "exposed_account",
+          "accounts" => [other],
+          "chain_id" => 84_532,
+          "permissions_count" => 1
+        })
+
+      refute html =~ "pill--ok"
+      assert html =~ "pill--warn"
+      assert html =~ "Account mismatch"
+      assert html =~ "exposing a different account"
+    end
+
+    test "no_account (revoked site permission) renders :browser_disconnected", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      html =
+        render_hook(view, "wallet_connect:browser_status", %{
+          "status" => "no_account",
+          "accounts" => [],
+          "chain_id" => 84_532,
+          "permissions_count" => 0
+        })
+
+      refute html =~ "pill--ok"
+      assert html =~ "Wallet disconnected"
+      assert html =~ "Reconnect wallet"
+    end
+
+    test "no_provider renders :browser_disconnected", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+
+      html =
+        render_hook(view, "wallet_connect:browser_status", %{
+          "status" => "no_provider",
+          "accounts" => [],
+          "chain_id" => nil,
+          "permissions_count" => 0
+        })
+
+      refute html =~ "pill--ok"
+      assert html =~ "Wallet disconnected"
+    end
+
+    test ":connected re-reverts to :browser_disconnected on a follow-up :no_account push", %{
+      conn: conn,
+      wallet_address: address
+    } do
+      {:ok, view, _html} = live(conn, "/")
+
+      _ = push_browser_connected(view, address)
+
+      assert render(view) =~ "pill--ok"
+
+      # Operator clicks "Disconnect this site" in MetaMask → the
+      # provider fires accountsChanged: [] → the hook re-pushes
+      # browser_status. The UI must drop "Connected" immediately.
+      html =
+        render_hook(view, "wallet_connect:browser_status", %{
+          "status" => "no_account",
+          "accounts" => [],
+          "chain_id" => 84_532,
+          "permissions_count" => 0
+        })
+
+      refute html =~ "pill--ok"
+      assert html =~ "Wallet disconnected"
     end
   end
 
@@ -329,11 +497,18 @@ defmodule BankWeb.AgentLive.WalletCardTest do
       [binding] = list_pending_bindings(address)
       signature = sign_challenge(binding.challenge_message, @privkey)
 
-      html =
+      _ =
         render_hook(view, "wallet_connect:verify", %{
           "challenge_id" => binding.id,
           "signature" => signature
         })
+
+      # The composite derive now requires a live browser_status push
+      # exposing the bound account before flipping to `:connected` —
+      # in production, MetaMask emits `accountsChanged` immediately
+      # after `eth_requestAccounts` resolves, which triggers the
+      # WalletConnect hook's `pushBrowserStatus`. Simulate that here.
+      html = push_browser_connected(view, address)
 
       assert html =~ "pill--ok"
       assert html =~ "Connected"
@@ -458,12 +633,13 @@ defmodule BankWeb.AgentLive.WalletCardTest do
       assert html =~ "Not connected"
     end
 
-    test "verified binding survives a fresh mount (reload from DB)", %{
-      conn: conn,
-      workspace: workspace,
-      current_user: user,
-      wallet_address: address
-    } do
+    test "verified binding survives a fresh mount (reload from DB) and lands :connected once browser confirms",
+         %{
+           conn: conn,
+           workspace: workspace,
+           current_user: user,
+           wallet_address: address
+         } do
       # Real challenge + verify flow so the row carries a valid
       # challenge_message that the EIP-191 verifier accepts.
       {:ok, binding} =
@@ -476,9 +652,18 @@ defmodule BankWeb.AgentLive.WalletCardTest do
       {:ok, _verified} = WalletBindings.verify_and_bind(binding.id, signature)
 
       # Fresh mount — `load_wallet_binding/1` reads the verified row
-      # from the DB and lands the card in :connected without any
-      # client-side challenge round-trip.
-      {:ok, _view, html} = live(conn, "/")
+      # from the DB. With the P0 wallet-state-divergence fix the
+      # mount alone is NOT enough — the UI lands on
+      # `:browser_disconnected` until the JS hook confirms the live
+      # provider still exposes the bound account. The hook does this
+      # on every mount via the subscribe → pushBrowserStatus path;
+      # we simulate it here.
+      {:ok, view, mount_html} = live(conn, "/")
+
+      refute mount_html =~ "pill--ok"
+      assert mount_html =~ "Wallet disconnected"
+
+      html = push_browser_connected(view, address)
 
       assert html =~ "pill--ok"
       assert html =~ "Connected"
@@ -548,6 +733,20 @@ defmodule BankWeb.AgentLive.WalletCardTest do
   end
 
   # --- helpers -----------------------------------------------------------
+
+  # Simulate the WalletConnect JS hook reporting that the live
+  # browser provider exposes the bound account on Base Sepolia.
+  # Production-equivalent push from `pushBrowserStatus` after a
+  # successful EIP-6963 selection + accounts read. Returns the
+  # updated rendered HTML.
+  defp push_browser_connected(view, address) do
+    render_hook(view, "wallet_connect:browser_status", %{
+      "status" => "exposed_account",
+      "accounts" => [address],
+      "chain_id" => 84_532,
+      "permissions_count" => 1
+    })
+  end
 
   defp list_pending_bindings(address) do
     workspace_id = Process.get(:bank_test_workspace_id)

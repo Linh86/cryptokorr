@@ -60,6 +60,29 @@ defmodule Bank.Decisions.SwapRouteArtifactsTest do
       assert steps["slippage_bps"] == 50
       assert steps["quote_timestamp"] == "2026-01-01T00:00:00.000000Z"
       assert steps["deadline"] == "2030-01-01T00:00:00.000000Z"
+
+      # No caps were passed → `steps["caps"]` not present. The worker's
+      # `caps_from_steps/1` returns the default `SwapRoute.caps/0`
+      # shape in that case (backwards-compatible with pre-#caps plans).
+      refute Map.has_key?(steps, "caps")
+    end
+
+    test "round-trips swap_route_caps onto steps so the worker re-validates against the SAME caps approval admitted" do
+      caps = %{
+        allowed_chains: ["base-sepolia"],
+        allowed_assets: ["USDC", "USDT"],
+        max_slippage_bps: 100
+      }
+
+      artifacts = SwapRouteArtifacts.from_route(valid_route(), caps: caps)
+
+      assert artifacts.steps["caps"] == %{
+               "allowed_chains" => ["base-sepolia"],
+               "allowed_assets" => ["USDC", "USDT"],
+               "max_slippage_bps" => 100
+             }
+
+      assert {:ok, ^caps} = SwapRouteArtifacts.caps_from_steps(artifacts.steps)
     end
   end
 

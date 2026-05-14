@@ -268,7 +268,7 @@ defmodule BankWeb.AgentLayouts do
     ~H"""
     <div :if={@open} class="modal-scrim" phx-click="confirm_stop:cancel">
       <div
-        class="modal"
+        class="cb-modal"
         role="dialog"
         aria-modal="true"
         phx-click-away="confirm_stop:cancel"

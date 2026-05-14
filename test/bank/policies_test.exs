@@ -759,4 +759,400 @@ defmodule Bank.PoliciesTest do
 
     Enum.reduce(extras, base, fn {k, v}, acc -> Map.put(acc, k, v) end)
   end
+
+  # ---------------------------------------------------------------------
+  # permission_outdated?/2 (agent-advanced runtime gate)
+  # ---------------------------------------------------------------------
+
+  describe "permission_outdated?/2" do
+    alias Bank.Policies.Versions
+    alias Bank.Delegations.Delegation
+
+    setup do
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "perm-outdated-#{System.unique_integer([:positive])}",
+          name: "Perm outdated test",
+          mainnet_enabled: true
+        })
+
+      %{workspace: ws, actor_id: Ecto.UUID.generate()}
+    end
+
+    test "nil workspace → false (greenfield/UI safe default)" do
+      refute Policies.permission_outdated?(nil, DateTime.utc_now())
+      refute Policies.permission_outdated?(nil, nil)
+    end
+
+    test "nil delegation → false (no anchor to compare against)",
+         %{workspace: ws} do
+      refute Policies.permission_outdated?(ws.id, nil)
+    end
+
+    test "delegation with nil granted_at → false (legacy row, UI read path)",
+         %{workspace: ws} do
+      refute Policies.permission_outdated?(ws.id, %Delegation{granted_at: nil})
+    end
+
+    test "no publish since granted_at → false",
+         %{workspace: ws, actor_id: actor_id} do
+      rule =
+        Fixtures.policy_rule(
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "100"},
+          workspace_id: ws.id
+        )
+
+      {:ok, draft} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [rule.id]}
+        )
+
+      {:ok, _} = Versions.publish_draft(draft, published_by: :user, actor_id: actor_id)
+
+      # Permission granted AFTER the publish → no publish in the
+      # window → not outdated.
+      granted_at = DateTime.add(DateTime.utc_now(), 3600, :second)
+      refute Policies.permission_outdated?(ws.id, granted_at)
+    end
+
+    test "only tightening publish since granted_at → false",
+         %{workspace: ws, actor_id: actor_id} do
+      granted_at = DateTime.add(DateTime.utc_now(), -3600, :second)
+
+      big_rule =
+        Fixtures.policy_rule(
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "1000"},
+          workspace_id: ws.id
+        )
+
+      {:ok, d1} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [big_rule.id]}
+        )
+
+      {:ok, _} = Versions.publish_draft(d1, published_by: :user, actor_id: actor_id)
+
+      small_rule =
+        Fixtures.policy_rule(
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "100"},
+          state: :draft,
+          workspace_id: ws.id
+        )
+
+      {:ok, d2} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [small_rule.id]}
+        )
+
+      {:ok, _} = Versions.publish_draft(d2, published_by: :user, actor_id: actor_id)
+
+      refute Policies.permission_outdated?(ws.id, granted_at)
+    end
+
+    test "expansion publish since granted_at → true",
+         %{workspace: ws, actor_id: actor_id} do
+      granted_at = DateTime.add(DateTime.utc_now(), -3600, :second)
+
+      small_rule =
+        Fixtures.policy_rule(
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "100"},
+          workspace_id: ws.id
+        )
+
+      {:ok, d1} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [small_rule.id]}
+        )
+
+      {:ok, _} = Versions.publish_draft(d1, published_by: :user, actor_id: actor_id)
+
+      big_rule =
+        Fixtures.policy_rule(
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "5000"},
+          state: :draft,
+          workspace_id: ws.id
+        )
+
+      {:ok, d2} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [big_rule.id]}
+        )
+
+      {:ok, _} = Versions.publish_draft(d2, published_by: :user, actor_id: actor_id)
+
+      assert Policies.permission_outdated?(ws.id, granted_at)
+
+      # Same fact via a delegation struct:
+      assert Policies.permission_outdated?(ws.id, %Delegation{granted_at: granted_at})
+    end
+
+    test "fresh grant after expansion → false",
+         %{workspace: ws, actor_id: actor_id} do
+      # Expansion happened in the past.
+      first_grant = DateTime.add(DateTime.utc_now(), -3600, :second)
+
+      small_rule =
+        Fixtures.policy_rule(
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "100"},
+          workspace_id: ws.id
+        )
+
+      {:ok, d1} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [small_rule.id]}
+        )
+
+      {:ok, _} = Versions.publish_draft(d1, published_by: :user, actor_id: actor_id)
+
+      big_rule =
+        Fixtures.policy_rule(
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "5000"},
+          state: :draft,
+          workspace_id: ws.id
+        )
+
+      {:ok, d2} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [big_rule.id]}
+        )
+
+      {:ok, _} = Versions.publish_draft(d2, published_by: :user, actor_id: actor_id)
+
+      # Old install is outdated.
+      assert Policies.permission_outdated?(ws.id, first_grant)
+
+      # Fresh install LATER than the expansion publish → not outdated.
+      fresh_grant = DateTime.add(DateTime.utc_now(), 60, :second)
+      refute Policies.permission_outdated?(ws.id, fresh_grant)
+    end
+  end
+
+  # ---------------------------------------------------------------------
+  # workspace_permission_gate/1 — shared runtime gate resolver
+  # ---------------------------------------------------------------------
+
+  describe "workspace_permission_gate/1" do
+    alias Bank.Policies.Versions
+
+    setup do
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "gate-#{System.unique_integer([:positive])}",
+          name: "Gate test workspace",
+          mainnet_enabled: true
+        })
+
+      %{workspace: ws, actor_id: Ecto.UUID.generate()}
+    end
+
+    defp install_delegation_at(ws_id, granted_at) do
+      sa = "sa-gate-#{System.unique_integer([:positive])}"
+      {:ok, del} = Bank.Delegations.grant(sa, "del-#{sa}", %{workspace_id: ws_id})
+
+      del
+      |> Ecto.Changeset.change(granted_at: granted_at)
+      |> Bank.Repo.update!()
+    end
+
+    test "returns :no_active_delegation when no :active row exists",
+         %{workspace: ws} do
+      assert Policies.workspace_permission_gate(ws.id) == :no_active_delegation
+    end
+
+    test "returns :no_active_delegation for nil / unknown workspace input" do
+      assert Policies.workspace_permission_gate(nil) == :no_active_delegation
+      assert Policies.workspace_permission_gate(123) == :no_active_delegation
+    end
+
+    test "returns :ok when active delegation predates only tightening publishes",
+         %{workspace: ws, actor_id: actor_id} do
+      granted_at = DateTime.add(DateTime.utc_now(), -3600, :second)
+      _delegation = install_delegation_at(ws.id, granted_at)
+
+      big_rule =
+        Fixtures.policy_rule(
+          workspace_id: ws.id,
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "1000"}
+        )
+
+      {:ok, draft1} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [big_rule.id]}
+        )
+
+      {:ok, _v1} = Versions.publish_draft(draft1, published_by: :user, actor_id: actor_id)
+
+      small_rule =
+        Fixtures.policy_rule(
+          workspace_id: ws.id,
+          rule_type: :amount_limit,
+          state: :draft,
+          params: %{"max_per_tx" => "100"}
+        )
+
+      {:ok, draft2} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [small_rule.id]}
+        )
+
+      {:ok, _v2} = Versions.publish_draft(draft2, published_by: :user, actor_id: actor_id)
+
+      assert Policies.workspace_permission_gate(ws.id) == :ok
+    end
+
+    test "returns {:outdated, granted_at} when expansion publish landed after grant",
+         %{workspace: ws, actor_id: actor_id} do
+      granted_at = DateTime.add(DateTime.utc_now(), -3600, :second)
+      _delegation = install_delegation_at(ws.id, granted_at)
+
+      small_rule =
+        Fixtures.policy_rule(
+          workspace_id: ws.id,
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "100"}
+        )
+
+      {:ok, draft1} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [small_rule.id]}
+        )
+
+      {:ok, _v1} = Versions.publish_draft(draft1, published_by: :user, actor_id: actor_id)
+
+      big_rule =
+        Fixtures.policy_rule(
+          workspace_id: ws.id,
+          rule_type: :amount_limit,
+          state: :draft,
+          params: %{"max_per_tx" => "5000"}
+        )
+
+      {:ok, draft2} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [big_rule.id]}
+        )
+
+      {:ok, _v2} = Versions.publish_draft(draft2, published_by: :user, actor_id: actor_id)
+
+      assert {:outdated, %DateTime{}} = Policies.workspace_permission_gate(ws.id)
+    end
+
+    # --- legacy nil grant fail-closed (Fix 4) ------------------------
+
+    test "active delegation with nil granted_at + published version => :legacy_nil_grant",
+         %{workspace: ws, actor_id: actor_id} do
+      delegation = install_delegation_at(ws.id, DateTime.utc_now())
+
+      delegation
+      |> Ecto.Changeset.change(granted_at: nil)
+      |> Bank.Repo.update!()
+
+      rule =
+        Fixtures.policy_rule(
+          workspace_id: ws.id,
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "100"}
+        )
+
+      {:ok, draft} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [rule.id]}
+        )
+
+      {:ok, _v} = Versions.publish_draft(draft, published_by: :user, actor_id: actor_id)
+
+      assert Policies.workspace_permission_gate(ws.id) == :legacy_nil_grant
+    end
+
+    test "active delegation with nil granted_at + NO published version stays :ok",
+         %{workspace: ws} do
+      delegation = install_delegation_at(ws.id, DateTime.utc_now())
+
+      delegation
+      |> Ecto.Changeset.change(granted_at: nil)
+      |> Bank.Repo.update!()
+
+      # Greenfield workspace has nothing to be outdated against
+      # — even if the install timestamp is missing, there's no
+      # policy snapshot to compare to.
+      assert Policies.workspace_permission_gate(ws.id) == :ok
+    end
+
+    test "superseded-only history (no current publish) still triggers :legacy_nil_grant",
+         %{workspace: ws, actor_id: actor_id} do
+      # Publish v1 + roll forward to v2 so v1 is :superseded.
+      rule_a =
+        Fixtures.policy_rule(
+          workspace_id: ws.id,
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "100"}
+        )
+
+      {:ok, draft1} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [rule_a.id]}
+        )
+
+      {:ok, _v1} = Versions.publish_draft(draft1, published_by: :user, actor_id: actor_id)
+
+      rule_b =
+        Fixtures.policy_rule(
+          workspace_id: ws.id,
+          rule_type: :amount_limit,
+          state: :draft,
+          params: %{"max_per_tx" => "50"}
+        )
+
+      {:ok, draft2} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [rule_b.id]}
+        )
+
+      {:ok, _v2} = Versions.publish_draft(draft2, published_by: :user, actor_id: actor_id)
+
+      delegation = install_delegation_at(ws.id, DateTime.utc_now())
+
+      delegation
+      |> Ecto.Changeset.change(granted_at: nil)
+      |> Bank.Repo.update!()
+
+      assert Policies.workspace_permission_gate(ws.id) == :legacy_nil_grant
+    end
+  end
 end

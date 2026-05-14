@@ -588,6 +588,37 @@ html[data-theme="dark"] .cb .cb-theme__btn[data-phx-theme="dark"] {
 .cb .intent-result__body { color: var(--ink-2); font-size: 13px; line-height: 1.5; margin-bottom: 8px; }
 .cb .intent-result__meta { display: flex; align-items: center; gap: 14px; font-size: 11.5px; color: var(--ink-3); }
 
+/* ── Real 0x quote preview (swap mode, read-only) ───────────────────── */
+.cb .real-quote {
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid var(--hair);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+.cb .real-quote__head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+.cb .real-quote__title { display: inline-flex; align-items: center; gap: 6px; font-size: 13.5px; font-weight: 500; color: var(--ink); margin-bottom: 2px; }
+.cb .real-quote__sub { font-size: 12px; color: var(--ink-3); max-width: 460px; line-height: 1.5; }
+.cb .real-quote__panel {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid;
+  border-radius: 8px;
+}
+.cb .real-quote__panel--ok { background: var(--surface); border-color: var(--hair-strong); }
+.cb .real-quote__panel--error { background: var(--warn-soft); border-color: var(--warn-line); }
+.cb .real-quote__dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 16px;
+  margin: 0;
+}
+.cb .real-quote__dl > div { display: flex; flex-direction: column; gap: 2px; }
+.cb .real-quote__dl dt { font-size: 11px; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.03em; }
+.cb .real-quote__dl dd { margin: 0; font-size: 12.5px; color: var(--ink); }
+.cb .real-quote__error { display: inline-flex; align-items: flex-start; gap: 8px; font-size: 12.5px; color: var(--ink-2); }
+.cb .real-quote__footer { margin-top: 10px; font-size: 11px; color: var(--ink-3); }
+
 /* ── Timeline ──────────────────────────────────────────────────────── */
 .cb .timeline { list-style: none; padding: 4px 0 4px; margin: 0; }
 .cb .timeline__row {
@@ -654,7 +685,16 @@ html[data-theme="dark"] .cb .cb-theme__btn[data-phx-theme="dark"] {
 .cb .stop__title { font-family: var(--font-display); font-size: 22px; font-weight: 500; letter-spacing: -0.005em; color: var(--ink); margin-bottom: 4px; }
 .cb .stop__sub { font-size: 13px; color: var(--ink-2); max-width: 60ch; line-height: 1.5; }
 
-/* ── Modal ─────────────────────────────────────────────────────────── */
+/* ── Modal ───────────────────────────────────────────────────────────
+ *
+ * `.cb-modal` (NOT bare `.modal`) — DaisyUI ships a `.modal` utility in
+ * `@layer utilities` with `visibility: hidden` toggled by `.modal-open`.
+ * Bare `.modal` here collided with that rule, leaving the confirm-stop
+ * dialog invisible (the scrim showed, the dialog DOM existed, click
+ * targets were technically reachable but not visible to the operator).
+ * Renaming sidesteps the collision without yanking DaisyUI from the
+ * operator console.
+ */
 .cb .modal-scrim {
   position: fixed; inset: 0;
   background: color-mix(in oklch, var(--ink) 50%, transparent);
@@ -664,7 +704,7 @@ html[data-theme="dark"] .cb .cb-theme__btn[data-phx-theme="dark"] {
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);
 }
-.cb .modal {
+.cb .cb-modal {
   background: var(--bg-elevated);
   border-radius: 14px;
   border: 1px solid var(--hair);

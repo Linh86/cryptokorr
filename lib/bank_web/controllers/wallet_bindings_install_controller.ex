@@ -164,12 +164,14 @@ defmodule BankWeb.WalletBindingsInstallController do
          :ok <- require_verified_binding(binding),
          {:ok, user_op_hash} <- parse_user_op_hash(params),
          {:ok, expected_session_signer} <-
-           validate_session_signer_match(params, BrowserInstall.configured_session_signer_address()),
+           validate_session_signer_match(
+             params,
+             BrowserInstall.configured_session_signer_address()
+           ),
          {:ok, result} <-
            AdapterClient.sign_install_session_portion(%{
              binding_id: binding.id,
-             smart_account_id:
-               Bank.SessionPermissions.compute_smart_account_id(binding),
+             smart_account_id: Bank.SessionPermissions.compute_smart_account_id(binding),
              user_op_hash: user_op_hash,
              session_signer_address: expected_session_signer
            }) do
@@ -286,7 +288,8 @@ defmodule BankWeb.WalletBindingsInstallController do
     if Regex.match?(~r/^0x[0-9a-fA-F]{64}$/, hash) do
       {:ok, hash}
     else
-      {:error, {:invalid_param, "invalid_user_op_hash", "user_op_hash must be 0x-prefixed 32-byte hex"}}
+      {:error,
+       {:invalid_param, "invalid_user_op_hash", "user_op_hash must be 0x-prefixed 32-byte hex"}}
     end
   end
 

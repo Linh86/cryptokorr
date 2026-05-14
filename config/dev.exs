@@ -120,6 +120,16 @@ config :bank, Bank.Telegram.Config,
 config :bank, Bank.Chains.BalanceReader,
   rpc_url: System.get_env("BASE_SEPOLIA_RPC_URL") || "https://sepolia.base.org/"
 
+# 0x Swap API v2 provider used by `Bank.Decisions.SwapRouteResolver`
+# for the swap-mode "Preview real 0x quote" path. The free tier
+# (~1 req/sec) is plenty for demo / dev. Set `ZEROX_API_KEY` in the
+# shell before running `mix phx.server`; without the key the provider
+# returns `{:provider_error, %{reason: "missing_api_key"}}` and the
+# preview UI surfaces a clean error rather than crashing.
+config :bank, Bank.Stablecoins.Providers.ZeroX,
+  base_url: "https://api.0x.org",
+  api_key: System.get_env("ZEROX_API_KEY")
+
 # On-chain install verifier — runs in `Bank.Runtime.Workers.VerifyInstallOnchain`
 # after the browser-signed install confirms via the bundler. It reads
 # `(smart_account_address, validation_id)` from the delegation row and

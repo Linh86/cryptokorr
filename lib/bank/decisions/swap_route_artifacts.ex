@@ -56,15 +56,16 @@ defmodule Bank.Decisions.SwapRouteArtifacts do
   `route.destination_asset` since that is what arrives in the smart
   account after the swap).
   """
-  @spec from_route(SwapRoute.t()) :: t()
-  def from_route(route) when is_map(route) do
+  @spec from_route(SwapRoute.t(), keyword()) :: t()
+  def from_route(route, opts \\ []) when is_map(route) do
     hash = route_hash(route)
+    caps = Keyword.get(opts, :caps)
 
     %{
       route_hash: hash,
       chain: route.chain,
       asset: route.destination_asset,
-      steps: persisted_steps(route, hash),
+      steps: persisted_steps(route, hash, caps),
       audit_metadata: %{route_hash: hash, route_provider: route.route_provider}
     }
   end
@@ -104,8 +105,8 @@ defmodule Bank.Decisions.SwapRouteArtifacts do
     :crypto.hash(:sha256, payload) |> Base.encode16(case: :lower)
   end
 
-  defp persisted_steps(route, hash) do
-    %{
+  defp persisted_steps(route, hash, caps) do
+    steps = %{
       "kind" => "swap",
       "route_hash" => hash,
       "route_provider" => route.route_provider,
@@ -126,7 +127,24 @@ defmodule Bank.Decisions.SwapRouteArtifacts do
       "quote_timestamp" => DateTime.to_iso8601(route.quote_timestamp),
       "deadline" => DateTime.to_iso8601(route.deadline)
     }
+
+    case persisted_caps(caps) do
+      nil -> steps
+      caps -> Map.put(steps, "caps", caps)
+    end
   end
+
+  defp persisted_caps(nil), do: nil
+
+  defp persisted_caps(%{} = caps) do
+    %{
+      "allowed_chains" => Map.get(caps, :allowed_chains),
+      "allowed_assets" => Map.get(caps, :allowed_assets),
+      "max_slippage_bps" => Map.get(caps, :max_slippage_bps)
+    }
+  end
+
+  defp persisted_caps(_), do: nil
 
   @doc """
   Reconstitute a canonical `Bank.Intents.SwapRoute.t()` map from a
@@ -181,6 +199,44 @@ defmodule Bank.Decisions.SwapRouteArtifacts do
   end
 
   def route_from_steps(_), do: {:error, :not_a_swap}
+
+  @doc """
+  Reconstitute optional swap-route caps from persisted plan steps.
+
+  Older plans did not persist caps, so this falls back to the
+  default `SwapRoute.caps/0` shape. New sandbox swap plans persist
+  their explicit `USDC` + `USDT` cap so the worker re-validates
+  the same route the approve path accepted.
+  """
+  @spec caps_from_steps(map()) :: {:ok, SwapRoute.caps()} | {:error, {:malformed_steps, :caps}}
+  def caps_from_steps(%{"caps" => caps}) when is_map(caps) do
+    allowed_chains = Map.get(caps, "allowed_chains")
+    allowed_assets = Map.get(caps, "allowed_assets")
+    max_slippage_bps = Map.get(caps, "max_slippage_bps")
+
+    cond do
+      not string_list?(allowed_chains) ->
+        {:error, {:malformed_steps, :caps}}
+
+      not string_list?(allowed_assets) ->
+        {:error, {:malformed_steps, :caps}}
+
+      not (is_integer(max_slippage_bps) and max_slippage_bps >= 0) ->
+        {:error, {:malformed_steps, :caps}}
+
+      true ->
+        {:ok,
+         %{
+           allowed_chains: allowed_chains,
+           allowed_assets: allowed_assets,
+           max_slippage_bps: max_slippage_bps
+         }}
+    end
+  end
+
+  def caps_from_steps(_), do: {:ok, SwapRoute.caps()}
+
+  defp string_list?(values), do: is_list(values) and Enum.all?(values, &is_binary/1)
 
   defp parse_decimal(steps, key) do
     case Map.get(steps, key) do

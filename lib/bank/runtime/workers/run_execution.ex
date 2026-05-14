@@ -96,7 +96,7 @@ defmodule Bank.Runtime.Workers.RunExecution do
   alias Bank.Security
 
   @impl Oban.Worker
-  def perform(%Oban.Job{args: %{"decision_id" => decision_id}}) do
+  def perform(%Oban.Job{args: %{"decision_id" => decision_id}} = job) do
     with {:ok, envelope} <- load_envelope(decision_id),
          {:ok, plan} <- load_active_plan(envelope),
          :ok <- verify_delegation(plan),
@@ -104,7 +104,7 @@ defmodule Bank.Runtime.Workers.RunExecution do
          :ok <- verify_mainnet_allowed(plan),
          :ok <- verify_canary_caps(plan),
          {:ok, claimed} <- claim_or_cancel(plan) do
-      dispatch_and_progress(envelope, claimed)
+      dispatch_and_progress(envelope, claimed, job)
     end
   end
 
@@ -112,6 +112,18 @@ defmodule Bank.Runtime.Workers.RunExecution do
     Logger.error("RunExecution: malformed args: #{inspect(args)}")
     {:cancel, :malformed_args}
   end
+
+  # Last-attempt guard: if Oban is on its final allowed try and the
+  # failure is a transient class (`:adapter_unavailable` / 5xx),
+  # escalate to a terminal abort instead of letting Oban discard the
+  # job silently. Without this the plan rusts at `:prepared` forever
+  # and the UI watchdog sits on "Still processing" with no terminal
+  # PubSub event — which is exactly what the manual tester observed
+  # when the chain_adapter was down.
+  defp last_attempt?(%Oban.Job{attempt: a, max_attempts: m}) when is_integer(a) and is_integer(m),
+    do: a >= m
+
+  defp last_attempt?(_), do: false
 
   # Atomically transition the plan `:prepared → :signing` BEFORE any
   # adapter call (#230 P1). Closes the abort-vs-dispatch race: an
@@ -306,7 +318,8 @@ defmodule Bank.Runtime.Workers.RunExecution do
   # before the claim transaction committed.
   defp dispatch_and_progress(
          %DecisionEnvelope{} = envelope,
-         %ExecutionPlan{} = claimed
+         %ExecutionPlan{} = claimed,
+         %Oban.Job{} = job
        ) do
     case adapter_dispatch(claimed) do
       {:ok, _} ->
@@ -320,22 +333,38 @@ defmodule Bank.Runtime.Workers.RunExecution do
         abort_for_morpho_safety(claimed, reason)
 
       {:error, :adapter_unavailable} ->
-        revert_after_adapter_failure(claimed, :adapter_unavailable)
+        if last_attempt?(job) do
+          Logger.warning(
+            "RunExecution: adapter unavailable for plan #{claimed.id} on final attempt #{job.attempt}/#{job.max_attempts}; aborting instead of retry"
+          )
 
-        Logger.warning(
-          "RunExecution: adapter unavailable for plan #{claimed.id}; reverted claim; retrying via Oban"
-        )
+          abort_for_adapter_exhausted(claimed, :adapter_unavailable)
+        else
+          revert_after_adapter_failure(claimed, :adapter_unavailable)
 
-        {:error, :adapter_unavailable}
+          Logger.warning(
+            "RunExecution: adapter unavailable for plan #{claimed.id}; reverted claim; retrying via Oban"
+          )
+
+          {:error, :adapter_unavailable}
+        end
 
       {:error, {:adapter_error, status, _body}} ->
-        revert_after_adapter_failure(claimed, {:adapter_error, status})
+        if last_attempt?(job) do
+          Logger.warning(
+            "RunExecution: adapter 5xx #{status} for plan #{claimed.id} on final attempt #{job.attempt}/#{job.max_attempts}; aborting instead of retry"
+          )
 
-        Logger.warning(
-          "RunExecution: adapter 5xx #{status} for plan #{claimed.id}; reverted claim; retrying via Oban"
-        )
+          abort_for_adapter_exhausted(claimed, {:adapter_error, status})
+        else
+          revert_after_adapter_failure(claimed, {:adapter_error, status})
 
-        {:error, {:adapter_error, status}}
+          Logger.warning(
+            "RunExecution: adapter 5xx #{status} for plan #{claimed.id}; reverted claim; retrying via Oban"
+          )
+
+          {:error, {:adapter_error, status}}
+        end
 
       {:error, {:adapter_rejected, status, body}} ->
         Logger.warning(
@@ -433,18 +462,24 @@ defmodule Bank.Runtime.Workers.RunExecution do
   end
 
   defp do_adapter_dispatch(%ExecutionPlan{steps: %{"kind" => "swap"} = steps} = plan) do
-    case SwapRouteArtifacts.route_from_steps(steps) do
-      {:ok, route} ->
-        context = %{intent: plan.intent, workspace_id: plan.workspace_id}
+    with {:ok, route} <- SwapRouteArtifacts.route_from_steps(steps),
+         {:ok, caps} <- SwapRouteArtifacts.caps_from_steps(steps) do
+      context = %{intent: plan.intent, workspace_id: plan.workspace_id}
 
-        case SwapDispatchSafety.validate(route, context) do
-          :ok ->
-            AdapterClient.dispatch_swap(plan)
+      # Re-validate with the SAME caps the approve path accepted.
+      # The caps live on `steps["caps"]` — the worker must read them
+      # back rather than falling through to `SwapRoute.caps/0`
+      # defaults, otherwise an approved route can be rejected here
+      # with e.g. `:asset_unsupported` because the worker's default
+      # caps were narrower than approval's.
+      case SwapDispatchSafety.validate(route, context, caps: caps) do
+        :ok ->
+          AdapterClient.dispatch_swap(plan)
 
-          {:error, reason_atom} ->
-            {:error, {:swap_safety_gate, reason_atom}}
-        end
-
+        {:error, reason_atom} ->
+          {:error, {:swap_safety_gate, reason_atom}}
+      end
+    else
       {:error, :not_a_swap} ->
         # Defensive — the outer head guards on `kind == "swap"`, but
         # if the steps shape ever drifts we fail closed rather than
@@ -661,6 +696,39 @@ defmodule Bank.Runtime.Workers.RunExecution do
         {:error, changeset}
     end
   end
+
+  # Terminal abort when the transient-class adapter failure
+  # (`:adapter_unavailable` or 5xx) has exhausted Oban's
+  # `max_attempts` budget. Without this the plan would sit at
+  # `:prepared` forever, the UI watchdog would render
+  # "Still processing" indefinitely, and no terminal
+  # `:execution_updated` PubSub event would ever broadcast.
+  # The abort mirrors the other terminal-abort helpers:
+  # `mark_plan_aborted/2` flips the plan to `:aborted` with a
+  # canonical `final_reason`, then
+  # `emit_aborted_side_effects/4` audits + broadcasts so AgentLive
+  # flips IntentResult to `:failed` ("Execution aborted.").
+  defp abort_for_adapter_exhausted(%ExecutionPlan{} = plan, cause) do
+    reason = "adapter_exhausted:#{cause_label(cause)}"
+    prior_status = plan.execution_status
+
+    case mark_plan_aborted(plan, reason) do
+      {:ok, updated_plan, intent_transition} ->
+        emit_aborted_side_effects(updated_plan, prior_status, intent_transition, reason)
+        {:cancel, :adapter_exhausted}
+
+      {:error, changeset} ->
+        Logger.error(
+          "RunExecution: abort-for-adapter-exhausted update failed for plan #{plan.id}: #{inspect(changeset.errors)}"
+        )
+
+        {:error, changeset}
+    end
+  end
+
+  defp cause_label(:adapter_unavailable), do: "adapter_unavailable"
+  defp cause_label({:adapter_error, status}), do: "adapter_error:#{status}"
+  defp cause_label(other), do: inspect(other)
 
   defp mark_plan_aborted(%ExecutionPlan{} = plan, reason) do
     Repo.transaction(fn ->

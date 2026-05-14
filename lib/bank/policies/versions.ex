@@ -493,6 +493,231 @@ defmodule Bank.Policies.Versions do
     end)
   end
 
+  @doc """
+  Discard an open draft. Deletes the draft row in a single
+  transaction and appends a `policy.version.draft_discarded`
+  audit event so the trail records what was thrown away.
+
+  Drafts are never consulted by the decision pipeline, so a
+  discarded draft cannot be referenced by a past decision —
+  deletion (rather than soft archive) is safe for replay
+  determinism.
+
+  Returns `{:error, :not_a_draft}` when the row was already
+  published / superseded by the time the transaction reloaded it.
+
+  Required opts: `:actor` (enum), `:actor_id` (UUID).
+  """
+  @type discard_result ::
+          {:ok, PolicyVersion.t()}
+          | {:error, :not_a_draft}
+          | {:error, Ecto.Changeset.t()}
+
+  @spec discard_draft(PolicyVersion.t(), keyword()) :: discard_result()
+  def discard_draft(%PolicyVersion{id: id, workspace_id: workspace_id}, opts) do
+    actor = Keyword.fetch!(opts, :actor)
+    actor_id = Keyword.fetch!(opts, :actor_id)
+
+    Repo.transaction(fn ->
+      case lock_for_update(id, workspace_id) do
+        nil ->
+          Repo.rollback(:not_a_draft)
+
+        %PolicyVersion{status: :draft} = draft ->
+          case Repo.delete(draft) do
+            {:ok, deleted} ->
+              {:ok, _audit} =
+                Audit.append_event(
+                  Bank.Audit.Events.policy_version_draft_discarded(
+                    deleted,
+                    actor_id: actor_id,
+                    actor: actor
+                  )
+                )
+
+              deleted
+
+            {:error, cs} ->
+              Repo.rollback(cs)
+          end
+
+        _other ->
+          Repo.rollback(:not_a_draft)
+      end
+    end)
+  end
+
+  @doc """
+  Classify a draft's rule set against the workspace's currently
+  published version. Used by the Advanced policy screen to:
+
+    * surface a per-rule "tightening vs expansion" badge so the
+      operator knows whether publishing would loosen or tighten
+      the agent's authority, and
+    * surface a `requires_permission_reinstall?` banner so the
+      operator cannot silently grant the agent broader on-chain
+      authority than the currently-installed permission covers.
+
+  Returns:
+
+      %{
+        tightening: [change],
+        expansion:  [change],
+        unchanged:  [policy_rule],
+        requires_permission_reinstall?: boolean
+      }
+
+  Each `change` map carries:
+
+      %{
+        kind:      :added | :removed | :modified,
+        rule_type: atom,
+        rule_id:   uuid,       # draft side id, or published id for :removed
+        prior:     %PolicyRule{} | nil,
+        next:      %PolicyRule{} | nil,
+        reason:    "humanise summary of why this counts as tightening/expansion"
+      }
+
+  ## Classification rules (conservative — see Phase 3 doc)
+
+    * **Tightening** (no reinstall):
+      - lower per-tx / rolling-cap limits
+      - lower slippage ceiling
+      - shorter rolling window with same cap
+      - shrinking an allowlist (removing assets / chains / routers)
+      - growing a denylist
+      - autonomy_tier moving toward `:block`
+      - adding any new rule (new constraints are tightening)
+
+    * **Expansion** (reinstall required):
+      - higher per-tx / rolling-cap limits
+      - higher slippage ceiling
+      - longer rolling window with same cap
+      - growing an allowlist (new assets / chains / routers)
+      - shrinking a denylist
+      - autonomy_tier moving toward `:auto`
+      - changing allowlist/denylist `mode` (flipping the rule's
+        intent is always treated as expansion)
+      - removing any rule (dropping a constraint is expansion)
+      - any change the classifier can't prove is tightening
+        (defensive default — unknown shapes never silently land
+        as "safe")
+  """
+  @type diff_result :: %{
+          required(:tightening) => [map()],
+          required(:expansion) => [map()],
+          required(:unchanged) => [Bank.Policies.PolicyRule.t()],
+          required(:requires_permission_reinstall?) => boolean()
+        }
+
+  @spec diff_against_published(PolicyVersion.t()) :: diff_result()
+  def diff_against_published(%PolicyVersion{workspace_id: ws_id} = draft) do
+    published = current_published(ws_id)
+
+    published_rules =
+      case published do
+        nil ->
+          []
+
+        %PolicyVersion{} = pv ->
+          ids = PolicyVersion.rule_ids_list(pv)
+          fetch_rules_in_workspace(ids, ws_id)
+      end
+
+    draft_rules =
+      draft
+      |> PolicyVersion.rule_ids_list()
+      |> fetch_rules_in_workspace(ws_id, [:active, :draft])
+
+    Bank.Policies.PolicyDiff.classify(published_rules, draft_rules)
+  end
+
+  @doc """
+  Diff two arbitrary published/superseded policy versions
+  belonging to the same workspace. Used by the agent-screen
+  permission-outdated detector to answer "did any expansion
+  publish land since the agent's permission was granted?".
+
+  Both versions must belong to the same workspace. Returns
+  the same shape as `diff_against_published/1`.
+  """
+  @spec diff_versions(PolicyVersion.t() | nil, PolicyVersion.t()) :: diff_result()
+  def diff_versions(prior, %PolicyVersion{workspace_id: ws_id} = next) do
+    prior_rules =
+      case prior do
+        nil ->
+          []
+
+        %PolicyVersion{workspace_id: ^ws_id} = pv ->
+          pv |> PolicyVersion.rule_ids_list() |> fetch_rules_in_workspace(ws_id)
+
+        %PolicyVersion{} ->
+          # Defensive guard: never silently diff across workspaces.
+          []
+      end
+
+    next_rules =
+      next |> PolicyVersion.rule_ids_list() |> fetch_rules_in_workspace(ws_id)
+
+    Bank.Policies.PolicyDiff.classify(prior_rules, next_rules)
+  end
+
+  @doc """
+  Have any "expansion" publishes happened in this workspace since
+  the given `granted_at` timestamp?
+
+  Walks every `:published` / `:superseded` `PolicyVersion` whose
+  `effective_at` is strictly after `granted_at`, in chronological
+  order. For each such version, compares it against the
+  immediately-prior version (via the `supersedes_id` chain) and
+  returns `true` on the first expansion classification.
+
+  Returns `false` when `granted_at` is `nil` (legacy
+  un-policy-tracked installs are not flagged as outdated; if a
+  workspace has never published a policy version, the runtime
+  uses the legacy active-ruleset path and there is nothing to be
+  "outdated" against).
+  """
+  @spec expansion_published_since?(binary(), DateTime.t() | nil) :: boolean()
+  def expansion_published_since?(_workspace_id, nil), do: false
+
+  def expansion_published_since?(workspace_id, %DateTime{} = granted_at)
+      when is_binary(workspace_id) do
+    versions =
+      Repo.all(
+        from v in PolicyVersion,
+          where:
+            v.workspace_id == ^workspace_id and v.status in ^[:published, :superseded] and
+              v.effective_at > ^granted_at,
+          order_by: [asc: v.effective_at, asc: v.version_number]
+      )
+
+    Enum.any?(versions, fn v ->
+      prior = if v.supersedes_id, do: Repo.get(PolicyVersion, v.supersedes_id), else: nil
+      diff = diff_versions(prior, v)
+      diff.requires_permission_reinstall?
+    end)
+  end
+
+  def expansion_published_since?(_workspace_id, _other), do: false
+
+  # ---------------------------------------------------------------
+  # Rule fetch helpers used by the diff entry points.
+  # ---------------------------------------------------------------
+
+  defp fetch_rules_in_workspace(ids, ws_id, states \\ [:active])
+
+  defp fetch_rules_in_workspace([], _ws_id, _states), do: []
+
+  defp fetch_rules_in_workspace(ids, ws_id, states) when is_list(ids) do
+    Bank.Policies.PolicyRule
+    |> where(
+      [r],
+      r.id in ^ids and r.state in ^states and r.workspace_id == ^ws_id
+    )
+    |> Repo.all()
+  end
+
   # --- internal ----------------------------------------------------------
 
   defp current_published_locked(workspace_id) do

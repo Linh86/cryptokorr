@@ -991,6 +991,28 @@ defmodule Bank.Audit.Events do
     }
   end
 
+  @doc """
+  `policy.version.draft_discarded` — operator threw away an open
+  draft policy version. The row is deleted (drafts never become
+  decision references, so deletion preserves replay
+  determinism). `before_ref` captures the discarded draft so the
+  audit trail still shows what was thrown away.
+  """
+  @spec policy_version_draft_discarded(Bank.Policies.PolicyVersion.t(), keyword()) :: attrs()
+  def policy_version_draft_discarded(%{__struct__: _} = version, opts \\ []) do
+    %{
+      actor: Keyword.get(opts, :actor, :user),
+      actor_id: Keyword.fetch!(opts, :actor_id),
+      event_type: "policy.version.draft_discarded",
+      subject_type: "policy_version",
+      subject_id: version.id,
+      correlation_id: version.id,
+      before_ref: policy_version_snapshot(version),
+      after_ref: nil,
+      workspace_id: version.workspace_id
+    }
+  end
+
   defp policy_version_prior_ref(nil), do: nil
 
   defp policy_version_prior_ref(%{__struct__: _} = version) do

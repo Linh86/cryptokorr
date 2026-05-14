@@ -169,6 +169,7 @@ defmodule Mix.Tasks.Bank.BrowserInstall.SmokeTest do
 
       assert output =~ "kernel_account_index"
       assert output =~ "ERROR"
+
       assert output =~ "AA23",
              "expected the collision check to name the on-chain failure mode"
     end

@@ -217,7 +217,8 @@ defmodule Bank.SessionPermissions.BrowserInstall do
   surfaces to the JS hook as the wire-allowlisted reason atom
   `:kernel_account_collision`.
   """
-  @spec check_kernel_index_collision(WalletBinding.t()) :: :ok | {:error, :kernel_account_collision}
+  @spec check_kernel_index_collision(WalletBinding.t()) ::
+          :ok | {:error, :kernel_account_collision}
   def check_kernel_index_collision(%WalletBinding{address: user_eoa}) do
     operator_eoa = operator_eoa_address()
 

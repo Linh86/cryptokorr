@@ -81,6 +81,18 @@ defmodule Bank.Demo do
   @chain "base"
   @asset "USDC"
 
+  # Sandbox test-intent path on Base Sepolia. The AgentLive Test Intent
+  # card always submits `chain: "base-sepolia"` for safety; the swap
+  # mode's destination asset is `USDT` after
+  # `Bank.Decisions.build_swap_quote_request/2` inverts the source for
+  # v0.1. The policy seed must therefore allow both chains AND both
+  # assets, with an `autonomy_tier` value matching
+  # `Bank.Policies.tier_param/1`'s allowlist (`auto | manual | block`).
+  # Without this the manual swap test path blocks on
+  # `policy_malformed_params` / `chain_not_allowed` / `asset_not_allowed`.
+  @sandbox_chain "base-sepolia"
+  @sandbox_swap_asset "USDT"
+
   # Environments where `reset/1` is allowed to delete. Prod is never
   # on this list — resetting a demo dataset should never be something
   # an operator can do against production data.
@@ -368,26 +380,41 @@ defmodule Bank.Demo do
       %{
         rule_type: :amount_limit,
         priority: 10,
-        scope: %{"asset" => @asset, "chain" => @chain},
-        params: %{"max_amount" => "10000"}
+        # Drop the `chain` pin so the cap applies to both historical
+        # demo intents on `base` and the sandbox Test Intent path on
+        # `base-sepolia`. Scoping by asset keeps the cap narrow.
+        scope: %{"asset" => @asset},
+        # `Bank.Policies.evaluate_rule/3` for `:amount_limit`
+        # expects `max_per_tx` (the Policy Builder UI writes the same
+        # key). The previous `max_amount` value made every manual Test
+        # Intent block with `policy_malformed_params`.
+        params: %{"max_per_tx" => "10000", "currency" => @asset}
       },
       %{
         rule_type: :allowed_chain,
         priority: 20,
         scope: %{},
-        params: %{"chains" => [@chain]}
+        params: %{"chains" => [@chain, @sandbox_chain]}
       },
       %{
         rule_type: :allowed_asset,
         priority: 30,
         scope: %{},
-        params: %{"assets" => [@asset]}
+        # USDC is the input asset; USDT is the destination after
+        # `Decisions.build_swap_quote_request/2` inverts the source
+        # for the v0.1 swap mode. Both must be allowed or the swap
+        # blocks on `asset_not_allowed`.
+        params: %{"assets" => [@asset, @sandbox_swap_asset]}
       },
       %{
         rule_type: :autonomy_tier,
         priority: 40,
         scope: %{},
-        params: %{"tier" => "guarded"}
+        # Must match `Bank.Policies.tier_param/1`'s allowlist
+        # (`auto | manual | block`). The previous `"guarded"` value
+        # was an invalid legacy literal that caused every evaluation
+        # to fail with `policy_malformed_params`.
+        params: %{"tier" => "auto"}
       }
     ]
   end
@@ -396,15 +423,36 @@ defmodule Bank.Demo do
     Enum.map(policy_rule_specs(), &upsert_policy_rule/1)
   end
 
-  defp upsert_policy_rule(%{rule_type: rt, priority: prio} = attrs) do
+  defp upsert_policy_rule(%{rule_type: rt, priority: prio, params: params, scope: scope} = attrs) do
+    workspace_id = demo_workspace_id()
+
     existing =
       Repo.one(
         from r in PolicyRule,
-          where: r.rule_type == ^rt and r.priority == ^prio and r.state == :active,
+          where:
+            r.workspace_id == ^workspace_id and
+              r.rule_type == ^rt and
+              r.priority == ^prio and
+              r.state == :active,
           limit: 1
       )
 
     case existing do
+      # Seed already matches — no-op.
+      %PolicyRule{params: ^params, scope: ^scope} = rule ->
+        {:ok, rule}
+
+      # Demo-seeded rule whose params/scope drifted from the current
+      # spec (e.g. the legacy `tier: "guarded"` value). Heal it in
+      # place so a re-run of `mix bank.demo.seed` normalises a dev DB
+      # that's already been seeded with the broken values.
+      # Operator-edited rules carry `created_by: :operator` and are
+      # left untouched.
+      %PolicyRule{created_by: :user} = rule ->
+        rule
+        |> PolicyRule.changeset(%{params: params, scope: scope})
+        |> Repo.update()
+
       %PolicyRule{} = rule ->
         {:ok, rule}
 
@@ -414,7 +462,7 @@ defmodule Bank.Demo do
           attrs
           |> Map.put(:state, :active)
           |> Map.put(:created_by, :user)
-          |> Map.put(:workspace_id, demo_workspace_id())
+          |> Map.put(:workspace_id, workspace_id)
         )
         |> Repo.insert()
     end
@@ -948,19 +996,29 @@ defmodule Bank.Demo do
   end
 
   defp delete_demo_policy_rules do
-    # Match each seeded rule by `(rule_type, priority, params)` so
-    # operator-authored rules with the same `(rule_type, priority)`
-    # but different params survive the reset.
-    Enum.each(policy_rule_specs(), fn %{
-                                        rule_type: rt,
-                                        priority: prio,
-                                        params: params
-                                      } ->
-      Repo.delete_all(
-        from r in PolicyRule,
-          where: r.rule_type == ^rt and r.priority == ^prio and r.params == ^params
-      )
-    end)
+    # Match each seeded rule by `(workspace_id, rule_type, priority,
+    # created_by: :user)`. Operator-authored rules carry
+    # `created_by: :operator` and survive the reset. Matching on the
+    # seeded `created_by` flag is more robust than matching on
+    # `params` exactly — a previous-generation seed with drifted
+    # params (the legacy `tier: "guarded"` rows) would otherwise leak
+    # through every reset.
+    case demo_workspace_id() do
+      nil ->
+        :ok
+
+      workspace_id when is_binary(workspace_id) ->
+        Enum.each(policy_rule_specs(), fn %{rule_type: rt, priority: prio} ->
+          Repo.delete_all(
+            from r in PolicyRule,
+              where:
+                r.workspace_id == ^workspace_id and
+                  r.rule_type == ^rt and
+                  r.priority == ^prio and
+                  r.created_by == :user
+          )
+        end)
+    end
   end
 
   defp all_demo_agent_ids, do: [@demo_agent_id, @legacy_demo_agent_id]

@@ -381,7 +381,8 @@ defmodule Mix.Tasks.Bank.BrowserInstall.Smoke do
         detail:
           "browser=#{inspect(browser_index)} == operator=#{inspect(operator_index)}; " <>
             "raise BROWSER_KERNEL_ACCOUNT_INDEX above " <>
-            inspect(operator_index) <> " or risk on-chain AA23 collision " <>
+            inspect(operator_index) <>
+            " or risk on-chain AA23 collision " <>
             "(only matters when user EOA == OPERATOR_ADDRESS=#{short_addr(operator_eoa) || "<unset>"})"
       }
     else
@@ -441,15 +442,15 @@ defmodule Mix.Tasks.Bank.BrowserInstall.Smoke do
         %{
           key: "chain_adapter /install/sign_session_portion",
           status: :error,
-          detail:
-            "route responded to an UNAUTHENTICATED probe — adapter auth gate is missing"
+          detail: "route responded to an UNAUTHENTICATED probe — adapter auth gate is missing"
         }
 
       {:error, :not_found} ->
         %{
           key: "chain_adapter /install/sign_session_portion",
           status: :error,
-          detail: "route returned 404 — chain_adapter does not expose the install signing endpoint; rebuild + restart"
+          detail:
+            "route returned 404 — chain_adapter does not expose the install signing endpoint; rebuild + restart"
         }
 
       {:error, :connection_refused} ->

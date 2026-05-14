@@ -143,6 +143,9 @@ defmodule Bank.Autonomy do
     inputs = resolve_screening(inputs)
 
     cond do
+      permission_outdated?(inputs) ->
+        build_permission_outdated(inputs)
+
       policy_violations?(inputs) ->
         build_policy_block(inputs)
 
@@ -302,6 +305,42 @@ defmodule Bank.Autonomy do
   end
 
   # --- guards -------------------------------------------------------
+
+  # Permission-outdated gate (agent-advanced). Fires when
+  # `Bank.Decisions.evaluate_policy/3` injected a synthetic
+  # `:permission_outdated_reinstall_required` violation because the
+  # workspace's active delegation predates an expansion publish.
+  # Checked BEFORE generic `policy_violations?` so the stable
+  # reason code wins over the `:policy_*` prefix path.
+  defp permission_outdated?(%{policy: %Evaluation{violations: violations}}) do
+    Enum.any?(violations, &(&1.rule_type == :permission_outdated_reinstall_required))
+  end
+
+  defp permission_outdated?(_), do: false
+
+  defp build_permission_outdated(%{policy: %Evaluation{violations: violations}}) do
+    outdated =
+      Enum.find(violations, &(&1.rule_type == :permission_outdated_reinstall_required))
+
+    # Flatten the violation's `details` into the rationale so the
+    # DecisionEnvelope's `reasons.items[0].details` carries
+    # `workspace_id`, `earliest_grant_at`, and (for legacy nil
+    # grants) `reason: "legacy_nil_grant"` directly — replay
+    # readers and UI consumers don't have to peel a nested
+    # `details.details` envelope.
+    rationale =
+      ((outdated && outdated.details) || %{})
+      |> Map.put("permission_outdated", true)
+
+    build(
+      :block,
+      :severe,
+      :permission_outdated_reinstall_required,
+      (outdated && outdated.message) ||
+        "policy expanded after this permission was installed; reinstall permission before running the agent",
+      rationale
+    )
+  end
 
   defp policy_violations?(%{policy: %Evaluation{violations: v}}) when v != [] do
     Enum.any?(v, &(&1.rule_type != :autonomy_tier))

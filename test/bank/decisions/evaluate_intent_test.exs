@@ -232,6 +232,95 @@ defmodule Bank.Decisions.EvaluateIntentTest do
     end
   end
 
+  describe "workspace-scoped policy fallback" do
+    test "uses only the intent workspace's active rules when no policy version is published" do
+      suffix = System.unique_integer([:positive])
+
+      {:ok, intent_workspace} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "intent-policy-fallback-#{suffix}",
+          name: "Intent Policy Fallback #{suffix}",
+          mainnet_enabled: true
+        })
+
+      {:ok, unrelated_workspace} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "unrelated-policy-fallback-#{suffix}",
+          name: "Unrelated Policy Fallback #{suffix}",
+          mainnet_enabled: true
+        })
+
+      bad_rule =
+        Fixtures.policy_rule(
+          workspace_id: unrelated_workspace.id,
+          rule_type: :allowed_asset,
+          priority: 1,
+          params: %{"assets" => []}
+        )
+
+      amount_rule =
+        Fixtures.policy_rule(
+          workspace_id: intent_workspace.id,
+          rule_type: :amount_limit,
+          priority: 10,
+          params: %{"max_per_tx" => "100", "currency" => "USDC"}
+        )
+
+      chain_rule =
+        Fixtures.policy_rule(
+          workspace_id: intent_workspace.id,
+          rule_type: :allowed_chain,
+          priority: 20,
+          params: %{"chains" => ["base-sepolia"]}
+        )
+
+      asset_rule =
+        Fixtures.policy_rule(
+          workspace_id: intent_workspace.id,
+          rule_type: :allowed_asset,
+          priority: 30,
+          params: %{"assets" => ["USDC"]}
+        )
+
+      tier_rule =
+        Fixtures.policy_rule(
+          workspace_id: intent_workspace.id,
+          rule_type: :autonomy_tier,
+          priority: 40,
+          params: %{"tier" => "auto"}
+        )
+
+      intent =
+        Fixtures.agent_intent(
+          workspace_id: intent_workspace.id,
+          target_counterparty_id: nil,
+          target_raw_address: "0x" <> String.duplicate("e", 40),
+          amount: Decimal.new("10"),
+          asset: "USDC",
+          chain: "base-sepolia"
+        )
+
+      assert {:ok, result} =
+               Decisions.evaluate_intent(intent, preview: {:ok, ok_preview(intent)})
+
+      rule_ids = result.decision.policy_snapshot_ref["rule_ids"]
+
+      assert amount_rule.id in rule_ids
+      assert chain_rule.id in rule_ids
+      assert asset_rule.id in rule_ids
+      assert tier_rule.id in rule_ids
+      refute bad_rule.id in rule_ids
+
+      reason_codes =
+        result.decision.reasons
+        |> Map.get("items", [])
+        |> Enum.map(& &1["code"])
+
+      refute "asset_not_allowed" in reason_codes
+      refute "policy_malformed_params" in reason_codes
+    end
+  end
+
   describe "supersession (re-evaluation)" do
     test "re-evaluation demotes prior trust / simulation / decision and chains supersedes_id" do
       intent = small_trusted_intent()
@@ -573,6 +662,420 @@ defmodule Bank.Decisions.EvaluateIntentTest do
 
       assert [%Bank.Notifications.Notification{}] =
                Bank.Notifications.list_for_workspace(ws.id)
+    end
+  end
+
+  # ── permission-outdated runtime gate (agent-advanced) ─────────────
+
+  describe "permission_outdated_reinstall_required gate" do
+    alias Bank.Policies.Versions
+
+    defp permission_setup do
+      suffix = System.unique_integer([:positive])
+
+      {:ok, ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "perm-gate-#{suffix}",
+          name: "Perm gate #{suffix}",
+          mainnet_enabled: true
+        })
+
+      actor_id = Ecto.UUID.generate()
+
+      %{workspace: ws, actor_id: actor_id, suffix: suffix}
+    end
+
+    defp seed_publish(ws, rule, actor_id) do
+      {:ok, draft} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [rule.id]}
+        )
+
+      {:ok, _} = Versions.publish_draft(draft, published_by: :user, actor_id: actor_id)
+    end
+
+    defp install_delegation(ws, granted_at) do
+      sa = "sa-perm-#{System.unique_integer([:positive])}"
+      {:ok, del} = Bank.Delegations.grant(sa, "del-#{sa}", %{workspace_id: ws.id})
+
+      del
+      |> Ecto.Changeset.change(granted_at: granted_at)
+      |> Bank.Repo.update!()
+    end
+
+    defp permissive_workspace_rules(ws) do
+      _amount =
+        Fixtures.policy_rule(
+          workspace_id: ws.id,
+          rule_type: :amount_limit,
+          priority: 10,
+          params: %{"max_per_tx" => "1000", "currency" => "USDC"}
+        )
+
+      _chain =
+        Fixtures.policy_rule(
+          workspace_id: ws.id,
+          rule_type: :allowed_chain,
+          priority: 20,
+          params: %{"chains" => ["base-sepolia"]}
+        )
+
+      _asset =
+        Fixtures.policy_rule(
+          workspace_id: ws.id,
+          rule_type: :allowed_asset,
+          priority: 30,
+          params: %{"assets" => ["USDC"]}
+        )
+
+      _tier =
+        Fixtures.policy_rule(
+          workspace_id: ws.id,
+          rule_type: :autonomy_tier,
+          priority: 40,
+          params: %{"tier" => "auto"}
+        )
+
+      :ok
+    end
+
+    defp trusted_intent_in(ws) do
+      cp = Fixtures.counterparty(workspace_id: ws.id)
+      _label = Fixtures.address_label(counterparty: cp, chain: "base-sepolia")
+
+      _ =
+        Fixtures.trust_assertion(
+          subject: cp,
+          level: :trusted,
+          scope: %{},
+          workspace_id: ws.id
+        )
+
+      Fixtures.agent_intent(
+        workspace_id: ws.id,
+        counterparty: cp,
+        amount: Decimal.new("25"),
+        asset: "USDC",
+        chain: "base-sepolia"
+      )
+    end
+
+    test "expansion publish after permission grant blocks with reason permission_outdated_reinstall_required and no ExecutionPlan",
+         _ctx do
+      %{workspace: ws, actor_id: actor_id} = permission_setup()
+      permissive_workspace_rules(ws)
+
+      # Snapshot a published v1 with the loose amount cap.
+      small_rule =
+        Fixtures.policy_rule(
+          workspace_id: ws.id,
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "1000", "currency" => "USDC"},
+          priority: 50
+        )
+
+      seed_publish(ws, small_rule, actor_id)
+
+      # Install permission AFTER v1.
+      granted_at = DateTime.add(DateTime.utc_now(), -3600, :second)
+      _delegation = install_delegation(ws, granted_at)
+
+      # v2 EXPANDS the cap (5000 vs 1000) — same fingerprint, higher
+      # value → expansion per `PolicyDiff`.
+      big_rule =
+        Fixtures.policy_rule(
+          workspace_id: ws.id,
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "5000", "currency" => "USDC"},
+          priority: 50,
+          state: :draft
+        )
+
+      seed_publish(ws, big_rule, actor_id)
+
+      intent = trusted_intent_in(ws)
+
+      assert {:ok, result} =
+               Decisions.evaluate_intent(intent, preview: {:ok, ok_preview(intent)})
+
+      assert result.outcome == :block
+      assert result.dispatch == :not_applicable
+      assert is_nil(result.execution_plan)
+
+      refute_enqueued(worker: Bank.Runtime.Workers.RunExecution)
+
+      # DecisionEnvelope carries the stable reason code in
+      # `reasons.items` (autonomy emits the code as a string when
+      # building the envelope).
+      reasons =
+        result.decision.reasons
+        |> Map.get("items", [])
+        |> Enum.map(&Map.get(&1, "code"))
+
+      assert "permission_outdated_reinstall_required" in reasons or
+               result.decision.reason_code == :permission_outdated_reinstall_required
+    end
+
+    test "tightening publish after permission grant does NOT block",
+         _ctx do
+      %{workspace: ws, actor_id: actor_id} = permission_setup()
+      permissive_workspace_rules(ws)
+
+      big_rule =
+        Fixtures.policy_rule(
+          workspace_id: ws.id,
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "5000", "currency" => "USDC"},
+          priority: 50
+        )
+
+      seed_publish(ws, big_rule, actor_id)
+
+      granted_at = DateTime.add(DateTime.utc_now(), -3600, :second)
+      _delegation = install_delegation(ws, granted_at)
+
+      # Tightening = lower cap.
+      small_rule =
+        Fixtures.policy_rule(
+          workspace_id: ws.id,
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "100", "currency" => "USDC"},
+          priority: 50,
+          state: :draft
+        )
+
+      seed_publish(ws, small_rule, actor_id)
+
+      intent = trusted_intent_in(ws)
+
+      assert {:ok, result} =
+               Decisions.evaluate_intent(intent, preview: {:ok, ok_preview(intent)})
+
+      assert result.outcome == :auto_exec
+
+      reasons =
+        result.decision.reasons
+        |> Map.get("items", [])
+        |> Enum.map(&Map.get(&1, "code"))
+
+      refute "permission_outdated_reinstall_required" in reasons
+    end
+
+    test "fresh permission install after expansion clears the gate",
+         _ctx do
+      %{workspace: ws, actor_id: actor_id} = permission_setup()
+      permissive_workspace_rules(ws)
+
+      small_rule =
+        Fixtures.policy_rule(
+          workspace_id: ws.id,
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "1000", "currency" => "USDC"},
+          priority: 50
+        )
+
+      seed_publish(ws, small_rule, actor_id)
+
+      big_rule =
+        Fixtures.policy_rule(
+          workspace_id: ws.id,
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "5000", "currency" => "USDC"},
+          priority: 50,
+          state: :draft
+        )
+
+      seed_publish(ws, big_rule, actor_id)
+
+      # Fresh install AFTER the expansion → granted_at is in the
+      # future relative to the publish window.
+      fresh_grant = DateTime.add(DateTime.utc_now(), 60, :second)
+      _delegation = install_delegation(ws, fresh_grant)
+
+      intent = trusted_intent_in(ws)
+
+      assert {:ok, result} =
+               Decisions.evaluate_intent(intent, preview: {:ok, ok_preview(intent)})
+
+      reasons =
+        result.decision.reasons
+        |> Map.get("items", [])
+        |> Enum.map(&Map.get(&1, "code"))
+
+      refute "permission_outdated_reinstall_required" in reasons
+      assert result.outcome == :auto_exec
+    end
+
+    test "no active delegation → gate is silent (other branches handle missing permission)",
+         _ctx do
+      %{workspace: ws, actor_id: actor_id} = permission_setup()
+      permissive_workspace_rules(ws)
+
+      small_rule =
+        Fixtures.policy_rule(
+          workspace_id: ws.id,
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "1000", "currency" => "USDC"},
+          priority: 50
+        )
+
+      seed_publish(ws, small_rule, actor_id)
+
+      big_rule =
+        Fixtures.policy_rule(
+          workspace_id: ws.id,
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "5000", "currency" => "USDC"},
+          priority: 50,
+          state: :draft
+        )
+
+      seed_publish(ws, big_rule, actor_id)
+
+      # No delegation installed.
+      intent = trusted_intent_in(ws)
+
+      assert {:ok, result} =
+               Decisions.evaluate_intent(intent, preview: {:ok, ok_preview(intent)})
+
+      reasons =
+        result.decision.reasons
+        |> Map.get("items", [])
+        |> Enum.map(&Map.get(&1, "code"))
+
+      # No outdated-permission gate fired (there's nothing to be
+      # outdated against). The downstream "no executable account"
+      # path takes over.
+      refute "permission_outdated_reinstall_required" in reasons
+    end
+
+    # --- :rules / skip_outdated_permission_gate? audit (Fix 3) ----
+
+    test "passing :rules does NOT silently bypass the gate (production parity)",
+         _ctx do
+      %{workspace: ws, actor_id: actor_id} = permission_setup()
+      permissive_workspace_rules(ws)
+
+      small_rule =
+        Fixtures.policy_rule(
+          workspace_id: ws.id,
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "100", "currency" => "USDC"},
+          priority: 50
+        )
+
+      seed_publish(ws, small_rule, actor_id)
+      _delegation = install_delegation(ws, DateTime.add(DateTime.utc_now(), -3600, :second))
+
+      big_rule =
+        Fixtures.policy_rule(
+          workspace_id: ws.id,
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "5000", "currency" => "USDC"},
+          priority: 50,
+          state: :draft
+        )
+
+      seed_publish(ws, big_rule, actor_id)
+
+      intent = trusted_intent_in(ws)
+
+      # Pre-fix, `:rules` implicitly skipped the gate. Post-fix the
+      # gate is keyed on the workspace's live delegation list, so
+      # an injected rule list does NOT open a bypass. The only
+      # opt-out is `skip_outdated_permission_gate?: true`.
+      assert {:ok, result} =
+               Decisions.evaluate_intent(intent,
+                 preview: {:ok, ok_preview(intent)},
+                 rules: Bank.Policies.load_active_ruleset(workspace_id: ws.id)
+               )
+
+      assert result.outcome == :block
+
+      reasons =
+        result.decision.reasons
+        |> Map.get("items", [])
+        |> Enum.map(&Map.get(&1, "code"))
+
+      assert "permission_outdated_reinstall_required" in reasons
+    end
+
+    test "skip_outdated_permission_gate?: true is the explicit opt-out (replay/simulator)",
+         _ctx do
+      %{workspace: ws, actor_id: actor_id} = permission_setup()
+      permissive_workspace_rules(ws)
+
+      small_rule =
+        Fixtures.policy_rule(
+          workspace_id: ws.id,
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "100", "currency" => "USDC"},
+          priority: 50
+        )
+
+      seed_publish(ws, small_rule, actor_id)
+      _delegation = install_delegation(ws, DateTime.add(DateTime.utc_now(), -3600, :second))
+
+      big_rule =
+        Fixtures.policy_rule(
+          workspace_id: ws.id,
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "5000", "currency" => "USDC"},
+          priority: 50,
+          state: :draft
+        )
+
+      seed_publish(ws, big_rule, actor_id)
+
+      intent = trusted_intent_in(ws)
+
+      assert {:ok, result} =
+               Decisions.evaluate_intent(intent,
+                 preview: {:ok, ok_preview(intent)},
+                 skip_outdated_permission_gate?: true
+               )
+
+      reasons =
+        result.decision.reasons
+        |> Map.get("items", [])
+        |> Enum.map(&Map.get(&1, "code"))
+
+      refute "permission_outdated_reinstall_required" in reasons
+      assert result.outcome == :auto_exec
+    end
+
+    test "active delegation with nil granted_at + published version fails closed",
+         _ctx do
+      %{workspace: ws, actor_id: actor_id} = permission_setup()
+      permissive_workspace_rules(ws)
+
+      delegation = install_delegation(ws, DateTime.utc_now())
+
+      delegation
+      |> Ecto.Changeset.change(granted_at: nil)
+      |> Repo.update!()
+
+      rule =
+        Fixtures.policy_rule(
+          workspace_id: ws.id,
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "100", "currency" => "USDC"}
+        )
+
+      seed_publish(ws, rule, actor_id)
+
+      intent = trusted_intent_in(ws)
+
+      assert {:ok, result} =
+               Decisions.evaluate_intent(intent, preview: {:ok, ok_preview(intent)})
+
+      assert result.outcome == :block
+
+      [first | _] = result.decision.reasons["items"]
+      assert first["code"] == "permission_outdated_reinstall_required"
+      assert first["details"]["reason"] == "legacy_nil_grant"
     end
   end
 end

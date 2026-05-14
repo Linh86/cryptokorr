@@ -23,7 +23,7 @@ Secrets covered:
 | `TELEGRAM_WEBHOOK_SECRET` | Phoenix | On staff change, after `setWebhook` | Phoenix env |
 | `GOOGLE_OAUTH_CLIENT_SECRET` | Phoenix | On staff change | Phoenix env |
 | `TENDERLY_API_KEY` | Phoenix | When Tenderly rotates | Phoenix env |
-| `BUNDLER_URL` (with API key) | chain_adapter | When provider rotates | adapter env |
+| `BUNDLER_RPC_URL` / `BUNDLER_URL` / `BASE_SEPOLIA_BUNDLER_RPC` (with API key) | chain_adapter; mirrored into Phoenix | When provider rotates | adapter env (canonical `BUNDLER_RPC_URL`); Phoenix `config/dev.exs` reads any of the three aliases |
 
 Out of scope: TLS certs (handled at ingress), database passwords (handled by
 managed Postgres provider).
@@ -288,8 +288,10 @@ op run --env-file=.env.prod -- curl -fsS -X POST \
 
 ### Other secrets
 
-`GOOGLE_OAUTH_CLIENT_SECRET`, `TENDERLY_API_KEY`, `BUNDLER_URL` — follow the
-"low risk" pattern: regenerate at provider, edit vault item, redeploy.
+`GOOGLE_OAUTH_CLIENT_SECRET`, `TENDERLY_API_KEY`, `BUNDLER_RPC_URL` (a.k.a.
+`BUNDLER_URL` / `BASE_SEPOLIA_BUNDLER_RPC` — Phoenix accepts any of the three
+aliases via `config/dev.exs`) — follow the "low risk" pattern: regenerate at
+provider, edit vault item, redeploy.
 
 ---
 

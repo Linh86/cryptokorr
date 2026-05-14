@@ -11,7 +11,7 @@ defmodule BankWeb.AgentLive.TestIntentCardTest do
   import Bank.Fixtures
   import Ecto.Query
 
-  alias Bank.Decisions.DecisionEnvelope
+  alias Bank.Decisions.{DecisionEnvelope, ExecutionPlan}
   alias Bank.Delegations.Delegation
   alias Bank.Intents.AgentIntent
   alias Bank.Repo
@@ -27,7 +27,16 @@ defmodule BankWeb.AgentLive.TestIntentCardTest do
 
       assert html =~ "04 — Test"
       assert html =~ "Run test intent"
-      assert html =~ "Install agent permission to run a test intent."
+
+      # P0 wallet-state-divergence: when no wallet is connected, the
+      # Run button is locked behind the wallet rather than the
+      # permission — the operator needs to connect a wallet FIRST,
+      # then install permission. The wallet-lock banner takes
+      # precedence over the install-permission banner so the
+      # operator follows the correct order. Either banner counts as
+      # "locked"; we assert at least one.
+      assert html =~ "Connect your wallet to run a test intent." or
+               html =~ "Install agent permission to run a test intent."
     end
 
     test "the Run button is disabled while locked", %{conn: conn} do
@@ -276,11 +285,9 @@ defmodule BankWeb.AgentLive.TestIntentCardTest do
 
       broadcast_decision(intent.id, envelope.id, :approval_required)
 
-      # Click Approve once. With no active delegation the dispatch branch
-      # returns `{:held, :no_executable_account}`; the LiveView surfaces
-      # that as a flash but the approval itself succeeds — the prior
-      # envelope is no longer current and a successor with outcome
-      # `:auto_exec` exists.
+      # Click Approve once. The LiveView passes the smart_account_id
+      # from its active wallet-bound delegation, so approval can
+      # dispatch without asking the global resolver to guess.
       view |> element("button", "Approve once") |> render_click()
 
       reloaded_prior = Repo.get!(DecisionEnvelope, envelope.id)
@@ -295,6 +302,188 @@ defmodule BankWeb.AgentLive.TestIntentCardTest do
       assert successor != nil
       assert successor.outcome == :auto_exec
       assert successor.current == true
+    end
+
+    test "Approve once dispatches through the active wallet-bound delegation even when another delegation exists",
+         %{conn: conn} do
+      {:ok, view, _} = live(conn, "/")
+      %{delegation: delegation} = activate_permission!(view)
+
+      workspace_id = Process.get(:bank_test_workspace_id)
+      _other_delegation = insert_delegation!(workspace_id, nil, "sa-other-active", :active)
+
+      view |> element("button", "Run test intent") |> render_click()
+      intent = latest_intent()
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          state: :pending_decision,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      broadcast_decision(intent.id, envelope.id, :approval_required)
+
+      view |> element("button", "Approve once") |> render_click()
+
+      successor =
+        Repo.one!(
+          from e in DecisionEnvelope,
+            where: e.intent_id == ^intent.id and e.supersedes_id == ^envelope.id
+        )
+
+      plan =
+        Repo.one!(
+          from p in ExecutionPlan,
+            where: p.decision_id == ^successor.id and p.active == true
+        )
+
+      assert plan.smart_account_id == delegation.smart_account_id
+
+      html = render(view)
+      refute html =~ "ambiguous_executable_account"
+      refute html =~ "Approved · dispatch held"
+    end
+
+    test "Approve once for swap mode fails closed when no executable 0x route is available",
+         %{conn: conn} do
+      # `base-sepolia` is the sandbox chain the test intent uses,
+      # but `Bank.Stablecoins.Registry` and the live 0x provider
+      # both only carry mainnet entries (ethereum/base/arbitrum/
+      # optimism/polygon). The resolver therefore rejects the
+      # pre-flight quote at `QuoteRequest.build/1` with
+      # `:unsupported_source_chain`, the LiveView flips IntentResult
+      # to a terminal failure, AND crucially never calls
+      # `Bank.Decisions.approve/2` — so no successor envelope and
+      # no execution plan are created.
+      {:ok, view, _} = live(conn, "/")
+      activate_permission!(view)
+
+      view |> element("button[phx-value-mode=\"swap\"]") |> render_click()
+      view |> element("button", "Run test intent") |> render_click()
+      intent = latest_intent()
+      assert intent.kind == :swap
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          state: :pending_decision,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      broadcast_decision(intent.id, envelope.id, :approval_required)
+
+      view |> element("button", "Approve once") |> render_click()
+
+      refute Repo.exists?(from e in DecisionEnvelope, where: e.supersedes_id == ^envelope.id)
+
+      refute Repo.exists?(from p in ExecutionPlan, where: p.intent_id == ^intent.id)
+
+      html = render(view)
+      assert html =~ "Cannot resolve swap route"
+      refute html =~ "0xdeadbeef"
+      refute html =~ "swap_route_missing"
+      refute html =~ "Approved · dispatch held"
+    end
+
+    test "Approve once successful dispatch flips IntentResult OFF needs-approval immediately (no stale Approve button, dispatching copy, execution_plan_id stored)",
+         %{conn: conn} do
+      {:ok, view, _} = live(conn, "/")
+      activate_permission!(view)
+
+      view |> element("button", "Run test intent") |> render_click()
+      intent = latest_intent()
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          state: :pending_decision,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      broadcast_decision(intent.id, envelope.id, :approval_required)
+
+      # Approve must be visible BEFORE the click and gone AFTER.
+      assert has_element?(view, "button", "Approve once")
+
+      view |> element("button", "Approve once") |> render_click()
+
+      # The IntentResult banner is now in the `dispatching` state
+      # — the prior "needs-approval" copy is GONE so the operator
+      # never sees a stale Approve button after a successful approve.
+      assert has_element?(view, "#test-intent-result[data-state='dispatching']")
+      refute has_element?(view, "#test-intent-result[data-state='needs-approval']")
+      refute has_element?(view, "button", "Approve once")
+
+      html = render(view)
+      assert html =~ "Approved · dispatching"
+      assert html =~ "Approval accepted"
+
+      # The execution_plan_id is stored on the result so the
+      # details panel surfaces it. Persisted plan exists in DB.
+      successor =
+        Repo.one!(
+          from e in DecisionEnvelope,
+            where: e.intent_id == ^intent.id and e.supersedes_id == ^envelope.id
+        )
+
+      plan =
+        Repo.one!(
+          from p in ExecutionPlan,
+            where: p.decision_id == ^successor.id and p.active == true
+        )
+
+      view |> element("#test-intent-view-details") |> render_click()
+      panel_html = view |> element("#test-intent-details-panel") |> render()
+      assert panel_html =~ plan.id
+      assert panel_html =~ successor.id
+    end
+
+    test "Approve once successful dispatch makes a repeat approve impossible (button gone, click is no-op)",
+         %{conn: conn} do
+      {:ok, view, _} = live(conn, "/")
+      activate_permission!(view)
+
+      view |> element("button", "Run test intent") |> render_click()
+      intent = latest_intent()
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :approval_required,
+          state: :pending_decision,
+          current: true,
+          approval_expires_at: ~U[2030-01-01 00:00:00Z]
+        )
+
+      broadcast_decision(intent.id, envelope.id, :approval_required)
+
+      view |> element("button", "Approve once") |> render_click()
+
+      # A second approve click can't be issued via the UI — the
+      # button is no longer in the DOM. Asserting via `has_element?`
+      # is the LiveView-honest way to prove this; raw HTML checks
+      # could miss class-only changes.
+      refute has_element?(view, "button", "Approve once")
+
+      # Defense in depth: even if some external actor synthesised an
+      # `intent:approve` event the LiveView still has no
+      # `decision_envelope_id` matching an `:approval_required` row
+      # in `last_result` (it's `state: "dispatching"` now), so the
+      # handler short-circuits to the catch-all no-op.
+      one_successor_count =
+        Repo.aggregate(
+          from(e in DecisionEnvelope, where: e.intent_id == ^intent.id and e.current == true),
+          :count
+        )
+
+      assert one_successor_count == 1
     end
 
     test "Approve once landing on :held renders an amber 'Approved · dispatch held' result, not a success",
@@ -340,6 +529,10 @@ defmodule BankWeb.AgentLive.TestIntentCardTest do
       # Held results render in the warn/amber slot — not the green "ok" slot.
       refute html =~ "intent-result--ok"
       assert html =~ "intent-result--warn"
+
+      # The approval is already in the past (the successor envelope
+      # exists). The UI must not invite another approve click.
+      refute has_element?(view, "button", "Approve once")
     end
   end
 
@@ -475,6 +668,306 @@ defmodule BankWeb.AgentLive.TestIntentCardTest do
 
       refute render(view) =~ "Still processing"
     end
+
+    # Regression for the manual-test bug: backend reached `:block`
+    # but the LiveView raced the `:decision_updated` broadcast (Oban
+    # worker finished synchronously, faster than
+    # `RuntimePubSub.subscribe`) and the UI stayed on "Running…"
+    # until the 30s watchdog flipped to "Still processing" — a
+    # non-terminal copy even though the row was already terminal.
+    # The watchdog now reads the DB first and applies the real
+    # outcome.
+    test "{:intent_timeout, ...} reconciles from DB and renders Blocked when an envelope already exists",
+         %{conn: conn} do
+      {:ok, view, _} = live(conn, "/")
+      activate_permission!(view)
+
+      view |> element("button", "Run test intent") |> render_click()
+      intent = latest_intent()
+
+      _envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :block,
+          state: :decided,
+          current: true,
+          reasons: %{
+            "items" => [
+              %{
+                "code" => "policy_malformed_params",
+                "message" =>
+                  "rule params failed validation: `tier` must be one of 'auto', 'manual', 'block'"
+              }
+            ]
+          }
+        )
+
+      send(view.pid, {:intent_timeout, intent.id})
+
+      html = render(view)
+      refute html =~ "Still processing"
+      assert has_element?(view, "#test-intent-result[data-state='blocked']")
+      assert html =~ "Intent blocked"
+      assert html =~ "`tier` must be one of"
+    end
+
+    test "{:intent_reconcile, ...} applies a fast-decided block without waiting for the watchdog",
+         %{conn: conn} do
+      {:ok, view, _} = live(conn, "/")
+      activate_permission!(view)
+
+      view |> element("button", "Run test intent") |> render_click()
+      intent = latest_intent()
+
+      _envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :block,
+          state: :decided,
+          current: true,
+          reasons: %{
+            "items" => [
+              %{"code" => "chain_not_allowed", "message" => "chain `base-sepolia` not allowed"}
+            ]
+          }
+        )
+
+      send(view.pid, {:intent_reconcile, intent.id})
+
+      html = render(view)
+      refute html =~ "Running…"
+      refute html =~ "Still processing"
+      assert html =~ "Intent blocked"
+      assert html =~ "chain `base-sepolia` not allowed"
+    end
+  end
+
+  describe "View details — inline expand panel" do
+    setup :register_and_log_in_user
+
+    test "the View details control is a real button and toggles the details panel with reason code + message",
+         %{conn: conn} do
+      {:ok, view, _} = live(conn, "/")
+      activate_permission!(view)
+
+      view |> element("button", "Run test intent") |> render_click()
+      intent = latest_intent()
+
+      envelope =
+        decision_envelope(
+          intent: intent,
+          outcome: :block,
+          state: :decided,
+          current: true,
+          reasons: %{
+            "items" => [
+              %{
+                "code" => "policy_malformed_params",
+                "message" =>
+                  "rule params failed validation: `tier` must be one of 'auto', 'manual', 'block'"
+              }
+            ]
+          }
+        )
+
+      broadcast_decision(intent.id, envelope.id, :block)
+
+      # Closed by default — panel not in the DOM yet.
+      refute has_element?(view, "#test-intent-details-panel")
+
+      # View-details exists and is a real <button> (not a dead anchor).
+      assert has_element?(
+               view,
+               "button#test-intent-view-details[phx-click='intent:toggle_details']"
+             )
+
+      view |> element("#test-intent-view-details") |> render_click()
+
+      assert has_element?(view, "#test-intent-details-panel")
+      panel_html = view |> element("#test-intent-details-panel") |> render()
+      assert panel_html =~ "policy_malformed_params"
+      assert panel_html =~ "`tier` must be one of"
+
+      # Toggle again closes the panel.
+      view |> element("#test-intent-view-details") |> render_click()
+      refute has_element?(view, "#test-intent-details-panel")
+    end
+  end
+
+  describe "Preview-only Run guard" do
+    setup :register_and_log_in_user
+
+    test "Swap mode + non-executable preview disables Run and surfaces the preview-only banner",
+         %{conn: conn} do
+      {:ok, view, _} = live(conn, "/")
+      activate_permission!(view)
+
+      view |> element("button[phx-value-mode=\"swap\"]") |> render_click()
+
+      send(view.pid, {:_test_set_preview, preview_for(:quote_only_odos)})
+      _ = render(view)
+
+      assert has_element?(view, "#test-intent-preview-only")
+      assert has_element?(view, "#test-intent-run[disabled]")
+
+      html = render(view)
+      assert html =~ "preview-only"
+      assert html =~ "0x route"
+      assert html =~ "odos"
+    end
+
+    test "Swap mode + executable preview keeps Run enabled and hides the preview-only banner",
+         %{conn: conn} do
+      {:ok, view, _} = live(conn, "/")
+      activate_permission!(view)
+
+      view |> element("button[phx-value-mode=\"swap\"]") |> render_click()
+
+      send(view.pid, {:_test_set_preview, preview_for(:executable_zerox)})
+      _ = render(view)
+
+      refute has_element?(view, "#test-intent-preview-only")
+      refute view |> element("#test-intent-run") |> render() =~ "disabled"
+    end
+
+    test "Hold mode is not gated on preview executability (advisory-only contract preserved)",
+         %{conn: conn} do
+      {:ok, view, _} = live(conn, "/")
+      activate_permission!(view)
+
+      # Default mode is "hold". Even with a non-executable preview,
+      # Run must stay enabled — Hold doesn't depend on a swap route.
+      send(view.pid, {:_test_set_preview, preview_for(:quote_only_odos)})
+      _ = render(view)
+
+      refute has_element?(view, "#test-intent-preview-only")
+      refute view |> element("#test-intent-run") |> render() =~ "disabled"
+    end
+  end
+
+  describe "real 0x quote preview (swap mode, read-only)" do
+    setup :register_and_log_in_user
+
+    test "swap mode renders the Fetch real quote button", %{conn: conn} do
+      {:ok, view, _} = live(conn, "/")
+      activate_permission!(view)
+
+      # Hold mode (default) must NOT render the preview block.
+      refute has_element?(view, "#test-intent-real-quote")
+      refute has_element?(view, "#test-intent-preview-real")
+
+      # Switch to swap → preview block + button appear.
+      view |> element("button[phx-value-mode=\"swap\"]") |> render_click()
+      html = render(view)
+      assert html =~ ~s(id="test-intent-real-quote")
+      assert html =~ ~s(id="test-intent-preview-real")
+      assert html =~ "Fetch real quote"
+    end
+
+    test "no wallet binding → no_wallet_binding reason with operator-friendly hint",
+         %{conn: conn} do
+      # Intentionally do NOT call activate_permission! — no binding row.
+      {:ok, view, _} = live(conn, "/")
+
+      view |> element("button[phx-value-mode=\"swap\"]") |> render_click()
+      view |> element("#test-intent-preview-real") |> render_click()
+
+      html = render(view)
+      assert html =~ ~s(id="test-intent-real-quote-panel")
+      assert html =~ ~s(data-state="error")
+      assert html =~ "preview:no_wallet_binding"
+      assert html =~ "Connect your wallet first"
+    end
+
+    test "all providers report missing api key → preview:missing_api_key reason",
+         %{conn: conn} do
+      # Force ZeroX + OneInch into the missing-key path. This is the
+      # exact failure mode an operator hits when they forget to export
+      # `ZEROX_API_KEY` before `mix phx.server`: every configured
+      # provider returns `{:provider_error, %{reason: "missing_api_key"}}`
+      # and `RouteSelector` collapses them into
+      # `{:no_quotes, [...]}`. The handler must collapse THAT into a
+      # stable `preview:missing_api_key` code so the UI can render a
+      # single, actionable hint instead of the nested term.
+      zerox_orig = Application.get_env(:bank, Bank.Stablecoins.Providers.ZeroX)
+      oneinch_orig = Application.get_env(:bank, Bank.Stablecoins.Providers.OneInch)
+
+      on_exit(fn ->
+        Application.put_env(:bank, Bank.Stablecoins.Providers.ZeroX, zerox_orig)
+        Application.put_env(:bank, Bank.Stablecoins.Providers.OneInch, oneinch_orig)
+      end)
+
+      Application.put_env(
+        :bank,
+        Bank.Stablecoins.Providers.ZeroX,
+        Keyword.put(zerox_orig, :api_key, nil)
+      )
+
+      Application.put_env(
+        :bank,
+        Bank.Stablecoins.Providers.OneInch,
+        Keyword.put(oneinch_orig, :api_key, nil)
+      )
+
+      {:ok, view, _} = live(conn, "/")
+      activate_permission!(view)
+      view |> element("button[phx-value-mode=\"swap\"]") |> render_click()
+
+      view |> element("#test-intent-preview-real") |> render_click()
+
+      html = render(view)
+      assert html =~ ~s(id="test-intent-real-quote-panel")
+      assert html =~ ~s(data-state="error")
+      assert html =~ "preview:missing_api_key"
+      assert html =~ "Server has no 0x API key configured"
+      assert html =~ "ZEROX_API_KEY"
+    end
+
+    test "happy path: injected ok preview renders the quote panel with route data",
+         %{conn: conn} do
+      {:ok, view, _} = live(conn, "/")
+      activate_permission!(view)
+      view |> element("button[phx-value-mode=\"swap\"]") |> render_click()
+
+      route = %{
+        chain: "base",
+        chain_id: 8453,
+        source_asset: "USDC",
+        source_token_address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        destination_asset: "USDT",
+        destination_token_address: "0xfde4C96c8593536E31F229EA8f37b2ADa2699bb2",
+        input_amount: Decimal.new("10"),
+        expected_output_amount: Decimal.new("9.990573"),
+        minimum_output_amount: Decimal.new("9.941049"),
+        slippage_bps: 50,
+        spender: "0x000000000022d473030f116ddee9f6b43ac78ba3",
+        swap_target_contract: "0x7747f8d2a76bd6345cc29622a946a929647f2359",
+        calldata: "0x" <> String.duplicate("ab", 100),
+        value: Decimal.new(0),
+        route_provider: "zerox",
+        quote_timestamp: ~U[2026-05-12 16:40:42Z],
+        deadline: ~U[2026-05-12 16:50:42Z]
+      }
+
+      send(
+        view.pid,
+        {:_test_set_real_quote_preview,
+         %{state: :ok, route: route, fetched_at: ~U[2026-05-12 16:40:42Z]}}
+      )
+
+      html = render(view)
+      assert html =~ ~s(id="test-intent-real-quote-panel")
+      assert html =~ ~s(data-state="ok")
+      assert html =~ "USDC"
+      assert html =~ "USDT"
+      assert html =~ "9.990573"
+      assert html =~ "9.941049"
+      assert html =~ "0.50% (50 bps)"
+      assert html =~ "zerox"
+      assert html =~ "base (8453)"
+      assert html =~ "100 bytes"
+      assert html =~ "Refresh quote"
+    end
   end
 
   # ─── Helpers ──────────────────────────────────────────────────────────
@@ -503,6 +996,21 @@ defmodule BankWeb.AgentLive.TestIntentCardTest do
     # `session_permission_install:confirmed` do on the real path).
     send(view.pid, :_test_reload_state)
     _ = render(view)
+
+    # P0 wallet-state-divergence: `intent:run` now requires
+    # `:wallet == :connected`, which is the composite of DB binding
+    # + live browser provider exposing the bound account. The DB
+    # side is satisfied by the rows above; simulate the JS hook's
+    # `pushBrowserStatus` so the LiveView learns the browser is
+    # exposing the bound EOA on Base Sepolia. Without this push the
+    # wallet would land in `:browser_disconnected` and the
+    # hardened `intent:run` guard would silently no-op every click.
+    render_hook(view, "wallet_connect:browser_status", %{
+      "status" => "exposed_account",
+      "accounts" => [binding.address],
+      "chain_id" => 84_532,
+      "permissions_count" => 1
+    })
 
     %{binding: binding, delegation: delegation}
   end
@@ -563,6 +1071,24 @@ defmodule BankWeb.AgentLive.TestIntentCardTest do
 
   defp latest_intent do
     Repo.one(from i in AgentIntent, order_by: [desc: i.inserted_at], limit: 1)
+  end
+
+  defp preview_for(:executable_zerox) do
+    %Bank.Quotes.Preview{
+      expected_output: Decimal.new("9.95"),
+      slippage_bps: 50,
+      estimated_fee: nil,
+      route: %{"provider_id" => "zerox", "executable?" => true}
+    }
+  end
+
+  defp preview_for(:quote_only_odos) do
+    %Bank.Quotes.Preview{
+      expected_output: Decimal.new("9.94"),
+      slippage_bps: 50,
+      estimated_fee: nil,
+      route: %{"provider_id" => "odos", "executable?" => false}
+    }
   end
 
   defp broadcast_decision(intent_id, envelope_id, outcome) do

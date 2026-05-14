@@ -34,6 +34,21 @@ defmodule BankWeb.PageControllerTest do
       assert csp =~ "base-uri 'self'"
       assert csp =~ "form-action 'self'"
 
+      # P0 bundler-CSP fix: `connect-src` MUST permit the browser to
+      # reach the configured ERC-4337 bundler. Without this directive
+      # widening, viem's call to `eth_chainId` on the bundler URL
+      # fails with `Failed to fetch` BEFORE any user-visible signing
+      # popup — and the install hook reports the cryptic
+      # `bundler_unavailable` reason. The regression is that the
+      # browser misinterprets CSP failures as network/CORS errors,
+      # so we pin the directive shape here directly.
+      bundler_origin =
+        BankWeb.Plugs.PutCSP.configured_bundler_origin() ||
+          "https://api.pimlico.io"
+
+      assert csp =~ bundler_origin,
+             "connect-src must include the bundler origin #{inspect(bundler_origin)} so the operator-console install hook can reach it from the browser"
+
       # `style-src 'unsafe-inline'` is intentional — Phoenix LiveView
       # injects per-element styles. Any tightening here is a
       # follow-up gated on upstream support.

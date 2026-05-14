@@ -77,12 +77,28 @@ defmodule BankWeb.WalletConnectHookSafetyTest do
 
   test "hook only uses approved JSON-RPC methods", %{source: source} do
     # Approved set:
-    #   - eth_requestAccounts: gated behind a user click
-    #   - eth_accounts:        passive read after `accountsChanged`
-    #   - eth_chainId:         passive read of active network
-    #   - personal_sign:       only invoked from `signChallenge` in
-    #                          response to a server-issued challenge
-    allowed = ~w(eth_requestAccounts eth_accounts eth_chainId personal_sign)
+    #   - eth_requestAccounts:     gated behind a user click
+    #   - eth_accounts:            passive read after `accountsChanged`
+    #   - eth_chainId:             passive read of active network
+    #   - personal_sign:           only invoked from `signChallenge` in
+    #                              response to a server-issued challenge
+    #   - wallet_revokePermissions: EIP-2255, dApp-driven revoke of the
+    #                              wallet's "Connected sites" entry for
+    #                              this origin. Signing-free, fund-safe,
+    #                              gated behind a server-pushed
+    #                              `wallet_connect:revoke_permissions`
+    #                              event that only fires after the
+    #                              server already committed the
+    #                              binding revoke. Older wallets reject
+    #                              with -32601 and the hook swallows
+    #                              the rejection.
+    # `wallet_getPermissions` is added for the browser-status probe
+    # (EIP-2255 read). It is signing-free and fund-safe — same
+    # rationale as `wallet_revokePermissions` — and the hook uses it
+    # ONLY from `pushBrowserStatus`, which is wired to `mounted`,
+    # `accountsChanged`, and `chainChanged` (passive lifecycle).
+    allowed =
+      ~w(eth_requestAccounts eth_accounts eth_chainId personal_sign wallet_revokePermissions wallet_getPermissions)
 
     used =
       ~r/method:\s*"([a-zA-Z_][a-zA-Z0-9_]*)"/

@@ -22,7 +22,7 @@ defmodule Bank.Policies.VersionsTest do
   use Oban.Testing, repo: Bank.Repo
 
   alias Bank.Audit.AuditEvent
-  alias Bank.Policies.{PolicyVersion, Versions}
+  alias Bank.Policies.{PolicyRule, PolicyVersion, Versions}
   alias Bank.Repo
 
   import Ecto.Query
@@ -915,5 +915,248 @@ defmodule Bank.Policies.VersionsTest do
       generated_at: DateTime.utc_now(),
       freshness_ttl_seconds: 30
     }
+  end
+
+  # --- discard_draft / diff_against_published / expansion_published_since? -
+
+  describe "discard_draft/2 (agent-advanced)" do
+    test "deletes an open draft + emits audit + leaves published intact",
+         %{workspace: ws, actor_id: actor_id} do
+      rule_a =
+        Bank.Fixtures.policy_rule(
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "100"},
+          workspace_id: ws.id
+        )
+
+      {:ok, published_draft} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [rule_a.id]}
+        )
+
+      {:ok, published} =
+        Versions.publish_draft(published_draft, published_by: :user, actor_id: actor_id)
+
+      {:ok, draft} = Versions.create_draft(ws.id, created_by: :user, actor_id: actor_id)
+
+      assert {:ok, discarded} =
+               Versions.discard_draft(draft, actor: :user, actor_id: actor_id)
+
+      assert discarded.id == draft.id
+      assert is_nil(Repo.get(PolicyVersion, draft.id))
+
+      # Published row untouched.
+      assert %PolicyVersion{status: :published} = Repo.get(PolicyVersion, published.id)
+
+      # Audit event emitted. The subject has two events (created
+      # first, discarded second); we assert on the discarded one.
+      events = list_events_for_subject(draft.id)
+      assert event = Enum.find(events, &(&1.event_type == "policy.version.draft_discarded"))
+      assert event.workspace_id == ws.id
+    end
+
+    test "refuses to discard a published row", %{workspace: ws, actor_id: actor_id} do
+      {:ok, draft} = Versions.create_draft(ws.id, created_by: :user, actor_id: actor_id)
+      {:ok, published} = Versions.publish_draft(draft, published_by: :user, actor_id: actor_id)
+
+      assert {:error, :not_a_draft} =
+               Versions.discard_draft(published, actor: :user, actor_id: actor_id)
+    end
+
+    test "cross-workspace discard refuses", %{workspace: ws, actor_id: actor_id} do
+      {:ok, other_ws} =
+        Bank.Workspaces.create_workspace(%{
+          slug: "other-#{System.unique_integer([:positive])}",
+          name: "Other",
+          mainnet_enabled: true
+        })
+
+      {:ok, draft} = Versions.create_draft(ws.id, created_by: :user, actor_id: actor_id)
+
+      # Pretend an attacker has the wrong workspace context. The
+      # lock_for_update query is workspace-scoped, so it can't find
+      # the draft and falls back to :not_a_draft.
+      stale = %{draft | workspace_id: other_ws.id}
+
+      assert {:error, :not_a_draft} =
+               Versions.discard_draft(stale, actor: :user, actor_id: actor_id)
+    end
+  end
+
+  describe "diff_against_published/1 (agent-advanced)" do
+    setup %{workspace: ws, actor_id: actor_id} do
+      rule_a =
+        Bank.Fixtures.policy_rule(
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "100"},
+          workspace_id: ws.id
+        )
+
+      {:ok, draft1} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [rule_a.id]}
+        )
+
+      {:ok, _published} =
+        Versions.publish_draft(draft1, published_by: :user, actor_id: actor_id)
+
+      %{rule_a: rule_a}
+    end
+
+    test "empty draft (vs published with rules) reports removal as expansion",
+         %{workspace: ws, actor_id: actor_id} do
+      {:ok, draft} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => []}
+        )
+
+      diff = Versions.diff_against_published(draft)
+
+      assert [%{kind: :removed}] = diff.expansion
+      assert diff.requires_permission_reinstall?
+    end
+
+    test "draft with same rules reports unchanged",
+         %{workspace: ws, actor_id: actor_id, rule_a: rule_a} do
+      {:ok, draft} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [rule_a.id]}
+        )
+
+      diff = Versions.diff_against_published(draft)
+
+      assert diff.tightening == []
+      assert diff.expansion == []
+      assert [%PolicyRule{}] = diff.unchanged
+      refute diff.requires_permission_reinstall?
+    end
+
+    test "draft adding a NEW rule reports tightening (no reinstall)",
+         %{workspace: ws, actor_id: actor_id, rule_a: rule_a} do
+      tighter_rule =
+        Bank.Fixtures.policy_rule(
+          rule_type: :slippage_ceiling,
+          params: %{"max_bps" => 30},
+          state: :draft,
+          workspace_id: ws.id
+        )
+
+      {:ok, draft} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [rule_a.id, tighter_rule.id]}
+        )
+
+      diff = Versions.diff_against_published(draft)
+
+      assert [%{kind: :added, rule_type: :slippage_ceiling}] = diff.tightening
+      refute diff.requires_permission_reinstall?
+    end
+  end
+
+  describe "expansion_published_since?/2 (agent-advanced)" do
+    test "false for nil granted_at", %{workspace: ws} do
+      refute Versions.expansion_published_since?(ws.id, nil)
+    end
+
+    test "false when no versions published after granted_at",
+         %{workspace: ws, actor_id: actor_id} do
+      {:ok, draft} = Versions.create_draft(ws.id, created_by: :user, actor_id: actor_id)
+      {:ok, _} = Versions.publish_draft(draft, published_by: :user, actor_id: actor_id)
+
+      future = DateTime.add(DateTime.utc_now(), 3600, :second)
+      refute Versions.expansion_published_since?(ws.id, future)
+    end
+
+    test "true when an expansion publish landed since granted_at",
+         %{workspace: ws, actor_id: actor_id} do
+      # `granted_at` is set in the past so every publish in this
+      # test is unambiguously after it — no Process.sleep needed.
+      granted_at = DateTime.add(DateTime.utc_now(), -3600, :second)
+
+      rule_a =
+        Bank.Fixtures.policy_rule(
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "100"},
+          workspace_id: ws.id
+        )
+
+      {:ok, draft1} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [rule_a.id]}
+        )
+
+      {:ok, _v1} = Versions.publish_draft(draft1, published_by: :user, actor_id: actor_id)
+
+      bigger_rule =
+        Bank.Fixtures.policy_rule(
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "1000"},
+          state: :draft,
+          workspace_id: ws.id
+        )
+
+      {:ok, draft2} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [bigger_rule.id]}
+        )
+
+      {:ok, _v2} = Versions.publish_draft(draft2, published_by: :user, actor_id: actor_id)
+
+      assert Versions.expansion_published_since?(ws.id, granted_at)
+    end
+
+    test "false when only tightening publishes landed since granted_at",
+         %{workspace: ws, actor_id: actor_id} do
+      granted_at = DateTime.add(DateTime.utc_now(), -3600, :second)
+
+      big_rule =
+        Bank.Fixtures.policy_rule(
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "1000"},
+          workspace_id: ws.id
+        )
+
+      {:ok, draft1} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [big_rule.id]}
+        )
+
+      {:ok, _v1} = Versions.publish_draft(draft1, published_by: :user, actor_id: actor_id)
+
+      small_rule =
+        Bank.Fixtures.policy_rule(
+          rule_type: :amount_limit,
+          params: %{"max_per_tx" => "100"},
+          state: :draft,
+          workspace_id: ws.id
+        )
+
+      {:ok, draft2} =
+        Versions.create_draft(ws.id,
+          created_by: :user,
+          actor_id: actor_id,
+          rule_ids: %{"items" => [small_rule.id]}
+        )
+
+      {:ok, _v2} = Versions.publish_draft(draft2, published_by: :user, actor_id: actor_id)
+
+      refute Versions.expansion_published_since?(ws.id, granted_at)
+    end
   end
 end

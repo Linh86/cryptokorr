@@ -1096,4 +1096,165 @@ defmodule Bank.Policies do
 
   defp to_map(%{} = m), do: m
   defp to_map(list) when is_list(list), do: Map.new(list)
+
+  # ---------------------------------------------------------------------
+  # Permission-outdated detector (agent-advanced runtime gate)
+  # ---------------------------------------------------------------------
+
+  @doc """
+  Workspace-level "should the UI show outdated / reinstall
+  required?" predicate — the **same** source of truth the runtime
+  gate (`Bank.Decisions.evaluate_policy/3` →
+  `Bank.Policies.workspace_permission_gate/1`) consults. Returns
+  true for both expansion-since-grant AND legacy `nil` install
+  timestamps that the runtime fail-closes on.
+
+  This is the function the AgentLive permission card and the
+  Advanced screen MUST call so the UI cannot disagree with the
+  runtime. The two-arg shapes below (`permission_outdated?/2`)
+  exist for tests and replay tooling that want to ask the question
+  about a specific timestamp.
+
+  Returns true when `workspace_permission_gate/1` returns:
+
+    * `{:outdated, _granted_at}` — expansion publish landed after
+      the active delegation's `granted_at`.
+    * `:legacy_nil_grant` — an `:active` delegation row has
+      `granted_at = nil` AND the workspace has at least one
+      published or superseded `PolicyVersion`. Runtime fails
+      closed; UI mirrors that with the same "Reinstall required"
+      treatment.
+
+  Returns false for `:ok` (no expansion since grant) and
+  `:no_active_delegation` (caller decides how to surface "no
+  permission").
+  """
+  @spec permission_outdated?(uuid() | nil) :: boolean()
+  def permission_outdated?(workspace_id)
+
+  def permission_outdated?(nil), do: false
+
+  def permission_outdated?(workspace_id) when is_binary(workspace_id) do
+    case workspace_permission_gate(workspace_id) do
+      {:outdated, _} -> true
+      :legacy_nil_grant -> true
+      :ok -> false
+      :no_active_delegation -> false
+    end
+  end
+
+  def permission_outdated?(_), do: false
+
+  @doc """
+  Timestamp-driven variant. Used by tests that want to ask "would
+  the gate fire for a hypothetical install at this time?" without
+  reading the live delegation list.
+
+  Note that this clause **does not** model the legacy-nil-grant
+  fail-closed branch — callers that want the full runtime
+  treatment must use `permission_outdated?/1` (workspace-level)
+  or `workspace_permission_gate/1` directly. A `%Delegation{}` row
+  with `granted_at: nil` returns `false` here so legacy callers
+  that only have a row in hand can decide what to do.
+  """
+  @spec permission_outdated?(uuid() | nil, any()) :: boolean()
+  def permission_outdated?(workspace_id, delegation_or_grant)
+
+  def permission_outdated?(nil, _), do: false
+
+  def permission_outdated?(workspace_id, %Bank.Delegations.Delegation{
+        granted_at: %DateTime{} = at
+      })
+      when is_binary(workspace_id),
+      do: Bank.Policies.Versions.expansion_published_since?(workspace_id, at)
+
+  def permission_outdated?(_workspace_id, %Bank.Delegations.Delegation{}), do: false
+
+  def permission_outdated?(workspace_id, %DateTime{} = at) when is_binary(workspace_id),
+    do: Bank.Policies.Versions.expansion_published_since?(workspace_id, at)
+
+  def permission_outdated?(_workspace_id, _), do: false
+
+  @type permission_gate_state ::
+          :ok
+          | :no_active_delegation
+          | :legacy_nil_grant
+          | {:outdated, DateTime.t()}
+
+  @doc """
+  Workspace-level "should the runtime gate fire?" resolver. Single
+  source of truth for both the transfer pipeline
+  (`Bank.Decisions.evaluate_policy/3`) and the Morpho/Earn
+  pipeline (`Bank.Decisions.MorphoEvaluator.evaluate/2`).
+
+  Reads every `:active` delegation for the workspace and returns:
+
+    * `:no_active_delegation` — no `:active` row exists; the
+      downstream "no executable account" branch handles missing
+      permission, so the gate stays silent.
+    * `:legacy_nil_grant` — an `:active` delegation row has
+      `granted_at = nil` AND the workspace has at least one
+      published or superseded `PolicyVersion`. The runtime cannot
+      prove the install postdates any expansion publish, so
+      conservative fail-closed → caller emits the standard
+      `permission_outdated_reinstall_required` violation. Legacy
+      installs predating the `granted_at` column land here.
+    * `{:outdated, granted_at}` — the earliest grant predates an
+      expansion publish; caller emits the standard violation.
+    * `:ok` — no expansion since the earliest grant; runtime
+      proceeds normally.
+
+  Multi-smart-account workspaces (v1.1) are handled conservatively:
+  taking the earliest `granted_at` across all `:active` rows means
+  a single stale install gates the whole workspace until that row
+  is reinstalled. Per-target gating is a v1.1 refinement.
+  """
+  @spec workspace_permission_gate(uuid() | nil) :: permission_gate_state()
+  def workspace_permission_gate(nil), do: :no_active_delegation
+
+  def workspace_permission_gate(workspace_id) when is_binary(workspace_id) do
+    active =
+      Bank.Delegations.list_active(workspace_id: workspace_id)
+      |> Enum.filter(&(&1.state == :active))
+
+    cond do
+      active == [] ->
+        :no_active_delegation
+
+      Enum.any?(active, &is_nil(&1.granted_at)) ->
+        # The schema (`priv/repo/migrations/20260416120000_create_delegations.exs`)
+        # does not enforce `null: false` on `granted_at`, so the
+        # runtime treats a nil timestamp on an `:active` row as
+        # unknown-but-load-bearing. If the workspace has ever
+        # published a policy version, we cannot disprove an
+        # expansion publish landed between the (unknown) install
+        # and now, so we fail closed.
+        if workspace_has_any_published_version?(workspace_id) do
+          :legacy_nil_grant
+        else
+          :ok
+        end
+
+      true ->
+        earliest =
+          active
+          |> Enum.map(& &1.granted_at)
+          |> Enum.min(DateTime)
+
+        if Bank.Policies.Versions.expansion_published_since?(workspace_id, earliest) do
+          {:outdated, earliest}
+        else
+          :ok
+        end
+    end
+  end
+
+  def workspace_permission_gate(_), do: :no_active_delegation
+
+  defp workspace_has_any_published_version?(workspace_id) do
+    Bank.Policies.Versions.list_versions(workspace_id,
+      status: [:published, :superseded],
+      limit: 1
+    ) != []
+  end
 end

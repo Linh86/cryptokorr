@@ -132,8 +132,8 @@ defmodule Bank.Decisions.MorphoEvaluator do
 
     explanation = RiskExplanation.explain(snapshot, policy_input, now)
 
-    outcome = explanation_outcome(explanation)
-    risk_tier = explanation_risk_tier(explanation)
+    {outcome, risk_tier, permission_outdated_reason} =
+      resolve_outcome_with_permission_gate(intent.workspace_id, explanation, opts)
 
     prior_decision = current_decision_for(intent.id)
     prior_state = intent.state
@@ -146,7 +146,8 @@ defmodule Bank.Decisions.MorphoEvaluator do
         explanation,
         morpho_rule_ids,
         prior_decision,
-        now
+        now,
+        permission_outdated_reason
       )
 
     multi =
@@ -216,21 +217,14 @@ defmodule Bank.Decisions.MorphoEvaluator do
          explanation,
          rule_ids,
          prior_decision,
-         now
+         now,
+         permission_outdated_reason
        ) do
     base = %{
       intent_id: intent.id,
       outcome: outcome,
       risk_tier: risk_tier,
-      reasons: %{
-        "items" => [
-          %{
-            "code" => "morpho_risk_explanation",
-            "message" => explanation["summary"],
-            "details" => %{"morpho_risk_explanation" => explanation}
-          }
-        ]
-      },
+      reasons: build_morpho_reasons(explanation, permission_outdated_reason),
       policy_snapshot_ref: %{"rule_ids" => rule_ids},
       decided_at: DateTime.utc_now(),
       decided_by: :runtime,
@@ -247,6 +241,99 @@ defmodule Bank.Decisions.MorphoEvaluator do
       )
     else
       base
+    end
+  end
+
+  # Build the `reasons.items` list. The Morpho risk explanation is
+  # ALWAYS surfaced (replay readers expect it for any Morpho
+  # decision). When the runtime gate fires, the
+  # `permission_outdated_reinstall_required` reason is prepended so
+  # consumers checking `items[0].code` see the gate (the same way
+  # the transfer pipeline surfaces it through `Bank.Autonomy`).
+  defp build_morpho_reasons(explanation, nil) do
+    %{
+      "items" => [
+        %{
+          "code" => "morpho_risk_explanation",
+          "message" => explanation["summary"],
+          "details" => %{"morpho_risk_explanation" => explanation}
+        }
+      ]
+    }
+  end
+
+  defp build_morpho_reasons(explanation, %{} = gate_reason) do
+    %{
+      "items" => [
+        gate_reason,
+        %{
+          "code" => "morpho_risk_explanation",
+          "message" => explanation["summary"],
+          "details" => %{"morpho_risk_explanation" => explanation}
+        }
+      ]
+    }
+  end
+
+  # --- permission-outdated gate (agent-advanced) -------------------
+  #
+  # Shares the workspace-permission resolver in `Bank.Policies` so
+  # the Morpho/Earn path enforces the same `:block` +
+  # `permission_outdated_reinstall_required` contract as the
+  # transfer pipeline (`Bank.Decisions.evaluate_policy/3`). The
+  # MorphoEvaluator never emits `:auto_exec` on its own, but an
+  # `:approval_required` envelope can still be approved and
+  # dispatched via `Bank.Decisions.approve/2 ->
+  # create_execution_plan/4`. Without this gate the operator could
+  # silently expand the agent's on-chain authority by approving a
+  # stale-permission Morpho deposit.
+  #
+  # `:skip_outdated_permission_gate?: true` is the only opt-out;
+  # see the documentation on
+  # `Bank.Decisions.maybe_block_on_outdated_permission/3`.
+  defp resolve_outcome_with_permission_gate(workspace_id, explanation, opts) do
+    explanation_outcome = explanation_outcome(explanation)
+    explanation_risk = explanation_risk_tier(explanation)
+
+    cond do
+      Keyword.get(opts, :skip_outdated_permission_gate?, false) ->
+        {explanation_outcome, explanation_risk, nil}
+
+      not is_binary(workspace_id) ->
+        {explanation_outcome, explanation_risk, nil}
+
+      true ->
+        case Policies.workspace_permission_gate(workspace_id) do
+          :ok ->
+            {explanation_outcome, explanation_risk, nil}
+
+          :no_active_delegation ->
+            {explanation_outcome, explanation_risk, nil}
+
+          {:outdated, %DateTime{} = granted_at} ->
+            {:block, :severe,
+             %{
+               "code" => "permission_outdated_reinstall_required",
+               "message" =>
+                 "policy was expanded after the agent's permission was installed; reinstall the permission before running this intent",
+               "details" => %{
+                 "workspace_id" => workspace_id,
+                 "earliest_grant_at" => DateTime.to_iso8601(granted_at)
+               }
+             }}
+
+          :legacy_nil_grant ->
+            {:block, :severe,
+             %{
+               "code" => "permission_outdated_reinstall_required",
+               "message" =>
+                 "agent permission row is missing the install timestamp; reinstall the permission so the runtime can compare against current policy",
+               "details" => %{
+                 "workspace_id" => workspace_id,
+                 "reason" => "legacy_nil_grant"
+               }
+             }}
+        end
     end
   end
 

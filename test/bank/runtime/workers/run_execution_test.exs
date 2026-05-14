@@ -229,6 +229,88 @@ defmodule Bank.Runtime.Workers.RunExecutionTest do
     end
   end
 
+  describe "transient adapter failures on the FINAL Oban attempt escalate to abort" do
+    # Regression: when chain_adapter is permanently down (or
+    # configured wrong) Phoenix used to let Oban silently
+    # `:discarded` the job after 5 attempts and the plan rusted at
+    # `:prepared` forever. UI sat on "Still processing". The
+    # last-attempt guard escalates the transient class
+    # (`:adapter_unavailable` / 5xx) to a terminal abort so a
+    # terminal `:execution_updated` event broadcasts and the UI
+    # flips to "Intent failed" with reason `adapter_exhausted:...`.
+    test "last attempt + :adapter_unavailable → plan :aborted, audit + broadcast emitted" do
+      %{decision: decision, plan: plan, intent: intent} = scenario()
+
+      :ok = PubSub.subscribe(PubSub.intent(intent.id))
+
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        Req.Test.transport_error(conn, :econnrefused)
+      end)
+
+      assert {:cancel, :adapter_exhausted} =
+               perform_job(RunExecution, %{"decision_id" => decision.id},
+                 attempt: 5,
+                 max_attempts: 5
+               )
+
+      assert %ExecutionPlan{
+               execution_status: :aborted,
+               final_outcome: :aborted,
+               final_reason: "adapter_exhausted:adapter_unavailable"
+             } = Repo.get!(ExecutionPlan, plan.id)
+
+      # Intent moves off `:decided` to `:blocked` so the
+      # IntentResult card flips off "Still processing".
+      assert %AgentIntent{state: :blocked} = Repo.get!(AgentIntent, intent.id)
+
+      assert_receive %{
+        topic: :intent_lifecycle,
+        event: :execution_updated,
+        payload: %{
+          execution_status: :aborted,
+          final_outcome: :aborted
+        }
+      }
+    end
+
+    test "last attempt + 5xx → plan :aborted with reason adapter_exhausted:adapter_error:status" do
+      %{decision: decision, plan: plan, intent: intent} = scenario()
+
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        Plug.Conn.resp(conn, 503, "upstream unavailable")
+      end)
+
+      assert {:cancel, :adapter_exhausted} =
+               perform_job(RunExecution, %{"decision_id" => decision.id},
+                 attempt: 5,
+                 max_attempts: 5
+               )
+
+      assert %ExecutionPlan{
+               execution_status: :aborted,
+               final_reason: "adapter_exhausted:adapter_error:503"
+             } = Repo.get!(ExecutionPlan, plan.id)
+
+      assert %AgentIntent{state: :blocked} = Repo.get!(AgentIntent, intent.id)
+    end
+
+    test "non-final attempt + :adapter_unavailable still returns {:error, ...} for Oban retry" do
+      %{decision: decision, plan: plan} = scenario()
+
+      Req.Test.stub(Bank.AdapterClient, fn conn ->
+        Req.Test.transport_error(conn, :econnrefused)
+      end)
+
+      # Default attempt=1, max_attempts=5 → not the last attempt.
+      # Behaviour MUST stay "transient retry" so Oban backoff
+      # gets its full budget before any terminal abort.
+      assert {:error, :adapter_unavailable} =
+               perform_job(RunExecution, %{"decision_id" => decision.id})
+
+      assert %ExecutionPlan{execution_status: :prepared} = Repo.get!(ExecutionPlan, plan.id)
+    end
+  end
+
   describe "adapter terminal failures abort the plan" do
     test "4xx → cancel :adapter_rejected, plan :aborted, intent :blocked" do
       %{decision: decision, plan: plan, intent: intent} = scenario()

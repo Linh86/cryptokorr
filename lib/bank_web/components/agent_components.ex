@@ -168,6 +168,9 @@ defmodule BankWeb.AgentComponents do
   defp pill_config("executing"), do: {"warn", "Executing…", true}
   defp pill_config("needs-approval"), do: {"warn", "Needs approval", true}
   defp pill_config("wrong-network"), do: {"warn", "Wrong network", true}
+  defp pill_config("account-mismatch"), do: {"warn", "Account mismatch", true}
+  defp pill_config("browser-disconnected"), do: {"warn", "Wallet disconnected", true}
+  defp pill_config("reinstall-required"), do: {"warn", "Reinstall required", true}
   defp pill_config("blocked"), do: {"danger", "Blocked", true}
   defp pill_config("failed"), do: {"danger", "Failed", true}
   defp pill_config("revoked"), do: {"ink", "Revoked", false}
@@ -368,7 +371,12 @@ defmodule BankWeb.AgentComponents do
       body: "Confirm the agent is reachable but does nothing."
     },
     "swap" => %{
-      title: "Swap 10 USDC → USDbC",
+      # `Bank.Decisions.build_swap_quote_request/2` inverts the source
+      # asset for the v0.1 swap mode (USDC → USDT), so the label must
+      # match the destination the test path actually produces. The
+      # previous "USDbC" label drifted from the route artifact and
+      # confused operators about which asset their swap would settle.
+      title: "Swap 10 USDC → USDT",
       body: "Test the 0x route inside slippage limit."
     },
     "earn" => %{
