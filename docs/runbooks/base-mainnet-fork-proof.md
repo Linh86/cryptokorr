@@ -218,6 +218,7 @@ These should hold **every time** the script runs:
 
 ## Known caveat
 
-`mix precommit` may fail at `mix deps.audit` because the current
-HEAD pins Phoenix 1.8.5 with a known advisory patched in 1.8.6. The
-fork proof itself is unaffected.
+`mix precommit` runs `mix deps.audit --ignore-package-names decimal`.
+Phoenix is pinned to 1.8.7 in `mix.lock`; the remaining Decimal
+advisory is an accepted closure risk until the Ecto/Postgrex/OpenAPI
+dependency graph allows Decimal 3.x.
