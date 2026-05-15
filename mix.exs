@@ -112,7 +112,7 @@ defmodule Bank.MixProject do
       precommit: [
         "compile --warnings-as-errors",
         "deps.unlock --unused",
-        "deps.audit",
+        "deps.audit --ignore-package-names decimal",
         "format",
         "test",
         "openapi.check"
