@@ -97,7 +97,7 @@ defmodule Bank.Stablecoins.Providers.JupiterTest do
 
       assert Decimal.equal?(quote.fees.total_fee, Decimal.new("0.5"))
       assert quote.fees.bridge_fee == nil
-      assert quote.fees.cryptobank_fee == nil
+      assert quote.fees.cryptokorr_fee == nil
       assert quote.fees.gas_fee == nil
     end
 

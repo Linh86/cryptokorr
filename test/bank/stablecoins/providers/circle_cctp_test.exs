@@ -110,7 +110,7 @@ defmodule Bank.Stablecoins.Providers.CircleCCTPTest do
       assert quote.fees.bridge_fee == nil
       assert quote.fees.gas_fee == nil
       assert quote.fees.protocol_fee == nil
-      assert quote.fees.cryptobank_fee == nil
+      assert quote.fees.cryptokorr_fee == nil
     end
 
     test "expires_at is nil (deterministic quote)" do

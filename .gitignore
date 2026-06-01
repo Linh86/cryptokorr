@@ -54,9 +54,11 @@ dist/
 # Local env files (never commit secrets). The *.example files are tracked.
 .env
 .env.*
+!.env.example
 !.env.*.example
 /chain_adapter/.env
 /chain_adapter/.env.*
+!/chain_adapter/.env.example
 !/chain_adapter/.env.*.example
 
 # Claude Code session data + temp worktrees. Not part of the app.

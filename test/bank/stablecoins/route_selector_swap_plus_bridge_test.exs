@@ -57,7 +57,7 @@ defmodule Bank.Stablecoins.RouteSelector.SwapPlusBridgeTest do
            gas_fee: nil,
            protocol_fee: nil,
            bridge_fee: nil,
-           cryptobank_fee: nil,
+           cryptokorr_fee: nil,
            total_fee: Decimal.sub(req.amount, out_amount)
          },
          eta_seconds: Process.get(:swap_eta, nil),
@@ -113,7 +113,7 @@ defmodule Bank.Stablecoins.RouteSelector.SwapPlusBridgeTest do
            gas_fee: nil,
            protocol_fee: nil,
            bridge_fee: nil,
-           cryptobank_fee: nil,
+           cryptokorr_fee: nil,
            total_fee: Decimal.new(0)
          },
          eta_seconds: Process.get(:bridge_eta, 120),

@@ -2,7 +2,7 @@
 
 ## Overview
 
-CryptoBank screens destination addresses against multiple external
+CryptoKorr screens destination addresses against multiple external
 feeds before allowing execution. Each feed has a freshness threshold;
 when a feed is stale, missing, or failing, the system degrades toward
 caution rather than silently proceeding with outdated data.

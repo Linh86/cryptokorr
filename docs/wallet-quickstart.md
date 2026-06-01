@@ -88,7 +88,7 @@ Phoenix issues a short-lived (5-minute) EIP-191 challenge that names
 your address, the workspace, and a server-issued nonce. Your wallet
 will pop a sign request showing the human-readable message; the
 hook only ever invokes `personal_sign` (no typed-data signing, no
-transaction signing). The exact text starts with "CryptoBank wants
+transaction signing). The exact text starts with "CryptoKorr wants
 to bind your wallet for an MVP delegation install."
 
 When you sign, the hook pushes the signature back. Phoenix runs

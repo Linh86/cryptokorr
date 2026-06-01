@@ -269,7 +269,7 @@ defmodule Bank.Stablecoins.IntentRouting do
       gas_fee: decimal_string(fees.gas_fee),
       protocol_fee: decimal_string(fees.protocol_fee),
       bridge_fee: decimal_string(fees.bridge_fee),
-      cryptobank_fee: decimal_string(fees.cryptobank_fee),
+      cryptokorr_fee: decimal_string(fees.cryptokorr_fee),
       total_fee: decimal_string(fees.total_fee),
       output_impact_pct: decimal_string(fees.output_impact_pct)
     }

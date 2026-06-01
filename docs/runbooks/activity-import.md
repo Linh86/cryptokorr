@@ -12,7 +12,7 @@ The ledger is composed of four read-only modules — none of which write outside
 
 1. **[`Bank.Activity.CsvImport`](../../lib/bank/activity/csv_import.ex)** — parses, previews, and commits CSV uploads (#244). Workspace-scoped via `current_scope.workspace.id`; the CSV body cannot supply a `workspace_id` (the parser's forbidden-columns guard rejects the upload outright).
 2. **[`Bank.Activity.ChainSync`](../../lib/bank/activity/chain_sync.ex)** — pulls ERC-20 transfers from a real RPC endpoint (`base-sepolia`) and projects adapter callbacks into the same ledger (#245). Wallet-chain syncs accept a test-friendly `:rpc_fn` injection.
-3. **[`Bank.Activity.Reconciliation`](../../lib/bank/activity/reconciliation.ex)** — links an `ExecutionPlan`'s `tx_refs` to imported activity rows on the same chain + workspace, so an operator can tell "this was a CryptoBank-driven transfer" apart from "this was external counterparty activity" (#246).
+3. **[`Bank.Activity.Reconciliation`](../../lib/bank/activity/reconciliation.ex)** — links an `ExecutionPlan`'s `tx_refs` to imported activity rows on the same chain + workspace, so an operator can tell "this was a CryptoKorr-driven transfer" apart from "this was external counterparty activity" (#246).
 4. **[`Bank.Activity.Exposure`](../../lib/bank/activity/exposure.ex)** — aggregates confirmed inbound / outbound activity per asset for a workspace, opt-in via `include_imported_activity: true` (#246).
 
 Every row carries a deterministic `dedupe_key`, so re-running an import is idempotent — the same CSV row, the same on-chain transfer, the same adapter callback all collapse to a single ledger row.
@@ -97,7 +97,7 @@ Reconciliation links a workspace's `ExecutionPlan` rows to imported activity row
 `Bank.Activity.Reconciliation.classify_activity/2` returns one of:
 
 - `:cryptobank_execution` — at least one `ExecutionPlan` in this workspace has a `tx_ref` that equals this activity's `tx_hash`.
-- `:external` — no plan match; this activity was driven by something other than CryptoBank's runtime.
+- `:external` — no plan match; this activity was driven by something other than CryptoKorr's runtime.
 
 In an alpha-staging review the typical operator flow is:
 

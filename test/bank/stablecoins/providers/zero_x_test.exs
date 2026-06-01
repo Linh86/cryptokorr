@@ -98,7 +98,7 @@ defmodule Bank.Stablecoins.Providers.ZeroXTest do
 
       assert Decimal.equal?(quote.fees.total_fee, Decimal.new("0.5"))
       assert quote.fees.bridge_fee == nil
-      assert quote.fees.cryptobank_fee == nil
+      assert quote.fees.cryptokorr_fee == nil
     end
 
     test "quote has single swap leg with correct structure" do

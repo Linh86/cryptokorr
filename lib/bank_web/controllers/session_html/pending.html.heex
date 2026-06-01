@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="csrf-token" content={get_csrf_token()} />
-    <title>{assigns[:page_title] || "Pending access"} — CryptoBank</title>
+    <title>{assigns[:page_title] || "Pending access"} — CryptoKorr</title>
     <link rel="stylesheet" href={~p"/assets/app.css"} />
   </head>
   <body class="min-h-screen bg-base-100 text-base-content">
@@ -37,7 +37,7 @@
           <% :allowlist_missed -> %>
             <section id="pending-status-no-invite" class="space-y-3">
               <p class="text-sm leading-relaxed">
-                We don't have an invite for your address yet. CryptoBank is
+                We don't have an invite for your address yet. CryptoKorr is
                 invite-only during private alpha.
               </p>
               <p class="text-xs text-base-content/60">
@@ -63,7 +63,7 @@
           <% _ -> %>
             <section id="pending-status-default" class="space-y-3">
               <p class="text-sm leading-relaxed">
-                We received your sign-in. CryptoBank is invite-only during
+                We received your sign-in. CryptoKorr is invite-only during
                 private alpha — an operator will review your account and
                 grant workspace access.
               </p>

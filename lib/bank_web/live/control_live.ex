@@ -429,7 +429,7 @@ defmodule BankWeb.ControlLive do
       |> Enum.join("\n")
 
     """
-    CryptoBank session permission install consent
+    CryptoKorr session permission install consent
 
     Account:        #{binding.address}
     Chain:          Base Sepolia (#{scope["chain_id"]})

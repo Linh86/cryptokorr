@@ -1,4 +1,4 @@
-# CryptoBank MVP demo (5 minutes)
+# CryptoKorr MVP demo (5 minutes)
 
 Script for a 5-minute walkthrough of the MVP. Audience: a technical
 reviewer outside the team. Goal: show what the runtime does, who it
@@ -9,10 +9,10 @@ Pairs with [decision memo](bank-v0.1-decision-memo.md),
 [zerodev-permissions-integration](zerodev-permissions-integration.md),
 and [smart-account-and-revoke-design](smart-account-and-revoke-design.md).
 
-## What CryptoBank is
+## What CryptoKorr is
 
 - A non-custodial AI treasury runtime. The user keeps the smart
-  account; CryptoBank acts inside scoped permissions the user grants.
+  account; CryptoKorr acts inside scoped permissions the user grants.
 - Phoenix is the decision authority. An agent submits a structured
   `AgentIntent`; the runtime evaluates policy + trust + simulation,
   decides `auto_exec` / `approval_required` / `hold` / `block`, then
@@ -111,9 +111,11 @@ end-to-end smokes.
   transfer / 0x swap / allowlisted Morpho deposit; no withdraw,
   no arbitrary calldata, no mainnet), and click Install to enqueue
   the existing `GrantDelegation` worker. Browser-native signing of
-  the install UserOp itself remains scaffolded; v0.1 install
-  signing flows through the adapter's operator key. (See
-  `docs/wallet-connect.md`.)
+  the install UserOp is live on Base Sepolia (epic #471 Path A):
+  the browser signs the install UserOp through ZeroDev SDK and the
+  adapter's session signer countersigns the permission portion.
+  `OPERATOR_PRIVATE_KEY` is **not** in the normal install path
+  any more. (See `docs/runbooks/browser-install-path-a.md`.)
 - Wallet-risk intelligence (sanctions, scam feeds, attribution).
   Counterparties are hand-curated; epic #55 is the future track.
 - Swap on mainnet. Live 0x swap dispatch on Base Sepolia ships
@@ -265,8 +267,10 @@ If you are on real Sepolia and the adapter is in sentinel-era mode,
   HSM/KMS yet.
 - Live smoke today depends on the operator's adapter terminal to
   capture logs. Without a tee, failure-mode triage is harder.
-- Browser-native wallet connect is scaffolded; the demo above is
-  operator-driven through `/v1/connect/smart_account`.
+- Browser-native wallet connect + browser-signed install is live on
+  Base Sepolia (epic #471 Path A). The operator-driven
+  `/v1/connect/smart_account` curl form is preserved as a
+  development fallback.
 - Single-operator alpha. No SSO, no rate limits on `/v1/`, no
   multi-tenant isolation.
 - The Telegram bot is a convenience surface for alerting +

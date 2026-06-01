@@ -99,7 +99,7 @@ defmodule Bank.Decisions.SwapRouteResolverTest do
            gas_fee: nil,
            protocol_fee: nil,
            bridge_fee: nil,
-           cryptobank_fee: nil,
+           cryptokorr_fee: nil,
            total_fee: Decimal.sub(req.amount, out)
          },
          eta_seconds: nil,
@@ -150,7 +150,7 @@ defmodule Bank.Decisions.SwapRouteResolverTest do
            gas_fee: nil,
            protocol_fee: nil,
            bridge_fee: nil,
-           cryptobank_fee: nil,
+           cryptokorr_fee: nil,
            total_fee: Decimal.sub(req.amount, out)
          },
          eta_seconds: nil,

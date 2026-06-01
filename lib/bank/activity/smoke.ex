@@ -266,7 +266,7 @@ defmodule Bank.Activity.Smoke do
       :external ->
         pass("reconciliation", "no-plan-match activity classified as :external")
 
-      :cryptobank_execution ->
+      :cryptokorr_execution ->
         # Surprising for the smoke fixture (no plan exists with
         # this tx_hash), but the function returned a valid label.
         pass("reconciliation", "smoke fixture matched a real plan — classified")
@@ -274,7 +274,7 @@ defmodule Bank.Activity.Smoke do
       other ->
         fail(
           "reconciliation",
-          "expected :external or :cryptobank_execution; got #{inspect(other)}"
+          "expected :external or :cryptokorr_execution; got #{inspect(other)}"
         )
     end
   rescue

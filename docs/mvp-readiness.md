@@ -327,9 +327,12 @@ recipes for every step.
   Multi-tenant deployments need an explicit smart_account_id field
   on the intent contract.
 - Agent API auth is documented but not enforced.
-- Browser-signed install (epic #471) ships with the #473 frontend
-  ZeroDev SDK + bundler wiring as a scaffold; full real on-chain
-  reproducibility uses Path B of
+- Browser-signed install (epic #471) is live end-to-end on Base
+  Sepolia via Path A: the browser signs the install UserOp through
+  ZeroDev SDK + bundler submission (#501 shipped on `main`); the
+  adapter's session signer countersigns the permission portion.
+  Path B (manual `cast` / dev-console SDK) is preserved as the
+  reviewer escape hatch in
   [`docs/runbooks/browser-signed-install-smoke.md`](runbooks/browser-signed-install-smoke.md).
 - Single-operator alpha; no SSO, no rate limits on `/v1/`, no
   per-tenant isolation.

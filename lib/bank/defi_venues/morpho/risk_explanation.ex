@@ -1,6 +1,6 @@
 defmodule Bank.DefiVenues.Morpho.RiskExplanation do
   @moduledoc """
-  CryptoBank-owned risk explanation for a proposed Morpho vault
+  CryptoKorr-owned risk explanation for a proposed Morpho vault
   action (#201).
 
   Pure deterministic function on

@@ -14,7 +14,8 @@ If you need the testnet-broadcast smoke (`mix bank.smoke.transfer` / `mix bank.s
 
 ## Prerequisites
 
-- Elixir / OTP per [`README.md`](../../README.md) (the toolchain pinned in `.tool-versions` if you use `asdf`).
+- Elixir / OTP per [`README.md`](../../README.md). This repo does
+  not currently ship an `asdf` / `mise` toolchain pin.
 - A local Postgres reachable on the `:dev` configuration in `config/dev.exs` (defaults to `localhost:5432`, no password). Postgres is the only external dependency.
 - Node / npm if you plan to render the LiveView in a browser tab (`mix assets.setup` builds esbuild + tailwind for you).
 

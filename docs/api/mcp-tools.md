@@ -12,7 +12,7 @@ This document pins the tool list, JSON schemas, readonly behaviour,
 and explicit non-goals for the stdio MCP server. The intent is that
 an agent host (Claude Desktop, Cursor, Codex, etc.) can discover
 the tools via standard MCP tool listing and use them safely without
-the host needing to understand CryptoBank semantics.
+the host needing to understand CryptoKorr semantics.
 
 ## Configuration
 
@@ -427,7 +427,7 @@ matches the SDK return shape exactly. Agents can `JSON.parse` it.
 ```
 
 The MCP error data carries the wire `code` exactly so an agent that
-understands the CryptoBank error taxonomy can branch on it. The
+understands the CryptoKorr error taxonomy can branch on it. The
 human-readable summary in `content[0].text` is the same prose an
 operator would see.
 

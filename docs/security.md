@@ -204,23 +204,27 @@ Controls:
   identify Telegram as the surface of origin.
 - The bot does **not** support free-form transaction authoring.
 
-## Planned next alpha control: address and wallet risk screening (#55)
+## Address and wallet risk screening (#55, live)
 
-Counterparty curation is necessary but not sufficient. The next alpha
-extension should add layered wallet-intelligence controls:
+Counterparty curation is necessary but not sufficient. Layered
+wallet-intelligence controls are wired through
+`Bank.WalletScreening` (`lib/bank/wallet_screening/`):
 
-- **Hard block:** exact match against OFAC digital currency entries and
-  OpenSanctions `CryptoWallet` sanctions data.
+- **Hard block:** exact match against OFAC digital currency entries
+  (`sources/ofac.ex`) and OpenSanctions `CryptoWallet` sanctions data
+  (`sources/open_sanctions.ex`).
 - **Warning / challenge:** exact or high-confidence matches from
-  community scam feeds such as ScamSniffer, EtherScamDB, and BTC-
-  specific abuse lists.
+  community scam feeds — ScamSniffer (`sources/scam_sniffer.ex`),
+  EtherScamDB (`sources/ether_scam_db.ex`), and BTC-specific abuse
+  lists.
 - **Context / labeling:** public attribution and cluster context from
-  GraphSense tagpacks and similar public tag sources.
+  GraphSense tagpacks (`sources/graphsense.ex`) and similar public
+  tag sources.
 - **Internal scoring only:** graph- or feature-based suspicious-wallet
-  scores using research datasets such as Elliptic++. Model output alone
-  must never create a hard block.
+  scores using research datasets such as Elliptic++. Model output
+  alone never creates a hard block.
 
-The operator and audit surfaces should preserve:
+The operator and audit surfaces preserve:
 
 - source feed
 - confidence / control tier
@@ -229,7 +233,9 @@ The operator and audit surfaces should preserve:
 
 This keeps the system explainable: sanctions produce a legal block,
 community scam feeds produce a challenge, and internal models only widen
-human review.
+human review. Feed freshness is tracked by
+`Bank.WalletScreening.FeedHealth`; the runbook is at
+[`docs/runbooks/wallet-screening-feed-freshness.md`](runbooks/wallet-screening-feed-freshness.md).
 
 ## Secrets inventory
 
@@ -337,5 +343,5 @@ refused at startup so a half-configured deploy fails fast.
 
 ## Incident response
 
-See `docs/runbook.md` for operator procedures covering pause / resume,
+See [`docs/incident-runbook.md`](incident-runbook.md) for operator procedures covering pause / resume,
 adapter incidents, stuck executions, and revoke failures.

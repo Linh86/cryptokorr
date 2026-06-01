@@ -26,7 +26,7 @@ defmodule Bank.Stablecoins.RoutePolicy do
     * provider/protocol fee
     * bridge fee
     * gas fee
-    * CryptoBank fee (configurable bps on input amount)
+    * CryptoKorr fee (configurable bps on input amount)
     * total fee (sum of all)
     * output impact (input − output as percentage)
 
@@ -70,12 +70,12 @@ defmodule Bank.Stablecoins.RoutePolicy do
           gas_fee: Decimal.t() | nil,
           protocol_fee: Decimal.t() | nil,
           bridge_fee: Decimal.t() | nil,
-          cryptobank_fee: Decimal.t() | nil,
+          cryptokorr_fee: Decimal.t() | nil,
           total_fee: Decimal.t(),
           output_impact_pct: Decimal.t()
         }
 
-  @default_cryptobank_fee_bps 10
+  @default_cryptokorr_fee_bps 10
   @default_max_amount nil
   @default_max_fee_bps 500
 
@@ -84,7 +84,7 @@ defmodule Bank.Stablecoins.RoutePolicy do
 
   Options:
     * `:providers` / `:swap_providers` / `:bridge_providers` — passed to RouteSelector
-    * `:cryptobank_fee_bps` — CryptoBank fee in basis points (default 10)
+    * `:cryptokorr_fee_bps` — CryptoKorr fee in basis points (default 10)
     * `:max_amount` — approval threshold (default nil = no limit)
     * `:max_fee_bps` — block if total fee exceeds this (default 500)
     * `:allowed_chains` — list of allowed chains (default nil = all)
@@ -141,9 +141,9 @@ defmodule Bank.Stablecoins.RoutePolicy do
   # -- Fee engine -----------------------------------------------------------
 
   defp compute_fee_summary(req, route_quote, opts) do
-    cb_bps = Keyword.get(opts, :cryptobank_fee_bps, @default_cryptobank_fee_bps)
+    cb_bps = Keyword.get(opts, :cryptokorr_fee_bps, @default_cryptokorr_fee_bps)
 
-    cryptobank_fee =
+    cryptokorr_fee =
       req.amount
       |> Decimal.mult(Decimal.new(cb_bps))
       |> Decimal.div(Decimal.new(10_000))
@@ -153,7 +153,7 @@ defmodule Bank.Stablecoins.RoutePolicy do
     gas_fee = route_quote.fees[:gas_fee]
     raw_total = route_quote.fees[:total_fee] || Decimal.new(0)
 
-    total_fee = Decimal.add(raw_total, cryptobank_fee)
+    total_fee = Decimal.add(raw_total, cryptokorr_fee)
 
     output_impact_pct =
       if Decimal.compare(req.amount, Decimal.new(0)) == :gt do
@@ -170,7 +170,7 @@ defmodule Bank.Stablecoins.RoutePolicy do
       gas_fee: gas_fee,
       protocol_fee: provider_fee,
       bridge_fee: bridge_fee,
-      cryptobank_fee: cryptobank_fee,
+      cryptokorr_fee: cryptokorr_fee,
       total_fee: total_fee,
       output_impact_pct: output_impact_pct
     }

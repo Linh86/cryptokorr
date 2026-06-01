@@ -100,7 +100,7 @@ defmodule BankWeb.AgentLayouts do
           <span class="brand__mark" aria-hidden="true">
             <.cb_icon name="brand" size={22} />
           </span>
-          <span class="brand__name serif">CryptoBank</span>
+          <span class="brand__name serif">CryptoKorr</span>
         </a>
         <div class="testnet-badge" title="This prototype is wired to Base Sepolia testnet only">
           <i class="testnet-badge__dot"></i>

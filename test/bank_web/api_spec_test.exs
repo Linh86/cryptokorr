@@ -41,13 +41,13 @@ defmodule BankWeb.ApiSpecTest do
       assert is_binary(json)
       decoded = Jason.decode!(json)
       assert is_map(decoded)
-      assert decoded["info"]["title"] == "CryptoBank /v1 API"
+      assert decoded["info"]["title"] == "CryptoKorr /v1 API"
     end
   end
 
   describe "info" do
-    test "title is the pinned CryptoBank /v1 API" do
-      assert ApiSpec.spec().info.title == "CryptoBank /v1 API"
+    test "title is the pinned CryptoKorr /v1 API" do
+      assert ApiSpec.spec().info.title == "CryptoKorr /v1 API"
     end
 
     test "version tracks the loaded :bank app version" do

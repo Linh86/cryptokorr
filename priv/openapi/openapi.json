@@ -2797,8 +2797,8 @@
     }
   },
   "info": {
-    "description": "External control-plane API for the CryptoBank non-custodial\ntreasury runtime. Scoped to the public `/v1/...` surface; the\nprivate `/internal/adapter/callback` contract is intentionally\nout of scope. The authoritative prose contract for this API\nlives at `docs/bank-v0.1-runtime-flow-and-api.md`.\n",
-    "title": "CryptoBank /v1 API",
+    "description": "External control-plane API for the CryptoKorr non-custodial\ntreasury runtime. Scoped to the public `/v1/...` surface; the\nprivate `/internal/adapter/callback` contract is intentionally\nout of scope. The authoritative prose contract for this API\nlives at `docs/bank-v0.1-runtime-flow-and-api.md`.\n",
+    "title": "CryptoKorr /v1 API",
     "version": "0.1.0"
   },
   "openapi": "3.0.0",

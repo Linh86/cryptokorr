@@ -39,7 +39,7 @@ defmodule Bank.Stablecoins.IntentRoutingTest do
            gas_fee: nil,
            protocol_fee: nil,
            bridge_fee: nil,
-           cryptobank_fee: nil,
+           cryptokorr_fee: nil,
            total_fee: Decimal.new("0.5")
          },
          risk_flags: []

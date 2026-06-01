@@ -39,7 +39,7 @@ defmodule Bank.Stablecoins.RoutePolicyTest do
            gas_fee: nil,
            protocol_fee: nil,
            bridge_fee: nil,
-           cryptobank_fee: nil,
+           cryptokorr_fee: nil,
            total_fee: Decimal.sub(req.amount, out_amount)
          },
          eta_seconds: Process.get(:fake_eta),
@@ -106,7 +106,7 @@ defmodule Bank.Stablecoins.RoutePolicyTest do
            gas_fee: nil,
            protocol_fee: nil,
            bridge_fee: nil,
-           cryptobank_fee: nil,
+           cryptokorr_fee: nil,
            total_fee: Decimal.sub(req.amount, out)
          }
        }}
@@ -149,7 +149,7 @@ defmodule Bank.Stablecoins.RoutePolicyTest do
            gas_fee: nil,
            protocol_fee: nil,
            bridge_fee: nil,
-           cryptobank_fee: nil,
+           cryptokorr_fee: nil,
            total_fee: Decimal.new(0)
          },
          eta_seconds: 120
@@ -326,18 +326,18 @@ defmodule Bank.Stablecoins.RoutePolicyTest do
   end
 
   describe "fee_summary" do
-    test "calculates explicit CryptoBank fee from input amount" do
+    test "calculates explicit CryptoKorr fee from input amount" do
       req = build_swap_request(%{amount: Decimal.new("1000")})
 
-      assert {:ok, eval} = RoutePolicy.evaluate(req, eval_opts(cryptobank_fee_bps: 10))
+      assert {:ok, eval} = RoutePolicy.evaluate(req, eval_opts(cryptokorr_fee_bps: 10))
 
-      assert Decimal.equal?(eval.fee_summary.cryptobank_fee, Decimal.new("1"))
+      assert Decimal.equal?(eval.fee_summary.cryptokorr_fee, Decimal.new("1"))
     end
 
-    test "total_fee includes provider fee plus CryptoBank fee" do
+    test "total_fee includes provider fee plus CryptoKorr fee" do
       req = build_swap_request()
 
-      assert {:ok, eval} = RoutePolicy.evaluate(req, eval_opts(cryptobank_fee_bps: 10))
+      assert {:ok, eval} = RoutePolicy.evaluate(req, eval_opts(cryptokorr_fee_bps: 10))
 
       expected =
         Decimal.new("0.5")
@@ -354,12 +354,12 @@ defmodule Bank.Stablecoins.RoutePolicyTest do
       assert Decimal.equal?(eval.fee_summary.output_impact_pct, Decimal.new("0.5"))
     end
 
-    test "supports zero CryptoBank fee" do
+    test "supports zero CryptoKorr fee" do
       req = build_swap_request()
 
-      assert {:ok, eval} = RoutePolicy.evaluate(req, eval_opts(cryptobank_fee_bps: 0))
+      assert {:ok, eval} = RoutePolicy.evaluate(req, eval_opts(cryptokorr_fee_bps: 0))
 
-      assert Decimal.equal?(eval.fee_summary.cryptobank_fee, Decimal.new(0))
+      assert Decimal.equal?(eval.fee_summary.cryptokorr_fee, Decimal.new(0))
     end
   end
 
@@ -522,7 +522,7 @@ defmodule Bank.Stablecoins.RoutePolicyTest do
         gas_fee: nil,
         protocol_fee: nil,
         bridge_fee: nil,
-        cryptobank_fee: nil,
+        cryptokorr_fee: nil,
         total_fee: Decimal.sub(req.amount, out)
       },
       risk_flags: []

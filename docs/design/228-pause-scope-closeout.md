@@ -3,10 +3,11 @@
 **Status:** closeout map. Phase 1 chain-pause shipped end-to-end on `main`.
 **Issue:** #228 — *Generalize kill-switch pause scopes*.
 **Parent epic:** #212.
-**Companion docs:** [`228-pause-scope-generalization.md`](228-pause-scope-generalization.md)
-(open as PR [#310](https://github.com/Linh86/cryptobank/pull/310);
-informed the implementation; remains the design reference for any
-future Phase 2 / Phase 3 work).
+**Companion design:** PR [#310](https://github.com/Linh86/cryptobank/pull/310)
+on branch `codex/228-pause-scope-design-memo` informed the
+implementation and remains the design reference for any future Phase 2
+/ Phase 3 work. The companion memo is not currently checked in as a
+local Markdown file on this branch.
 
 ## Purpose
 

@@ -1,20 +1,20 @@
 # Morpho deposits — operator runbook
 
-This runbook is the operator-facing reference for Morpho vault risk explanation and the read-only ERC-4626 yield-deposit decision pipeline (issues [#199](https://github.com/Linh86/cryptobank/issues/199), [#201](https://github.com/Linh86/cryptobank/issues/201), [#202](https://github.com/Linh86/cryptobank/issues/202), [#203](https://github.com/Linh86/cryptobank/issues/203), [#208](https://github.com/Linh86/cryptobank/issues/208), and [#209](https://github.com/Linh86/cryptobank/issues/209)). It tells a fresh reviewer what Morpho is in CryptoBank's model, what is and is not implemented today, and how to verify the surfaces locally without secrets, without `.env`, without any chain broadcast, and without calling Morpho's GraphQL API.
+This runbook is the operator-facing reference for Morpho vault risk explanation and the read-only ERC-4626 yield-deposit decision pipeline (issues [#199](https://github.com/Linh86/cryptobank/issues/199), [#201](https://github.com/Linh86/cryptobank/issues/201), [#202](https://github.com/Linh86/cryptobank/issues/202), [#203](https://github.com/Linh86/cryptobank/issues/203), [#208](https://github.com/Linh86/cryptobank/issues/208), and [#209](https://github.com/Linh86/cryptobank/issues/209)). It tells a fresh reviewer what Morpho is in CryptoKorr's model, what is and is not implemented today, and how to verify the surfaces locally without secrets, without `.env`, without any chain broadcast, and without calling Morpho's GraphQL API.
 
 > **Audience.** Operators, alpha reviewers, and anyone wiring Morpho yield actions into the runtime. The Morpho surface today is **read-only risk + decision** — *not* execution dispatch (that lives in [#206](https://github.com/Linh86/cryptobank/issues/206) deposit / [#207](https://github.com/Linh86/cryptobank/issues/207) withdraw), *not* a yield aggregator, *not* a Morpho UI ([#204](https://github.com/Linh86/cryptobank/issues/204)).
 
-The detailed risk model, dimension definitions, severity mappings, and operator UI copy live in the design doc [`docs/morpho-risk-explanation.md`](../morpho-risk-explanation.md). This runbook is the operational counterpart: it explains how to drive the surfaces locally and how to read the operator-visible output.
+The detailed risk model, dimension definitions, severity mappings, and operator UI copy live in the design doc [`docs/morpho-risk-explanation.md`](../morpho-risk-explanation.md) and the implementation module [`Bank.DefiVenues.Morpho.RiskExplanation`](../../lib/bank/defi_venues/morpho/risk_explanation.ex). This runbook is the operational counterpart: it explains how to drive the surfaces locally and how to read the operator-visible output.
 
-## What Morpho is in CryptoBank's model
+## What Morpho is in CryptoKorr's model
 
-Morpho is **not** one global trusted venue with one global risk score. CryptoBank models Morpho as **lending infrastructure plus a curation layer**:
+Morpho is **not** one global trusted venue with one global risk score. CryptoKorr models Morpho as **lending infrastructure plus a curation layer**:
 
 - **Morpho markets** are isolated lending markets with their own loan asset, collateral asset, oracle, interest-rate model, LLTV, liquidity, and caps.
 - **Morpho Vaults** are ERC-4626 vaults that accept one loan asset and allocate deposits across one or more Morpho markets.
 - **Curators and allocators** manage market eligibility and allocation within vault constraints — Morpho itself is not the asset manager.
 
-The runtime therefore displays a **CryptoBank-owned risk explanation** that takes Morpho's API + on-chain data as **input**, never as a final decision. The design doc covers the full vocabulary; this runbook documents the implementation surface.
+The runtime therefore displays a **CryptoKorr-owned risk explanation** that takes Morpho's API + on-chain data as **input**, never as a final decision. The source modules cover the full vocabulary; this runbook documents the implementation surface.
 
 ## First supported workflow: USDC deposit into an allowlisted Morpho vault
 
@@ -45,7 +45,7 @@ A future "auto-exec for tightly-bounded vaults" path is explicit follow-up work 
 
 ## Risk dimensions
 
-The risk explanation (see [`Bank.DefiVenues.Morpho.RiskExplanation`](../../lib/bank/defi_venues/morpho/risk_explanation.ex)) computes ten risk dimensions in fixed order. The full check list lives in the source; the operator-visible summary table is below. The detailed rule narrative for each is in [`docs/morpho-risk-explanation.md`](../morpho-risk-explanation.md).
+The risk explanation (see [`docs/morpho-risk-explanation.md`](../morpho-risk-explanation.md) and [`Bank.DefiVenues.Morpho.RiskExplanation`](../../lib/bank/defi_venues/morpho/risk_explanation.ex)) computes ten risk dimensions in fixed order. The full check list lives in the source; the operator-visible summary table is below.
 
 | # | Dimension | Sample check codes |
 |---|---|---|
@@ -289,7 +289,7 @@ What this surface does **not** do (today):
 - No mainnet `allocate_idle_capital`. Base Sepolia only at the HTTP boundary; mainnet is post-MVP and gated on #166/#178.
 - No agent-initiated withdraw / redeem. Operator-only, tracked in #207.
 - No public launch docs, no external SIEM integration, no analytics dashboard.
-- Morpho data is **input** to CryptoBank's policy, not the policy itself. APY is **never** treated as a safety signal.
+- Morpho data is **input** to CryptoKorr's policy, not the policy itself. APY is **never** treated as a safety signal.
 
 Provenance:
 
@@ -299,4 +299,7 @@ Provenance:
 - Decision pipeline integration: [#203](https://github.com/Linh86/cryptobank/issues/203) (`Bank.Decisions.MorphoEvaluator`, `evaluate_intent/2` dispatch on `kind: :defi_yield_deposit`)
 - Audit & replay evidence: [#208](https://github.com/Linh86/cryptobank/issues/208) (`morpho.risk_explained`, `morpho.snapshot_stale`, `morpho.policy_blocked` event types; `morpho_evidence` replay slice)
 - Docs + smoke (this runbook): [#209](https://github.com/Linh86/cryptobank/issues/209)
-- Design doc: [`docs/morpho-risk-explanation.md`](../morpho-risk-explanation.md)
+- Risk explanation design:
+  [`docs/morpho-risk-explanation.md`](../morpho-risk-explanation.md)
+- Risk explanation source:
+  [`Bank.DefiVenues.Morpho.RiskExplanation`](../../lib/bank/defi_venues/morpho/risk_explanation.ex)

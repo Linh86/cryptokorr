@@ -845,7 +845,7 @@ defmodule Bank.Decisions.ReportMarkdownTest do
           "gas_fee" => "0.05",
           "protocol_fee" => "0.10",
           "bridge_fee" => nil,
-          "cryptobank_fee" => "0.45",
+          "cryptokorr_fee" => "0.45",
           "total_fee" => "0.60",
           "output_impact_pct" => "0.05"
         },
@@ -927,7 +927,7 @@ defmodule Bank.Decisions.ReportMarkdownTest do
       assert out =~ "- total_fee: `0.60`"
       assert out =~ "- gas_fee: `0.05`"
       assert out =~ "- protocol_fee: `0.10`"
-      assert out =~ "- cryptobank_fee: `0.45`"
+      assert out =~ "- cryptokorr_fee: `0.45`"
       assert out =~ "- output_impact_pct: `0.05`"
     end
 

@@ -512,7 +512,7 @@ defmodule BankWeb.ControlLiveTest do
       })
 
       assert is_binary(id)
-      assert message =~ "CryptoBank wants to bind"
+      assert message =~ "CryptoKorr wants to bind"
       assert message =~ address
       assert message =~ "84532 (Base Sepolia)"
     end

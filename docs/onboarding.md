@@ -1,7 +1,7 @@
 # Design partner onboarding
 
 This is the document we hand a partner on day one. Everything they
-need to understand, try, and decide whether to keep using Bank.
+need to understand, try, and decide whether to keep using CryptoKorr.
 
 It assumes zero prior familiarity with the product. It does not
 assume zero familiarity with crypto — partners are builders and
@@ -9,7 +9,7 @@ treasury teams, not first-time wallet users.
 
 ## Contents
 
-1. [What Bank is (and isn't)](#what-bank-is-and-isnt)
+1. [What CryptoKorr is (and isn't)](#what-cryptokorr-is-and-isnt)
 2. [Core concepts, briefly](#core-concepts-briefly)
 3. [Before the first session](#before-the-first-session)
 4. [The first session](#the-first-session)
@@ -17,31 +17,32 @@ treasury teams, not first-time wallet users.
 6. [Known limitations in alpha](#known-limitations-in-alpha)
 7. [Getting help](#getting-help)
 
-## What Bank is (and isn't)
+## What CryptoKorr is (and isn't)
 
-**Bank is a control plane for AI-driven treasury actions.** An agent
+**CryptoKorr is a control plane for AI-driven treasury actions.** An agent
 sends an intent ("pay this counterparty 250 USDC on Base"); the
 runtime decides whether to auto-execute, hold for approval, or block;
 and — when it executes — it drives an ERC-4337 account abstraction
 flow through a pinned bundler, returning a chain receipt.
 
-**Bank is *not*:**
+**CryptoKorr is *not*:**
 
-- A custody solution. The smart account is yours. Bank signs against
-  a delegation you granted; you can revoke it in the control tower
-  at any time.
+- A custody solution. The smart account is yours. CryptoKorr signs
+  against a scoped delegation you granted; you can revoke it in the
+  control tower at any time.
 - A replacement for your treasury team. Everything the runtime does
   lands in the audit log and — for non-trivial decisions — in the
   approval queue.
-- A market maker, yield router, or DEX aggregator. The alpha
-  supports transfers. Swaps come later.
+- A market maker, broad yield router, or general DEX aggregator. The
+  alpha supports narrow Base Sepolia transfer, 0x swap, and allowlisted
+  Morpho deposit paths.
 
 ## Core concepts, briefly
 
 | Term              | What it means                                                                          |
 | ----------------- | -------------------------------------------------------------------------------------- |
-| **Smart account** | Your ERC-4337 account. Bank signs userops against it via a delegation.                 |
-| **Delegation**    | An on-chain permission granting Bank the scope it needs to execute. Revocable.         |
+| **Smart account** | Your ERC-4337 account. CryptoKorr signs userops against it via a delegation.           |
+| **Delegation**    | An on-chain permission granting CryptoKorr the scope it needs to execute. Revocable.   |
 | **Intent**        | A structured request from an agent ("transfer X to Y"). Input to the runtime.          |
 | **Decision**      | The runtime's verdict: `auto_exec`, `approval_required`, `hold`, or `block`.            |
 | **Execution plan**| The AA userop being built, signed, broadcast, and confirmed.                           |
@@ -51,8 +52,8 @@ flow through a pinned bundler, returning a chain receipt.
 | **Audit event**   | The append-only record of every state change. Replay an intent end-to-end from this.    |
 | **Control tower** | The LiveView console — dashboard, queue, counterparties, policies, audit, security.     |
 
-See [docs/domain-model.md](domain-model.md) for the full data model
-if you want to go deeper.
+See [docs/bank-v0.1-domain-model.md](bank-v0.1-domain-model.md) for
+the full data model if you want to go deeper.
 
 ## Before the first session
 
@@ -63,7 +64,8 @@ session:
    testnet unless we specifically agree otherwise). We will help you
    provision one if you don't have one; send us the account address.
 2. **A shared Slack channel** so we can co-operate during the
-   session. Invite the Bank team to the channel before session day.
+   session. Invite the CryptoKorr team to the channel before session
+   day.
 3. **Two sample counterparties** representing payment flows you
    actually care about — one "trusted" (recurring, low-risk) and one
    "sensitive" (new, needs review). We'll seed them with you in
@@ -80,15 +82,15 @@ one of us is watching the logs.
 - We verify the connection on our side: the delegation is active, the
   control tower dashboard shows the account as healthy, the adapter is
   reachable.
-- [docs/control-tower.md](control-tower.md) has the connection flow
-  screenshots.
+- The current operator walkthrough lives in
+  [docs/runbooks/guided-sandbox.md](runbooks/guided-sandbox.md).
 
 ### 2. Policy walkthrough (15 min)
 
 - We walk the default policy bundle:
     - `amount_limit`: 10000 USDC per transfer (tune down or up for
       your flow).
-    - `allowed_chain: [base]`.
+    - `allowed_chain: [base-sepolia]`.
     - `allowed_asset: [USDC]`.
     - `autonomy_tier: guarded` (default — most transfers auto-exec;
       first-touch partners hold for approval).
@@ -122,7 +124,8 @@ one of us is watching the logs.
 
 ## Operator quickstart
 
-The shortest path to actually using Bank yourself after onboarding.
+The shortest path to actually using CryptoKorr yourself after
+onboarding.
 
 ### Connect
 
@@ -144,7 +147,7 @@ curl -XPOST "$BANK_BASE_URL/v1/intents" \
   -d '{
     "kind": "transfer",
     "asset": "USDC",
-    "chain": "base",
+    "chain": "base-sepolia",
     "amount": "250",
     "target": {
       "counterparty_id": "cp_abc...",
@@ -168,8 +171,8 @@ currently API-only; tracked in #44).
 
 1. Go to `/security`.
 2. **Pause all** stops the runtime from dispatching any new work.
-3. **Revoke delegation** removes Bank's on-chain permission for the
-   selected smart account. This is the nuclear option — do it any
+3. **Revoke delegation** removes CryptoKorr's on-chain permission for
+   the selected smart account. This is the nuclear option — do it any
    time something feels wrong.
 
 ### Review
@@ -185,9 +188,9 @@ We tell partners these up front. Most are tracked as explicit issues.
 
 | Limitation                                            | Status                                          |
 | ----------------------------------------------------- | ----------------------------------------------- |
-| Base (mainnet + Sepolia) only — no multi-chain.       | Intentional for alpha.                          |
+| Public alpha execution is Base Sepolia only; operator-only Base mainnet preflight exists separately. | Intentional for alpha. |
 | Live swap is Base Sepolia + 0x router only (USDC ↔ USDT and USDC ↔ ETH, exact-input). No scheduled transfers. | Mainnet swap, 1inch / CCTP / Jupiter live execution, and arbitrary-token support stay post-MVP. See `docs/runbooks/swap-dispatch.md`. |
-| Control tower does not yet have an intents page.      | Tracked as #44.                                 |
+| Control tower can inspect intents, but does not yet provide a full operator intent-creation form. | API submission remains the primary path. |
 | No multi-account support in the operator UI.          | Tracked as #46.                                 |
 | Audit pagination is coarse (no filter by date range). | Tracked as #45.                                 |
 | Approvals UI is minimal.                              | Tracked as #47.                                 |

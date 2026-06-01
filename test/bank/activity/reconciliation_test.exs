@@ -1,7 +1,7 @@
 defmodule Bank.Activity.ReconciliationTest do
   @moduledoc """
   Tests for `Bank.Activity.Reconciliation` (#246) — links imported
-  chain activity rows to CryptoBank execution plans by `tx_hash`,
+  chain activity rows to CryptoKorr execution plans by `tx_hash`,
   workspace, and chain.
 
   Coverage:
@@ -10,7 +10,7 @@ defmodule Bank.Activity.ReconciliationTest do
       activities citing a tx_hash from the plan's `tx_refs`
     * cross-workspace and cross-chain misses collapse to `[]`
     * `match_for_plans/1` — flat batch shape
-    * `classify_activity/2` — `:cryptobank_execution` for matched
+    * `classify_activity/2` — `:cryptokorr_execution` for matched
       rows, `:external` for unmatched / no tx_hash
     * read-only: no row mutation, no Oban enqueue
   """
@@ -163,8 +163,8 @@ defmodule Bank.Activity.ReconciliationTest do
 
   # --- classify_activity/2 ----------------------------------------------
 
-  describe "classify_activity/2 — :cryptobank_execution vs :external" do
-    test "matches plan in same workspace + chain → :cryptobank_execution",
+  describe "classify_activity/2 — :cryptokorr_execution vs :external" do
+    test "matches plan in same workspace + chain → :cryptokorr_execution",
          %{workspace: ws} do
       tx_hash = "0xclass1" <> String.duplicate("1", 38)
       plan = build_plan(ws, tx_refs: [tx_hash], chain: "base")
@@ -172,7 +172,7 @@ defmodule Bank.Activity.ReconciliationTest do
       {:ok, :inserted, activity} =
         Activity.create_imported_activity(activity_attrs(ws.id, tx_hash: tx_hash, chain: "base"))
 
-      assert Reconciliation.classify_activity(activity, [plan]) == :cryptobank_execution
+      assert Reconciliation.classify_activity(activity, [plan]) == :cryptokorr_execution
     end
 
     test "no matching plan → :external (external wallet transfer)", %{workspace: ws} do
@@ -208,7 +208,7 @@ defmodule Bank.Activity.ReconciliationTest do
       assert Reconciliation.classify_activity(activity, [plan]) == :external
     end
 
-    test "plan in a sibling workspace does NOT classify the activity as :cryptobank_execution",
+    test "plan in a sibling workspace does NOT classify the activity as :cryptokorr_execution",
          %{workspace: ws_a} do
       tx_hash = "0xsibling" <> String.duplicate("a", 37)
 

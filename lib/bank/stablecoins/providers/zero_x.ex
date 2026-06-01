@@ -209,7 +209,7 @@ defmodule Bank.Stablecoins.Providers.ZeroX do
            gas_fee: nil,
            protocol_fee: protocol_fee,
            bridge_fee: nil,
-           cryptobank_fee: nil,
+           cryptokorr_fee: nil,
            total_fee: total_fee
          },
          eta_seconds: nil,

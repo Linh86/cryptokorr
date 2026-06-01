@@ -16,7 +16,7 @@ Issue [#187](https://github.com/Linh86/cryptobank/issues/187) (epic
 
 ## TL;DR — v0.1 reality
 
-CryptoBank v0.1 is **workspace-scoped**, not multi-account. Every
+CryptoKorr v0.1 is **workspace-scoped**, not multi-account. Every
 durable resource a workspace owns lives in a row whose
 `workspace_id` column matches that workspace's id; every list /
 read / mutation surface that has been migrated takes an opt-in
@@ -90,7 +90,7 @@ itself in lockstep with the contract.
 
 ## The five workspace-scoped surfaces
 
-CryptoBank v0.1 carries `workspace_id` on five durable surfaces.
+CryptoKorr v0.1 carries `workspace_id` on five durable surfaces.
 Every isolation guarantee in this runbook reduces to one of them:
 
 1. **Intents** (`agent_intents.workspace_id`) — set at

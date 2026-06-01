@@ -81,10 +81,14 @@ Required at startup:
 - `SMART_ACCOUNT_ADDRESS`, `DELEGATION_SIGNER_KEY`
 - `USDC_CONTRACT_ADDRESS`
 
-Additional env required by the eventual ZeroDev SDK integration is
-deferred — see
+The ZeroDev SDK browser-signed install is live (epic #471 Path A);
+its env requirements (`BUNDLER_RPC_URL`, browser-tier RPC URL,
+`DELEGATION_SIGNER_KEY` for the session signer countersignature) are
+documented in
+[`docs/runbooks/browser-install-path-a.md`](runbooks/browser-install-path-a.md).
+The original
 [`docs/zerodev-permissions-integration.md`](zerodev-permissions-integration.md)
-for the hard-blocker list.
+captures the historical hard-blocker list that was closed by epic #471.
 
 ### Deploy-time check
 

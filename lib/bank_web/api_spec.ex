@@ -1,6 +1,6 @@
 defmodule BankWeb.ApiSpec do
   @moduledoc """
-  Top-level OpenAPI 3.0 document for the external CryptoBank `/v1`
+  Top-level OpenAPI 3.0 document for the external CryptoKorr `/v1`
   API (epic #85, issue #86).
 
   This module is the **foundation**: it pins the title, version,
@@ -222,10 +222,10 @@ defmodule BankWeb.ApiSpec do
 
   defp info do
     %Info{
-      title: "CryptoBank /v1 API",
+      title: "CryptoKorr /v1 API",
       version: app_version(),
       description: """
-      External control-plane API for the CryptoBank non-custodial
+      External control-plane API for the CryptoKorr non-custodial
       treasury runtime. Scoped to the public `/v1/...` surface; the
       private `/internal/adapter/callback` contract is intentionally
       out of scope. The authoritative prose contract for this API

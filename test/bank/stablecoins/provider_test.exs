@@ -41,7 +41,7 @@ defmodule Bank.Stablecoins.ProviderTest do
            gas_fee: Decimal.new("0.10"),
            protocol_fee: Decimal.new("0.30"),
            bridge_fee: nil,
-           cryptobank_fee: Decimal.new("0.10"),
+           cryptokorr_fee: Decimal.new("0.10"),
            total_fee: Decimal.new("0.50")
          },
          eta_seconds: 15,

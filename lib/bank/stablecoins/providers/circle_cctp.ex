@@ -147,7 +147,7 @@ defmodule Bank.Stablecoins.Providers.CircleCCTP do
          gas_fee: nil,
          protocol_fee: nil,
          bridge_fee: nil,
-         cryptobank_fee: nil,
+         cryptokorr_fee: nil,
          total_fee: Decimal.new(0)
        },
        eta_seconds: eta,

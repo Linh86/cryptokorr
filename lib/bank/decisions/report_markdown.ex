@@ -144,7 +144,7 @@ defmodule Bank.Decisions.ReportMarkdown do
     gas_fee
     protocol_fee
     bridge_fee
-    cryptobank_fee
+    cryptokorr_fee
     output_impact_pct
   )
 

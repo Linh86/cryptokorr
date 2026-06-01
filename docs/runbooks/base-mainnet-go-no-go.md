@@ -11,7 +11,7 @@ Issue [#182](https://github.com/Linh86/cryptobank/issues/182) (epic [#166](https
 - Commit: `4a88386c86a3fe31ac2be02956e24329ca9b1129` (`main`)
 - Date: 2026-05-05
 - Env class: any deployment that has cleared the [no-broadcast rehearsal](base-mainnet-rehearsal.md) on this commit
-- Reviewer: Worker C (CryptoBank parallel-issue protocol; final operator sign-off below)
+- Reviewer: Worker C (CryptoKorr parallel-issue protocol; final operator sign-off below)
 
 ## Verdict
 

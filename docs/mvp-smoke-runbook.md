@@ -1,4 +1,4 @@
-# CryptoBank MVP smoke test (Base Sepolia)
+# CryptoKorr MVP smoke test (Base Sepolia)
 
 Operator runbook for re-running the cryptographic grant + revoke
 flow that closed #58 / #31 under PR #132. Repeats the proven

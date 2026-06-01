@@ -17,7 +17,7 @@ defmodule BankWeb.AgentLiveTest do
     test "renders the hero, top bar and all six sections", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/")
 
-      assert html =~ "CryptoBank"
+      assert html =~ "CryptoKorr"
       assert html =~ "Base Sepolia · testnet"
 
       assert html =~ "Connect a wallet to begin." or html =~ "Set the agent up in two steps."

@@ -350,7 +350,7 @@ defmodule Bank.Stablecoins.RouteSelector do
         gas_fee: nil,
         protocol_fee: nil,
         bridge_fee: bridge_quote.fees[:bridge_fee],
-        cryptobank_fee: nil,
+        cryptokorr_fee: nil,
         total_fee: total_fee
       },
       eta_seconds: eta,

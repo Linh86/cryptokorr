@@ -122,7 +122,7 @@ A coarser path also exists: `Kernel.invalidateNonce(uint32)` bumps
 is below it. Closer to "rotate the whole set of session keys" than
 to per-permission revoke.
 
-## How CryptoBank should integrate (sketch)
+## How CryptoKorr should integrate (sketch)
 
 1. **Grant** = construct a `PermissionPlugin` via
    `toPermissionValidator({ signer, policies, entryPoint, kernelVersion })`,

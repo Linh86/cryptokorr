@@ -207,7 +207,7 @@ defmodule Bank.WalletBindings do
         expires_at: %DateTime{} = expires_at
       }) do
     """
-    CryptoBank wants to bind your wallet for an MVP delegation install.
+    CryptoKorr wants to bind your wallet for an MVP delegation install.
 
     Workspace: #{workspace_id}
     Address:   #{address}

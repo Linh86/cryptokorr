@@ -13,9 +13,9 @@ defmodule Bank.Activity.Reconciliation do
       key to the replay bundle without N+1 queries.
     * **`classify_activity/2`** — given an imported activity and the
       list of execution plans available in the same workspace,
-      label the activity as either `:cryptobank_execution`
+      label the activity as either `:cryptokorr_execution`
       (matched to a plan's `tx_refs`) or `:external` (no match;
-      external wallet transfer not initiated by CryptoBank).
+      external wallet transfer not initiated by CryptoKorr).
 
   ## Workspace boundary
 
@@ -58,11 +58,11 @@ defmodule Bank.Activity.Reconciliation do
         }
 
   @typedoc """
-  Either `:cryptobank_execution` (matched to a plan in the same
+  Either `:cryptokorr_execution` (matched to a plan in the same
   workspace) or `:external` (no match; external wallet transfer
-  not initiated by CryptoBank).
+  not initiated by CryptoKorr).
   """
-  @type classification :: :cryptobank_execution | :external
+  @type classification :: :cryptokorr_execution | :external
 
   @doc """
   Find the imported-activity rows in the plan's workspace that
@@ -131,7 +131,7 @@ defmodule Bank.Activity.Reconciliation do
   workspace's plans loaded by the caller — this function does
   not query the DB.
 
-  Returns `:cryptobank_execution` on match; `:external` otherwise.
+  Returns `:cryptokorr_execution` on match; `:external` otherwise.
 
   An activity with `tx_hash: nil` (e.g. a CSV row with no chain
   hash) classifies as `:external` — there is no chain reference
@@ -147,7 +147,7 @@ defmodule Bank.Activity.Reconciliation do
            p.chain == activity.chain and
            activity.tx_hash in p.tx_refs
        end) do
-      :cryptobank_execution
+      :cryptokorr_execution
     else
       :external
     end

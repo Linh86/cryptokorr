@@ -222,7 +222,7 @@ defmodule Bank.Stablecoins.Providers.OneInch do
            gas_fee: nil,
            protocol_fee: nil,
            bridge_fee: nil,
-           cryptobank_fee: nil,
+           cryptokorr_fee: nil,
            total_fee: total_fee
          },
          eta_seconds: nil,

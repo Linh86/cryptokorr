@@ -1,6 +1,9 @@
-# CryptoBank chain adapter
+# CryptoKorr chain adapter
 
-TypeScript chain adapter for Bank v0.1 — Base + USDC execution.
+TypeScript chain adapter for the CryptoKorr v0.1 runtime. The
+public-alpha execution path is Base Sepolia only: scoped
+session-permission install/revoke, USDC transfer, 0x exact-input swap,
+and allowlisted Morpho USDC deposit callbacks.
 
 ## What this service owns
 
@@ -37,10 +40,10 @@ system of record for everything except live chain state.
 
 ## Contract
 
-The Phoenix ↔ Adapter contract is defined in the Phoenix repo:
+The Phoenix ↔ Adapter contract is defined in this monorepo:
 
-- Spec: `CryptoBank/priv/adapter/contract.md`
-- Fixtures: `CryptoBank/priv/adapter/fixtures/*.json`
+- Spec: [`../priv/adapter/contract.md`](../priv/adapter/contract.md)
+- Fixtures: [`../priv/adapter/fixtures/`](../priv/adapter/fixtures/)
 
 This adapter validates all incoming requests and outgoing callbacks
 against Zod schemas derived from those fixtures. Contract drift is
@@ -52,23 +55,31 @@ caught at build time by the contract test suite.
 |--------|-------------------------------|-------------|
 | GET    | `/health`                     | Live        |
 | POST   | `/dispatch/transfer`          | Live        |
-| POST   | `/dispatch/swap`              | Scaffolded  |
+| POST   | `/dispatch/swap`              | Live on Base Sepolia (#192) |
+| POST   | `/dispatch/morpho_deposit`    | Live on Base Sepolia (#206) |
 | POST   | `/dispatch/grant_delegation`  | Live (#58 grant flow — confirmed on Base Sepolia by PR #132; see "Cryptographic grant + revoke status" below) |
 | POST   | `/dispatch/revoke_delegation` | Live, cryptographic when the dispatch carries a `permission` block (default for rows granted under #58) and sentinel for legacy rows without artifacts |
 
-**Transfer** is the first real execution path. It builds a USDC
-ERC-20 transfer on Base wrapped in a `SimpleAccount.execute` call,
-assembles an ERC-4337 v0.7 UserOperation, signs it with the
-delegation key, submits to the bundler, and delivers the full
-callback lifecycle (`execution.broadcast` → `execution.confirmed`
-or `execution.reverted`). Callbacks carry both the `userop_hash`
+**Transfer** builds a USDC ERC-20 transfer on Base Sepolia wrapped in
+an account `execute(...)` call, assembles an ERC-4337 v0.7
+UserOperation, signs it with the delegation key, submits to the
+bundler, and delivers the full callback lifecycle
+(`execution.broadcast` → `execution.confirmed` or
+`execution.reverted`). Callbacks carry both the `userop_hash`
 (EntryPoint identity) and — on confirmation — the chain-level `hash`
-along with `nonce` (hex string), `bundler` label, and
-`block_number`.
+along with `nonce` (hex string), `bundler` label, and `block_number`.
 
-**Swap** validates the request shape and explicitly aborts. Phoenix
-receives an `execution.aborted` callback with a clear reason. No fake
-success is ever produced.
+**Swap** is live for Base Sepolia exact-input 0x routes. It validates
+the execution-route shape, rejects Base mainnet, builds an
+approve+swap batch, dispatches it through the bundler, and reports
+the same broadcast → confirmed/reverted/aborted callback chain as
+transfers. No fake success is ever produced.
+
+**Morpho deposit** is live for allowlisted Base Sepolia USDC
+ERC-4626 vault deposits. Phoenix owns vault allowlist, snapshot
+freshness, material-drift, pause, and policy gates; the adapter
+re-checks the structural chain/asset envelope, builds approve+deposit
+calldata itself, and exposes no withdraw/redeem endpoint.
 
 **Revoke delegation** validates the request, emits a `revoking`
 callback, then submits a **sentinel UserOperation** whose inner call
@@ -200,17 +211,18 @@ npm run dev        # starts on PORT from .env (default 4100)
 | `ADAPTER_DISPATCH_SECRET`   | Bearer the adapter REQUIRES on inbound `POST /dispatch/*`. Phoenix sends this. |
 | `PHOENIX_BASE_URL`          | Phoenix control plane URL                |
 | `ADAPTER_CALLBACK_SECRET`   | Bearer the adapter SENDS on outbound callbacks; Phoenix validates it. |
-| `BASE_RPC_URL`              | Base chain RPC endpoint                  |
+| `BASE_RPC_URL`              | Base Sepolia RPC endpoint for public alpha |
 | `BUNDLER_RPC_URL`           | ERC-4337 v0.7 bundler RPC endpoint       |
-| `SMART_ACCOUNT_ADDRESS`     | Smart-account (sender) address on Base   |
+| `SMART_ACCOUNT_ADDRESS`     | Smart-account (sender) address on the configured Base chain |
 | `DELEGATION_SIGNER_KEY`     | Private key for delegation signing       |
-| `USDC_CONTRACT_ADDRESS`     | USDC contract on Base                    |
+| `USDC_CONTRACT_ADDRESS`     | USDC contract on the configured Base chain; Base Sepolia in public alpha |
 | `ENTRY_POINT_ADDRESS`       | Optional; defaults to EntryPoint v0.7    |
 | `ADAPTER_TLS_CERT_PATH`     | Optional; if set with key, Fastify serves HTTPS instead of plain HTTP. |
 | `ADAPTER_TLS_KEY_PATH`      | Optional; partner to cert path above. Both must be set together. |
 
 The two bearer secrets gate the two directions of the trust boundary
-independently — see `docs/security.md` (in the Phoenix repo) for the
+independently — see
+[`../docs/security.md`](../docs/security.md) for the
 full model. Inbound dispatch auth is enforced by a Fastify preHandler
 on every `/dispatch/*` route; `/health` stays public. Constant-time
 comparison is used for the bearer check.
@@ -292,7 +304,14 @@ Test suites:
 - **Transfer dispatch** (`test/dispatch-transfer.test.ts`) — request
   validation, chain/asset support checks, error shapes.
 - **Swap dispatch** (`test/dispatch-swap.test.ts`) — validates input,
-  verifies explicit abort + callback delivery.
+  enforces Base Sepolia-only dispatch, and verifies structured abort
+  behavior when chain clients are unavailable. Full approve+swap
+  execution is covered by `test/base-swap.test.ts`.
+- **Morpho deposit dispatch** (`test/dispatch-morpho-deposit.test.ts`) —
+  validates input, enforces Base Sepolia-only USDC deposit dispatch,
+  and verifies structured abort behavior when chain clients are
+  unavailable. The approve+deposit executor lives in
+  `src/chains/base/morpho_deposit.ts`.
 - **Revoke dispatch** (`test/dispatch-revoke.test.ts`) — validates
   input, verifies the `revoking` → `revoked` callback sequence on
   success and the `revoking` → `revoke_failed` sequence on each
@@ -331,8 +350,9 @@ Test suites:
 
 ## What is intentionally deferred
 
-- **Real swap execution.** Router integration (Uniswap, CoW, etc.) is
-  not wired. The handler validates and aborts safely.
+- **Mainnet swap and Morpho execution.** Public-alpha swap and Morpho
+  deposit dispatch are Base Sepolia only. Mainnet routing, broad venue
+  support, and production liquidity operations remain post-MVP.
 - **Sentinel revoke as legacy fallback.** Cryptographic revoke
   is the default for rows with `permission` artifacts (#58 /
   #31, closed by PR #132). The sentinel
@@ -356,5 +376,6 @@ Test suites:
   callbacks sign with `$ADAPTER_CALLBACK_SECRET`. Production will
   add mutual TLS per the contract spec; not yet wired in either
   direction.
-- **Multi-chain support.** Only Base. Schema is chain-aware but
-  runtime rejects non-Base dispatches.
+- **Multi-chain support.** Only Base Sepolia is live for the public
+  MVP execution paths. Schemas are chain-aware, but non-Base chains
+  and mainnet swap/Morpho dispatches fail closed.

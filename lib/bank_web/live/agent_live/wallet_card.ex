@@ -118,7 +118,7 @@ defmodule BankWeb.AgentLive.WalletCard do
         </div>
         <div :if={@wallet == :wrong_network} class="card__body">
           <p class="lede">
-            Your wallet is on a different network. CryptoBank only operates on Base Sepolia
+            Your wallet is on a different network. CryptoKorr only operates on Base Sepolia
             during private alpha.
           </p>
           <div class="card__actions">

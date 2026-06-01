@@ -88,7 +88,7 @@ defmodule Bank.WalletBindingsTest do
       assert binding.verified_at == nil
       assert binding.revoked_at == nil
       assert is_binary(binding.nonce)
-      assert binding.challenge_message =~ "CryptoBank wants to bind"
+      assert binding.challenge_message =~ "CryptoKorr wants to bind"
       assert binding.challenge_message =~ binding.nonce
       assert binding.challenge_message =~ address
       assert DateTime.compare(binding.expires_at, DateTime.utc_now()) == :gt

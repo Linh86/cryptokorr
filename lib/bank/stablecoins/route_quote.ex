@@ -28,7 +28,7 @@ defmodule Bank.Stablecoins.RouteQuote do
           gas_fee: Decimal.t() | nil,
           protocol_fee: Decimal.t() | nil,
           bridge_fee: Decimal.t() | nil,
-          cryptobank_fee: Decimal.t() | nil,
+          cryptokorr_fee: Decimal.t() | nil,
           total_fee: Decimal.t() | nil
         }
 
@@ -56,7 +56,7 @@ defmodule Bank.Stablecoins.RouteQuote do
       gas_fee: nil,
       protocol_fee: nil,
       bridge_fee: nil,
-      cryptobank_fee: nil,
+      cryptokorr_fee: nil,
       total_fee: nil
     },
     eta_seconds: nil,

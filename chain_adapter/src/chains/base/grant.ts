@@ -17,7 +17,7 @@
  * confirmed that `serializePermissionAccount(account,
  * sessionPrivateKey)` embeds the key VERBATIM in the base64 blob.
  * Persisting that in Phoenix would make the control plane hold a
- * signing key — a hard violation of CryptoBank's threat model
+ * signing key — a hard violation of CryptoKorr's threat model
  * (adapter-only signers). We therefore call
  * `serializePermissionAccount(account, undefined)` and ship the
  * `session_signer_address` as a separate field. At revoke-time
