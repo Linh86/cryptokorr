@@ -1,7 +1,7 @@
 # Base mainnet rehearsal — no-broadcast operator runbook
 
-Issue [#180](https://github.com/Linh86/cryptobank/issues/180) (epic
-[#166](https://github.com/Linh86/cryptobank/issues/166)).
+Issue [#180](https://github.com/Linh86/cryptokorr/issues/180) (epic
+[#166](https://github.com/Linh86/cryptokorr/issues/166)).
 
 > **Audience.** Operator preparing to flip a workspace into Base
 > mainnet for the first time, or rehearsing a fresh deployment
@@ -312,10 +312,10 @@ operation at every layer with `:mainnet_disabled` — see the
 
 ## Related issues
 
-- [#166](https://github.com/Linh86/cryptobank/issues/166) — epic.
-- [#178](https://github.com/Linh86/cryptobank/issues/178) —
+- [#166](https://github.com/Linh86/cryptokorr/issues/166) — epic.
+- [#178](https://github.com/Linh86/cryptokorr/issues/178) —
   workspace `mainnet_enabled` flag.
-- [#179](https://github.com/Linh86/cryptobank/issues/179) —
+- [#179](https://github.com/Linh86/cryptokorr/issues/179) —
   read-only mainnet preflight.
-- [#180](https://github.com/Linh86/cryptobank/issues/180) — this
+- [#180](https://github.com/Linh86/cryptokorr/issues/180) — this
   runbook.

@@ -1,7 +1,7 @@
 # MVP readiness — closure audit (post epic #134)
 
 Snapshot taken 2026-04-29 on `main` after PR #148 (`7f12c4a`).
-Epic [#134](https://github.com/Linh86/cryptobank/issues/134) is the
+Epic [#134](https://github.com/Linh86/cryptokorr/issues/134) is the
 "Intent Execution MVP" tracker; PRs #142 (#135), #145 (#136), #144
 (#139), #146 (#137), #147 (#138), and #148 (#140) closed every
 technical sub-issue. PR #141 (this file) is the docs-polish closer.
@@ -158,7 +158,7 @@ These are intentional v0.1 simplifications, not bugs. Each has a
 documented escape hatch.
 
 - **Mainnet readiness is reviewed; broadcast is gated by canary caps.**
-  Epic [#166](https://github.com/Linh86/cryptobank/issues/166) shipped
+  Epic [#166](https://github.com/Linh86/cryptokorr/issues/166) shipped
   the workspace `mainnet_enabled` flag (#178), the read-only preflight
   (#179), the no-broadcast rehearsal runbook (#180), the in-code
   capped canary (#181), and the formal go / no-go review (#182). The

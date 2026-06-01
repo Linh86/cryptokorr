@@ -2,25 +2,25 @@
 
 Reviewer-ready smoke runbook for the browser-signed ZeroDev session
 permission install on **Base Sepolia (84532) only**. Closes the epic
-[#471](https://github.com/Linh86/cryptobank/issues/471) walkthrough
+[#471](https://github.com/Linh86/cryptokorr/issues/471) walkthrough
 and references the launch-track child issues:
 
-- [#472](https://github.com/Linh86/cryptobank/issues/472) — design note
+- [#472](https://github.com/Linh86/cryptokorr/issues/472) — design note
   (`docs/design/browser-signed-install.md`)
-- [#473](https://github.com/Linh86/cryptobank/issues/473) — frontend
+- [#473](https://github.com/Linh86/cryptokorr/issues/473) — frontend
   scaffold (LiveView + JS hook)
-- [#474](https://github.com/Linh86/cryptobank/issues/474) — Phoenix
+- [#474](https://github.com/Linh86/cryptokorr/issues/474) — Phoenix
   attestation endpoints + on-chain verifier worker
-- [#475](https://github.com/Linh86/cryptobank/issues/475) — revoke
+- [#475](https://github.com/Linh86/cryptokorr/issues/475) — revoke
   parity (sentinel for `:user`-rooted rows)
-- [#476](https://github.com/Linh86/cryptobank/issues/476) — initial
+- [#476](https://github.com/Linh86/cryptokorr/issues/476) — initial
   reviewer-ready smoke runbook
-- [#500](https://github.com/Linh86/cryptobank/issues/500) — browser
+- [#500](https://github.com/Linh86/cryptokorr/issues/500) — browser
   session-authenticated install routes + server-side receipt
   recovery (shipped on `main`)
-- [#501](https://github.com/Linh86/cryptobank/issues/501) — frontend
+- [#501](https://github.com/Linh86/cryptokorr/issues/501) — frontend
   ZeroDev SDK + bundler submission (shipped on `main`)
-- [#502](https://github.com/Linh86/cryptobank/issues/502) — this
+- [#502](https://github.com/Linh86/cryptokorr/issues/502) — this
   runbook + docs hygiene + preflight Mix task (shipped on `main`)
 
 **Hard guarantees this runbook exercises:**
@@ -41,10 +41,10 @@ and references the launch-track child issues:
 > **Implementation status (read this first).** Path A is **shipped
 > on `main`** as the launch reviewer flow. The backend
 > browser-session install routes + server-side receipt poller
-> ([#500](https://github.com/Linh86/cryptobank/issues/500)) and the
+> ([#500](https://github.com/Linh86/cryptokorr/issues/500)) and the
 > frontend ZeroDev SDK + bundler submission
-> ([#501](https://github.com/Linh86/cryptobank/issues/501)) merged
-> together with this runbook ([#502](https://github.com/Linh86/cryptobank/issues/502)).
+> ([#501](https://github.com/Linh86/cryptokorr/issues/501)) merged
+> together with this runbook ([#502](https://github.com/Linh86/cryptokorr/issues/502)).
 > Path B is the **manual / debug / escape-hatch** route — useful for
 > debugging a malfunctioning Path A run, exercising the API directly
 > from `curl`, or unblocking a partner whose browser environment is
@@ -78,7 +78,7 @@ contract.
 ## API surface
 
 The browser-signed install lifecycle uses three endpoints under
-`/v1/wallet_bindings/:id/`. After [#500](https://github.com/Linh86/cryptobank/issues/500)
+`/v1/wallet_bindings/:id/`. After [#500](https://github.com/Linh86/cryptokorr/issues/500)
 lands, the same three paths are also reachable on the
 browser-session pipeline (`/wallet_bindings/:id/install_*`) so the
 in-LiveView hook can hit them with the operator's session cookie
@@ -134,9 +134,9 @@ existence leak; pinned by controller tests).
 ## Path A — Real automated browser install
 
 This is the launch path, shipped on `main` via
-[#500](https://github.com/Linh86/cryptobank/issues/500) +
-[#501](https://github.com/Linh86/cryptobank/issues/501) +
-[#502](https://github.com/Linh86/cryptobank/issues/502).
+[#500](https://github.com/Linh86/cryptokorr/issues/500) +
+[#501](https://github.com/Linh86/cryptokorr/issues/501) +
+[#502](https://github.com/Linh86/cryptokorr/issues/502).
 End-to-end the reviewer never leaves the browser; the wallet pop-up
 for the EIP-712 install signature is the only manual moment.
 
@@ -228,7 +228,7 @@ these match the operator-consent UI string before approving.
    `(binding_id, install_userop_hash)`. **Audit evidence**:
    `delegation.install_signed_by_user`.
 3. Phoenix simultaneously enqueues the receipt poller from
-   [#500](https://github.com/Linh86/cryptobank/issues/500)
+   [#500](https://github.com/Linh86/cryptokorr/issues/500)
    (`Bank.Runtime.Workers.PollInstallReceipt`). The poller
    carries the row to a verdict regardless of browser tab state —
    if the operator closes the tab here, the install still
@@ -329,7 +329,7 @@ Browser-signed delegations carry `root_validator_owner: "user"`,
 so the revoke worker (`Bank.Runtime.Workers.RevokeDelegation`)
 takes the **sentinel-revoke path** for this row — see
 [`docs/design/browser-signed-install.md`](../design/browser-signed-install.md)
-§ 6 and the implementation under [#475](https://github.com/Linh86/cryptobank/issues/475).
+§ 6 and the implementation under [#475](https://github.com/Linh86/cryptokorr/issues/475).
 The delegation row transitions
 `:active → :revoking → :revoked`; subsequent intents against the
 same smart account are held / blocked by the runtime decision

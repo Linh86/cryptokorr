@@ -18,32 +18,32 @@ This is a working map of progress as of the most recent `main`.
 
 ## Recently landed since this map opened
 
-- [PR #324](https://github.com/Linh86/cryptobank/pull/324) — SecurityLive
+- [PR #324](https://github.com/Linh86/cryptokorr/pull/324) — SecurityLive
   in-flight execution plans card (`#in-flight-plans-card`). Originally
   listed under *Remaining likely slices*; moved into *Shipped surfaces*
   below. Read-only: it does NOT add abort/pause controls, does NOT
   surface failed/retrying jobs, does NOT add provider/adapter health,
   does NOT add chain-pause UI controls, and does NOT close #229 by
   itself.
-- [PR #327](https://github.com/Linh86/cryptobank/pull/327) — SecurityLive
+- [PR #327](https://github.com/Linh86/cryptokorr/pull/327) — SecurityLive
   emergency action confirmations (`data-confirm` audit). Originally
   listed under *Remaining likely slices*; moved into *Shipped surfaces*
   below. Closes the *"All emergency actions confirm before applying"*
   acceptance bullet for the `/security` surface only — does not by
   itself close #229.
-- [PR #329](https://github.com/Linh86/cryptobank/pull/329) — SecurityLive
+- [PR #329](https://github.com/Linh86/cryptokorr/pull/329) — SecurityLive
   pending approvals card (`#pending-approvals-card`). Originally listed
   under *Remaining likely slices*; moved into *Shipped surfaces* below.
   Read-only inline panel; the dedicated `/queue#pending-approvals-section`
   remains the operator workhorse for triage.
-- [PR #330](https://github.com/Linh86/cryptobank/pull/330) — SecurityLive
+- [PR #330](https://github.com/Linh86/cryptokorr/pull/330) — SecurityLive
   incident summary snapshot (`#incident-summary-card` +
   `#incident-summary-copy-block`). The original *"Richer incident summary
   / export"* slice has been narrowed: this PR ships read-only operational
   counts and a copy-block; reasons, payloads, token material, tx refs,
   and signing material are intentionally excluded. Any further
   enrichment is reframed as optional below.
-- [PR #326](https://github.com/Linh86/cryptobank/pull/326) — DB-backed
+- [PR #326](https://github.com/Linh86/cryptokorr/pull/326) — DB-backed
   per-chain pause gate (#228 Phase 1, backend). Backend-only: new
   `pauses` table, `Bank.Security.Pauses` context, dispatch gates at
   `Decisions.validate_not_paused/2` and
@@ -52,26 +52,26 @@ This is a working map of progress as of the most recent `main`.
   clauses + `@safety_event_types` entries that wire the new events into
   the `/security` safety timeline. **Not** a chain-pause UI card; that
   shipped separately in #334 (below).
-- [PR #332](https://github.com/Linh86/cryptobank/pull/332) — per-chain
+- [PR #332](https://github.com/Linh86/cryptokorr/pull/332) — per-chain
   pause HTTP / OpenAPI endpoints (#228 Phase 1). Adds `POST
   /v1/security/pause_chain` and `POST /v1/security/resume_chain` to the
   `/v1` surface. Phase 1 accepts only `chain: "base"`; any other value
   returns `422 unsupported_chain` with a stable error code naming the
   supported set. Merge SHA
   `35a1574c06d8944fa1f18ea90d757c99f5a18653`.
-- [PR #334](https://github.com/Linh86/cryptobank/pull/334) — SecurityLive
+- [PR #334](https://github.com/Linh86/cryptokorr/pull/334) — SecurityLive
   read-only chain-pauses card (`#chain-pauses-card`). Originally listed
   under *Remaining likely slices* as "chain-pause UI card"; the
   read-only half is now shipped, mutating controls remain a follow-up.
   Merge SHA `69d8770c0630fbc51ae43d008956c48c68f6942d`.
-- [PR #336](https://github.com/Linh86/cryptobank/pull/336) — `expires_at`
+- [PR #336](https://github.com/Linh86/cryptokorr/pull/336) — `expires_at`
   + auto-resume sweeper (#228 Phase 1.5, backend-only). Adds nullable
   `expires_at` to the `pauses` table with a partial index for the
   sweeper, and a periodic `Bank.Runtime.Workers.SweepExpiredPauses` job
   that flips active rows whose `expires_at <= now()` to resumed. No UI
   surface; no new HTTP/OpenAPI endpoints. Merge SHA
   `6744871da00f415173053e9a2c94d1769be710ef`.
-- [PR #337](https://github.com/Linh86/cryptobank/pull/337) — SecurityLive
+- [PR #337](https://github.com/Linh86/cryptokorr/pull/337) — SecurityLive
   Base chain pause/resume controls. Adds the mutating half of the
   chain-pause UI on the existing `#chain-pauses-card`: an admin-only
   `#chain-pause-base-control` panel with `#chain-pause-base-form`,
@@ -84,7 +84,7 @@ This is a working map of progress as of the most recent `main`.
   Originally listed under *Remaining likely slices* as "mutating
   chain-pause controls on `/security`"; moved into *Shipped surfaces*
   below. Merge SHA `d67dd951d3a4479dbbadb72d7339d74d96628cf9`.
-- [PR #339](https://github.com/Linh86/cryptobank/pull/339) — cached
+- [PR #339](https://github.com/Linh86/cryptokorr/pull/339) — cached
   adapter health snapshot for the Incident Center UI (#229,
   backend-only). Adds `Bank.Ops.AdapterHealthSnapshot`, a supervised
   GenServer that owns a named ETS table and refreshes the latest
@@ -93,7 +93,7 @@ This is a working map of progress as of the most recent `main`.
   HTTP probe. Unblocks the provider/adapter health summary slice on
   the LiveView side. Merge SHA
   `000ff91068dfa7d3ab7e0ee24889d6487a6a5eb6`.
-- [PR #342](https://github.com/Linh86/cryptobank/pull/342) — SecurityLive
+- [PR #342](https://github.com/Linh86/cryptokorr/pull/342) — SecurityLive
   cached adapter health card. Read-only `#adapter-health-card`
   rendered in the right column between `#chain-pauses-card` and
   `#safety-events-card`. Stable element ids: `#adapter-health-status`
@@ -105,7 +105,7 @@ This is a working map of progress as of the most recent `main`.
   cache boundary; raw exception text, credentialed RPC URLs, and
   stack traces are excluded by construction. No refresh button. Merge
   SHA `88f409d176389cce606d8579a81852398a1232bf`.
-- [PR #344](https://github.com/Linh86/cryptobank/pull/344) — sanitized
+- [PR #344](https://github.com/Linh86/cryptokorr/pull/344) — sanitized
   problem-job read API for the Incident Center UI (#229,
   backend-only). Adds `Bank.Ops.Jobs.list_problem_jobs/1`, a
   workspace-agnostic read function with a hard query cap that
@@ -120,7 +120,7 @@ This is a working map of progress as of the most recent `main`.
   columns are filtered at the module boundary and have explicit
   redaction tests. Merge SHA
   `9ce6ad718a4cfc45778dafbd3862c8c1ec86a66c`.
-- [PR #345](https://github.com/Linh86/cryptobank/pull/345) — SecurityLive
+- [PR #345](https://github.com/Linh86/cryptokorr/pull/345) — SecurityLive
   incident readiness snapshot. Read-only `#incident-readiness-card`
   with `data-level` summarizing `critical` / `attention` / `steady`.
   Per-field stable ids: `#incident-readiness-runtime`,
@@ -132,7 +132,7 @@ This is a working map of progress as of the most recent `main`.
   Pure projection from already-loaded assigns — no backend call, no
   new ETS read, no forms / buttons / events. Merge SHA
   `7ed96ec8391799e8d1e342de9eb502ea242407af`.
-- [PR #348](https://github.com/Linh86/cryptobank/pull/348) — SecurityLive
+- [PR #348](https://github.com/Linh86/cryptokorr/pull/348) — SecurityLive
   sanitized problem-jobs card. Read-only `#problem-jobs-card` with
   `data-scope="global"` and `data-count`. Per-row stable ids:
   `#problem-job-<id>`, `#problem-job-state-<id>` (with `data-state`),
@@ -152,23 +152,23 @@ organized by the LiveView they live on.
 
 - **Agent-keys pause card** — operator-visible card showing workspace
   agent-key pause state with pause/resume controls. Landed in
-  [#294](https://github.com/Linh86/cryptobank/pull/294)
+  [#294](https://github.com/Linh86/cryptokorr/pull/294)
   ("SecurityLive agent-keys pause card (#231-c, parent epic #212)").
 - **Active delegation risk summary + agent-key safety events** —
   delegation risk panel and inclusion of agent-key audit events on the
   safety timeline. Landed in
-  [#297](https://github.com/Linh86/cryptobank/pull/297)
+  [#297](https://github.com/Linh86/cryptokorr/pull/297)
   ("Active delegation risk summary + agent-key safety events (#231-e)").
 - **Safety timeline filters** — event-type / actor / range filters on
   the security safety timeline. Initial filter UI in
-  [#300](https://github.com/Linh86/cryptobank/pull/300); the actor /
+  [#300](https://github.com/Linh86/cryptokorr/pull/300); the actor /
   range filters were pushed into the DB query for correctness and
-  scalability in [#301](https://github.com/Linh86/cryptobank/pull/301).
+  scalability in [#301](https://github.com/Linh86/cryptokorr/pull/301).
 - **Stuck-plans card + `ops.stuck_plan_detected` on the safety
   timeline** — surfaces detector output operator-side. Landed in
-  [#305](https://github.com/Linh86/cryptobank/pull/305) and
+  [#305](https://github.com/Linh86/cryptokorr/pull/305) and
   workspace-scoped via
-  [#308](https://github.com/Linh86/cryptobank/pull/308) ("SecurityLive:
+  [#308](https://github.com/Linh86/cryptokorr/pull/308) ("SecurityLive:
   workspace-scoped stuck-plan query + Layouts.app current_scope").
 - **In-flight execution plans card** — operator-visible card listing
   the current workspace's non-terminal execution plans (the superset
@@ -184,7 +184,7 @@ organized by the LiveView they live on.
   statuses rendering with `data-status`, terminal exclusion,
   sibling-workspace isolation, and stuck/in-flight coexistence (a
   stuck plan appears in BOTH cards because in-flight is the superset).
-  Landed in [#324](https://github.com/Linh86/cryptobank/pull/324)
+  Landed in [#324](https://github.com/Linh86/cryptokorr/pull/324)
   ("SecurityLive: show in-flight execution plans (#229)"), merge SHA
   `9f8bdbc`.
 - **Emergency-action confirmation audit** — every mutating control on
@@ -198,7 +198,7 @@ organized by the LiveView they live on.
   pinned negative so a future drive-by edit cannot silently regress
   the audit. Eight tests in `SecurityLiveTest` use stable
   `#id[data-confirm]` selectors. Landed in
-  [#327](https://github.com/Linh86/cryptobank/pull/327) ("SecurityLive:
+  [#327](https://github.com/Linh86/cryptokorr/pull/327) ("SecurityLive:
   confirm emergency actions (#229)"), merge SHA `8eba1b3`. Closes the
   *"All emergency actions confirm before applying"* acceptance bullet
   for `/security`; does not close #229 by itself.
@@ -210,7 +210,7 @@ organized by the LiveView they live on.
   pushed into the DB query. Each row links into
   `/queue#pending-approvals-section`, which remains the dedicated
   triage surface. Landed in
-  [#329](https://github.com/Linh86/cryptobank/pull/329) ("SecurityLive:
+  [#329](https://github.com/Linh86/cryptokorr/pull/329) ("SecurityLive:
   show pending approvals card (#229)"), merge SHA `89f6698`.
 - **Incident summary snapshot** — read-only operational-counts panel
   rendered above `#safety-events-card`. Stable element id
@@ -218,7 +218,7 @@ organized by the LiveView they live on.
   `#incident-summary-copy-block` for the operator copy/export block
   underneath. Counts only — no reasons, no payloads, no policy
   snapshot, no API keys, no bearer tokens, no tx refs, no signing
-  material. Landed in [#330](https://github.com/Linh86/cryptobank/pull/330)
+  material. Landed in [#330](https://github.com/Linh86/cryptokorr/pull/330)
   ("SecurityLive: add incident summary snapshot (#229)"), merge SHA
   `4f0d64b`.
 - **`security.scope_paused` / `security.scope_resumed` on the safety
@@ -227,7 +227,7 @@ organized by the LiveView they live on.
   `visible_to_workspace?/3` with workspace-id-gated clauses placed
   BEFORE the existing `"security." <> _` catch-all so workspace-scoped
   scope events do not leak across workspaces. Backend gate landed in
-  [#326](https://github.com/Linh86/cryptobank/pull/326) ("Add DB-backed
+  [#326](https://github.com/Linh86/cryptokorr/pull/326) ("Add DB-backed
   per-chain pause gate (#228 phase 1)"), merge SHA `9083bc3`.
 - **Active chain pauses card** — read-only operator-visible card
   listing the current workspace's currently-active scope pauses
@@ -241,7 +241,7 @@ organized by the LiveView they live on.
   Tests cover empty state (`data-count="0"`), present rows,
   sibling-workspace isolation, and an audit-hygiene assertion that
   reasons / payloads are not exposed beyond the rendered fields.
-  Landed in [#334](https://github.com/Linh86/cryptobank/pull/334)
+  Landed in [#334](https://github.com/Linh86/cryptokorr/pull/334)
   ("SecurityLive: show active chain pauses (#229)"), merge SHA
   `69d8770`.
 - **Base chain pause/resume controls** — admin-only mutating half of
@@ -268,7 +268,7 @@ organized by the LiveView they live on.
   read-only rendering (no mutating buttons), and hostile-operator
   `pause_chain` / `resume_chain` event refusal with admin-required
   flash. Landed in
-  [#337](https://github.com/Linh86/cryptobank/pull/337) ("SecurityLive:
+  [#337](https://github.com/Linh86/cryptokorr/pull/337) ("SecurityLive:
   add base chain pause controls (#228/#229)"), merge SHA `d67dd951`.
 - **Cached adapter health card** — read-only `#adapter-health-card`
   rendered in the right column between `#chain-pauses-card` and
@@ -285,7 +285,7 @@ organized by the LiveView they live on.
   `#pending-approvals-card`, and `#safety-events-card`. Tests pin
   the card's negative posture (no `AdapterHealthSnapshot.refresh/1`
   network calls during render) plus the cache-only data flow. Landed
-  in [#342](https://github.com/Linh86/cryptobank/pull/342)
+  in [#342](https://github.com/Linh86/cryptokorr/pull/342)
   ("SecurityLive: show cached adapter health (#229)"), merge SHA
   `88f409d`.
 - **Incident readiness card** — compact read-only roll-up of the
@@ -307,7 +307,7 @@ organized by the LiveView they live on.
   otherwise. Tests cover the steady / critical / attention branches
   individually, plus sibling-workspace isolation, coexistence with
   the other cards, and a secret-negative content assertion. Landed
-  in [#345](https://github.com/Linh86/cryptobank/pull/345)
+  in [#345](https://github.com/Linh86/cryptokorr/pull/345)
   ("SecurityLive: add incident readiness snapshot (#229)"), merge
   SHA `7ed96ec8`.
 - **Sanitized problem-jobs card** — read-only `#problem-jobs-card`
@@ -327,7 +327,7 @@ organized by the LiveView they live on.
   `args` / `errors` / `meta` / `tags` / stack traces / raw
   exception text / RPC URLs; those columns are filtered at the
   context boundary. Landed in
-  [#348](https://github.com/Linh86/cryptobank/pull/348)
+  [#348](https://github.com/Linh86/cryptokorr/pull/348)
   ("SecurityLive: show sanitized problem jobs (#229)"), merge SHA
   `aa0fc020`.
 
@@ -335,28 +335,28 @@ organized by the LiveView they live on.
 
 - **Stuck-plans attention line** — top-of-dashboard banner row when the
   detector reports stuck plans. Landed in
-  [#311](https://github.com/Linh86/cryptobank/pull/311)
+  [#311](https://github.com/Linh86/cryptokorr/pull/311)
   ("DashboardLive: stuck-plans attention line + Layouts.app
   current_scope (#229)").
 - **Workspace agent-keys-paused attention line** — top-of-dashboard
   banner row when the workspace agent-key lockdown is active. Landed in
-  [#313](https://github.com/Linh86/cryptobank/pull/313).
+  [#313](https://github.com/Linh86/cryptokorr/pull/313).
 - **Attention-banner stable ids and links** — every attention banner
   row now has a stable id and an actionable link target. Landed in
-  [#315](https://github.com/Linh86/cryptobank/pull/315).
+  [#315](https://github.com/Linh86/cryptokorr/pull/315).
 - **Stat-card queue links** — dashboard stat cards link into the
   per-queue sections (intents, decisions, plans). Landed in
-  [#316](https://github.com/Linh86/cryptobank/pull/316).
+  [#316](https://github.com/Linh86/cryptokorr/pull/316).
 - **Runtime + delegation stat-card links to `/security`** — the
   symmetric set of dashboard stat-card links pointing into the security
-  console. Landed in [#320](https://github.com/Linh86/cryptobank/pull/320).
+  console. Landed in [#320](https://github.com/Linh86/cryptokorr/pull/320).
 
 ### Cross-cutting (operator pages)
 
 - **`current_scope` propagation across operator pages** — every
   operator LiveView passes the current scope to `<Layouts.app>` so
   navigation and per-tenant guards behave uniformly. Landed in
-  [#319](https://github.com/Linh86/cryptobank/pull/319) ("LiveViews:
+  [#319](https://github.com/Linh86/cryptokorr/pull/319) ("LiveViews:
   pass current_scope to <Layouts.app> across operator pages (P3 sweep,
   supersedes #317)").
 
@@ -384,7 +384,7 @@ surface, not a green-field reimplementation.
 - **Smart-account / api-key scoped pause UI** — Phase 2 (smart_account)
   and Phase 3 (api_key) backends do not exist yet. UI for those
   scopes remains future scope per design memo
-  [PR #310](https://github.com/Linh86/cryptobank/pull/310) §9.
+  [PR #310](https://github.com/Linh86/cryptokorr/pull/310) §9.
 
 ## Optional enhancements
 
@@ -394,7 +394,7 @@ issue if pursued; do not bundle into a #229 closeout.
 
 - **Richer incident summary beyond the snapshot card** — the basic
   read-only operational-counts snapshot landed in
-  [PR #330](https://github.com/Linh86/cryptobank/pull/330). Further
+  [PR #330](https://github.com/Linh86/cryptokorr/pull/330). Further
   enrichment (e.g., a curated "what happened in the last N minutes"
   narrative pulled from the safety timeline + audit log, or a
   structured export the post-mortem checklist in
@@ -406,7 +406,7 @@ issue if pursued; do not bundle into a #229 closeout.
 ## Blocked by #228
 
 The per-scope pause backend is being delivered under #228. The design
-memo ([PR #310](https://github.com/Linh86/cryptobank/pull/310)) is
+memo ([PR #310](https://github.com/Linh86/cryptokorr/pull/310)) is
 still open. As of this refresh, **Phase 1 chain-pause is materially
 complete** across backend, API, read-only UI, mutating UI, and expiry
 axes; only the optional ETS projection and the later scope phases
@@ -414,21 +414,21 @@ remain under #228.
 
 - **Per-chain pause** — Phase 1 of #228.
   - Backend gate: **MERGED** in
-    [PR #326](https://github.com/Linh86/cryptobank/pull/326)
+    [PR #326](https://github.com/Linh86/cryptokorr/pull/326)
     (SHA `9083bc3`).
   - HTTP / OpenAPI endpoints (`POST /v1/security/pause_chain`,
     `POST /v1/security/resume_chain`): **MERGED** in
-    [PR #332](https://github.com/Linh86/cryptobank/pull/332)
+    [PR #332](https://github.com/Linh86/cryptokorr/pull/332)
     (SHA `35a1574`). Phase 1 accepts `"base"` only; other values get
     `422 unsupported_chain`.
   - Read-only `#chain-pauses-card`: **MERGED** in
-    [PR #334](https://github.com/Linh86/cryptobank/pull/334)
+    [PR #334](https://github.com/Linh86/cryptokorr/pull/334)
     (SHA `69d8770`).
   - `expires_at` + auto-resume sweeper: **MERGED** in
-    [PR #336](https://github.com/Linh86/cryptobank/pull/336)
+    [PR #336](https://github.com/Linh86/cryptokorr/pull/336)
     (SHA `6744871`).
   - Mutating Base pause/resume controls on `/security`: **MERGED** in
-    [PR #337](https://github.com/Linh86/cryptobank/pull/337)
+    [PR #337](https://github.com/Linh86/cryptokorr/pull/337)
     (SHA `d67dd951`). Admin-only via `LiveAuth` re-check;
     `data-confirm` on both buttons; chain pinned to `"base"`
     server-side.
@@ -442,7 +442,7 @@ remain under #228.
 - **Aggregate scoped-pause badge** on the security console header —
   also part of #228 §9 UI impact.
 
-The design memo §9 ([PR #310](https://github.com/Linh86/cryptobank/pull/310))
+The design memo §9 ([PR #310](https://github.com/Linh86/cryptokorr/pull/310))
 documents exactly which `SecurityLive` slots get touched, so each UI
 slice is bounded and reviewable once its backend half lands.
 
@@ -468,7 +468,7 @@ slice is bounded and reviewable once its backend half lands.
 - Closing #229: do **not** rely on this map alone. Map every
   acceptance criterion in the #229 issue body to landed evidence (PRs,
   tests, screenshots), the way the [#230 closure
-  comment](https://github.com/Linh86/cryptobank/issues/230) did.
+  comment](https://github.com/Linh86/cryptokorr/issues/230) did.
 
 ## Maintenance
 

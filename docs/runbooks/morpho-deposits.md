@@ -1,8 +1,8 @@
 # Morpho deposits — operator runbook
 
-This runbook is the operator-facing reference for Morpho vault risk explanation and the read-only ERC-4626 yield-deposit decision pipeline (issues [#199](https://github.com/Linh86/cryptobank/issues/199), [#201](https://github.com/Linh86/cryptobank/issues/201), [#202](https://github.com/Linh86/cryptobank/issues/202), [#203](https://github.com/Linh86/cryptobank/issues/203), [#208](https://github.com/Linh86/cryptobank/issues/208), and [#209](https://github.com/Linh86/cryptobank/issues/209)). It tells a fresh reviewer what Morpho is in CryptoKorr's model, what is and is not implemented today, and how to verify the surfaces locally without secrets, without `.env`, without any chain broadcast, and without calling Morpho's GraphQL API.
+This runbook is the operator-facing reference for Morpho vault risk explanation and the read-only ERC-4626 yield-deposit decision pipeline (issues [#199](https://github.com/Linh86/cryptokorr/issues/199), [#201](https://github.com/Linh86/cryptokorr/issues/201), [#202](https://github.com/Linh86/cryptokorr/issues/202), [#203](https://github.com/Linh86/cryptokorr/issues/203), [#208](https://github.com/Linh86/cryptokorr/issues/208), and [#209](https://github.com/Linh86/cryptokorr/issues/209)). It tells a fresh reviewer what Morpho is in CryptoKorr's model, what is and is not implemented today, and how to verify the surfaces locally without secrets, without `.env`, without any chain broadcast, and without calling Morpho's GraphQL API.
 
-> **Audience.** Operators, alpha reviewers, and anyone wiring Morpho yield actions into the runtime. The Morpho surface today is **read-only risk + decision** — *not* execution dispatch (that lives in [#206](https://github.com/Linh86/cryptobank/issues/206) deposit / [#207](https://github.com/Linh86/cryptobank/issues/207) withdraw), *not* a yield aggregator, *not* a Morpho UI ([#204](https://github.com/Linh86/cryptobank/issues/204)).
+> **Audience.** Operators, alpha reviewers, and anyone wiring Morpho yield actions into the runtime. The Morpho surface today is **read-only risk + decision** — *not* execution dispatch (that lives in [#206](https://github.com/Linh86/cryptokorr/issues/206) deposit / [#207](https://github.com/Linh86/cryptokorr/issues/207) withdraw), *not* a yield aggregator, *not* a Morpho UI ([#204](https://github.com/Linh86/cryptokorr/issues/204)).
 
 The detailed risk model, dimension definitions, severity mappings, and operator UI copy live in the design doc [`docs/morpho-risk-explanation.md`](../morpho-risk-explanation.md) and the implementation module [`Bank.DefiVenues.Morpho.RiskExplanation`](../../lib/bank/defi_venues/morpho/risk_explanation.ex). This runbook is the operational counterpart: it explains how to drive the surfaces locally and how to read the operator-visible output.
 
@@ -26,7 +26,7 @@ The conservative MVP workflow is **Base Sepolia only**:
 4. The evaluator resolves the persisted vault snapshot via [`Bank.DefiVenues.Morpho.Snapshots.get_current/2`](../../lib/bank/defi_venues/morpho/snapshots.ex), compiles the workspace's active Morpho rules into a [`%Bank.DefiVenues.Morpho.PolicyInput{}`](../../lib/bank/defi_venues/morpho/policy_input.ex) via [`Bank.Policies.Morpho.RulesCompiler.compile/2`](../../lib/bank/policies/morpho/rules_compiler.ex), and runs [`Bank.DefiVenues.Morpho.RiskExplanation.explain/3`](../../lib/bank/defi_venues/morpho/risk_explanation.ex).
 5. The resulting explanation map is embedded in the new `DecisionEnvelope`'s `reasons.items[0].details.morpho_risk_explanation`, the matched rule ids land in `policy_snapshot_ref`, and three Morpho-specific audit events fire alongside `decision.decided` (see *Audit & replay surface* below).
 
-> **Withdraw / redeem is operator-only and never agent-initiated.** Agents may submit only `allocate_idle_capital` (deposit). Any withdraw, redeem, borrow, leverage, or looping path is operator-only safety work tracked in [#207](https://github.com/Linh86/cryptobank/issues/207) and is **never** reachable through the public agent HTTP surface.
+> **Withdraw / redeem is operator-only and never agent-initiated.** Agents may submit only `allocate_idle_capital` (deposit). Any withdraw, redeem, borrow, leverage, or looping path is operator-only safety work tracked in [#207](https://github.com/Linh86/cryptokorr/issues/207) and is **never** reachable through the public agent HTTP surface.
 
 > **`allocate_idle_capital` is a public intent kind on `POST /v1/intents`.** The OpenAPI `kind` enum accepts `transfer | swap | scheduled_transfer | allocate_idle_capital`. The internal atom is `:defi_yield_deposit`; the request → internal mapping happens in `Bank.Intents.normalize/1` and the response renders the internal atom back as the public string. Submitting `kind: "defi_yield_deposit"` (the internal name) is rejected as `{:invalid, :kind}`.
 
@@ -71,7 +71,7 @@ The evaluator maps the explanation's `decision` string onto the `DecisionEnvelop
 - `"block"` → `:block`
 - `"auto_exec"` → also `:approval_required` (belt-and-suspenders MVP cap; today unreachable because of the `mvp_morpho_deposit` rule, but the code defends against a future engine change)
 
-When the outcome is `:block`, the intent moves to state `:blocked`. For the other three outcomes the intent moves to state `:decided`. The Morpho path **never** creates an `ExecutionPlan` and **never** enqueues `RunExecution` — execution dispatch is owned by [#206](https://github.com/Linh86/cryptobank/issues/206) (deposit) and [#207](https://github.com/Linh86/cryptobank/issues/207) (withdraw).
+When the outcome is `:block`, the intent moves to state `:blocked`. For the other three outcomes the intent moves to state `:decided`. The Morpho path **never** creates an `ExecutionPlan` and **never** enqueues `RunExecution` — execution dispatch is owned by [#206](https://github.com/Linh86/cryptokorr/issues/206) (deposit) and [#207](https://github.com/Linh86/cryptokorr/issues/207) (withdraw).
 
 ## Audit & replay surface
 
@@ -128,7 +128,7 @@ Re-running the smoke is safe: snapshot persistence demotes the prior current row
 
 ## Optional: explicit-confirmation Base Sepolia deposit smoke (#209)
 
-A live Base Sepolia ERC-4626 deposit smoke ships under [`mix bank.morpho.deposit_smoke`](../../lib/mix/tasks/bank.morpho.deposit_smoke.ex) (paired runner [`Bank.DefiVenues.Morpho.DepositSmoke`](../../lib/bank/defi_venues/morpho/deposit_smoke.ex)). Unlike the read-only `mix bank.morpho.smoke` above, this task drives the full [#206](https://github.com/Linh86/cryptobank/issues/206) dispatch path against a real chain adapter and **broadcasts a UserOperation** when the operator passes `--confirm`.
+A live Base Sepolia ERC-4626 deposit smoke ships under [`mix bank.morpho.deposit_smoke`](../../lib/mix/tasks/bank.morpho.deposit_smoke.ex) (paired runner [`Bank.DefiVenues.Morpho.DepositSmoke`](../../lib/bank/defi_venues/morpho/deposit_smoke.ex)). Unlike the read-only `mix bank.morpho.smoke` above, this task drives the full [#206](https://github.com/Linh86/cryptokorr/issues/206) dispatch path against a real chain adapter and **broadcasts a UserOperation** when the operator passes `--confirm`.
 
 > **`--confirm` is required.** Without it the task prints the pre-flight checklist and exits non-zero. CI never runs this task; even if it did, the `--confirm` gate makes accidental broadcast impossible.
 
@@ -140,7 +140,7 @@ The task fails closed at three independent layers if any of these would be viola
 - **USDC only.**
 - **Allowlisted vault only** — the runner refuses to dispatch against a vault not in the workspace's active Morpho `:allowed_vault` rules.
 - **No `.env` source.** Phoenix-side config is asserted by name only (`Bank.AdapterClient :base_url`, `:dispatch_secret`, `:callback_secret`); values are never printed.
-- **No withdraw / redeem path.** Only `allocate_idle_capital` (deposit). Withdraw is operator-only and tracked under [#207](https://github.com/Linh86/cryptobank/issues/207); this task carries no withdraw surface.
+- **No withdraw / redeem path.** Only `allocate_idle_capital` (deposit). Withdraw is operator-only and tracked under [#207](https://github.com/Linh86/cryptokorr/issues/207); this task carries no withdraw surface.
 - **No arbitrary calldata.** The dispatch envelope built by `Bank.AdapterClient.dispatch_morpho_deposit/2` carries no calldata field on the wire; the adapter builds ERC-4626 `deposit(assets, receiver)` and bounded `IERC20.approve(vault, amount)` calldata itself.
 
 ### Pre-flight checklist
@@ -234,10 +234,10 @@ The existing `Bank.Audit.replay/1` `morpho_evidence` slice (#208) automatically 
 ### Hard safety boundaries
 
 - **Operator-only.** `actor_role: :operator` required; `:agent`, `:runtime`, missing role refused with `:operator_role_required`.
-- **Allowlisted vault only.** Workspace's `:allowed_vault` policy rules are the source of truth (case-insensitive on address comparison, mirroring [#206](https://github.com/Linh86/cryptobank/issues/206)'s `MorphoDispatchSafety`).
+- **Allowlisted vault only.** Workspace's `:allowed_vault` policy rules are the source of truth (case-insensitive on address comparison, mirroring [#206](https://github.com/Linh86/cryptokorr/issues/206)'s `MorphoDispatchSafety`).
 - **Base Sepolia + USDC only.** Pinned at the module's `@chain` / `@chain_id` / `@asset` constants.
 - **No agent intent kind for withdraw.** Pinned by `agent_no_withdraw_test.exs`.
-- **No arbitrary calldata.** The future adapter dispatch will build ERC-4626 calldata itself from `vault_address` + `amount` + `receiver` (mirroring [#206](https://github.com/Linh86/cryptobank/issues/206)'s deposit pattern).
+- **No arbitrary calldata.** The future adapter dispatch will build ERC-4626 calldata itself from `vault_address` + `amount` + `receiver` (mirroring [#206](https://github.com/Linh86/cryptokorr/issues/206)'s deposit pattern).
 
 ### Failure modes
 
@@ -251,7 +251,7 @@ The existing `Bank.Audit.replay/1` `morpho_evidence` slice (#208) automatically 
 | `:morpho_withdraw_invalid_amount` | `requested_assets` is nil, non-positive, or not a `Decimal.t/0` |
 | `:morpho_withdraw_snapshot_invalid` | Snapshot's `state.total_assets` is missing or unparseable |
 
-> **Mainnet boundary (post-MVP).** Base mainnet for `allocate_idle_capital` is **out of v0.1 scope**. The HTTP boundary fails closed: a public submission with `chain: "base"` is rejected with `morpho_chain_not_supported` regardless of the workspace's `mainnet_enabled` flag (#203 P2). When mainnet support arrives, it requires [#166](https://github.com/Linh86/cryptobank/issues/166) (mainnet operational policy), [#178](https://github.com/Linh86/cryptobank/issues/178) (workspace mainnet eligibility), and the post-MVP exposure / concentration engine that is explicitly tracked outside the MVP plan (#205 was closed post-MVP).
+> **Mainnet boundary (post-MVP).** Base mainnet for `allocate_idle_capital` is **out of v0.1 scope**. The HTTP boundary fails closed: a public submission with `chain: "base"` is rejected with `morpho_chain_not_supported` regardless of the workspace's `mainnet_enabled` flag (#203 P2). When mainnet support arrives, it requires [#166](https://github.com/Linh86/cryptokorr/issues/166) (mainnet operational policy), [#178](https://github.com/Linh86/cryptokorr/issues/178) (workspace mainnet eligibility), and the post-MVP exposure / concentration engine that is explicitly tracked outside the MVP plan (#205 was closed post-MVP).
 
 ## Troubleshooting
 
@@ -267,7 +267,7 @@ This is a regression. The MVP rule (`mvp_morpho_deposit` `:approval` reason) sho
 
 ### `vault_not_allowlisted` block on a vault you expected to allow
 
-The vault allowlist is **most-restrictive intersection** across rules ([#202 P2](https://github.com/Linh86/cryptobank/issues/202)). An empty or malformed `:allowed_vault` rule collapses the intersection to `[]`. Inspect the workspace's active Morpho rules:
+The vault allowlist is **most-restrictive intersection** across rules ([#202 P2](https://github.com/Linh86/cryptokorr/issues/202)). An empty or malformed `:allowed_vault` rule collapses the intersection to `[]`. Inspect the workspace's active Morpho rules:
 
 ```elixir
 Bank.Policies.list_rules(%{rule_type: :allowed_vault}, workspace_id: ws.id)
@@ -285,7 +285,7 @@ The runner requires the demo workspace from `mix bank.demo.seed`. Run that first
 
 What this surface does **not** do (today):
 
-- No deposit / withdraw / borrow / leverage / looping execution. The decision is a `DecisionEnvelope`; the on-chain action lives in [#206](https://github.com/Linh86/cryptobank/issues/206) / [#207](https://github.com/Linh86/cryptobank/issues/207).
+- No deposit / withdraw / borrow / leverage / looping execution. The decision is a `DecisionEnvelope`; the on-chain action lives in [#206](https://github.com/Linh86/cryptokorr/issues/206) / [#207](https://github.com/Linh86/cryptokorr/issues/207).
 - No mainnet `allocate_idle_capital`. Base Sepolia only at the HTTP boundary; mainnet is post-MVP and gated on #166/#178.
 - No agent-initiated withdraw / redeem. Operator-only, tracked in #207.
 - No public launch docs, no external SIEM integration, no analytics dashboard.
@@ -293,12 +293,12 @@ What this surface does **not** do (today):
 
 Provenance:
 
-- Snapshot ingestion: [#199](https://github.com/Linh86/cryptobank/issues/199) (`Bank.DefiVenues.Morpho.Snapshots`, `PersistedVaultSnapshot`, `VaultSnapshot`)
-- Risk explanation: [#201](https://github.com/Linh86/cryptobank/issues/201) (`Bank.DefiVenues.Morpho.RiskExplanation`)
-- Policy rules + compiler: [#202](https://github.com/Linh86/cryptobank/issues/202) (`Bank.Policies.Morpho.RulesCompiler`, the 16 Morpho `PolicyRule` types, fail-closed empty-allowlist posture)
-- Decision pipeline integration: [#203](https://github.com/Linh86/cryptobank/issues/203) (`Bank.Decisions.MorphoEvaluator`, `evaluate_intent/2` dispatch on `kind: :defi_yield_deposit`)
-- Audit & replay evidence: [#208](https://github.com/Linh86/cryptobank/issues/208) (`morpho.risk_explained`, `morpho.snapshot_stale`, `morpho.policy_blocked` event types; `morpho_evidence` replay slice)
-- Docs + smoke (this runbook): [#209](https://github.com/Linh86/cryptobank/issues/209)
+- Snapshot ingestion: [#199](https://github.com/Linh86/cryptokorr/issues/199) (`Bank.DefiVenues.Morpho.Snapshots`, `PersistedVaultSnapshot`, `VaultSnapshot`)
+- Risk explanation: [#201](https://github.com/Linh86/cryptokorr/issues/201) (`Bank.DefiVenues.Morpho.RiskExplanation`)
+- Policy rules + compiler: [#202](https://github.com/Linh86/cryptokorr/issues/202) (`Bank.Policies.Morpho.RulesCompiler`, the 16 Morpho `PolicyRule` types, fail-closed empty-allowlist posture)
+- Decision pipeline integration: [#203](https://github.com/Linh86/cryptokorr/issues/203) (`Bank.Decisions.MorphoEvaluator`, `evaluate_intent/2` dispatch on `kind: :defi_yield_deposit`)
+- Audit & replay evidence: [#208](https://github.com/Linh86/cryptokorr/issues/208) (`morpho.risk_explained`, `morpho.snapshot_stale`, `morpho.policy_blocked` event types; `morpho_evidence` replay slice)
+- Docs + smoke (this runbook): [#209](https://github.com/Linh86/cryptokorr/issues/209)
 - Risk explanation design:
   [`docs/morpho-risk-explanation.md`](../morpho-risk-explanation.md)
 - Risk explanation source:

@@ -2,7 +2,7 @@
 
 A fresh reviewer should be able to follow this page top-to-bottom, starting from an empty database, and finish with the `/sandbox` checklist green — without configuring any secrets, without `.env` files, and without ever broadcasting to a real chain.
 
-This is the closeout doc for [#242](https://github.com/Linh86/cryptobank/issues/242). It sits next to the dataset reference in [`docs/demo.md`](../demo.md), the demo dataset scenarios in [`docs/demo-scenarios.md`](../demo-scenarios.md), and the alpha-staging smoke in [`docs/mvp-smoke-runbook.md`](../mvp-smoke-runbook.md). What is new here is the *single guided path*: setup → seed → smoke → walk → reset, with explicit boundaries against staging / testnet / mainnet.
+This is the closeout doc for [#242](https://github.com/Linh86/cryptokorr/issues/242). It sits next to the dataset reference in [`docs/demo.md`](../demo.md), the demo dataset scenarios in [`docs/demo-scenarios.md`](../demo-scenarios.md), and the alpha-staging smoke in [`docs/mvp-smoke-runbook.md`](../mvp-smoke-runbook.md). What is new here is the *single guided path*: setup → seed → smoke → walk → reset, with explicit boundaries against staging / testnet / mainnet.
 
 ## What this runbook is — and is not
 

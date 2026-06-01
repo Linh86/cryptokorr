@@ -17,7 +17,7 @@ spell out their `*_demo_*` / `sandbox-demo-*` origin.
 
 ## Workspace placeholder (#155 forward-compat)
 
-Until [#155 (Auth + Workspace Alpha Gate)](https://github.com/Linh86/CryptoBank/issues/155)
+Until [#155 (Auth + Workspace Alpha Gate)](https://github.com/Linh86/cryptokorr/issues/155)
 lands the `workspaces` / `memberships` tables, every seeded row is
 implicitly scoped to a single demo workspace handle —
 `Bank.Demo.workspace_slug/0`, currently `"sandbox-demo"`. Inside

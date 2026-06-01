@@ -91,7 +91,7 @@ GET /audit/replay/:intent_id/report
 ```
 
 This is the **browser-session-authenticated** route added by
-[#251](https://github.com/Linh86/cryptobank/pull/384). It uses the
+[#251](https://github.com/Linh86/cryptokorr/pull/384). It uses the
 session cookie set by `BankWeb.Plugs.FetchCurrentUser`, enforces a
 `viewer+` role, and scopes the lookup with
 `Bank.Intents.get_in_workspace/2`. No `Authorization: Bearer`
@@ -120,7 +120,7 @@ curl -i \
 The route is `/v1/intents/:id/report` in router terms.
 
 This is the API-key-gated route added by
-[#250](https://github.com/Linh86/cryptobank/pull/360). The
+[#250](https://github.com/Linh86/cryptokorr/pull/360). The
 response body, content type, and `x-decision-report-*` headers are
 **byte-identical** to the browser route — the only difference is
 the auth surface.

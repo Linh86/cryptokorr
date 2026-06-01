@@ -2,7 +2,7 @@
 
 Date: 2026-05-07
 Commit: `fd1da6f` (`Render swap route evidence on intent replay (#510)`).
-Initial baseline run was on `7f2ec79` (`Pin public intent kind vocabulary at /v1/intents (MVP test plan) (#509)`); Worker C's [#510](https://github.com/Linh86/cryptobank/pull/510) and Worker D's [#511](https://github.com/Linh86/cryptobank/pull/511) landed in parallel and this report's final commit reference covers both.
+Initial baseline run was on `7f2ec79` (`Pin public intent kind vocabulary at /v1/intents (MVP test plan) (#509)`); Worker C's [#510](https://github.com/Linh86/cryptokorr/pull/510) and Worker D's [#511](https://github.com/Linh86/cryptokorr/pull/511) landed in parallel and this report's final commit reference covers both.
 Branch: `main` (verified from isolated worktree at `/private/tmp/cryptobank-d-mvp-baseline-docs`)
 
 ## Summary Recommendation
@@ -117,7 +117,7 @@ What's deferred to a follow-up:
 
 ### Operator console + audit + replay (Phase 11)
 
-Audited by Worker C. 143 LiveView tests pass across `queue_live_test.exs`, `intent_replay_live_test.exs`, `control_live_test.exs`, `queue_live_format_hygiene_test.exs`. Every Phase 11 acceptance was LANDED before the audit, plus one real gap closed under PR [#510](https://github.com/Linh86/cryptobank/pull/510) (squash-merged `fd1da6f`).
+Audited by Worker C. 143 LiveView tests pass across `queue_live_test.exs`, `intent_replay_live_test.exs`, `control_live_test.exs`, `queue_live_format_hygiene_test.exs`. Every Phase 11 acceptance was LANDED before the audit, plus one real gap closed under PR [#510](https://github.com/Linh86/cryptokorr/pull/510) (squash-merged `fd1da6f`).
 
 LiveViews present and tested with stable DOM ids:
 
@@ -126,7 +126,7 @@ LiveViews present and tested with stable DOM ids:
 - `BankWeb.QueueLive` (`/queue`) — pending approvals, active executions, held actions, blocked actions; approve/reject is wire-tested via `Decisions.approve/2`.
 - `BankWeb.SecurityLive` (`/security`) — pause/resume + delegation revoke (sentinel for `:user`-rooted, cryptographic for `:operator`-rooted).
 - `BankWeb.AuditLive` (`/audit`) + `BankWeb.IntentReplayLive` (`/audit/replay/:intent_id`) — append-only log + per-intent replay bundle.
-- Replay cards: `<.morpho_evidence_card>` (`#replay-morpho-evidence`), and **`<.swap_route_card>` (`#replay-swap-routes`) added by [#510](https://github.com/Linh86/cryptobank/pull/510)** with per-route `replay-swap-route-<idx>` ids and empty-state copy. Renders source/destination asset, input/expected/minimum/actual output, slippage_bps, route_hash, block_number, plan_id, final_outcome, final_reason.
+- Replay cards: `<.morpho_evidence_card>` (`#replay-morpho-evidence`), and **`<.swap_route_card>` (`#replay-swap-routes`) added by [#510](https://github.com/Linh86/cryptokorr/pull/510)** with per-route `replay-swap-route-<idx>` ids and empty-state copy. Renders source/destination asset, input/expected/minimum/actual output, slippage_bps, route_hash, block_number, plan_id, final_outcome, final_reason.
 - Telegram operator alerts + signed-button approval (alerting only; no command dispatch beyond pause/resume).
 
 ### SDK / MCP surface (Phase 12)

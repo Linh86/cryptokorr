@@ -1,10 +1,10 @@
 # Base mainnet go / no-go review
 
-Issue [#182](https://github.com/Linh86/cryptobank/issues/182) (epic [#166](https://github.com/Linh86/cryptobank/issues/166) — Base Mainnet Readiness Gate).
+Issue [#182](https://github.com/Linh86/cryptokorr/issues/182) (epic [#166](https://github.com/Linh86/cryptokorr/issues/166) — Base Mainnet Readiness Gate).
 
 > **Audience.** Operator + workspace admin + repo maintainer signing off on the first Base mainnet broadcast on this deployment.
 >
-> **Posture.** This is the formal closure review for epic #166. It is **point-in-time** — it grades the state of `main` at the reviewed commit and produces an explicit GO / NO-GO verdict per scope. Mainnet stays disabled by default regardless of verdict; this review only authorizes the next operator step (the capped canary per [#181](https://github.com/Linh86/cryptobank/issues/181)), never broadcast itself.
+> **Posture.** This is the formal closure review for epic #166. It is **point-in-time** — it grades the state of `main` at the reviewed commit and produces an explicit GO / NO-GO verdict per scope. Mainnet stays disabled by default regardless of verdict; this review only authorizes the next operator step (the capped canary per [#181](https://github.com/Linh86/cryptokorr/issues/181)), never broadcast itself.
 
 ## Reviewed commit
 
@@ -17,7 +17,7 @@ Issue [#182](https://github.com/Linh86/cryptobank/issues/182) (epic [#166](https
 
 **GO** for the **capped canary** path defined by #181 — `Bank.Chains.CanaryCaps` (chain `base`, asset `USDC`, amount `$10` per UserOp) bounds the blast radius of every first mainnet broadcast. The two safety gates (`verify_mainnet_allowed/1` from #178 and `verify_canary_caps/1` from #181) are layered before any plan is claimed for dispatch and are pinned by automated tests.
 
-**NO-GO** for **broad mainnet usage** (i.e. removing or raising the canary caps) until [#185](https://github.com/Linh86/cryptobank/issues/185) lands. The single-active-delegation fallback is acceptable while the canary cap holds amounts at $10 per UserOp; it is **not** acceptable for sustained mainnet usage across multiple smart accounts. Any edit that removes / weakens `Bank.Chains.CanaryCaps` re-opens this review.
+**NO-GO** for **broad mainnet usage** (i.e. removing or raising the canary caps) until [#185](https://github.com/Linh86/cryptokorr/issues/185) lands. The single-active-delegation fallback is acceptable while the canary cap holds amounts at $10 per UserOp; it is **not** acceptable for sustained mainnet usage across multiple smart accounts. Any edit that removes / weakens `Bank.Chains.CanaryCaps` re-opens this review.
 
 ## Scope
 
@@ -74,9 +74,9 @@ Issue [#182](https://github.com/Linh86/cryptobank/issues/182) (epic [#166](https
 
 If the verdict above were NO-GO, blockers would be opened as issues per #182's acceptance criteria. At this commit there are **no blockers** for the capped canary scope. Tracking issues that gate **broad mainnet usage** (out of scope for this verdict) are already open and named explicitly so a future review can re-grade row 18:
 
-1. [#185](https://github.com/Linh86/cryptobank/issues/185) — replace single-active-delegation fallback with account-aware routing. Required before raising or removing canary caps.
-2. [#158](https://github.com/Linh86/cryptobank/issues/158) — cross-workspace query-layer isolation. Required before multi-workspace mainnet.
-3. [#167 children](https://github.com/Linh86/cryptobank/issues/167) — multi-account smart-account routing. Required for any deployment with more than one mainnet smart account.
+1. [#185](https://github.com/Linh86/cryptokorr/issues/185) — replace single-active-delegation fallback with account-aware routing. Required before raising or removing canary caps.
+2. [#158](https://github.com/Linh86/cryptokorr/issues/158) — cross-workspace query-layer isolation. Required before multi-workspace mainnet.
+3. [#167 children](https://github.com/Linh86/cryptokorr/issues/167) — multi-account smart-account routing. Required for any deployment with more than one mainnet smart account.
 
 These are tracking links, not blockers for the canary verdict above.
 
@@ -86,7 +86,7 @@ The verdict is binding only when all three signatures are present on this docume
 
 | Role | Attests | Signature (PR comment / issue comment / GPG) |
 |---|---|---|
-| Operator (on-call) | The no-broadcast rehearsal ([#180](https://github.com/Linh86/cryptobank/issues/180)) was executed against this commit on the target deployment; the artifacts (preflight log, dispatch-worker `:mainnet_disabled` log, pause-state log) are attached to issue #182. | _pending_ |
+| Operator (on-call) | The no-broadcast rehearsal ([#180](https://github.com/Linh86/cryptokorr/issues/180)) was executed against this commit on the target deployment; the artifacts (preflight log, dispatch-worker `:mainnet_disabled` log, pause-state log) are attached to issue #182. | _pending_ |
 | Workspace admin | The workspace eligibility list at this commit has been reviewed; only the workspaces explicitly intended for canary have `mainnet_enabled: true`; no other workspace was inadvertently flipped. | _pending_ |
 | Repo maintainer | The reviewed commit SHA matches the deployed code; `mix precommit` is green; `mix openapi.check` is clean; the canary caps in `Bank.Chains.CanaryCaps` are unchanged from the values referenced in row 5. | _pending_ |
 

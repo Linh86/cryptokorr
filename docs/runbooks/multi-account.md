@@ -1,7 +1,7 @@
 # Multi-account isolation — operator runbook
 
-Issue [#187](https://github.com/Linh86/cryptobank/issues/187) (epic
-[#167](https://github.com/Linh86/cryptobank/issues/167)).
+Issue [#187](https://github.com/Linh86/cryptokorr/issues/187) (epic
+[#167](https://github.com/Linh86/cryptokorr/issues/167)).
 
 > **Audience.** Operator or auditor verifying that one workspace
 > cannot see, query, or mutate another workspace's account state,
@@ -45,10 +45,10 @@ The richer multi-account routing — e.g. a workspace holding
 multiple smart accounts, intents declaring an explicit account
 target, per-account caps and ledgers, account-level approval
 queues — is **deferred** to issues
-[#183](https://github.com/Linh86/cryptobank/issues/183),
-[#184](https://github.com/Linh86/cryptobank/issues/184),
-[#185](https://github.com/Linh86/cryptobank/issues/185), and
-[#186](https://github.com/Linh86/cryptobank/issues/186). This
+[#183](https://github.com/Linh86/cryptokorr/issues/183),
+[#184](https://github.com/Linh86/cryptokorr/issues/184),
+[#185](https://github.com/Linh86/cryptokorr/issues/185), and
+[#186](https://github.com/Linh86/cryptokorr/issues/186). This
 runbook honestly states what is true today and is the audit pin
 that catches a regression that would let a future multi-account
 refactor leak across workspaces.
@@ -185,16 +185,16 @@ new failure modes land here as the multi-account model rolls in.
 
 ## Related issues
 
-- [#167](https://github.com/Linh86/cryptobank/issues/167) — epic
+- [#167](https://github.com/Linh86/cryptokorr/issues/167) — epic
   (multi-account routing).
-- [#158](https://github.com/Linh86/cryptobank/issues/158) —
+- [#158](https://github.com/Linh86/cryptokorr/issues/158) —
   workspace_id foundation across the five scoped tables.
-- [#183](https://github.com/Linh86/cryptobank/issues/183),
-  [#184](https://github.com/Linh86/cryptobank/issues/184),
-  [#185](https://github.com/Linh86/cryptobank/issues/185),
-  [#186](https://github.com/Linh86/cryptobank/issues/186) —
+- [#183](https://github.com/Linh86/cryptokorr/issues/183),
+  [#184](https://github.com/Linh86/cryptokorr/issues/184),
+  [#185](https://github.com/Linh86/cryptokorr/issues/185),
+  [#186](https://github.com/Linh86/cryptokorr/issues/186) —
   the deferred multi-account model. This runbook is the audit
   pin that catches a regression those issues' refactor would
   introduce if isolation slipped.
-- [#187](https://github.com/Linh86/cryptobank/issues/187) — this
+- [#187](https://github.com/Linh86/cryptokorr/issues/187) — this
   runbook.

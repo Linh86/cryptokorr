@@ -1,7 +1,7 @@
 # Base mainnet capped canary broadcast — operator runbook
 
-Issue [#181](https://github.com/Linh86/cryptobank/issues/181) (epic
-[#166](https://github.com/Linh86/cryptobank/issues/166)).
+Issue [#181](https://github.com/Linh86/cryptokorr/issues/181) (epic
+[#166](https://github.com/Linh86/cryptokorr/issues/166)).
 
 > **Audience.** Operator preparing to run the *first* real Base
 > mainnet broadcast on this deployment. The no-broadcast rehearsal
@@ -388,15 +388,15 @@ sufficient.
 
 ## Related issues
 
-- [#166](https://github.com/Linh86/cryptobank/issues/166) — epic.
-- [#178](https://github.com/Linh86/cryptobank/issues/178) —
+- [#166](https://github.com/Linh86/cryptokorr/issues/166) — epic.
+- [#178](https://github.com/Linh86/cryptokorr/issues/178) —
   workspace `mainnet_enabled` flag.
-- [#179](https://github.com/Linh86/cryptobank/issues/179) —
+- [#179](https://github.com/Linh86/cryptokorr/issues/179) —
   read-only mainnet preflight.
-- [#180](https://github.com/Linh86/cryptobank/issues/180) —
+- [#180](https://github.com/Linh86/cryptokorr/issues/180) —
   no-broadcast rehearsal runbook (prerequisite).
-- [#181](https://github.com/Linh86/cryptobank/issues/181) — this
+- [#181](https://github.com/Linh86/cryptokorr/issues/181) — this
   runbook + the cap module.
-- [#182](https://github.com/Linh86/cryptobank/issues/182) —
+- [#182](https://github.com/Linh86/cryptokorr/issues/182) —
   mainnet go/no-go review (the canary's clean-run record is one
   of #182's inputs).
