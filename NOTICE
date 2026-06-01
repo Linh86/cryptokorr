@@ -1,0 +1,49 @@
+CryptoKorr
+Copyright 2026 Linh Nguyen
+
+This product includes software developed by Linh Nguyen and contributors
+to the CryptoKorr project.
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may
+not use this file except in compliance with the License. A copy of the
+License is included in the LICENSE file at the root of this repository
+and is also available at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+------------------------------------------------------------------------
+
+About CryptoKorr
+
+CryptoKorr is the codename for a non-custodial control plane that lets
+AI agents propose on-chain treasury actions while every decision is
+evaluated against explicit policy, trust, screening, simulation, and
+audit gates. The control plane (Phoenix) decides; a separate TypeScript
+adapter executes through scoped, revocable smart-account permissions.
+CryptoKorr never holds user funds or private keys.
+
+This project depends on and integrates with third-party software,
+protocols, and services. Each such dependency is governed by its own
+license and terms. A non-exhaustive list of components and integration
+points whose names are referenced in this repository for interoperability
+purposes only includes:
+
+  - Ethereum, ERC-4337, and ERC-7579 specifications and reference
+    implementations.
+  - Kernel smart-account contracts and the ZeroDev permission system.
+  - Base and Base Sepolia (Coinbase / Optimism / OP Stack).
+  - 0x, 1inch, Jupiter, and Circle CCTP routing and bridging APIs.
+  - Morpho protocol contracts and the Morpho GraphQL API.
+  - The Elixir/Phoenix framework and the Oban background-job system.
+  - The Node.js / TypeScript runtime and its ecosystem packages.
+
+All trademarks, service marks, trade names, product names, and logos
+referenced in this repository are the property of their respective
+owners. Reference to a third-party name, protocol, or product does not
+imply any endorsement of, affiliation with, or sponsorship by that party.
+
+Per Section 6 of the Apache License, Version 2.0, this License does not
+grant permission to use the trade name "CryptoKorr" or any other trade
+name, trademark, service mark, or product name of the Licensor, except
+as required for describing the origin of the Work and reproducing the
+content of this NOTICE file.
