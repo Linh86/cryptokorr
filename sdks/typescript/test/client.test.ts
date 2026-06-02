@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { Cryptobank } from "../src/client.js";
+import { CryptoKorr } from "../src/client.js";
 import { SwapSafetyError, ValidationError } from "../src/errors.js";
 
 const TEST_KEY = "cb_test_dummy_key_for_unit_tests_only";
@@ -22,7 +22,7 @@ function jsonResponse({ status = 200, body, headers = {} }: MockSpec): Response 
   });
 }
 
-function makeClient(specs: MockSpec[]): { client: Cryptobank; calls: MockCall[] } {
+function makeClient(specs: MockSpec[]): { client: CryptoKorr; calls: MockCall[] } {
   const calls: MockCall[] = [];
   let i = 0;
   const fetchImpl = vi.fn(async (input: string | URL, init?: RequestInit) => {
@@ -33,7 +33,7 @@ function makeClient(specs: MockSpec[]): { client: Cryptobank; calls: MockCall[] 
     return jsonResponse(spec);
   });
   return {
-    client: new Cryptobank({
+    client: new CryptoKorr({
       apiKey: TEST_KEY,
       baseUrl: "http://localhost:4000",
       fetch: fetchImpl,
@@ -46,27 +46,27 @@ function readBody(init: RequestInit): Record<string, unknown> {
   return JSON.parse(init.body as string) as Record<string, unknown>;
 }
 
-describe("Cryptobank.fromEnv", () => {
-  it("reads CRYPTOBANK_API_KEY from process.env", () => {
-    const old = process.env["CRYPTOBANK_API_KEY"];
-    process.env["CRYPTOBANK_API_KEY"] = TEST_KEY;
+describe("CryptoKorr.fromEnv", () => {
+  it("reads CRYPTOKORR_API_KEY from process.env", () => {
+    const old = process.env["CRYPTOKORR_API_KEY"];
+    process.env["CRYPTOKORR_API_KEY"] = TEST_KEY;
     try {
-      const client = Cryptobank.fromEnv();
-      expect(client.toString()).toBe("Cryptobank(baseUrl=http://localhost:4000)");
+      const client = CryptoKorr.fromEnv();
+      expect(client.toString()).toBe("CryptoKorr(baseUrl=http://localhost:4000)");
     } finally {
-      if (old === undefined) delete process.env["CRYPTOBANK_API_KEY"];
-      else process.env["CRYPTOBANK_API_KEY"] = old;
+      if (old === undefined) delete process.env["CRYPTOKORR_API_KEY"];
+      else process.env["CRYPTOKORR_API_KEY"] = old;
     }
   });
 
   it("toString() does NOT echo the API key", () => {
-    const client = new Cryptobank({ apiKey: TEST_KEY, baseUrl: "http://localhost:4000" });
+    const client = new CryptoKorr({ apiKey: TEST_KEY, baseUrl: "http://localhost:4000" });
     expect(client.toString()).not.toContain("cb_");
     expect(client.toString()).not.toContain(TEST_KEY);
   });
 });
 
-describe("Cryptobank.submitTransfer", () => {
+describe("CryptoKorr.submitTransfer", () => {
   it("POSTs /v1/intents with snake_case kind=transfer", async () => {
     const { client, calls } = makeClient([
       {
@@ -165,7 +165,7 @@ describe("Cryptobank.submitTransfer", () => {
   });
 });
 
-describe("Cryptobank.submitAllocateIdleCapital", () => {
+describe("CryptoKorr.submitAllocateIdleCapital", () => {
   it("defaults chain to base-sepolia and sends the public wire kind", async () => {
     // Phoenix's `IntentSubmissionRequest.kind` enum (per
     // `priv/openapi/openapi.json`) is `transfer | swap |
@@ -189,7 +189,7 @@ describe("Cryptobank.submitAllocateIdleCapital", () => {
   });
 });
 
-describe("Cryptobank.simulateIntent / cancelIntent / getAuditTrail", () => {
+describe("CryptoKorr.simulateIntent / cancelIntent / getAuditTrail", () => {
   it("simulateIntent posts the reason", async () => {
     const { client, calls } = makeClient([
       { status: 200, body: { id: "sim_1", intent_id: "int_1", status: "ok" } },
@@ -229,7 +229,7 @@ describe("Cryptobank.simulateIntent / cancelIntent / getAuditTrail", () => {
   });
 });
 
-describe("Cryptobank.waitForDecision", () => {
+describe("CryptoKorr.waitForDecision", () => {
   it("polls intent → decision until outcome lands", async () => {
     const { client, calls } = makeClient([
       // First intent fetch — no decision yet.
@@ -277,7 +277,7 @@ describe("Cryptobank.waitForDecision", () => {
   });
 });
 
-describe("Cryptobank.operator.approveDecision / rejectDecision", () => {
+describe("CryptoKorr.operator.approveDecision / rejectDecision", () => {
   it("approveDecision posts to /v1/approvals/:id/approve with actor_id", async () => {
     const { client, calls } = makeClient([
       {
@@ -315,7 +315,7 @@ describe("Cryptobank.operator.approveDecision / rejectDecision", () => {
   });
 });
 
-describe("Cryptobank.getRuntimeStatus", () => {
+describe("CryptoKorr.getRuntimeStatus", () => {
   it("hits /v1/health/deep without Authorization", async () => {
     const { client, calls } = makeClient([
       { status: 200, body: { status: "ok", service: "bank", version: "0.1.0", checks: {} } },

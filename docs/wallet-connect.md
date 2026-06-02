@@ -158,7 +158,7 @@ Server-side flow now lands end-to-end:
   trigger the EIP-712 enable signature, and emits
   `delegation.state_changed{state: "granted"}` with a populated
   KEYLESS `permission` block (no session privateKey embedded —
-  see `docs/security.md` and Subagent D's review under the #58
+  see `docs/security.md` and A security review under the #58
   grant-flow PR).
 - `Bank.Delegations.apply_callback/1` decodes the artifacts; the
   resulting row is `cryptographically_revocable?/1` and a future

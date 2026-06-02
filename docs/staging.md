@@ -52,7 +52,7 @@ encryption (TLS / mTLS) is operator-supplied at the ingress. See
 | ---------- | --------------------------- | ----- | ------------------------------------------ |
 | `phoenix`  | this repo, `Dockerfile`     | 4000  | Phoenix 1.8 + Ecto + Oban + LiveView       |
 | `db`       | `postgres:16`               | 5432  | Managed Postgres in cloud staging          |
-| `adapter`  | TS adapter repo (separate)  | 3000  | Published under `ghcr.io/cryptobank/adapter` |
+| `adapter`  | TS adapter repo (separate)  | 3000  | Published under `ghcr.io/cryptokorr/adapter` |
 | `bundler`  | 3rd-party (Alchemy, Pimlico)| —     | Consumed by the adapter, not by Phoenix    |
 
 ## Environment variables

@@ -1,16 +1,16 @@
 {
-  "_comment": "CryptoBank MCP server config for Claude Desktop. Merge the `mcpServers.cryptobank` block into your existing claude_desktop_config.json. NEVER commit a real cb_<...> key; the placeholder below is enforced by the example smoke test.",
+  "_comment": "CryptoKorr MCP server config for Claude Desktop. Merge the `mcpServers.cryptokorr` block into your existing claude_desktop_config.json. NEVER commit a real cb_<...> key; the placeholder below is enforced by the example smoke test.",
   "mcpServers": {
-    "cryptobank": {
-      "command": "cryptobank-mcp",
+    "cryptokorr": {
+      "command": "cryptokorr-mcp",
       "args": [],
       "env": {
-        "CRYPTOBANK_API_KEY": "cb_REPLACE_ME_DO_NOT_COMMIT",
-        "CRYPTOBANK_BASE_URL": "http://localhost:4000",
-        "CRYPTOBANK_AGENT_ID": "agent-claude-desktop-example",
-        "CRYPTOBANK_READONLY": "false",
-        "CRYPTOBANK_TIMEOUT_MS": "15000",
-        "CRYPTOBANK_LOG_LEVEL": "INFO"
+        "CRYPTOKORR_API_KEY": "cb_REPLACE_ME_DO_NOT_COMMIT",
+        "CRYPTOKORR_BASE_URL": "http://localhost:4000",
+        "CRYPTOKORR_AGENT_ID": "agent-claude-desktop-example",
+        "CRYPTOKORR_READONLY": "false",
+        "CRYPTOKORR_TIMEOUT_MS": "15000",
+        "CRYPTOKORR_LOG_LEVEL": "INFO"
       }
     }
   }

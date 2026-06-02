@@ -1,7 +1,7 @@
 # `examples/vercel-ai-sdk/` — Vercel AI SDK tool definition (TypeScript SDK)
 
-A copy-pastable Vercel AI SDK tool that wraps the **CryptoBank
-TypeScript SDK** (`@cryptobank/sdk`). Drops into any
+A copy-pastable Vercel AI SDK tool that wraps the **CryptoKorr
+TypeScript SDK** (`@cryptokorr/sdk`). Drops into any
 `generateText` / `streamText` call so an LLM can submit treasury
 intents on Base Sepolia and the agent reads
 `Decision.outcome` to handle `approval_required` correctly.
@@ -40,8 +40,8 @@ test does not hit any network.
 
 - Node **18+** (the SDK uses native `fetch` and
   `globalThis.crypto`).
-- A workspace API key (`cb_<...>`) in `CRYPTOBANK_API_KEY`.
-- A running CryptoBank backend (default `http://localhost:4000`).
+- A workspace API key (`cb_<...>`) in `CRYPTOKORR_API_KEY`.
+- A running CryptoKorr backend (default `http://localhost:4000`).
 
 The Vercel AI SDK itself (`ai` package) is **not** required to
 build the tool definitions — they are plain `tool({ ... })`
@@ -59,15 +59,15 @@ npm install
 
 The example installs the local TypeScript SDK from the repo
 (`file:../../sdks/typescript`). To use the published package,
-swap the `dependencies` entry to `"@cryptobank/sdk": "^0.1.0"`.
+swap the `dependencies` entry to `"@cryptokorr/sdk": "^0.1.0"`.
 
 ## Environment variables
 
 | Variable                  | Required | Purpose                                                          |
 | ------------------------- | -------- | ---------------------------------------------------------------- |
-| `CRYPTOBANK_API_KEY`      | yes      | Workspace API key (`cb_<...>`). Never log or commit this.        |
-| `CRYPTOBANK_BASE_URL`     | no       | Defaults to `http://localhost:4000`.                            |
-| `CRYPTOBANK_AGENT_ID`     | no       | Defaults to `agent-vercel-ai-example`. Used as the tool's        |
+| `CRYPTOKORR_API_KEY`      | yes      | Workspace API key (`cb_<...>`). Never log or commit this.        |
+| `CRYPTOKORR_BASE_URL`     | no       | Defaults to `http://localhost:4000`.                            |
+| `CRYPTOKORR_AGENT_ID`     | no       | Defaults to `agent-vercel-ai-example`. Used as the tool's        |
 |                           |          | `agentId` field unless the LLM passes one.                       |
 
 The example deliberately reads the API key from env so it never
@@ -76,19 +76,19 @@ lands in source control.
 ## Run
 
 ```sh
-export CRYPTOBANK_API_KEY="cb_..."
+export CRYPTOKORR_API_KEY="cb_..."
 node --experimental-strip-types ./demo.ts   # Node 22+
 # or compile first: npx tsc -p tsconfig.json && node ./dist/demo.js
 ```
 
-`demo.ts` builds a `Cryptobank` client from `fromEnv()`, defines
+`demo.ts` builds a `CryptoKorr` client from `fromEnv()`, defines
 the three tools, and prints their shape so you can copy them
 straight into your `generateText({...tools})` call.
 
 ## Expected output
 
 ```
-[demo]      Cryptobank client ready
+[demo]      CryptoKorr client ready
             base url   = http://localhost:4000
             tools      = ["submitTransfer", "submitAllocateIdleCapital", "getDecision"]
 
@@ -106,9 +106,9 @@ straight into your `generateText({...tools})` call.
 
 ```ts
 import { generateText } from "ai";
-import { buildCryptobankTools } from "./tools.js";
+import { buildCryptoKorrTools } from "./tools.js";
 
-const tools = await buildCryptobankTools();
+const tools = await buildCryptoKorrTools();
 
 const result = await generateText({
   model: yourModel,

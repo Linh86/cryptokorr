@@ -2,8 +2,8 @@
 
 Date: 2026-05-07
 Commit: `fd1da6f` (`Render swap route evidence on intent replay (#510)`).
-Initial baseline run was on `7f2ec79` (`Pin public intent kind vocabulary at /v1/intents (MVP test plan) (#509)`); Worker C's [#510](https://github.com/Linh86/cryptokorr/pull/510) and Worker D's [#511](https://github.com/Linh86/cryptokorr/pull/511) landed in parallel and this report's final commit reference covers both.
-Branch: `main` (verified from isolated worktree at `/private/tmp/cryptobank-d-mvp-baseline-docs`)
+Initial baseline run was on `7f2ec79` (`Pin public intent kind vocabulary at /v1/intents (MVP test plan) (#509)`); PRs [#510](https://github.com/Linh86/cryptokorr/pull/510) and [#511](https://github.com/Linh86/cryptokorr/pull/511) landed in parallel and this report's final commit reference covers both.
+Branch: `main` (verified from an isolated worktree per the test plan's safety rule)
 
 ## Summary Recommendation
 
@@ -28,7 +28,7 @@ The owner's required step is the live Base Sepolia walkthrough enumerated under 
 | Python SDK | `cd sdks/python && python -m unittest discover` | **(no test suite present)** | Package ships under `sdks/python/`; `pyproject.toml` lists `pytest` as a dev-extra but `tests/` is empty. SDK code itself is exercised indirectly through MCP server tests + examples hygiene. Python smoke is owner-deferred unless we want to add a test scaffold. |
 | MCP server (stdio) | `cd sdks/mcp && python -m unittest discover -s tests -t .` | **82 / 82 PASS** | stdlib-only; covers `initialize`, `tools/list`, `tools/call`, error mapping, role probing, console-script entry, request signing. |
 | Examples hygiene | `python -m unittest examples/test/test_examples_hygiene.py` | **9 / 9 PASS** | Pins no real keys committed, Base Sepolia only, `approval_required` documented as success in every example README. |
-| Vercel AI SDK example | `cd examples/vercel-ai-sdk && npm ci && npm test` | **8 / 8 PASS** | `tools.ts` builds against the public `/v1` surface using `cryptobank` Python SDK ToolDefinitions; pinned to wire `kind: "allocate_idle_capital"` (#477 / #497). |
+| Vercel AI SDK example | `cd examples/vercel-ai-sdk && npm ci && npm test` | **8 / 8 PASS** | `tools.ts` builds against the public `/v1` surface using `cryptokorr` Python SDK ToolDefinitions; pinned to wire `kind: "allocate_idle_capital"` (#477 / #497). |
 | Docs honesty grep | `rg -nE "production-ready\|audited\|insured\|mainnet ready\|mainnet-ready\|custody-grade\|full CCTP\|full 1inch\|full Jupiter\|autonomous withdrawals\|supports all\|complete routing" README.md docs` | clean (5 hits, all legitimate uses of "audited" as a verb) | No overclaim. |
 | GH open issues | `gh issue list --state open --limit 200` | **0 open** | The MVP work tree converged to a clean post-launch state. |
 | GH open PRs | `gh pr list --state open --limit 100` | **0 open** | |
@@ -37,23 +37,23 @@ Total automated test surface: **~4566 tests** across Phoenix, the chain adapter,
 
 ## Product Capabilities Verified
 
-The capabilities below are pinned by tests on `origin/main` at `7f2ec79` and verified by this lane plus the Worker A and Worker B MVP-test-lane reports under `control-tower/worker-reports/`.
+The capabilities below are pinned by tests on `origin/main` at `7f2ec79` and verified by this lane plus companion MVP-test-lane reports.
 
 ### Browser wallet + scoped delegation install (Phases 3 + 4)
 
-Pinned by Worker A's #508 audit and the existing `Bank.SessionPermissions.BrowserInstall`, `Bank.Runtime.Workers.VerifyInstallOnchain`, `Bank.Runtime.Workers.PollInstallReceipt`, `Bank.Runtime.Workers.RevokeDelegation`, and `BankWeb.API.V1.WalletBindingsInstallController` test suites:
+Pinned by the #508 audit and the existing `Bank.SessionPermissions.BrowserInstall`, `Bank.Runtime.Workers.VerifyInstallOnchain`, `Bank.Runtime.Workers.PollInstallReceipt`, `Bank.Runtime.Workers.RevokeDelegation`, and `BankWeb.API.V1.WalletBindingsInstallController` test suites:
 
 - The user's connected EOA wallet on Base Sepolia signs the install UserOperation directly via the ZeroDev SDK in the browser; **no operator/server key signs the normal install** (pinned by the hook-safety test refusing `setTimeout` / `SYNTHETIC_CONFIRMATION_MS` / typed-data signing in the production hook source).
 - Phoenix marks the delegation `:active` only after `Bank.Runtime.Workers.VerifyInstallOnchain` reads the kernel's installed validator set via `eth_call` and confirms the permission validator is present. The verifier worker is the **sole writer** of the `:active` transition.
 - Tab-close mid-poll is handled by `Bank.Runtime.Workers.PollInstallReceipt` (#500), enqueued in the same `Repo.transaction/1` as the row insert. Idempotent against the browser fast-path.
-- Delegation states `:revoking`, `:revoked`, and `:expired` all close `Delegations.executable?/1` (Worker A's #508 pins all three; the partial unique index forbids two non-terminal rows per smart account).
+- Delegation states `:revoking`, `:revoked`, and `:expired` all close `Delegations.executable?/1` (the #508 audit pins all three; the partial unique index forbids two non-terminal rows per smart account).
 - Failure-category allowlist `Bank.SessionPermissions.BrowserInstall.failure_categories/0` collapses any free-form upstream string to `:unknown`; raw RPC errors never reach `last_reason`.
 - Cross-workspace `binding_id` returns `404 not_found` (no existence leak; pinned by both `/v1` and browser-session controller tests).
 - Revoke posture (#475) branches on `delegations.root_validator_owner`: legacy `:operator` rows take the cryptographic `Kernel.uninstallValidation(...)` path through `OPERATOR_PRIVATE_KEY`; new `:user` rows take the v0.1 sentinel audit anchor.
 
 ### Agent intent API + USDC transfer (Phases 5 + 6)
 
-Pinned by Worker B's #509 audit:
+Pinned by the #509 audit:
 
 - `POST /v1/intents` and `GET /v1/intents/:id` under the `:api_authenticated, :api_operator` pipeline.
 - Public `kind` vocabulary closed-set: `transfer`, `swap`, `scheduled_transfer`, `allocate_idle_capital`. Unknown kinds (e.g. `buy_token`) → 422 `invalid_body` with no `EvaluateIntent` enqueue.
@@ -90,7 +90,7 @@ The honesty grep confirmed no `production-ready` / `full CCTP` / `full 1inch` / 
 
 ### Allowlisted Morpho USDC deposit (Phase 9)
 
-Audited end-to-end by Worker C's MVP test lane (`control-tower/worker-reports/worker-c.md`). 205 focused tests pass across `test/bank/defi_venues/morpho/`, `test/bank/decisions/morpho_deposit_artifacts_test.exs`, `morpho_deposit_plan_test.exs`, `morpho_dispatch_safety_test.exs`, `evaluate_intent_morpho_test.exs`. Every Phase 9 acceptance was already LANDED before the audit:
+Audited end-to-end by the MVP test lane for Phase 9. 205 focused tests pass across `test/bank/defi_venues/morpho/`, `test/bank/decisions/morpho_deposit_artifacts_test.exs`, `morpho_deposit_plan_test.exs`, `morpho_dispatch_safety_test.exs`, `evaluate_intent_morpho_test.exs`. Every Phase 9 acceptance was already LANDED before the audit:
 
 - Allowlisted vault config via `Bank.Policies.PolicyRule` `:allowed_vault` rule type → `Bank.Policies.Morpho.RulesCompiler` → `PolicyInput.vault_allowlist`.
 - Risk evaluator `Bank.DefiVenues.Morpho.RiskExplanation.explain/3` produces `decision: "auto_exec" | "approval_required" | "hold" | "block"` + `risk_tier: "low" | "moderate" | "elevated" | "severe"`.
@@ -102,7 +102,7 @@ Audited end-to-end by Worker C's MVP test lane (`control-tower/worker-reports/wo
 
 ### Morpho withdraw boundary (Phase 10)
 
-Audited by Worker C; classification confirmed as **operator-only preview / planning** with on-chain dispatch explicitly deferred to issue #207. Withdraw is intentionally NOT a session-permitted capability for v0.1: `Bank.SessionPermissions.Scope.default/0` documents it under denied actions, and the chain adapter's session-permission install does not encode it on chain.
+Audited; classification confirmed as **operator-only preview / planning** with on-chain dispatch explicitly deferred to issue #207. Withdraw is intentionally NOT a session-permitted capability for v0.1: `Bank.SessionPermissions.Scope.default/0` documents it under denied actions, and the chain adapter's session-permission install does not encode it on chain.
 
 What's wired today (operator-only, preview/planning):
 
@@ -117,7 +117,7 @@ What's deferred to a follow-up:
 
 ### Operator console + audit + replay (Phase 11)
 
-Audited by Worker C. 143 LiveView tests pass across `queue_live_test.exs`, `intent_replay_live_test.exs`, `control_live_test.exs`, `queue_live_format_hygiene_test.exs`. Every Phase 11 acceptance was LANDED before the audit, plus one real gap closed under PR [#510](https://github.com/Linh86/cryptokorr/pull/510) (squash-merged `fd1da6f`).
+Audited. 143 LiveView tests pass across `queue_live_test.exs`, `intent_replay_live_test.exs`, `control_live_test.exs`, `queue_live_format_hygiene_test.exs`. Every Phase 11 acceptance was LANDED before the audit, plus one real gap closed under PR [#510](https://github.com/Linh86/cryptokorr/pull/510) (squash-merged `fd1da6f`).
 
 LiveViews present and tested with stable DOM ids:
 
@@ -131,9 +131,9 @@ LiveViews present and tested with stable DOM ids:
 
 ### SDK / MCP surface (Phase 12)
 
-- `cryptobank` (Python SDK, `sdks/python/`) — sync + async clients, full method surface (intents, decisions, audit, operator namespace), typed exception hierarchy keyed off the wire `error.code`. Bundle smoke: `pip install` from sdist + import surface check passed.
-- `@cryptobank/sdk` (TypeScript SDK, `sdks/typescript/`) — Node 18+, native `fetch` + `globalThis.crypto`, no runtime deps. 80 / 80 vitest. ESM + types build under `dist/`. CHANGELOG packed.
-- `cryptobank-mcp` (stdio MCP server, `sdks/mcp/`) — stdlib-only. 82 / 82 unittest. Console script `cryptobank-mcp` round-trips `initialize` JSON-RPC against a clean-venv install.
+- `cryptokorr` (Python SDK, `sdks/python/`) — sync + async clients, full method surface (intents, decisions, audit, operator namespace), typed exception hierarchy keyed off the wire `error.code`. Bundle smoke: `pip install` from sdist + import surface check passed.
+- `@cryptokorr/sdk` (TypeScript SDK, `sdks/typescript/`) — Node 18+, native `fetch` + `globalThis.crypto`, no runtime deps. 80 / 80 vitest. ESM + types build under `dist/`. CHANGELOG packed.
+- `cryptokorr-mcp` (stdio MCP server, `sdks/mcp/`) — stdlib-only. 82 / 82 unittest. Console script `cryptokorr-mcp` round-trips `initialize` JSON-RPC against a clean-venv install.
 - Examples (`examples/`) — Claude Desktop config, LangGraph Python agent, Vercel AI SDK Node tools. All three pinned to Base Sepolia, env-var-supplied API keys, `approval_required` documented as success not failure, no real keys committed.
 - Path-A / Path-B reviewer smoke runbook: `docs/runbooks/browser-signed-install-smoke.md`.
 - Reviewer preflight: `mix bank.browser_install.smoke` (preflight only — refuses `--confirm` / `--broadcast` / `--send` / `--sign` / `--execute` with exit code 2; redacts API keys to `cb_<first8>***`).
@@ -151,15 +151,15 @@ None.
 
 P2 follow-ups carried over from prior worker reports + this lane's audit. None blocks the demo:
 
-- **Bundler RPC key rotation is not documented in `docs/operator-secrets-checklist.md`** (Worker D audit, this run). The checklist covers initial acquisition of `BUNDLER_RPC_URL` (lines 150-157 EN, mirrored in `-cs.md`) but does not name a rotation cadence or operator responsibility for refreshing the public-tier API key. The bundler URL is a low-trust credential surfaced viewer-tier on the install envelope — acceptable for private alpha, but worth a one-paragraph rotation note.
-- **Browser-signed cryptographic revoke** (Worker A's report; design note `docs/design/browser-signed-install.md` § 6) — v0.1 ships the sentinel audit anchor for `:user`-rooted rows; the user-signed cryptographic revoke flow is a v0.2 follow-up.
-- **Per-policy on-chain ZeroDev policy encoding** (Worker A's report, Worker C's #501 closeout) — v0.1 ships `toSudoPolicy({})` to mirror the legacy adapter; encoding `Bank.SessionPermissions.Scope.default()` as a real policy array is a v0.2 follow-up.
-- **Wallet-provider error-code corpus** (Worker C's #501 closeout) — `classifySendError` and `classifyReceiptError` cover EIP-1193 4001 plus viem's typical message shapes; per-provider fixture corpora (Coinbase Wallet, Phantom-EVM) are a v0.2 hardening pass. MetaMask, Rabby, and Frame are smoke-tested.
-- **`bundler_rpc_url` doubles as the read RPC** (Worker C's #501 closeout) — Pimlico endpoints serve generic JSON-RPC alongside bundler-specific methods so this works today; if a bundler without generic-RPC support is ever swapped in, Phoenix would need to expose a separate `read_rpc_url` in the envelope.
-- **Test-isolation flake exposed in #500** (Worker C's #501 closeout) — a one-line `Bank.Security.PauseState.reset/0` setup landed in `wallet_bindings_install_controller_test.exs` to fix `runtime_paused` bleed from a sibling test. A more complete fix (eliminating any test that mutates global PauseState without an `on_exit` reset) is worth a pass when someone next rotates onto the install lane.
-- **Morpho withdraw on-chain dispatch is deferred** (Worker C's MVP test lane; tracked under #207). The audit chain is forward-compatible — when the dispatch slice lands, `morpho.withdraw_dispatched` / `withdraw_confirmed` / `withdraw_failed` events flow into the existing `morpho_evidence` replay slice automatically. Not blocking the demo since the agent surface deliberately omits withdraw.
-- **`Bank.DefiVenues.Morpho.WithdrawPreview` doesn't do an on-chain `maxWithdraw(owner)` read** (Worker C's MVP test lane). Preview uses the snapshot's `state.total_assets` as an upper bound; actual chain `maxWithdraw` may be lower (other withdrawals, cap reductions). Documented at `docs/runbooks/morpho-deposits.md:219-223` and treated as fail-closed safety. Worth tightening to a real chain read when a chain client is wired for that path.
-- **`mix bank.morpho.deposit_smoke` is `--confirm`-gated and not run in this verification** (Worker C's MVP test lane). That's by design (the test plan forbids live transaction claims) but worth flagging that the deepest end-to-end Morpho path remains operator-driven only.
+- **Bundler RPC key rotation is not documented in `docs/operator-secrets-checklist.md`** (audit, this run). The checklist covers initial acquisition of `BUNDLER_RPC_URL` (lines 150-157 EN, mirrored in `-cs.md`) but does not name a rotation cadence or operator responsibility for refreshing the public-tier API key. The bundler URL is a low-trust credential surfaced viewer-tier on the install envelope — acceptable for private alpha, but worth a one-paragraph rotation note.
+- **Browser-signed cryptographic revoke** (the design note; design note `docs/design/browser-signed-install.md` § 6) — v0.1 ships the sentinel audit anchor for `:user`-rooted rows; the user-signed cryptographic revoke flow is a v0.2 follow-up.
+- **Per-policy on-chain ZeroDev policy encoding** (the design note, the #501 closeout) — v0.1 ships `toSudoPolicy({})` to mirror the legacy adapter; encoding `Bank.SessionPermissions.Scope.default()` as a real policy array is a v0.2 follow-up.
+- **Wallet-provider error-code corpus** (the #501 closeout) — `classifySendError` and `classifyReceiptError` cover EIP-1193 4001 plus viem's typical message shapes; per-provider fixture corpora (Coinbase Wallet, Phantom-EVM) are a v0.2 hardening pass. MetaMask, Rabby, and Frame are smoke-tested.
+- **`bundler_rpc_url` doubles as the read RPC** (the #501 closeout) — Pimlico endpoints serve generic JSON-RPC alongside bundler-specific methods so this works today; if a bundler without generic-RPC support is ever swapped in, Phoenix would need to expose a separate `read_rpc_url` in the envelope.
+- **Test-isolation flake exposed in #500** (the #501 closeout) — a one-line `Bank.Security.PauseState.reset/0` setup landed in `wallet_bindings_install_controller_test.exs` to fix `runtime_paused` bleed from a sibling test. A more complete fix (eliminating any test that mutates global PauseState without an `on_exit` reset) is worth a pass when someone next rotates onto the install lane.
+- **Morpho withdraw on-chain dispatch is deferred** (the MVP test lane; tracked under #207). The audit chain is forward-compatible — when the dispatch slice lands, `morpho.withdraw_dispatched` / `withdraw_confirmed` / `withdraw_failed` events flow into the existing `morpho_evidence` replay slice automatically. Not blocking the demo since the agent surface deliberately omits withdraw.
+- **`Bank.DefiVenues.Morpho.WithdrawPreview` doesn't do an on-chain `maxWithdraw(owner)` read** (the MVP test lane). Preview uses the snapshot's `state.total_assets` as an upper bound; actual chain `maxWithdraw` may be lower (other withdrawals, cap reductions). Documented at `docs/runbooks/morpho-deposits.md:219-223` and treated as fail-closed safety. Worth tightening to a real chain read when a chain client is wired for that path.
+- **`mix bank.morpho.deposit_smoke` is `--confirm`-gated and not run in this verification** (the MVP test lane). That's by design (the test plan forbids live transaction claims) but worth flagging that the deepest end-to-end Morpho path remains operator-driven only.
 - **Python SDK has no `tests/` directory.** `sdks/python/pyproject.toml` lists `pytest>=7.0` as a dev-extra but the directory is empty. The SDK code is exercised indirectly through the MCP server's HTTP-client tests and the examples hygiene. Adding even a small mocked-transport test scaffold would close the parity gap with the TypeScript SDK's 80-test suite.
 
 ## Docs And Code Mismatches
@@ -168,7 +168,7 @@ P2 follow-ups carried over from prior worker reports + this lane's audit. None b
 
 - **`Bank.Runtime.Workers.PollInstallUserOpReceipt` → `Bank.Runtime.Workers.PollInstallReceipt`.** The actual implementation module is `lib/bank/runtime/workers/poll_install_receipt.ex` (defmodule `Bank.Runtime.Workers.PollInstallReceipt`). The docs carried over the design-note name `PollInstallUserOpReceipt` from `docs/design/browser-signed-install.md` instead of the implementation name. Three locations updated: `docs/mvp-readiness.md:213`, `docs/runbooks/browser-signed-install-smoke.md:232`, `docs/runbooks/browser-signed-install-smoke.md:426`. Pinned by two new assertions in `test/docs/browser_signed_install_docs_hygiene_test.exs` (one per affected doc) so future edits cannot reintroduce the design-note name.
 
-**No other docs/code drift surfaced by the honesty grep or by reading the runbooks against the current source.** Worker B's report explicitly lane-checked the swap and provider runbooks; Worker A's report explicitly lane-checked the browser install runbook; this lane added the missing module-name pin.
+**No other docs/code drift surfaced by the honesty grep or by reading the runbooks against the current source.** the lane report explicitly lane-checked the swap and provider runbooks; the design note explicitly lane-checked the browser install runbook; this lane added the missing module-name pin.
 
 ## Manual-Only Checks For Owner
 
@@ -194,9 +194,10 @@ These are the only items left where a human must drive a real wallet on Base Sep
   - `docs/runbooks/morpho-deposits.md` (allowlisted USDC deposit)
 - `mix bank.browser_install.smoke` is the env / config preflight a reviewer can run before walking the manual steps. It refuses to sign or broadcast under any flag.
 - No private keys, seed phrases, or signed transactions were used in any phase of this verification. No real funds were moved. No claim of manual-only-pass is made — those steps are owner work.
-- Worker reports synthesized into this report:
-  - `control-tower/worker-reports/worker-a.md` — Worker A's #506 (launch docs cleanup) + #508 (MVP test lane: delegation gate pinning `:revoking` + `:revoked` + `:expired`) closeouts.
-  - `control-tower/worker-reports/worker-b.md` — Worker B's MVP test lane (Phases 5–8: agent intent API + USDC transfer + MVP 0x swap + provider claims) + #509 (intent-kind controller pins) closeout.
-  - `control-tower/worker-reports/worker-c.md` — Worker C's MVP test lane (Phases 9–11: Morpho deposit + withdraw boundary + operator console) + #510 (`<.swap_route_card>` rendering on `BankWeb.IntentReplayLive`, squash-merged `fd1da6f`) closeout, plus their prior #501 (frontend ZeroDev SDK + bundler) closeout context.
-- All four lanes (A baseline-delegation, B intent/transfer/swap/provider, C Morpho/withdraw/console, D baseline+SDK/MCP+docs+GH+report) merged green on `main` between `1e75e05` and `fd1da6f` on 2026-05-07, in five test-plan PRs (#508, #509, #510, #511) plus this update.
-- The shared worktree at `/Users/linhnguyen/dev/CryptoBank` carries tracked dirty files plus several untracked `docs/` and `control-tower/` paths from parallel work. None were modified by this lane — the verification ran from an isolated worktree at `/private/tmp/cryptobank-d-mvp-baseline-docs` per the test plan's safety rule.
+- Test lanes synthesized into this report:
+  - **Baseline-delegation** — #506 (launch docs cleanup) + #508 (delegation gate pinning `:revoking` + `:revoked` + `:expired`).
+  - **Intent / transfer / swap / provider** — Phases 5–8 (agent intent API + USDC transfer + MVP 0x swap + provider claims) + #509 (intent-kind controller pins).
+  - **Morpho / withdraw / console** — Phases 9–11 (Morpho deposit + withdraw boundary + operator console) + #510 (`<.swap_route_card>` rendering on `BankWeb.IntentReplayLive`, squash-merged `fd1da6f`); prior #501 (frontend ZeroDev SDK + bundler) closeout context applied.
+  - **Baseline + SDK / MCP / docs / GH / report** — this update.
+- All four lanes merged green on `main` between `1e75e05` and `fd1da6f` on 2026-05-07, in five test-plan PRs (#508, #509, #510, #511) plus this report.
+- The verification ran from an isolated worktree per the test plan's safety rule; the canonical workspace was left untouched.

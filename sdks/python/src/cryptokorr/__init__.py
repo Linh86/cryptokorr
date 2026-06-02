@@ -1,13 +1,13 @@
-"""CryptoBank Python SDK.
+"""CryptoKorr Python SDK.
 
 Public surface:
 
-  * ``Cryptobank`` — the sync client (``from_env`` constructor).
+  * ``CryptoKorr`` — the sync client (``from_env`` constructor).
   * ``client.operator`` — operator-only writes (approve / reject /
     pause / resume).
-  * ``cryptobank.errors`` — typed exception hierarchy keyed off the
+  * ``cryptokorr.errors`` — typed exception hierarchy keyed off the
     wire ``error.code`` (see ``docs/api/error-codes.md``).
-  * ``cryptobank.models`` — ``TypedDict`` result types.
+  * ``cryptokorr.models`` — ``TypedDict`` result types.
 
 See ``docs/api/sdk-surface.md`` for the full method contract.
 Quickstart: ``sdks/python/README.md``.
@@ -16,7 +16,7 @@ Quickstart: ``sdks/python/README.md``.
 from __future__ import annotations
 
 from . import errors, models
-from ._client import Cryptobank, OperatorClient
+from ._client import CryptoKorr, OperatorClient
 from ._version import __version__
 from .errors import (
     APIError,
@@ -39,7 +39,7 @@ from .errors import (
 __all__ = [
     "__version__",
     # Client.
-    "Cryptobank",
+    "CryptoKorr",
     "OperatorClient",
     # Errors.
     "APIError",

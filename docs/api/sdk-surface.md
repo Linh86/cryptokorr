@@ -39,14 +39,14 @@ Both SDKs read configuration in this priority order:
 
 1. Constructor argument.
 2. Environment variable.
-3. `~/.cryptobank/config.toml` (planned, post-MVP).
+3. `~/.cryptokorr/config.toml` (planned, post-MVP).
 
 | Setting       | Env var                | Default                       | Notes                                             |
 | ------------- | ---------------------- | ----------------------------- | ------------------------------------------------- |
-| `api_key`     | `CRYPTOBANK_API_KEY`   | (required, no default)        | `Authorization: Bearer cb_<...>`. Must be a valid `cb_` prefixed key.                          |
-| `base_url`    | `CRYPTOBANK_BASE_URL`  | `http://localhost:4000`       | Production deployments override with their tenant URL. No trailing slash.                      |
-| `timeout`     | `CRYPTOBANK_TIMEOUT_MS`| `15_000` (ms)                 | Per-request HTTP timeout. SDK retry budget is on top of this.                                  |
-| `user_agent`  | (n/a)                  | `cryptobank-py/<v>` / `cryptobank-js/<v>` | Sent on every request for telemetry / log correlation.                  |
+| `api_key`     | `CRYPTOKORR_API_KEY`   | (required, no default)        | `Authorization: Bearer cb_<...>`. Must be a valid `cb_` prefixed key.                          |
+| `base_url`    | `CRYPTOKORR_BASE_URL`  | `http://localhost:4000`       | Production deployments override with their tenant URL. No trailing slash.                      |
+| `timeout`     | `CRYPTOKORR_TIMEOUT_MS`| `15_000` (ms)                 | Per-request HTTP timeout. SDK retry budget is on top of this.                                  |
+| `user_agent`  | (n/a)                  | `cryptokorr-py/<v>` / `cryptokorr-js/<v>` | Sent on every request for telemetry / log correlation.                  |
 
 `api_key` is **never** logged, **never** included in error message
 text, and **never** echoed in repr/inspect output. Both SDKs strip it
@@ -56,14 +56,14 @@ from formatted exceptions.
 
 ```python
 # Python
-client = Cryptobank(api_key="cb_...", base_url="https://api.example.com")
-client = Cryptobank.from_env()  # reads CRYPTOBANK_API_KEY + CRYPTOBANK_BASE_URL
+client = Cryptokorr(api_key="cb_...", base_url="https://api.example.com")
+client = Cryptokorr.from_env()  # reads CRYPTOKORR_API_KEY + CRYPTOKORR_BASE_URL
 ```
 
 ```typescript
 // TypeScript
-const client = new Cryptobank({ apiKey: "cb_...", baseUrl: "https://api.example.com" });
-const client = Cryptobank.fromEnv();  // reads CRYPTOBANK_API_KEY + CRYPTOBANK_BASE_URL
+const client = new Cryptokorr({ apiKey: "cb_...", baseUrl: "https://api.example.com" });
+const client = Cryptokorr.fromEnv();  // reads CRYPTOKORR_API_KEY + CRYPTOKORR_BASE_URL
 ```
 
 Both clients add `Authorization: Bearer <api_key>` to every request,
@@ -91,7 +91,7 @@ Each method is listed with:
   [`error-codes.md`](error-codes.md)).
 
 All methods are async in TypeScript (`Promise<T>`). The Python SDK
-ships sync (`Cryptobank`) and async (`AsyncCryptobank`) clients with
+ships sync (`Cryptokorr`) and async (`AsyncCryptokorr`) clients with
 identical method names; the signatures below show the sync form.
 
 ### Intents
@@ -543,8 +543,8 @@ type Decision = {
 ### Submit a transfer (Python)
 
 ```python
-from cryptobank import Cryptobank
-client = Cryptobank.from_env()  # CRYPTOBANK_API_KEY + CRYPTOBANK_BASE_URL
+from cryptokorr import Cryptokorr
+client = Cryptokorr.from_env()  # CRYPTOKORR_API_KEY + CRYPTOKORR_BASE_URL
 
 result = client.submit_transfer(
     agent_id="agent-alice",
@@ -568,9 +568,9 @@ elif decision.outcome in ("hold", "block"):
 ### Submit a swap (TypeScript)
 
 ```typescript
-import { Cryptobank } from "@cryptobank/sdk";
+import { Cryptokorr } from "@cryptokorr/sdk";
 
-const client = Cryptobank.fromEnv();
+const client = Cryptokorr.fromEnv();
 
 const result = await client.submitSwap({
   agentId: "agent-alice",
@@ -589,8 +589,8 @@ if (decision.outcome === "approval_required") {
 ### Handle a typed error (Python)
 
 ```python
-from cryptobank import (
-    Cryptobank,
+from cryptokorr import (
+    Cryptokorr,
     SwapSafetyError,
     IdempotencyConflictError,
     RateLimitError,

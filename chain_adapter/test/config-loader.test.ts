@@ -131,7 +131,7 @@ describe("loadConfig — operator (kernel root) signer", () => {
     // The kernel root signer is a different role from the runtime
     // session signer. A single EOA serving both lets a leak of the
     // session key escalate to root authority. Refusing is a hard
-    // architectural invariant — Subagent D's review explicitly
+    // architectural invariant — A security review explicitly
     // called this out and the loader enforces it.
     process.env.OPERATOR_PRIVATE_KEY = DELEGATION_KEY;
     process.env.OPERATOR_ADDRESS = privateKeyToAccount(DELEGATION_KEY).address;

@@ -1,6 +1,6 @@
-# `@cryptobank/sdk` — TypeScript SDK for CryptoBank
+# `@cryptokorr/sdk` — TypeScript SDK for CryptoKorr
 
-The official TypeScript SDK for the CryptoBank `/v1` control-plane
+The official TypeScript SDK for the CryptoKorr `/v1` control-plane
 API. Submit intents, poll decisions, drive operator approvals, and
 read audit trails from a Node-server-side application — without
 ever pasting a private key into your code.
@@ -9,13 +9,13 @@ The SDK matches the contract pinned in
 [`docs/api/sdk-surface.md`](../../docs/api/sdk-surface.md) and the
 error taxonomy in
 [`docs/api/error-codes.md`](../../docs/api/error-codes.md). The
-Python SDK ([`@cryptobank/sdk-py`](../python)) ships alongside it
+Python SDK ([`@cryptokorr/sdk-py`](../python)) ships alongside it
 with the same method names.
 
 ## Install
 
 ```sh
-npm install @cryptobank/sdk
+npm install @cryptokorr/sdk
 ```
 
 The SDK targets **Node 18+**. It uses native `fetch` + `globalThis.crypto`;
@@ -34,11 +34,11 @@ no transitive runtime dependencies.
 ## Quickstart (Node, server-side)
 
 ```ts
-import { Cryptobank } from "@cryptobank/sdk";
+import { CryptoKorr } from "@cryptokorr/sdk";
 
-// Reads CRYPTOBANK_API_KEY (required) + CRYPTOBANK_BASE_URL +
-// CRYPTOBANK_TIMEOUT_MS from process.env.
-const client = Cryptobank.fromEnv();
+// Reads CRYPTOKORR_API_KEY (required) + CRYPTOKORR_BASE_URL +
+// CRYPTOKORR_TIMEOUT_MS from process.env.
+const client = CryptoKorr.fromEnv();
 
 // 1. Submit a transfer intent.
 const result = await client.submitTransfer({
@@ -75,11 +75,11 @@ switch (decision.outcome) {
 }
 ```
 
-Run it (with a valid CryptoBank workspace API key):
+Run it (with a valid CryptoKorr workspace API key):
 
 ```sh
-export CRYPTOBANK_API_KEY="cb_..."
-export CRYPTOBANK_BASE_URL="http://localhost:4000"  # optional
+export CRYPTOKORR_API_KEY="cb_..."
+export CRYPTOKORR_BASE_URL="http://localhost:4000"  # optional
 node ./demo.mjs
 ```
 
@@ -108,15 +108,15 @@ that path. It does not use this SDK.
 
 | Setting       | Constructor key | Env var                 | Default                  |
 | ------------- | --------------- | ----------------------- | ------------------------ |
-| API key       | `apiKey`        | `CRYPTOBANK_API_KEY`    | (required, no default)   |
-| Base URL      | `baseUrl`       | `CRYPTOBANK_BASE_URL`   | `http://localhost:4000`  |
-| Timeout (ms)  | `timeoutMs`     | `CRYPTOBANK_TIMEOUT_MS` | `15000`                  |
-| User-Agent    | `userAgent`     | n/a                     | `cryptobank-js/<v>`      |
+| API key       | `apiKey`        | `CRYPTOKORR_API_KEY`    | (required, no default)   |
+| Base URL      | `baseUrl`       | `CRYPTOKORR_BASE_URL`   | `http://localhost:4000`  |
+| Timeout (ms)  | `timeoutMs`     | `CRYPTOKORR_TIMEOUT_MS` | `15000`                  |
+| User-Agent    | `userAgent`     | n/a                     | `cryptokorr-js/<v>`      |
 | `fetch`       | `fetch`         | n/a                     | `globalThis.fetch`       |
 
 ```ts
-const client = new Cryptobank({
-  apiKey: process.env.CRYPTOBANK_API_KEY!,
+const client = new CryptoKorr({
+  apiKey: process.env.CRYPTOKORR_API_KEY!,
   baseUrl: "https://api.example.com",
   timeoutMs: 30_000,
 });
@@ -214,11 +214,11 @@ APIError
 
 ```ts
 import {
-  Cryptobank,
+  CryptoKorr,
   SwapSafetyError,
   IdempotencyConflictError,
   RateLimitError,
-} from "@cryptobank/sdk";
+} from "@cryptokorr/sdk";
 
 try {
   await client.submitSwap({

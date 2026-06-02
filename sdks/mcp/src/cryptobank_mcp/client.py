@@ -16,9 +16,9 @@ from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 from urllib.parse import urlencode
 
-from cryptobank_mcp import __version__ as _VERSION
+from cryptokorr_mcp import __version__ as _VERSION
 
-_USER_AGENT = f"cryptobank-mcp/{_VERSION}"
+_USER_AGENT = f"cryptokorr-mcp/{_VERSION}"
 
 
 @dataclass(frozen=True)

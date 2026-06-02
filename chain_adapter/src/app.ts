@@ -104,7 +104,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   app.get("/health", async (_request, reply) => {
     return reply.status(200).send({
       status: "ok",
-      service: "cryptobank-ts-adapter",
+      service: "cryptokorr-ts-adapter",
       contract_version: config.contractVersion,
       supported_chains: ["base", "base-sepolia"],
       supported_assets: ["USDC"],

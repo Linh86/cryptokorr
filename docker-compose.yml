@@ -50,7 +50,7 @@ services:
     # Placeholder image — the real adapter artifact is published from the
     # TypeScript adapter repo. Override with `ADAPTER_IMAGE=...` in
     # .env.staging once that repo publishes a tag.
-    image: ${ADAPTER_IMAGE:-ghcr.io/cryptobank/adapter:placeholder}
+    image: ${ADAPTER_IMAGE:-ghcr.io/cryptokorr/adapter:placeholder}
     environment:
       ADAPTER_DISPATCH_SECRET: ${ADAPTER_DISPATCH_SECRET:?}
       ADAPTER_CALLBACK_SECRET: ${ADAPTER_CALLBACK_SECRET:?}

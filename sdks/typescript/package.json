@@ -1,7 +1,7 @@
 {
-  "name": "@cryptobank/sdk",
+  "name": "@cryptokorr/sdk",
   "version": "0.1.0",
-  "description": "TypeScript SDK for the CryptoBank /v1 control-plane API (intents, decisions, approvals, audit, runtime).",
+  "description": "TypeScript SDK for the CryptoKorr /v1 control-plane API (intents, decisions, approvals, audit, runtime).",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -40,13 +40,13 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/Linh86/cryptobank",
+    "url": "https://github.com/Linh86/cryptokorr",
     "directory": "sdks/typescript"
   },
-  "homepage": "https://github.com/Linh86/cryptobank/tree/main/sdks/typescript#readme",
-  "bugs": "https://github.com/Linh86/cryptobank/issues",
+  "homepage": "https://github.com/Linh86/cryptokorr/tree/main/sdks/typescript#readme",
+  "bugs": "https://github.com/Linh86/cryptokorr/issues",
   "keywords": [
-    "cryptobank",
+    "cryptokorr",
     "sdk",
     "treasury",
     "agent",

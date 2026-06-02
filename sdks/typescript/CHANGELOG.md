@@ -1,4 +1,4 @@
-# Changelog — `@cryptobank/sdk` (TypeScript SDK)
+# Changelog — `@cryptokorr/sdk` (TypeScript SDK)
 
 All notable changes to the TypeScript SDK ship in this file.
 Versioning follows [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
@@ -18,8 +18,8 @@ v1 API contract.
 
 ### Added
 
-- ESM `Cryptobank` class with workspace-scoped auth via
-  `CRYPTOBANK_API_KEY` / constructor option.
+- ESM `CryptoKorr` class with workspace-scoped auth via
+  `CRYPTOKORR_API_KEY` / constructor option.
 - Intent submission: `submitTransfer`, `submitSwap`,
   `submitAllocateIdleCapital`. Wire `kind` is `allocate_idle_capital`
   for the Morpho ERC-4626 deposit.
@@ -70,5 +70,5 @@ wallet flow described in `docs/wallet-quickstart.md`.
 - Withdraw / redeem from Morpho is intentionally absent — operator-only
   via the LiveView.
 
-[0.1.0]: https://github.com/Linh86/cryptobank/releases/tag/cryptobank-ts-0.1.0
-[Unreleased]: https://github.com/Linh86/cryptobank/compare/cryptobank-ts-0.1.0...HEAD
+[0.1.0]: https://github.com/Linh86/cryptokorr/releases/tag/cryptokorr-ts-0.1.0
+[Unreleased]: https://github.com/Linh86/cryptokorr/compare/cryptokorr-ts-0.1.0...HEAD

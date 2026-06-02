@@ -287,7 +287,7 @@ both env vars derive to the same EOA.
      installed.
   Should live behind tighter controls than the runtime session
   key (HSM / KMS / cold-signing sidecar — tracked as a follow-up
-  hardening track per Subagent D's review).
+  hardening track per A security review).
 
 ### Session-key secrecy (#58 grant flow)
 
@@ -301,7 +301,7 @@ permission.
 
 The serialized blob persisted in Phoenix is **KEYLESS**:
 `serializePermissionAccount(account, undefined)` — the optional
-`privateKey` parameter is deliberately omitted. Subagent D's
+`privateKey` parameter is deliberately omitted. A prior security review's
 security review (PR #129 grant-flow follow-up) verified that
 ZeroDev's serializer embeds the privateKey VERBATIM if passed,
 so persisting the blob with the key would make Phoenix an

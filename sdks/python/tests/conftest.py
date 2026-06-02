@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 # Ensure the in-tree package is importable without an editable
-# install. The package layout uses src/cryptobank/, so tests prepend
+# install. The package layout uses src/cryptokorr/, so tests prepend
 # the src/ directory to sys.path. This matches the contract that
 # downstream `pip install -e .` would set up.
 _SRC = Path(__file__).resolve().parent.parent / "src"

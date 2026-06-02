@@ -120,12 +120,12 @@ def map_transport_error(exc: BaseException) -> ToolError:
     if "timeout" in name.lower() or "timeout" in text.lower():
         return ToolError(
             code="upstream_timeout",
-            message=f"Request to CryptoBank API timed out: {safe}",
+            message=f"Request to CryptoKorr API timed out: {safe}",
             retryable=True,
         )
     return ToolError(
         code="service_unavailable",
-        message=f"Could not reach CryptoBank API: {safe}",
+        message=f"Could not reach CryptoKorr API: {safe}",
         retryable=True,
     )
 

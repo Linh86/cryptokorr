@@ -230,7 +230,7 @@ defmodule BankWeb.Internal.AdapterCallbackController do
   defp summarise_error(reason), do: inspect(reason)
 
   # Logging an inbound callback's full params on failure was the
-  # post-PR-132 redaction-audit (Subagent C) finding: today's
+  # post-PR-132 redaction-audit (prior review) finding: today's
   # callback shapes don't carry secrets, but `inspect(params)` is
   # a latent leak channel against future schema drift (a new
   # field — say a signed delegation payload that incidentally

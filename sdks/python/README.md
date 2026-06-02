@@ -1,4 +1,4 @@
-# `cryptobank` — Python SDK
+# `cryptokorr` — Python SDK
 
 > Status: MVP foundation (#479) on top of the SDK contract pinned in
 > [`docs/api/sdk-surface.md`](../../docs/api/sdk-surface.md), error
@@ -6,7 +6,7 @@
 > and the OpenAPI artifact at
 > [`priv/openapi/openapi.json`](../../priv/openapi/openapi.json).
 
-A typed Python client for CryptoBank `/v1`. Submit and inspect
+A typed Python client for CryptoKorr `/v1`. Submit and inspect
 intents, follow decisions to approval / dispatch, and read the
 audit / replay bundle without hand-writing HTTP glue.
 
@@ -35,7 +35,7 @@ audit / replay bundle without hand-writing HTTP glue.
 Once published to PyPI:
 
 ```bash
-pip install cryptobank
+pip install cryptokorr
 ```
 
 From a checkout (works today):
@@ -43,7 +43,7 @@ From a checkout (works today):
 ```bash
 pip install -e sdks/python
 # or, from outside the repo:
-pip install "cryptobank @ git+https://github.com/Linh86/cryptobank.git#subdirectory=sdks/python"
+pip install "cryptokorr @ git+https://github.com/Linh86/cryptokorr.git#subdirectory=sdks/python"
 ```
 
 The release/publish workflow lives in
@@ -58,15 +58,15 @@ The SDK reads configuration in this priority order:
 
 | Setting    | Env var                | Default                       |
 | ---------- | ---------------------- | ----------------------------- |
-| `api_key`  | `CRYPTOBANK_API_KEY`   | (required, no default)        |
-| `base_url` | `CRYPTOBANK_BASE_URL`  | `http://localhost:4000`       |
-| `timeout`  | `CRYPTOBANK_TIMEOUT_MS`| `15_000` (ms)                 |
+| `api_key`  | `CRYPTOKORR_API_KEY`   | (required, no default)        |
+| `base_url` | `CRYPTOKORR_BASE_URL`  | `http://localhost:4000`       |
+| `timeout`  | `CRYPTOKORR_TIMEOUT_MS`| `15_000` (ms)                 |
 
 Set the API key via env var before running the quickstart:
 
 ```bash
-export CRYPTOBANK_API_KEY="cb_your_key_here"
-export CRYPTOBANK_BASE_URL="https://api.example.com"  # optional
+export CRYPTOKORR_API_KEY="cb_your_key_here"
+export CRYPTOKORR_BASE_URL="https://api.example.com"  # optional
 ```
 
 The API key is **never** logged, **never** included in error
@@ -75,9 +75,9 @@ messages, and **never** echoed by `repr(client)`.
 ## Quickstart
 
 ```python
-from cryptobank import Cryptobank, IdempotencyConflictError, RateLimitError
+from cryptokorr import CryptoKorr, IdempotencyConflictError, RateLimitError
 
-client = Cryptobank.from_env()
+client = CryptoKorr.from_env()
 
 # 1. Submit a transfer intent.
 result = client.submit_transfer(
@@ -145,8 +145,8 @@ runtime = client.get_runtime_status()  # /v1/health/deep, no auth required
 ## Typed errors
 
 ```python
-from cryptobank import (
-    Cryptobank,
+from cryptokorr import (
+    CryptoKorr,
     IdempotencyConflictError,
     RateLimitError,
     SwapSafetyError,
@@ -171,7 +171,7 @@ except RateLimitError as e:
 
 The full exception hierarchy is documented in
 [`docs/api/error-codes.md`](../../docs/api/error-codes.md). All
-errors are subclasses of `cryptobank.APIError`; their `code`
+errors are subclasses of `cryptokorr.APIError`; their `code`
 attribute is the stable wire identifier.
 
 ## Operator namespace
@@ -229,7 +229,7 @@ the single `Transport._urlopen` seam to inject canned responses.
 
 ## Non-goals (deferred)
 
-* `AsyncCryptobank` — sync-only in MVP; async client follows in a
+* `AsyncCryptoKorr` — sync-only in MVP; async client follows in a
   separate PR.
 * Streaming / websocket subscription — polling only in MVP.
 * Workspace-management writes, API-key management, browser-wallet

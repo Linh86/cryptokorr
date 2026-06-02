@@ -1,4 +1,4 @@
-"""Unit tests for the sync ``Cryptobank`` client.
+"""Unit tests for the sync ``CryptoKorr`` client.
 
 The tests patch ``Transport._urlopen`` with ``CallRecorder`` so a
 single fixture pins what the SDK puts on the wire (method, path,
@@ -14,9 +14,9 @@ import pytest
 
 # conftest.py prepends src/ to sys.path; these imports work without
 # an editable install.
-import cryptobank
-from cryptobank import Cryptobank
-from cryptobank.errors import (
+import cryptokorr
+from cryptokorr import CryptoKorr
+from cryptokorr.errors import (
     AuthenticationError,
     AuthorizationError,
     ConflictError,
@@ -34,8 +34,8 @@ from cryptobank.errors import (
 from conftest import CallRecorder, FakeResponse
 
 
-def _client(recorder: CallRecorder, *, base_url: str = "https://api.example.test") -> Cryptobank:
-    client = Cryptobank(api_key="cb_testkey_xxxxxxxxxxxxxxxxxxxxxxxxxxxx", base_url=base_url)
+def _client(recorder: CallRecorder, *, base_url: str = "https://api.example.test") -> CryptoKorr:
+    client = CryptoKorr(api_key="cb_testkey_xxxxxxxxxxxxxxxxxxxxxxxxxxxx", base_url=base_url)
     # Patch the transport's seam.
     client._transport._urlopen = recorder  # type: ignore[method-assign]
     return client
@@ -47,32 +47,32 @@ def _client(recorder: CallRecorder, *, base_url: str = "https://api.example.test
 class TestConstruction:
     def test_requires_api_key(self):
         with pytest.raises(ValueError, match="api_key"):
-            Cryptobank(api_key="", base_url="https://api.example.test")
+            CryptoKorr(api_key="", base_url="https://api.example.test")
 
     def test_requires_base_url(self):
         with pytest.raises(ValueError, match="base_url"):
-            Cryptobank(api_key="cb_x", base_url="")
+            CryptoKorr(api_key="cb_x", base_url="")
 
     def test_timeout_must_be_positive(self):
         with pytest.raises(ValueError, match="timeout_ms"):
-            Cryptobank(api_key="cb_x", base_url="https://api.example.test", timeout_ms=0)
+            CryptoKorr(api_key="cb_x", base_url="https://api.example.test", timeout_ms=0)
 
     def test_from_env_reads_required_vars(self, monkeypatch):
-        monkeypatch.setenv("CRYPTOBANK_API_KEY", "cb_envkey_xxxxxxxxxxxxxxxxxxxxxx")
-        monkeypatch.setenv("CRYPTOBANK_BASE_URL", "https://api.from-env.test")
-        client = Cryptobank.from_env()
+        monkeypatch.setenv("CRYPTOKORR_API_KEY", "cb_envkey_xxxxxxxxxxxxxxxxxxxxxx")
+        monkeypatch.setenv("CRYPTOKORR_BASE_URL", "https://api.from-env.test")
+        client = CryptoKorr.from_env()
         assert client._base_url == "https://api.from-env.test"
 
     def test_from_env_missing_api_key_raises(self, monkeypatch):
-        monkeypatch.delenv("CRYPTOBANK_API_KEY", raising=False)
-        with pytest.raises(ValueError, match="CRYPTOBANK_API_KEY"):
-            Cryptobank.from_env()
+        monkeypatch.delenv("CRYPTOKORR_API_KEY", raising=False)
+        with pytest.raises(ValueError, match="CRYPTOKORR_API_KEY"):
+            CryptoKorr.from_env()
 
     def test_from_env_invalid_timeout_raises(self, monkeypatch):
-        monkeypatch.setenv("CRYPTOBANK_API_KEY", "cb_x")
-        monkeypatch.setenv("CRYPTOBANK_TIMEOUT_MS", "not-an-int")
-        with pytest.raises(ValueError, match="CRYPTOBANK_TIMEOUT_MS"):
-            Cryptobank.from_env()
+        monkeypatch.setenv("CRYPTOKORR_API_KEY", "cb_x")
+        monkeypatch.setenv("CRYPTOKORR_TIMEOUT_MS", "not-an-int")
+        with pytest.raises(ValueError, match="CRYPTOKORR_TIMEOUT_MS"):
+            CryptoKorr.from_env()
 
 
 # -- Secret hygiene ---------------------------------------------------------
@@ -83,7 +83,7 @@ class TestSecretHygiene:
 
     def test_repr_redacts_api_key(self):
         secret = "cb_supersecret_DO_NOT_LEAK_xxxxxxxxxxxxxxxxxxxx"
-        client = Cryptobank(api_key=secret, base_url="https://api.example.test")
+        client = CryptoKorr(api_key=secret, base_url="https://api.example.test")
         rendered = repr(client)
         assert secret not in rendered
         assert "DO_NOT_LEAK" not in rendered
@@ -93,7 +93,7 @@ class TestSecretHygiene:
         assert "cb_" in rendered
 
     def test_repr_redacts_short_key(self):
-        client = Cryptobank(api_key="cb_short", base_url="https://api.example.test")
+        client = CryptoKorr(api_key="cb_short", base_url="https://api.example.test")
         rendered = repr(client)
         assert "cb_short" not in rendered
 
@@ -360,7 +360,7 @@ class TestTypedExceptions:
         # No `error` key — surface as a synthetic http_<status>.
         recorder = CallRecorder([FakeResponse(status=500, body={"unexpected": True})])
         client = _client(recorder)
-        with pytest.raises(cryptobank.APIError) as ei:
+        with pytest.raises(cryptokorr.APIError) as ei:
             client.get_intent("abc")
         assert ei.value.code == "http_500"
 
@@ -381,7 +381,7 @@ class TestRetry:
             FakeResponse(status=200, body={"id": "ok"}),
         ])
         client = _client(recorder)
-        with patch("cryptobank._http.time.sleep"):
+        with patch("cryptokorr._http.time.sleep"):
             result = client.get_runtime_status()
         assert result == {"id": "ok"}
         assert len(recorder.calls) == 2
@@ -426,7 +426,7 @@ class TestRetry:
         # Provide enough fake responses for 1 attempt + 4 retries.
         recorder = CallRecorder([boom, boom, boom, boom, boom])
         client = _client(recorder)
-        with patch("cryptobank._http.time.sleep"):
+        with patch("cryptokorr._http.time.sleep"):
             with pytest.raises(UpstreamError) as ei:
                 client.get_runtime_status()
         assert ei.value.retryable is True

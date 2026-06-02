@@ -3,7 +3,7 @@
 Zero runtime dependencies — uses ``urllib.request`` from the stdlib so
 ``pip install -e sdks/python`` is trivial and free of dependency
 resolution. The only externally-visible class is ``Transport``,
-constructed by ``Cryptobank.__init__``; tests patch
+constructed by ``CryptoKorr.__init__``; tests patch
 ``Transport._urlopen`` to inject mocked HTTP responses.
 
 Posture (see ``docs/api/sdk-surface.md``):
@@ -39,7 +39,7 @@ from ._version import __version__
 __all__ = ["Transport", "Response"]
 
 
-_LOG = logging.getLogger("cryptobank")
+_LOG = logging.getLogger("cryptokorr")
 
 
 def _redact_key(key: str) -> str:
@@ -74,7 +74,7 @@ class Response:
 
 @dataclass
 class Transport:
-    """HTTP transport bound to a single ``Cryptobank`` client."""
+    """HTTP transport bound to a single ``CryptoKorr`` client."""
 
     api_key: str
     base_url: str
@@ -104,7 +104,7 @@ class Transport:
     ) -> Response:
         """Issue an HTTP request and return the parsed response.
 
-        Raises ``cryptobank.APIError`` (or a subclass) on non-2xx
+        Raises ``cryptokorr.APIError`` (or a subclass) on non-2xx
         responses. Retries on ``retryable=True`` codes when
         ``retryable`` is True (the call-site default); the chain-
         action path family is excluded automatically.

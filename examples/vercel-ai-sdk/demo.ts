@@ -1,5 +1,5 @@
 /**
- * Demo entry — builds the Cryptobank toolset and prints its shape.
+ * Demo entry — builds the CryptoKorr toolset and prints its shape.
  *
  * Run with Node 22+: `node --experimental-strip-types ./demo.ts`
  *
@@ -8,7 +8,7 @@
  * wiring them into `generateText` / `streamText`.
  */
 
-import { buildCryptobankTools } from "./tools.ts";
+import { buildCryptoKorrTools } from "./tools.ts";
 
 function printToolDescription(name: string, description: string): void {
   console.log(`\n[demo]      ${name}.description:`);
@@ -18,18 +18,18 @@ function printToolDescription(name: string, description: string): void {
 }
 
 function main(): void {
-  if (!process.env["CRYPTOBANK_API_KEY"]) {
+  if (!process.env["CRYPTOKORR_API_KEY"]) {
     console.error(
-      "[demo]      CRYPTOBANK_API_KEY is not set. Export your workspace API key " +
+      "[demo]      CRYPTOKORR_API_KEY is not set. Export your workspace API key " +
         "(cb_<...>) before running the demo. The SDK never falls back to a default key.",
     );
     process.exit(1);
   }
 
-  const tools = buildCryptobankTools();
-  const baseUrl = process.env["CRYPTOBANK_BASE_URL"] ?? "http://localhost:4000";
+  const tools = buildCryptoKorrTools();
+  const baseUrl = process.env["CRYPTOKORR_BASE_URL"] ?? "http://localhost:4000";
 
-  console.log("[demo]      Cryptobank client ready");
+  console.log("[demo]      CryptoKorr client ready");
   console.log(`            base url   = ${baseUrl}`);
   console.log(`            tools      = ${JSON.stringify(Object.keys(tools))}`);
 

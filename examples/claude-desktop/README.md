@@ -1,14 +1,14 @@
-# `examples/claude-desktop/` — MCP walkthrough (`cryptobank-mcp`)
+# `examples/claude-desktop/` — MCP walkthrough (`cryptokorr-mcp`)
 
-A copy-pastable walkthrough that wires the **CryptoBank stdio MCP
-server** (`cryptobank-mcp`) into Claude Desktop and submits a
+A copy-pastable walkthrough that wires the **CryptoKorr stdio MCP
+server** (`cryptokorr-mcp`) into Claude Desktop and submits a
 first intent on Base Sepolia. Includes a Claude-Desktop-style
 config snippet (`config.example.json`), a tested first prompt, and
 a side-by-side mapping from MCP tool names to the SDK methods.
 
 The MCP server is the **read-mostly** surface in the
-`@cryptobank` toolkit: it exposes the same wire contract as the
-SDKs, but every write tool requires `CRYPTOBANK_READONLY=false`
+`@cryptokorr` toolkit: it exposes the same wire contract as the
+SDKs, but every write tool requires `CRYPTOKORR_READONLY=false`
 (default `false`, but worth saying out loud) and the operator
 tools require an operator-role API key.
 
@@ -36,23 +36,23 @@ tools require an operator-role API key.
 - Claude Desktop **with MCP support**. Anthropic publishes
   install instructions for macOS, Windows, and Linux at
   https://claude.ai/download.
-- The CryptoBank MCP server (`cryptobank-mcp`) installed on your
+- The CryptoKorr MCP server (`cryptokorr-mcp`) installed on your
   machine. From the repo root:
 
   ```sh
   cd sdks/mcp
   pip install -e .                 # local development install
-  cryptobank-mcp --help             # confirm the binary resolves
+  cryptokorr-mcp --help             # confirm the binary resolves
   ```
 
   Or if you publish later (out of scope here under #483):
 
   ```sh
-  pipx install cryptobank-mcp
+  pipx install cryptokorr-mcp
   ```
 
 - A workspace API key (`cb_<...>`).
-- A running CryptoBank backend (default `http://localhost:4000`).
+- A running CryptoKorr backend (default `http://localhost:4000`).
 
 ## Configure Claude Desktop
 
@@ -71,14 +71,14 @@ into your `mcpServers` block. The shape:
 ```json
 {
   "mcpServers": {
-    "cryptobank": {
-      "command": "cryptobank-mcp",
+    "cryptokorr": {
+      "command": "cryptokorr-mcp",
       "args": [],
       "env": {
-        "CRYPTOBANK_API_KEY": "cb_REPLACE_ME_DO_NOT_COMMIT",
-        "CRYPTOBANK_BASE_URL": "http://localhost:4000",
-        "CRYPTOBANK_AGENT_ID": "agent-claude-desktop-example",
-        "CRYPTOBANK_READONLY": "false"
+        "CRYPTOKORR_API_KEY": "cb_REPLACE_ME_DO_NOT_COMMIT",
+        "CRYPTOKORR_BASE_URL": "http://localhost:4000",
+        "CRYPTOKORR_AGENT_ID": "agent-claude-desktop-example",
+        "CRYPTOKORR_READONLY": "false"
       }
     }
   }
@@ -92,19 +92,19 @@ into your `mcpServers` block. The shape:
 > `cb_[A-Za-z0-9_-]{16,}` in the example config.
 
 After editing the config, fully quit and re-launch Claude Desktop.
-The CryptoBank tools appear in the model's tool list when a
+The CryptoKorr tools appear in the model's tool list when a
 session starts.
 
 ## Environment variables
 
 | Variable                  | Required | Purpose                                                                 |
 | ------------------------- | -------- | ----------------------------------------------------------------------- |
-| `CRYPTOBANK_API_KEY`      | yes      | Workspace API key (`cb_<...>`). Never log or commit this.               |
-| `CRYPTOBANK_BASE_URL`     | no       | Defaults to `http://localhost:4000`.                                   |
-| `CRYPTOBANK_AGENT_ID`     | no       | Default `agent_id` for write tools. Recommended for multi-app setups.   |
-| `CRYPTOBANK_READONLY`     | no       | `"true"` hides every write tool. Default `"false"`.                    |
-| `CRYPTOBANK_TIMEOUT_MS`   | no       | Per-request timeout. Defaults to `15000`.                              |
-| `CRYPTOBANK_LOG_LEVEL`    | no       | Defaults to `INFO`.                                                    |
+| `CRYPTOKORR_API_KEY`      | yes      | Workspace API key (`cb_<...>`). Never log or commit this.               |
+| `CRYPTOKORR_BASE_URL`     | no       | Defaults to `http://localhost:4000`.                                   |
+| `CRYPTOKORR_AGENT_ID`     | no       | Default `agent_id` for write tools. Recommended for multi-app setups.   |
+| `CRYPTOKORR_READONLY`     | no       | `"true"` hides every write tool. Default `"false"`.                    |
+| `CRYPTOKORR_TIMEOUT_MS`   | no       | Per-request timeout. Defaults to `15000`.                              |
+| `CRYPTOKORR_LOG_LEVEL`    | no       | Defaults to `INFO`.                                                    |
 
 ## Tool-name → SDK-method map
 
@@ -134,7 +134,7 @@ keys see all of them.
 
 Open a fresh Claude Desktop session and paste:
 
-> Use the cryptobank tools to submit a USDC transfer of 5.0 to
+> Use the cryptokorr tools to submit a USDC transfer of 5.0 to
 > counterparty `b6a10f53-8c6e-4d79-9bb9-3e1e5b1f1a11` on Base
 > Sepolia. Then call `get_decision` with the returned
 > `currentDecisionId` and tell me the outcome plainly. If the
@@ -154,7 +154,7 @@ MCP server. The expected high-level flow:
 ## Expected output (Claude's reply)
 
 ```
-I submitted the transfer through the CryptoBank MCP. Result:
+I submitted the transfer through the CryptoKorr MCP. Result:
 
   intent id        : int_xxxxxxxx
   decision id      : dec_yyyyyyyy
@@ -165,7 +165,7 @@ approval_required is a successful response — the runtime accepted
 the intent but a workspace operator must approve before it
 dispatches. The MCP server returned this as a normal tool result
 (isError: false). I will not loop; please approve from the
-CryptoBank dashboard or have an operator call the
+CryptoKorr dashboard or have an operator call the
 `approve_decision` tool.
 ```
 
@@ -201,7 +201,7 @@ outcome:
 - **Base Sepolia (`84532`) only.** The runtime rejects mainnet
   writes with `mainnet_disabled` unless the workspace flag is on.
   The example pins `chain: "base-sepolia"` everywhere.
-- **Read-only mode.** Set `CRYPTOBANK_READONLY=true` for
+- **Read-only mode.** Set `CRYPTOKORR_READONLY=true` for
   exploration sessions where you don't want Claude to be able to
   emit writes. The MCP server hides every write + operator tool
   in that mode.

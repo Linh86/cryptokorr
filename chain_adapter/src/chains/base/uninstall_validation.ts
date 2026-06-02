@@ -220,7 +220,7 @@ export function assertPackageVersionPinned(block: PermissionBlock): void {
  * `delegation.state_changed{state: "revoke_failed"}` callback's
  * `reason` field; the offending address is logged in the structured
  * log line but deliberately NOT included in the callback payload
- * (Subagent D's redaction discipline review).
+ * (A redaction-discipline review).
  */
 export function assertSignerModuleAllowed(
   signerContractAddress: string | undefined,

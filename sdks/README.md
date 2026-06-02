@@ -6,9 +6,9 @@ Three packages, one wire contract — the
 
 | Package                                 | Path                            | Install (after publish)                    | Audience                                  |
 | --------------------------------------- | ------------------------------- | ------------------------------------------ | ----------------------------------------- |
-| [`cryptobank`](python/README.md)        | [`sdks/python/`](python/)       | `pip install cryptobank`                   | Python services and agent runtimes        |
-| [`@cryptobank/sdk`](typescript/README.md) | [`sdks/typescript/`](typescript/) | `npm install @cryptobank/sdk`              | Node 18+ services and edge functions      |
-| [`cryptobank-mcp`](mcp/README.md)       | [`sdks/mcp/`](mcp/)             | `pip install cryptobank-mcp`               | stdio MCP hosts (Claude Desktop, Cursor)  |
+| [`cryptokorr`](python/README.md)        | [`sdks/python/`](python/)       | `pip install cryptokorr`                   | Python services and agent runtimes        |
+| [`@cryptokorr/sdk`](typescript/README.md) | [`sdks/typescript/`](typescript/) | `npm install @cryptokorr/sdk`              | Node 18+ services and edge functions      |
+| [`cryptokorr-mcp`](mcp/README.md)       | [`sdks/mcp/`](mcp/)             | `pip install cryptokorr-mcp`               | stdio MCP hosts (Claude Desktop, Cursor)  |
 
 All three packages target the same MVP posture:
 
@@ -17,7 +17,7 @@ All three packages target the same MVP posture:
 - **USDC** is the only supported asset.
 - **`approval_required` is a successful response**, not an error —
   agents short-circuit and hand off to a human instead of looping.
-- **API key** is read from `CRYPTOBANK_API_KEY`; never hardcode.
+- **API key** is read from `CRYPTOKORR_API_KEY`; never hardcode.
 - **Idempotency keys** are auto-generated for every write.
 - **Structured errors** carry the wire `error.code` from
   [`docs/api/error-codes.md`](../docs/api/error-codes.md).
@@ -36,8 +36,8 @@ All three packages target the same MVP posture:
 
 | Package           | Local check                                    |
 | ----------------- | ---------------------------------------------- |
-| `cryptobank`      | `cd sdks/python && pytest`                     |
-| `@cryptobank/sdk` | `cd sdks/typescript && npm test`               |
-| `cryptobank-mcp`  | `cd sdks/mcp && python -m unittest discover -s tests -t .` |
+| `cryptokorr`      | `cd sdks/python && pytest`                     |
+| `@cryptokorr/sdk` | `cd sdks/typescript && npm test`               |
+| `cryptokorr-mcp`  | `cd sdks/mcp && python -m unittest discover -s tests -t .` |
 
 CI gates all three on every PR to `main`.

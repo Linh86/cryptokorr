@@ -478,7 +478,7 @@ describe("POST /dispatch/revoke_delegation", () => {
     });
 
     it("emits revoke_failed with session_signer_missing when the keyless-blob design is violated", async () => {
-      // Subagent D's review forces a keyless blob, which means the
+      // A security review forces a keyless blob, which means the
       // session-signer EOA must travel separately. A `permission`
       // block without `session_signer_address` cannot rebuild the
       // stub ModularSigner that `deserializePermissionAccount`

@@ -26,11 +26,11 @@ import sys
 from dataclasses import dataclass, field
 from typing import IO, Any, Callable, Iterable, Mapping
 
-from cryptobank_mcp import __version__ as VERSION
-from cryptobank_mcp.client import HttpClient
-from cryptobank_mcp.config import Config
-from cryptobank_mcp.errors import ToolError
-from cryptobank_mcp.tools import (
+from cryptokorr_mcp import __version__ as VERSION
+from cryptokorr_mcp.client import HttpClient
+from cryptokorr_mcp.config import Config
+from cryptokorr_mcp.errors import ToolError
+from cryptokorr_mcp.tools import (
     Role,
     ToolContext,
     ToolRegistry,
@@ -39,7 +39,7 @@ from cryptobank_mcp.tools import (
 )
 
 PROTOCOL_VERSION = "2024-11-05"
-SERVER_NAME = "cryptobank-mcp"
+SERVER_NAME = "cryptokorr-mcp"
 DEFAULT_RESULT_SIZE_CAP = 256 * 1024
 
 JSONRPC_PARSE_ERROR = -32700
@@ -48,7 +48,7 @@ JSONRPC_METHOD_NOT_FOUND = -32601
 JSONRPC_INVALID_PARAMS = -32602
 JSONRPC_INTERNAL_ERROR = -32603
 
-_log = logging.getLogger("cryptobank_mcp")
+_log = logging.getLogger("cryptokorr_mcp")
 
 
 @dataclass
@@ -168,7 +168,7 @@ class Server:
                     retryable=False,
                     hint=(
                         "List tools with tools/list. Write/operator tools "
-                        "are hidden when CRYPTOBANK_READONLY=true."
+                        "are hidden when CRYPTOKORR_READONLY=true."
                     ),
                 )
             )
@@ -369,7 +369,7 @@ def build_default_server(env: Mapping[str, str] | None = None) -> Server:
         base_url=config.base_url,
         timeout_seconds=config.timeout_seconds,
     )
-    role_override = (env.get("CRYPTOBANK_ROLE") if env else None) or _maybe_env("CRYPTOBANK_ROLE")
+    role_override = (env.get("CRYPTOKORR_ROLE") if env else None) or _maybe_env("CRYPTOKORR_ROLE")
     role = probe_role(client, override=role_override)
     registry = ToolRegistry(config=config, role=role)
     return Server(config=config, registry=registry, client=client)

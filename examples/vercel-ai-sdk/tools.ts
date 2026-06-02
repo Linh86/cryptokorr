@@ -1,5 +1,5 @@
 /**
- * Vercel AI SDK tool definitions wrapping the CryptoBank
+ * Vercel AI SDK tool definitions wrapping the CryptoKorr
  * TypeScript SDK. Drops into `generateText({...tools})` /
  * `streamText({...tools})`.
  *
@@ -11,7 +11,7 @@
  * depends on Zod.
  *
  * **No private keys cross the wire.** The SDK uses the bearer API
- * key from `CRYPTOBANK_API_KEY`. The browser must never see this
+ * key from `CRYPTOKORR_API_KEY`. The browser must never see this
  * key — see `README.md`.
  *
  * **`approval_required` is a successful response.** After a write
@@ -19,12 +19,12 @@
  * `decision.outcome`. The tool descriptions name this contract.
  */
 
-import { Cryptobank } from "@cryptobank/sdk";
+import { CryptoKorr } from "@cryptokorr/sdk";
 import type {
   Decision,
   IntentSubmitResult,
   IntentTarget,
-} from "@cryptobank/sdk";
+} from "@cryptokorr/sdk";
 
 /**
  * Minimal tool shape compatible with `ai`'s `tool({...})` factory
@@ -33,7 +33,7 @@ import type {
  * with `z.object({...})` and the body of `execute` stays
  * identical.
  */
-export interface CryptobankTool<Args, Result> {
+export interface CryptoKorrTool<Args, Result> {
   description: string;
   parameters: { type: "object"; properties: Record<string, unknown>; required: string[] };
   execute: (args: Args) => Promise<Result>;
@@ -61,13 +61,13 @@ export interface SubmitAllocateIdleCapitalArgs {
   idempotencyKey?: string;
 }
 
-export interface CryptobankToolset {
-  submitTransfer: CryptobankTool<SubmitTransferArgs, IntentSubmitResult>;
-  submitAllocateIdleCapital: CryptobankTool<
+export interface CryptoKorrToolset {
+  submitTransfer: CryptoKorrTool<SubmitTransferArgs, IntentSubmitResult>;
+  submitAllocateIdleCapital: CryptoKorrTool<
     SubmitAllocateIdleCapitalArgs,
     IntentSubmitResult
   >;
-  getDecision: CryptobankTool<{ decisionId: string }, Decision>;
+  getDecision: CryptoKorrTool<{ decisionId: string }, Decision>;
 }
 
 const SUPPORTED_CHAIN = "base-sepolia";
@@ -75,15 +75,15 @@ const DEFAULT_ASSET = "USDC";
 
 /**
  * Build the toolset. Each call constructs a fresh client from
- * `Cryptobank.fromEnv()` so the credentials stay server-side.
+ * `CryptoKorr.fromEnv()` so the credentials stay server-side.
  *
  * Pass `client` to inject a pre-built one (e.g. for unit tests).
  */
-export function buildCryptobankTools(opts: { client?: Cryptobank } = {}): CryptobankToolset {
-  const client = opts.client ?? Cryptobank.fromEnv();
-  const defaultAgentId = process.env["CRYPTOBANK_AGENT_ID"] ?? "agent-vercel-ai-example";
+export function buildCryptoKorrTools(opts: { client?: CryptoKorr } = {}): CryptoKorrToolset {
+  const client = opts.client ?? CryptoKorr.fromEnv();
+  const defaultAgentId = process.env["CRYPTOKORR_AGENT_ID"] ?? "agent-vercel-ai-example";
 
-  const submitTransfer: CryptobankTool<SubmitTransferArgs, IntentSubmitResult> = {
+  const submitTransfer: CryptoKorrTool<SubmitTransferArgs, IntentSubmitResult> = {
     description:
       "Submit a USDC transfer intent on Base Sepolia. Returns the intent id + initial " +
       "state. Use getDecision after the runtime settles. approval_required is a " +
@@ -133,7 +133,7 @@ export function buildCryptobankTools(opts: { client?: Cryptobank } = {}): Crypto
       }),
   };
 
-  const submitAllocateIdleCapital: CryptobankTool<
+  const submitAllocateIdleCapital: CryptoKorrTool<
     SubmitAllocateIdleCapitalArgs,
     IntentSubmitResult
   > = {
@@ -187,9 +187,9 @@ export function buildCryptobankTools(opts: { client?: Cryptobank } = {}): Crypto
       }),
   };
 
-  const getDecision: CryptobankTool<{ decisionId: string }, Decision> = {
+  const getDecision: CryptoKorrTool<{ decisionId: string }, Decision> = {
     description:
-      "Fetch a CryptoBank decision envelope by id. Read decision.outcome to branch: " +
+      "Fetch a CryptoKorr decision envelope by id. Read decision.outcome to branch: " +
       "auto_exec (dispatched), approval_required (operator must approve — successful, " +
       "not an error), hold (waiting for data), block (terminal refusal).",
     parameters: {

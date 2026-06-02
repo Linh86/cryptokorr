@@ -174,7 +174,7 @@ defmodule BankWeb.SessionPermissionInstallHookSafetyTest do
 
   test "hook fetches the canonical envelope from the browser route", %{source_combined: source} do
     # Browser routes (no /v1/ prefix) — Phoenix is the source of
-    # truth for the envelope. Worker B ships #500.
+    # truth for the envelope. PR #500.
     assert source =~ "/wallet_bindings/"
     assert source =~ "/install_envelope"
     assert source =~ "/install_attestation"
@@ -313,6 +313,6 @@ defmodule BankWeb.SessionPermissionInstallHookSafetyTest do
   } do
     assert source =~ "data-binding-id" or source =~ "dataset.bindingId" or
              source =~ "bindingId",
-           "hook must read the binding id from a data-binding-id attribute (Worker B's #500 contract)"
+           "hook must read the binding id from a data-binding-id attribute (the #500 contract)"
   end
 end

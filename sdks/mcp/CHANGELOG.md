@@ -1,4 +1,4 @@
-# Changelog — `cryptobank-mcp` (stdio MCP server)
+# Changelog — `cryptokorr-mcp` (stdio MCP server)
 
 All notable changes to the stdio MCP server ship in this file.
 Versioning follows [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
@@ -27,14 +27,14 @@ internal `urllib`-based HTTP client to Phoenix `/v1/*`.
   `get_runtime_status`, `get_policy`.
 - Read-operator tier (hidden when role < operator OR readonly):
   `list_pending_approvals`.
-- Write tier (hidden when `CRYPTOBANK_READONLY=true`):
+- Write tier (hidden when `CRYPTOKORR_READONLY=true`):
   `submit_transfer`, `submit_swap`, `submit_allocate_idle_capital`.
   Wire `kind` is `allocate_idle_capital` for Morpho ERC-4626 deposit.
 - Operator tier (hidden when readonly OR role < operator):
   `approve_decision`, `reject_decision`, `pause_runtime`,
   `resume_runtime`.
 - Forbidden surfaces enforced by an explicit allowlist in
-  `cryptobank_mcp.tools` and tested per tier × role × readonly:
+  `cryptokorr_mcp.tools` and tested per tier × role × readonly:
   delegation revoke, policy edits, trust mutation, API-key management,
   chain/agent pause-resume, abort_execution, browser-wallet flows.
 - `wait_for_decision` caps timeout at 60 seconds, returns synthetic
@@ -44,12 +44,12 @@ internal `urllib`-based HTTP client to Phoenix `/v1/*`.
   `outcome`, `kind`).
 - Structured tool errors with `error.code`, `retryable`, `hint`, and
   `http_status` from Phoenix's `ErrorEnvelope`.
-- Configuration: `CRYPTOBANK_API_KEY` (required), `CRYPTOBANK_BASE_URL`,
-  `CRYPTOBANK_READONLY`, `CRYPTOBANK_AGENT_ID`, `CRYPTOBANK_TIMEOUT_MS`,
-  `CRYPTOBANK_ROLE`, `CRYPTOBANK_LOG_LEVEL`.
+- Configuration: `CRYPTOKORR_API_KEY` (required), `CRYPTOKORR_BASE_URL`,
+  `CRYPTOKORR_READONLY`, `CRYPTOKORR_AGENT_ID`, `CRYPTOKORR_TIMEOUT_MS`,
+  `CRYPTOKORR_ROLE`, `CRYPTOKORR_LOG_LEVEL`.
 - Role probing at startup hits `GET /v1/approvals?limit=1` to detect
-  viewer vs operator+; `CRYPTOBANK_ROLE` overrides the probe.
-- Console script `cryptobank-mcp` (Hatchling-built wheel + sdist).
+  viewer vs operator+; `CRYPTOKORR_ROLE` overrides the probe.
+- Console script `cryptokorr-mcp` (Hatchling-built wheel + sdist).
 
 ### Notes
 
@@ -66,5 +66,5 @@ internal `urllib`-based HTTP client to Phoenix `/v1/*`.
 - Live Claude Desktop / Cursor smoke is documented but not wired to
   CI; the subprocess smoke tests prove the wire protocol end-to-end.
 
-[0.1.0]: https://github.com/Linh86/cryptobank/releases/tag/cryptobank-mcp-0.1.0
-[Unreleased]: https://github.com/Linh86/cryptobank/compare/cryptobank-mcp-0.1.0...HEAD
+[0.1.0]: https://github.com/Linh86/cryptokorr/releases/tag/cryptokorr-mcp-0.1.0
+[Unreleased]: https://github.com/Linh86/cryptokorr/compare/cryptokorr-mcp-0.1.0...HEAD

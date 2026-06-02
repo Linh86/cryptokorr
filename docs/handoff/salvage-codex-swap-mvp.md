@@ -86,7 +86,7 @@ Categories are roughly self-contained. Each category lists **all** files that ne
 - `lib/bank_web/controllers/e2e_auth_controller.ex` (670 LOC) — dev-only `/dev/__e2e/login_as/:id` login bypass behind double-gate (`Application.compile_env(:bank, :dev_routes)` AND runtime `BANK_E2E_DEV=1`).
 - `lib/bank_web/plugs/e2e_adapter_dispatch_fixture.ex` (138 LOC) — captures adapter dispatch payloads for fixture E2E.
 - `lib/bank_web/plugs/e2e_stablecoin_provider_fixture.ex` (227 LOC) — in-process stablecoin route fixture so previews reach `:ready` without external HTTP.
-- `lib/mix/tasks/bank.e2e.seed_operator.ex` (246 LOC) — idempotent `e2e-operator@cryptobank.local` seeder.
+- `lib/mix/tasks/bank.e2e.seed_operator.ex` (246 LOC) — idempotent `e2e-operator@cryptokorr.local` seeder.
 - `assets/js/hooks/__tests__/session_permission_install.test.js` (466 LOC) — Vitest unit tests for the install hook's gating (account-vs-owner pin, chain check, bundler url). **May not compile** against today's `session_permission_install.js` (Path A rewrite); diff first.
 
 **Dependencies on M files:** `lib/bank_web/router.ex` (M) needs the dev-only routes wired; `lib/bank_web/plugs/put_csp.ex` (M) needs the playwright origin allowed; `config/test.exs` (M) needs the fixture plugs registered.

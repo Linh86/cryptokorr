@@ -1,4 +1,4 @@
-"""Console-script entrypoint: ``cryptobank-mcp``.
+"""Console-script entrypoint: ``cryptokorr-mcp``.
 
 Reads config from env, probes role, then drives the JSON-RPC stdio
 loop until stdin closes.
@@ -10,16 +10,16 @@ import logging
 import os
 import sys
 
-from cryptobank_mcp.config import ConfigError
-from cryptobank_mcp.server import build_default_server
+from cryptokorr_mcp.config import ConfigError
+from cryptokorr_mcp.server import build_default_server
 
 
 def main(argv: list[str] | None = None) -> int:
-    _configure_logging(os.environ.get("CRYPTOBANK_LOG_LEVEL", "INFO"))
+    _configure_logging(os.environ.get("CRYPTOKORR_LOG_LEVEL", "INFO"))
     try:
         server = build_default_server(os.environ)
     except ConfigError as exc:
-        sys.stderr.write(f"cryptobank-mcp: {exc}\n")
+        sys.stderr.write(f"cryptokorr-mcp: {exc}\n")
         return 2
     return server.serve_forever()
 

@@ -1,11 +1,11 @@
 /**
- * CryptoBank TypeScript SDK — public exports.
+ * CryptoKorr TypeScript SDK — public exports.
  *
  * @example Submit a transfer (Node, Base Sepolia):
  * ```ts
- * import { Cryptobank } from "@cryptobank/sdk";
+ * import { CryptoKorr } from "@cryptokorr/sdk";
  *
- * const client = Cryptobank.fromEnv();
+ * const client = CryptoKorr.fromEnv();
  *
  * const result = await client.submitTransfer({
  *   agentId: "agent-alice",
@@ -38,7 +38,7 @@
  * of scope here.
  */
 
-export { Cryptobank } from "./client.js";
+export { CryptoKorr } from "./client.js";
 export {
   type ClientConfig,
   DEFAULT_BASE_URL,

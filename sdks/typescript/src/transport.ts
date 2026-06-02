@@ -224,11 +224,11 @@ export class Transport {
         const isAbort = err.name === "AbortError" || /aborted/i.test(err.message);
         if (isAbort) {
           throw new Error(
-            `Cryptobank: request to ${redactString(opts.path)} timed out after ${timeoutMs}ms`,
+            `Cryptokorr: request to ${redactString(opts.path)} timed out after ${timeoutMs}ms`,
           );
         }
         throw new Error(
-          `Cryptobank: network error contacting ${redactString(opts.path)}: ${redactString(err.message)}`,
+          `Cryptokorr: network error contacting ${redactString(opts.path)}: ${redactString(err.message)}`,
         );
       } finally {
         clearTimeout(timer);

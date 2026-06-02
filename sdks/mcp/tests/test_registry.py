@@ -6,8 +6,8 @@ import unittest
 
 from tests._fixtures import _PROJECT_ROOT  # noqa: F401  (sys.path side effect)
 
-from cryptobank_mcp.config import Config
-from cryptobank_mcp.tools import (
+from cryptokorr_mcp.config import Config
+from cryptokorr_mcp.tools import (
     ALL_TOOLS,
     Role,
     Tier,

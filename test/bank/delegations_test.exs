@@ -1061,7 +1061,7 @@ defmodule Bank.DelegationsTest do
     end
 
     test "cryptographically_revocable?/1 returns false when session_signer_address is missing" do
-      # Subagent D's security review forces a keyless blob, which
+      # A security review forces a keyless blob, which
       # means the session-signer EOA must travel separately. Without
       # it the adapter cannot rebuild the stub ModularSigner at
       # revoke-time, so the row is NOT cryptographically revocable.

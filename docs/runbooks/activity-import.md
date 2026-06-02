@@ -96,7 +96,7 @@ Reconciliation links a workspace's `ExecutionPlan` rows to imported activity row
 
 `Bank.Activity.Reconciliation.classify_activity/2` returns one of:
 
-- `:cryptobank_execution` — at least one `ExecutionPlan` in this workspace has a `tx_ref` that equals this activity's `tx_hash`.
+- `:cryptokorr_execution` — at least one `ExecutionPlan` in this workspace has a `tx_ref` that equals this activity's `tx_hash`.
 - `:external` — no plan match; this activity was driven by something other than CryptoKorr's runtime.
 
 In an alpha-staging review the typical operator flow is:
@@ -132,7 +132,7 @@ The seven checks (in order) and what makes them fail:
 4. `csv_mixed` — a CSV with one valid + one invalid row lands the valid row only and reports `invalid: 1`.
 5. `csv_forbidden_header` — `preview/2` of a CSV containing `workspace_id` in the header returns `{:error, {:forbidden_column, _}}`. A regression that silently accepts the column would fail here.
 6. `chain_sync_stub` — `Bank.Activity.ChainSync.sync_address/4` against a canned RPC stub completes with at least one `:wallet_chain` row in the ledger after the run.
-7. `reconciliation` — `Bank.Activity.Reconciliation.classify_activity/2` returns `:external` (or `:cryptobank_execution`) for the chain-imported row — never raises, never returns a stub `nil`.
+7. `reconciliation` — `Bank.Activity.Reconciliation.classify_activity/2` returns `:external` (or `:cryptokorr_execution`) for the chain-imported row — never raises, never returns a stub `nil`.
 
 If the demo workspace has not been seeded yet the runner short-circuits with a single `seed` failure check pointing the operator at `mix bank.demo.seed`, so the first-run experience tells the operator exactly what to do next.
 

@@ -19,7 +19,7 @@
 export const REDACTED = "[REDACTED]";
 
 /**
- * Match a CryptoBank API key (stable `cb_` prefix + opaque body of
+ * Match a CryptoKorr API key (stable `cb_` prefix + opaque body of
  * 16+ url-safe characters). Defensive: matches anywhere inside a
  * larger string so we catch concatenations like
  * `Authorization: Bearer cb_abc...`.
@@ -27,7 +27,7 @@ export const REDACTED = "[REDACTED]";
 const API_KEY_PATTERN = /\bcb_[A-Za-z0-9_-]{16,}\b/g;
 
 /**
- * Redact every CryptoBank API key from `value`. Pass through
+ * Redact every CryptoKorr API key from `value`. Pass through
  * non-string inputs unchanged.
  */
 export function redact(value: unknown): unknown {
@@ -36,7 +36,7 @@ export function redact(value: unknown): unknown {
 }
 
 /**
- * Redact every CryptoBank API key from a string.
+ * Redact every CryptoKorr API key from a string.
  */
 export function redactString(value: string): string {
   return value.replace(API_KEY_PATTERN, REDACTED);

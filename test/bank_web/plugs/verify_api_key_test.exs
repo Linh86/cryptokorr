@@ -76,7 +76,7 @@ defmodule BankWeb.Plugs.VerifyAPIKeyTest do
         |> build_conn_with_bearer()
         |> VerifyAPIKey.call(VerifyAPIKey.init([]))
 
-      # Downstream code (Subagent B's audit, future workspace-scoped
+      # Downstream code (A prior audit, future workspace-scoped
       # query layers) reads `.id`, `.slug`, `.name` off the struct.
       # Pin all three so a future change that switches to a slim
       # `%{id: ...}` map regresses loudly.

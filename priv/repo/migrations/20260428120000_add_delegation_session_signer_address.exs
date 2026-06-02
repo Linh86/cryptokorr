@@ -9,11 +9,11 @@ defmodule Bank.Repo.Migrations.AddDelegationSessionSignerAddress do
   embedded in the serialized blob OR an externally provided
   `modularSigner`.
 
-  Subagent D's security review (PR #129's grant-flow follow-up)
+  A security review (PR #129's grant-flow follow-up)
   confirmed that `serializePermissionAccount(account, privateKey)`
   embeds the session ECDSA private key VERBATIM in the base64 JSON
   blob. Persisting that blob in Phoenix would make the control plane
-  hold a signing key — a hard violation of CryptoBank's threat model
+  hold a signing key — a hard violation of CryptoKorr's threat model
   (adapter-only signing keys, Phoenix is the control plane).
 
   The fix: at grant time the adapter calls

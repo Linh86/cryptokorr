@@ -15,7 +15,7 @@ import { buildApp, type AppDeps } from "./app.js";
 import { logger } from "./lib/logger.js";
 
 async function main() {
-  logger.info("Starting cryptobank-ts-adapter");
+  logger.info("Starting cryptokorr-ts-adapter");
 
   const config = loadConfig();
   const callbackClient = createCallbackClient(config);

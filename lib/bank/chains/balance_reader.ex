@@ -2,7 +2,7 @@ defmodule Bank.Chains.BalanceReader do
   @moduledoc """
   Read-only ERC-20 balance reader for the redesigned wallet card.
 
-  The Plynn redesign's wallet status section displays a user's USDC
+  The Agent Control redesign's wallet status section displays a user's USDC
   balance on Base Sepolia. Until this module landed, the balance was
   hardcoded `nil` (rendering "— USDC") because neither
   `Bank.AdapterClient` nor the TS chain_adapter exposes a balance

@@ -1,6 +1,6 @@
-"""Sync ``Cryptobank`` client.
+"""Sync ``CryptoKorr`` client.
 
-The SDK is currently sync-only. An ``AsyncCryptobank`` mirror is
+The SDK is currently sync-only. An ``AsyncCryptoKorr`` mirror is
 deferred to a follow-up; the method names below are the canonical
 contract for both forms.
 """
@@ -31,26 +31,26 @@ from .models import (
     TransferTarget,
 )
 
-__all__ = ["Cryptobank", "OperatorClient"]
+__all__ = ["CryptoKorr", "OperatorClient"]
 
 
 _DEFAULT_BASE_URL = "http://localhost:4000"
 _DEFAULT_TIMEOUT_MS = 15_000
-_USER_AGENT = f"cryptobank-py/{__version__}"
+_USER_AGENT = f"cryptokorr-py/{__version__}"
 
 
-class Cryptobank:
-    """The CryptoBank Python client.
+class CryptoKorr:
+    """The CryptoKorr Python client.
 
     Construction:
 
-        client = Cryptobank(api_key="cb_...", base_url="https://api...")
+        client = CryptoKorr(api_key="cb_...", base_url="https://api...")
 
     Or from environment:
 
-        client = Cryptobank.from_env()
-        # Reads CRYPTOBANK_API_KEY (required), CRYPTOBANK_BASE_URL
-        # (default http://localhost:4000), CRYPTOBANK_TIMEOUT_MS
+        client = CryptoKorr.from_env()
+        # Reads CRYPTOKORR_API_KEY (required), CRYPTOKORR_BASE_URL
+        # (default http://localhost:4000), CRYPTOKORR_TIMEOUT_MS
         # (default 15_000).
 
     The API key is **never** echoed in ``repr()`` and **never**
@@ -86,28 +86,28 @@ class Cryptobank:
     # -- Construction helpers --------------------------------------------
 
     @classmethod
-    def from_env(cls) -> "Cryptobank":
+    def from_env(cls) -> "CryptoKorr":
         """Build a client from environment variables.
 
         Reads:
 
-          * ``CRYPTOBANK_API_KEY`` — required.
-          * ``CRYPTOBANK_BASE_URL`` — defaults to
+          * ``CRYPTOKORR_API_KEY`` — required.
+          * ``CRYPTOKORR_BASE_URL`` — defaults to
             ``http://localhost:4000``.
-          * ``CRYPTOBANK_TIMEOUT_MS`` — defaults to ``15_000``.
+          * ``CRYPTOKORR_TIMEOUT_MS`` — defaults to ``15_000``.
         """
-        api_key = os.environ.get("CRYPTOBANK_API_KEY")
+        api_key = os.environ.get("CRYPTOKORR_API_KEY")
         if not api_key:
             raise ValueError(
-                "CRYPTOBANK_API_KEY env var is required for Cryptobank.from_env()"
+                "CRYPTOKORR_API_KEY env var is required for CryptoKorr.from_env()"
             )
-        base_url = os.environ.get("CRYPTOBANK_BASE_URL", _DEFAULT_BASE_URL)
-        timeout_ms_str = os.environ.get("CRYPTOBANK_TIMEOUT_MS")
+        base_url = os.environ.get("CRYPTOKORR_BASE_URL", _DEFAULT_BASE_URL)
+        timeout_ms_str = os.environ.get("CRYPTOKORR_TIMEOUT_MS")
         try:
             timeout_ms = int(timeout_ms_str) if timeout_ms_str else _DEFAULT_TIMEOUT_MS
         except ValueError as exc:
             raise ValueError(
-                "CRYPTOBANK_TIMEOUT_MS must be an integer (milliseconds)"
+                "CRYPTOKORR_TIMEOUT_MS must be an integer (milliseconds)"
             ) from exc
         return cls(api_key=api_key, base_url=base_url, timeout_ms=timeout_ms)
 
@@ -115,7 +115,7 @@ class Cryptobank:
 
     def __repr__(self) -> str:
         return (
-            f"Cryptobank(base_url={self._base_url!r}, "
+            f"CryptoKorr(base_url={self._base_url!r}, "
             f"api_key={_redact_key(self._api_key)!r})"
         )
 
@@ -138,7 +138,7 @@ class Cryptobank:
 
         See ``docs/api/sdk-surface.md#submit_transfer-submitTransfer``
         for the full contract. Errors map to typed
-        ``cryptobank.APIError`` subclasses.
+        ``cryptokorr.APIError`` subclasses.
         """
         body: dict[str, Any] = {
             "idempotency_key": idempotency_key or self._transport._generate_idempotency_key(),
@@ -323,7 +323,7 @@ class Cryptobank:
         Agents should treat that as "waiting on a human" and not
         loop further.
 
-        Raises ``cryptobank.NotFoundError`` if the intent id is
+        Raises ``cryptokorr.NotFoundError`` if the intent id is
         invalid; otherwise propagates whatever error the underlying
         polls raise (rate-limit, etc.).
         """

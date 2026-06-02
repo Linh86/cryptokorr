@@ -7,9 +7,9 @@
 
 This guide covers all three publish targets:
 
-- `cryptobank` (Python SDK) — PyPI.
-- `@cryptobank/sdk` (TypeScript SDK) — npm.
-- `cryptobank-mcp` (stdio MCP server) — PyPI.
+- `cryptokorr` (Python SDK) — PyPI.
+- `@cryptokorr/sdk` (TypeScript SDK) — npm.
+- `cryptokorr-mcp` (stdio MCP server) — PyPI.
 
 If you're a developer who just wants to install one of these locally,
 skip to the package READMEs:
@@ -47,7 +47,7 @@ If any of those is `no`, stop. Don't publish.
 These are **safe** to run locally — they produce artifacts under
 `dist/` (or `build/` for hatchling) but never push.
 
-### `cryptobank` (Python SDK) — setuptools
+### `cryptokorr` (Python SDK) — setuptools
 
 ```bash
 cd sdks/python
@@ -63,13 +63,13 @@ python -m build
 
 # Inspect what's inside
 ls -la dist/
-unzip -l dist/cryptobank-*.whl | head -40
+unzip -l dist/cryptokorr-*.whl | head -40
 
 # Validate metadata against PyPI's rules without uploading
 python -m twine check dist/*
 ```
 
-### `@cryptobank/sdk` (TypeScript SDK) — tsc + npm pack
+### `@cryptokorr/sdk` (TypeScript SDK) — tsc + npm pack
 
 ```bash
 cd sdks/typescript
@@ -83,14 +83,14 @@ npm pack --dry-run
 
 # Or write the tarball to disk and inspect
 npm pack
-tar -tzf cryptobank-sdk-*.tgz | head -40
+tar -tzf cryptokorr-sdk-*.tgz | head -40
 ```
 
 The `prepublishOnly` script chains `typecheck → test → build`, so
 `npm publish` (or `npm publish --dry-run`) will refuse to ship if any
 step fails. Do not bypass it.
 
-### `cryptobank-mcp` (stdio MCP server) — hatchling
+### `cryptokorr-mcp` (stdio MCP server) — hatchling
 
 ```bash
 cd sdks/mcp
@@ -103,13 +103,13 @@ rm -rf build dist *.egg-info
 python -m build
 
 ls -la dist/
-unzip -l dist/cryptobank_mcp-*.whl | head -40
+unzip -l dist/cryptokorr_mcp-*.whl | head -40
 
 python -m twine check dist/*
 
 # Smoke the console-script entry from the freshly built wheel
-pip install --force-reinstall dist/cryptobank_mcp-*.whl
-CRYPTOBANK_API_KEY="cb_test_doesnotexist0000" cryptobank-mcp <<< '{"jsonrpc":"2.0","id":1,"method":"initialize"}'
+pip install --force-reinstall dist/cryptokorr_mcp-*.whl
+CRYPTOKORR_API_KEY="cb_test_doesnotexist0000" cryptokorr-mcp <<< '{"jsonrpc":"2.0","id":1,"method":"initialize"}'
 # Expect a single JSON-RPC response with serverInfo on stdout.
 ```
 
@@ -125,7 +125,7 @@ CRYPTOBANK_API_KEY="cb_test_doesnotexist0000" cryptobank-mcp <<< '{"jsonrpc":"2.
   artifact is the source of truth.
 - **MCP tool surface drives MCP major.** Renaming or removing a tool,
   or shrinking a tool's input schema, is a major-version bump on
-  `cryptobank-mcp`.
+  `cryptokorr-mcp`.
 - **Independent minor/patch.** Each package can ship a minor or patch
   release independently — they don't have to march together. Track
   drift in this doc if it grows beyond two minor versions across
@@ -148,7 +148,7 @@ on a CLI flag, into shell history, or into a commit. Use a token
 manager (`pass`, 1Password CLI, AWS Secrets Manager, etc.) that
 exports into the shell session and clears on exit.
 
-### `cryptobank` → PyPI
+### `cryptokorr` → PyPI
 
 ```bash
 cd sdks/python
@@ -171,11 +171,11 @@ python -m twine upload --repository testpypi dist/*
 python -m twine upload dist/*
 
 # 5. Tag and push.
-git tag cryptobank-py-<version>
-git push origin cryptobank-py-<version>
+git tag cryptokorr-py-<version>
+git push origin cryptokorr-py-<version>
 ```
 
-### `@cryptobank/sdk` → npm
+### `@cryptokorr/sdk` → npm
 
 The package currently has `"private": true` set in `package.json`
 specifically so an accidental `npm publish` refuses. Removing that
@@ -188,7 +188,7 @@ cd sdks/typescript
 # 0. Confirm CI is green and version in package.json is correct.
 
 # 1. Authenticate (token from npm account settings; scope: read+write
-#    on @cryptobank).
+#    on @cryptokorr).
 npm login                  # or pre-set ~/.npmrc with "//registry.npmjs.org/:_authToken=..."
 
 # 2. Drop the private flag (do this in the version-bump commit).
@@ -202,18 +202,18 @@ npm publish --dry-run
 npm publish
 
 # 5. Tag and push.
-git tag cryptobank-ts-<version>
-git push origin cryptobank-ts-<version>
+git tag cryptokorr-ts-<version>
+git push origin cryptokorr-ts-<version>
 ```
 
-### `cryptobank-mcp` → PyPI
+### `cryptokorr-mcp` → PyPI
 
 ```bash
 cd sdks/mcp
 
 # 0. Confirm CI is green and version in pyproject.toml is correct.
 
-# 1. Authenticate (separate PyPI token, scope: cryptobank-mcp project).
+# 1. Authenticate (separate PyPI token, scope: cryptokorr-mcp project).
 export TWINE_USERNAME="__token__"
 export TWINE_PASSWORD="pypi-..."
 
@@ -228,8 +228,8 @@ python -m twine upload --repository testpypi dist/*
 python -m twine upload dist/*
 
 # 5. Tag and push.
-git tag cryptobank-mcp-<version>
-git push origin cryptobank-mcp-<version>
+git tag cryptokorr-mcp-<version>
+git push origin cryptokorr-mcp-<version>
 ```
 
 ---
@@ -243,9 +243,9 @@ shipping inconsistent license claims confuses downstream consumers.
 
 | Package           | Manifest license claim         | LICENSE file? |
 | ----------------- | ------------------------------ | ------------- |
-| `cryptobank`      | `Apache-2.0` in `pyproject.toml` | ✗            |
-| `@cryptobank/sdk` | `MIT` in `package.json`          | ✗            |
-| `cryptobank-mcp`  | (not declared)                  | ✗            |
+| `cryptokorr`      | `Apache-2.0` in `pyproject.toml` | ✗            |
+| `@cryptokorr/sdk` | `MIT` in `package.json`          | ✗            |
+| `cryptokorr-mcp`  | (not declared)                  | ✗            |
 
 Recommended path:
 
@@ -259,32 +259,32 @@ Recommended path:
 
 ## MCP community-directory submission checklist
 
-After `cryptobank-mcp` is on PyPI and the README install snippet
+After `cryptokorr-mcp` is on PyPI and the README install snippet
 works, submit to the MCP community directory at
 <https://github.com/modelcontextprotocol/servers>.
 
 Required for the directory entry:
 
-- [ ] Package is installable from PyPI: `pip install cryptobank-mcp`
-      runs from a clean venv and exposes the `cryptobank-mcp` console
+- [ ] Package is installable from PyPI: `pip install cryptokorr-mcp`
+      runs from a clean venv and exposes the `cryptokorr-mcp` console
       script.
 - [ ] README documents the Claude Desktop and Cursor JSON config
       snippets verbatim. (Already true — see
       [`sdks/mcp/README.md`](mcp/README.md).)
-- [ ] README documents the `CRYPTOBANK_READONLY=true` posture so
+- [ ] README documents the `CRYPTOKORR_READONLY=true` posture so
       directory readers can recommend the safe-by-default config to
       end users.
 - [ ] Tool list (with descriptions) is documented at a stable URL.
       Use the section in
       [`docs/api/mcp-tools.md`](../docs/api/mcp-tools.md).
-- [ ] Submission PR title: `[New Server] cryptobank-mcp — non-custodial
+- [ ] Submission PR title: `[New Server] cryptokorr-mcp — non-custodial
       treasury intents and decisions`.
 - [ ] Category: `Finance` or `DeFi` (whichever the directory uses
       this quarter).
 
-The submission is a docs-only PR to the directory repo. CryptoBank's
+The submission is a docs-only PR to the directory repo. CryptoKorr's
 publish process and the directory submission are independent — list
-in the directory only after `cryptobank-mcp` is live on PyPI.
+in the directory only after `cryptokorr-mcp` is live on PyPI.
 
 ---
 
@@ -293,10 +293,10 @@ in the directory only after `cryptobank-mcp` is live on PyPI.
 1. Smoke-test the live install in a clean environment:
    ```bash
    python -m venv /tmp/cb-smoke && source /tmp/cb-smoke/bin/activate
-   pip install cryptobank        # for the SDK
-   pip install cryptobank-mcp    # for the MCP server
+   pip install cryptokorr        # for the SDK
+   pip install cryptokorr-mcp    # for the MCP server
    # In another shell, an empty Node project:
-   npm install @cryptobank/sdk
+   npm install @cryptokorr/sdk
    ```
 2. Open a release note under [`docs/`](../docs/) (or a GitHub Release)
    linking to the package CHANGELOG entry.

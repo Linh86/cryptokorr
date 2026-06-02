@@ -1,5 +1,5 @@
 /**
- * Public {@link Cryptobank} client.
+ * Public {@link CryptoKorr} client.
  *
  * Per `docs/api/sdk-surface.md` — single namespace for agent /
  * viewer surfaces, `client.operator` namespace for operator-scoped
@@ -92,11 +92,11 @@ const DEFAULT_WAIT_TIMEOUT_S = 60;
 const DEFAULT_WAIT_POLL_MS = 500;
 
 /**
- * The CryptoBank API client.
+ * The CryptoKorr API client.
  *
  * @example
  * ```ts
- * const client = Cryptobank.fromEnv();
+ * const client = CryptoKorr.fromEnv();
  *
  * const result = await client.submitTransfer({
  *   agentId: "agent-alice",
@@ -109,7 +109,7 @@ const DEFAULT_WAIT_POLL_MS = 500;
  * const decision = await client.waitForDecision(result.intentId);
  * ```
  */
-export class Cryptobank {
+export class CryptoKorr {
   /** Operator-scoped surfaces. Agents calling these get `403 insufficient_role`. */
   public readonly operator: OperatorClient;
 
@@ -126,16 +126,16 @@ export class Cryptobank {
   }
 
   /**
-   * Build a client from `CRYPTOBANK_API_KEY` + optional
-   * `CRYPTOBANK_BASE_URL` / `CRYPTOBANK_TIMEOUT_MS`.
+   * Build a client from `CRYPTOKORR_API_KEY` + optional
+   * `CRYPTOKORR_BASE_URL` / `CRYPTOKORR_TIMEOUT_MS`.
    */
-  static fromEnv(env?: NodeJS.ProcessEnv): Cryptobank {
-    return new Cryptobank(readConfigFromEnv(env));
+  static fromEnv(env?: NodeJS.ProcessEnv): CryptoKorr {
+    return new CryptoKorr(readConfigFromEnv(env));
   }
 
   /** Redact-safe inspect output. The API key is never echoed. */
   toString(): string {
-    return `Cryptobank(baseUrl=${this.resolvedConfig.baseUrl})`;
+    return `CryptoKorr(baseUrl=${this.resolvedConfig.baseUrl})`;
   }
 
   // --- Intents ---------------------------------------------------------
@@ -294,7 +294,7 @@ export class Cryptobank {
 
       if (Date.now() >= deadline) {
         throw new Error(
-          `Cryptobank.waitForDecision: timed out after ${timeoutMs}ms waiting for a decision on intent ${intentId}`,
+          `CryptoKorr.waitForDecision: timed out after ${timeoutMs}ms waiting for a decision on intent ${intentId}`,
         );
       }
       await new Promise<void>((resolve) => setTimeout(resolve, interval));

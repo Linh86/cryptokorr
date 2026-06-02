@@ -27,7 +27,7 @@ describe("resolveConfig", () => {
     const cfg = resolveConfig({ apiKey: "cb_test_dummy_key_for_unit_tests_only" });
     expect(cfg.baseUrl).toBe(DEFAULT_BASE_URL);
     expect(cfg.timeoutMs).toBe(DEFAULT_TIMEOUT_MS);
-    expect(cfg.userAgent).toMatch(/^cryptobank-js\//);
+    expect(cfg.userAgent).toMatch(/^cryptokorr-js\//);
   });
 
   it("rejects non-positive timeouts", () => {
@@ -38,17 +38,17 @@ describe("resolveConfig", () => {
 });
 
 describe("readConfigFromEnv", () => {
-  it("requires CRYPTOBANK_API_KEY", () => {
+  it("requires CRYPTOKORR_API_KEY", () => {
     expect(() => readConfigFromEnv({} as NodeJS.ProcessEnv)).toThrow(
-      /CRYPTOBANK_API_KEY/,
+      /CRYPTOKORR_API_KEY/,
     );
   });
 
   it("parses base url + timeout", () => {
     const cfg = readConfigFromEnv({
-      CRYPTOBANK_API_KEY: "cb_env_dummy_key_for_unit_tests_only",
-      CRYPTOBANK_BASE_URL: "http://localhost:5000",
-      CRYPTOBANK_TIMEOUT_MS: "1234",
+      CRYPTOKORR_API_KEY: "cb_env_dummy_key_for_unit_tests_only",
+      CRYPTOKORR_BASE_URL: "http://localhost:5000",
+      CRYPTOKORR_TIMEOUT_MS: "1234",
     } as NodeJS.ProcessEnv);
 
     expect(cfg.apiKey).toBe("cb_env_dummy_key_for_unit_tests_only");
@@ -59,9 +59,9 @@ describe("readConfigFromEnv", () => {
   it("rejects bogus timeouts in the env", () => {
     expect(() =>
       readConfigFromEnv({
-        CRYPTOBANK_API_KEY: "cb_env_dummy_key_for_unit_tests_only",
-        CRYPTOBANK_TIMEOUT_MS: "not-a-number",
+        CRYPTOKORR_API_KEY: "cb_env_dummy_key_for_unit_tests_only",
+        CRYPTOKORR_TIMEOUT_MS: "not-a-number",
       } as NodeJS.ProcessEnv),
-    ).toThrow(/CRYPTOBANK_TIMEOUT_MS/);
+    ).toThrow(/CRYPTOKORR_TIMEOUT_MS/);
   });
 });

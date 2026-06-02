@@ -13,7 +13,7 @@
  *
  * ## Why keyless
  *
- * Subagent D's security review of PR #129's grant-flow follow-up
+ * A security review of PR #129's grant-flow follow-up
  * confirmed that `serializePermissionAccount(account,
  * sessionPrivateKey)` embeds the key VERBATIM in the base64 blob.
  * Persisting that in Phoenix would make the control plane hold a

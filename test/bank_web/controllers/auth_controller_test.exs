@@ -307,7 +307,7 @@ defmodule BankWeb.AuthControllerTest do
         Accounts.find_or_create_from_oauth(%{
           provider: :google,
           subject: "admin-#{System.unique_integer([:positive])}",
-          email: "admin@cryptobank.test",
+          email: "admin@cryptokorr.test",
           name: "Admin"
         })
 

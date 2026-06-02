@@ -1,4 +1,4 @@
-# Changelog — `cryptobank` (Python SDK)
+# Changelog — `cryptokorr` (Python SDK)
 
 All notable changes to the Python SDK ship in this file. Versioning
 follows [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html).
@@ -18,9 +18,9 @@ v1 API contract.
 
 ### Added
 
-- Sync `Cryptobank` client and async `AsyncCryptobank` client with
+- Sync `CryptoKorr` client and async `AsyncCryptoKorr` client with
   identical method names.
-- Workspace-scoped auth via `CRYPTOBANK_API_KEY` / constructor
+- Workspace-scoped auth via `CRYPTOKORR_API_KEY` / constructor
   argument.
 - Intent submission: `submit_transfer`, `submit_swap`,
   `submit_allocate_idle_capital`. Wire `kind` is `allocate_idle_capital`
@@ -59,5 +59,5 @@ v1 API contract.
 - `simulate_intent` and `cancel_intent` rely on `/v1/intents/:id/{simulate,cancel}` being live; the routes exist but the engines complete progressively.
 - Withdraw / redeem from Morpho is intentionally absent — operator-only via the LiveView.
 
-[0.1.0]: https://github.com/Linh86/cryptobank/releases/tag/cryptobank-py-0.1.0
-[Unreleased]: https://github.com/Linh86/cryptobank/compare/cryptobank-py-0.1.0...HEAD
+[0.1.0]: https://github.com/Linh86/cryptokorr/releases/tag/cryptokorr-py-0.1.0
+[Unreleased]: https://github.com/Linh86/cryptokorr/compare/cryptokorr-py-0.1.0...HEAD

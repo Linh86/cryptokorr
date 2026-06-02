@@ -6,7 +6,7 @@ defmodule BankWeb.PageControllerTest do
   test "GET / serves the redesigned Agent LiveView for an authenticated workspace member",
        %{conn: conn} do
     conn = get(conn, ~p"/")
-    # The route serves AgentLive (Plynn redesign). A non-websocket GET
+    # The route serves AgentLive (Agent Control redesign). A non-websocket GET
     # returns the static mount HTML; "Agent Control" is the always-on
     # eyebrow above the hero, regardless of wallet/permission state.
     assert html_response(conn, 200) =~ "Agent Control"

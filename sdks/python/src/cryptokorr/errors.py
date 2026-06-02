@@ -1,4 +1,4 @@
-"""Typed exception hierarchy for CryptoBank API errors.
+"""Typed exception hierarchy for CryptoKorr API errors.
 
 Every non-2xx ``/v1/*`` response is mapped to a typed ``APIError``
 subclass keyed off the wire ``error.code``. The hierarchy mirrors the

@@ -1,10 +1,10 @@
 """LangGraph-style agent — monitor a condition and submit
-``allocate_idle_capital`` through the CryptoBank Python SDK.
+``allocate_idle_capital`` through the CryptoKorr Python SDK.
 
 Runs against **Base Sepolia only** (`chain: "base-sepolia"`); the
 runtime rejects mainnet writes unless the workspace flag is on. The
 example never asks for a private key — the agent only emits intent;
-the CryptoBank runtime decides whether to dispatch.
+the CryptoKorr runtime decides whether to dispatch.
 
 If the ``langgraph`` package is on ``sys.path`` the example uses
 ``StateGraph`` so the wiring is recognisable to LangGraph users. If
@@ -14,14 +14,14 @@ external install.
 
 Env vars (see ``README.md`` for the full table):
 
-    CRYPTOBANK_API_KEY       (required)  cb_<...>
-    CRYPTOBANK_BASE_URL      (optional)  http://localhost:4000
-    CRYPTOBANK_AGENT_ID      (optional)  agent-langgraph-example
+    CRYPTOKORR_API_KEY       (required)  cb_<...>
+    CRYPTOKORR_BASE_URL      (optional)  http://localhost:4000
+    CRYPTOKORR_AGENT_ID      (optional)  agent-langgraph-example
     MORPHO_VAULT_ADDRESS     (required)  Allowlisted Morpho USDC vault
     IDLE_BALANCE_USDC        (optional)  Synthetic balance      (default 100)
     IDLE_THRESHOLD_USDC      (optional)  Trigger threshold      (default 50)
     DEPLOY_AMOUNT_USDC       (optional)  Deposit amount         (default 10)
-    CRYPTOBANK_DRY_RUN       (optional)  "1" to skip SDK calls and print only
+    CRYPTOKORR_DRY_RUN       (optional)  "1" to skip SDK calls and print only
 """
 
 from __future__ import annotations
@@ -112,15 +112,15 @@ def deposit_node(state: AgentState) -> AgentState:
         return state
 
     try:
-        from cryptobank import Cryptobank
+        from cryptokorr import CryptoKorr
     except ImportError as exc:  # pragma: no cover — covered via dry_run path
         raise RuntimeError(
-            "The cryptobank Python SDK is not installed. Run "
+            "The cryptokorr Python SDK is not installed. Run "
             "`pip install -e ../../sdks/python` from this directory or "
-            "set CRYPTOBANK_DRY_RUN=1 to skip the network call."
+            "set CRYPTOKORR_DRY_RUN=1 to skip the network call."
         ) from exc
 
-    client = Cryptobank.from_env()
+    client = CryptoKorr.from_env()
     result = client.submit_allocate_idle_capital(
         agent_id=state.agent_id,
         asset=state.asset,
@@ -229,22 +229,22 @@ def _decimal_env(name: str, default: str) -> Decimal:
 
 def build_state() -> AgentState:
     vault = os.environ.get("MORPHO_VAULT_ADDRESS")
-    if not vault and not os.environ.get("CRYPTOBANK_DRY_RUN"):
+    if not vault and not os.environ.get("CRYPTOKORR_DRY_RUN"):
         raise SystemExit(
             "MORPHO_VAULT_ADDRESS is required. Set it to the workspace's "
             "allowlisted Morpho USDC vault on Base Sepolia, or export "
-            "CRYPTOBANK_DRY_RUN=1 to print the intent shape without calling "
+            "CRYPTOKORR_DRY_RUN=1 to print the intent shape without calling "
             "the SDK."
         )
     return AgentState(
-        agent_id=os.environ.get("CRYPTOBANK_AGENT_ID", "agent-langgraph-example"),
+        agent_id=os.environ.get("CRYPTOKORR_AGENT_ID", "agent-langgraph-example"),
         asset="USDC",
         chain="base-sepolia",
         vault_address=vault or "0x0000000000000000000000000000000000000000",
         idle_balance=_decimal_env("IDLE_BALANCE_USDC", "100"),
         threshold=_decimal_env("IDLE_THRESHOLD_USDC", "50"),
         deploy_amount=_decimal_env("DEPLOY_AMOUNT_USDC", "10"),
-        dry_run=os.environ.get("CRYPTOBANK_DRY_RUN") == "1",
+        dry_run=os.environ.get("CRYPTOKORR_DRY_RUN") == "1",
     )
 
 

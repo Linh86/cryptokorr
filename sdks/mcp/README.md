@@ -1,6 +1,6 @@
-# cryptobank-mcp
+# cryptokorr-mcp
 
-Stdio MCP server that exposes a curated subset of CryptoBank's `/v1`
+Stdio MCP server that exposes a curated subset of CryptoKorr's `/v1`
 agent surface to MCP-aware hosts (Claude Desktop, Cursor, Codex, etc.).
 
 > Status: MVP. Targets **Base Sepolia** and **USDC** by default.
@@ -10,7 +10,7 @@ agent surface to MCP-aware hosts (Claude Desktop, Cursor, Codex, etc.).
 ## What it does
 
 The server speaks the standard MCP wire protocol (JSON-RPC 2.0 over
-stdio). It advertises a subset of CryptoBank's REST endpoints as tools
+stdio). It advertises a subset of CryptoKorr's REST endpoints as tools
 with stable names, JSON Schemas, and structured error codes that an
 agent can branch on without reading docs.
 
@@ -20,19 +20,19 @@ taxonomy is in [`docs/api/error-codes.md`](../../docs/api/error-codes.md).
 
 ## Install
 
-The package is published as `cryptobank-mcp`. Until that lands on
+The package is published as `cryptokorr-mcp`. Until that lands on
 PyPI you can install from the repo:
 
 ```bash
 pip install ./sdks/mcp
 # or, from outside the repo:
-pip install "cryptobank-mcp @ git+https://github.com/Linh86/cryptobank.git#subdirectory=sdks/mcp"
+pip install "cryptokorr-mcp @ git+https://github.com/Linh86/cryptokorr.git#subdirectory=sdks/mcp"
 ```
 
-The console script `cryptobank-mcp` is the stdio entrypoint.
+The console script `cryptokorr-mcp` is the stdio entrypoint.
 
 ```bash
-CRYPTOBANK_API_KEY="cb_..." cryptobank-mcp
+CRYPTOKORR_API_KEY="cb_..." cryptokorr-mcp
 ```
 
 The server reads JSON-RPC requests from stdin and writes responses to
@@ -43,13 +43,13 @@ tool arguments, only result sizes).
 
 | Env var                  | Required | Default                   | Purpose                                                     |
 | ------------------------ | -------- | ------------------------- | ----------------------------------------------------------- |
-| `CRYPTOBANK_API_KEY`     | yes      | (none)                    | Workspace API key. Must start with `cb_`.                   |
-| `CRYPTOBANK_BASE_URL`    | no       | `http://localhost:4000`   | Tenant URL. No trailing slash.                              |
-| `CRYPTOBANK_READONLY`    | no       | `false`                   | When `true`, write + operator tools are absent from `tools/list`. The model cannot invoke a tool that was not advertised. |
-| `CRYPTOBANK_AGENT_ID`    | no       | (none)                    | Default `agent_id` injected into write tools when the caller doesn't supply one. |
-| `CRYPTOBANK_TIMEOUT_MS`  | no       | `15000`                   | Per-request HTTP timeout (1000–120000).                     |
-| `CRYPTOBANK_ROLE`        | no       | (probed)                  | Override role probing — `viewer` / `operator` / `admin`. The server otherwise probes `GET /v1/approvals`. |
-| `CRYPTOBANK_LOG_LEVEL`   | no       | `INFO`                    | Standard Python log level.                                  |
+| `CRYPTOKORR_API_KEY`     | yes      | (none)                    | Workspace API key. Must start with `cb_`.                   |
+| `CRYPTOKORR_BASE_URL`    | no       | `http://localhost:4000`   | Tenant URL. No trailing slash.                              |
+| `CRYPTOKORR_READONLY`    | no       | `false`                   | When `true`, write + operator tools are absent from `tools/list`. The model cannot invoke a tool that was not advertised. |
+| `CRYPTOKORR_AGENT_ID`    | no       | (none)                    | Default `agent_id` injected into write tools when the caller doesn't supply one. |
+| `CRYPTOKORR_TIMEOUT_MS`  | no       | `15000`                   | Per-request HTTP timeout (1000–120000).                     |
+| `CRYPTOKORR_ROLE`        | no       | (probed)                  | Override role probing — `viewer` / `operator` / `admin`. The server otherwise probes `GET /v1/approvals`. |
+| `CRYPTOKORR_LOG_LEVEL`   | no       | `INFO`                    | Standard Python log level.                                  |
 
 The API key is **never** logged, **never** included in tool errors,
 and **never** echoed in tool results. The server logs the first 8
@@ -63,19 +63,19 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`
 ```json
 {
   "mcpServers": {
-    "cryptobank": {
-      "command": "cryptobank-mcp",
+    "cryptokorr": {
+      "command": "cryptokorr-mcp",
       "env": {
-        "CRYPTOBANK_API_KEY": "cb_your_key_here",
-        "CRYPTOBANK_BASE_URL": "https://api.your-tenant.example.com",
-        "CRYPTOBANK_READONLY": "false"
+        "CRYPTOKORR_API_KEY": "cb_your_key_here",
+        "CRYPTOKORR_BASE_URL": "https://api.your-tenant.example.com",
+        "CRYPTOKORR_READONLY": "false"
       }
     }
   }
 }
 ```
 
-Restart Claude Desktop. The CryptoBank tools appear in the tool
+Restart Claude Desktop. The CryptoKorr tools appear in the tool
 picker.
 
 ## Cursor config
@@ -86,11 +86,11 @@ Add to `~/.cursor/mcp.json` (project-scoped configs go in
 ```json
 {
   "mcpServers": {
-    "cryptobank": {
-      "command": "cryptobank-mcp",
+    "cryptokorr": {
+      "command": "cryptokorr-mcp",
       "env": {
-        "CRYPTOBANK_API_KEY": "cb_your_key_here",
-        "CRYPTOBANK_BASE_URL": "https://api.your-tenant.example.com"
+        "CRYPTOKORR_API_KEY": "cb_your_key_here",
+        "CRYPTOKORR_BASE_URL": "https://api.your-tenant.example.com"
       }
     }
   }
@@ -100,16 +100,16 @@ Add to `~/.cursor/mcp.json` (project-scoped configs go in
 ## Readonly example
 
 For audit / read-only sessions (e.g. a chatbot that should never
-submit intents), set `CRYPTOBANK_READONLY=true`:
+submit intents), set `CRYPTOKORR_READONLY=true`:
 
 ```json
 {
   "mcpServers": {
-    "cryptobank-readonly": {
-      "command": "cryptobank-mcp",
+    "cryptokorr-readonly": {
+      "command": "cryptokorr-mcp",
       "env": {
-        "CRYPTOBANK_API_KEY": "cb_your_key_here",
-        "CRYPTOBANK_READONLY": "true"
+        "CRYPTOKORR_API_KEY": "cb_your_key_here",
+        "CRYPTOKORR_READONLY": "true"
       }
     }
   }
@@ -230,9 +230,9 @@ cd sdks/mcp
 python3 -m unittest discover -s tests -v
 
 # Run the server locally against a Phoenix dev instance
-CRYPTOBANK_API_KEY="cb_test_..." \
-CRYPTOBANK_BASE_URL="http://localhost:4000" \
-python3 -m cryptobank_mcp
+CRYPTOKORR_API_KEY="cb_test_..." \
+CRYPTOKORR_BASE_URL="http://localhost:4000" \
+python3 -m cryptokorr_mcp
 ```
 
 The package has zero runtime dependencies (stdlib `urllib` only) so a

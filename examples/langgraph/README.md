@@ -2,12 +2,12 @@
 
 A minimal LangGraph-style agent that monitors a condition and, when
 the condition fires, submits an `allocate_idle_capital` intent
-through the **Python SDK** (`@cryptobank/sdk-py` — package
-`cryptobank` on PyPI). The agent then waits for the decision
+through the **Python SDK** (`@cryptokorr/sdk-py` — package
+`cryptokorr` on PyPI). The agent then waits for the decision
 pipeline and prints the outcome (`auto_exec`, `approval_required`,
 `hold`, or `block`).
 
-This example **never** asks for a private key. The CryptoBank
+This example **never** asks for a private key. The CryptoKorr
 runtime decides whether to dispatch; the agent just emits intent.
 
 ## Scope
@@ -27,10 +27,10 @@ runtime decides whether to dispatch; the agent just emits intent.
 ## Prerequisites
 
 - Python **3.10+**.
-- The CryptoBank Python SDK (`cryptobank>=0.1.0`).
+- The CryptoKorr Python SDK (`cryptokorr>=0.1.0`).
 - A workspace API key (`cb_<...>`) — operator-level, **not**
   embedded in the code; loaded from the environment.
-- A running CryptoBank backend (default `http://localhost:4000`).
+- A running CryptoKorr backend (default `http://localhost:4000`).
 
 LangGraph itself is **optional** for this example. The graph shape
 is small enough that it runs cleanly with or without the
@@ -59,19 +59,19 @@ pip install -e ../../sdks/python  # local development install
 
 | Variable                  | Required | Purpose                                                            |
 | ------------------------- | -------- | ------------------------------------------------------------------ |
-| `CRYPTOBANK_API_KEY`      | yes      | Workspace API key (`cb_<...>`). Never log or commit this.          |
-| `CRYPTOBANK_BASE_URL`     | no       | Defaults to `http://localhost:4000`.                              |
-| `CRYPTOBANK_AGENT_ID`     | no       | Defaults to `agent-langgraph-example`.                            |
+| `CRYPTOKORR_API_KEY`      | yes      | Workspace API key (`cb_<...>`). Never log or commit this.          |
+| `CRYPTOKORR_BASE_URL`     | no       | Defaults to `http://localhost:4000`.                              |
+| `CRYPTOKORR_AGENT_ID`     | no       | Defaults to `agent-langgraph-example`.                            |
 | `MORPHO_VAULT_ADDRESS`    | yes      | Allowlisted Morpho USDC vault address (Base Sepolia).             |
 | `IDLE_BALANCE_USDC`       | no       | Synthetic balance the monitor reports. Defaults to `"100"`.       |
 | `IDLE_THRESHOLD_USDC`     | no       | Trigger threshold. Defaults to `"50"`.                            |
 | `DEPLOY_AMOUNT_USDC`      | no       | Amount to deposit when the trigger fires. Defaults to `"10"`.     |
-| `CRYPTOBANK_DRY_RUN`      | no       | Set to `1` to skip the SDK call and print the intent shape only.  |
+| `CRYPTOKORR_DRY_RUN`      | no       | Set to `1` to skip the SDK call and print the intent shape only.  |
 
 ## Run
 
 ```sh
-export CRYPTOBANK_API_KEY="cb_..."
+export CRYPTOKORR_API_KEY="cb_..."
 export MORPHO_VAULT_ADDRESS="0x..."   # operator-supplied, allowlisted
 python3 main.py
 ```

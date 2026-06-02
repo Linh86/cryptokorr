@@ -417,7 +417,7 @@ defmodule BankWeb.Router do
       live "/inbox", OperatorInboxLive
     end
 
-    # Plynn redesign — three-screen private-alpha UI (Agent / Activity
+    # Agent Control redesign — three-screen private-alpha UI (Agent / Activity
     # / Advanced) at the root. Gated behind `:require_role, :operator`
     # because every screen ships at least one mutation surface (wallet
     # bind, install permission, run intent, revoke). The shared
@@ -450,7 +450,7 @@ defmodule BankWeb.Router do
     # callbacks (pause/resume/revoke, archive) check role inside the
     # callback.
     #
-    # Plynn redesign cutover: ControlLive moved from `/` to
+    # Agent Control redesign cutover: ControlLive moved from `/` to
     # `/legacy/control` so the redesigned AgentLive can claim the
     # root path. The old operator screens stay reachable at their
     # existing paths for backwards compatibility, but the new design's

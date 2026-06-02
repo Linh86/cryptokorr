@@ -9,7 +9,7 @@ frameworks installed:
   * Every example README documents its env vars.
   * Every example pins Base Sepolia.
   * The Claude Desktop config carries the placeholder key, not a
-    real one, and points at `cryptobank-mcp`.
+    real one, and points at `cryptokorr-mcp`.
   * Each README documents `approval_required` as a successful
     response, not an error.
 """
@@ -43,7 +43,7 @@ ALL_FILES = [
     CLAUDE_CONFIG,
 ]
 
-# Real CryptoBank API keys are `cb_` + 16+ url-safe characters.
+# Real CryptoKorr API keys are `cb_` + 16+ url-safe characters.
 # The documented placeholder is `cb_REPLACE_ME_DO_NOT_COMMIT`. We
 # allow that exact string and refuse any other key-shaped value.
 API_KEY_PATTERN = re.compile(r"\bcb_[A-Za-z0-9_-]{16,}\b")
@@ -161,9 +161,9 @@ class TestEnvVarTablesPresent(unittest.TestCase):
     """Each README must document its env vars in a markdown table."""
 
     REQUIRED_VARS_BY_README = {
-        LANGGRAPH_README: ["CRYPTOBANK_API_KEY", "MORPHO_VAULT_ADDRESS"],
-        VERCEL_README: ["CRYPTOBANK_API_KEY"],
-        CLAUDE_README: ["CRYPTOBANK_API_KEY", "CRYPTOBANK_READONLY"],
+        LANGGRAPH_README: ["CRYPTOKORR_API_KEY", "MORPHO_VAULT_ADDRESS"],
+        VERCEL_README: ["CRYPTOKORR_API_KEY"],
+        CLAUDE_README: ["CRYPTOKORR_API_KEY", "CRYPTOKORR_READONLY"],
     }
 
     def test_required_env_vars_documented(self) -> None:
@@ -185,22 +185,22 @@ class TestEnvVarTablesPresent(unittest.TestCase):
 
 class TestClaudeDesktopConfig(unittest.TestCase):
     """The Claude Desktop config must use the placeholder key and
-    invoke the `cryptobank-mcp` binary."""
+    invoke the `cryptokorr-mcp` binary."""
 
     def test_config_shape(self) -> None:
         config = json.loads(CLAUDE_CONFIG.read_text())
         self.assertIn("mcpServers", config)
-        self.assertIn("cryptobank", config["mcpServers"])
+        self.assertIn("cryptokorr", config["mcpServers"])
 
-        server = config["mcpServers"]["cryptobank"]
-        self.assertEqual(server["command"], "cryptobank-mcp")
+        server = config["mcpServers"]["cryptokorr"]
+        self.assertEqual(server["command"], "cryptokorr-mcp")
         self.assertIn("env", server)
 
         env = server["env"]
-        self.assertEqual(env["CRYPTOBANK_API_KEY"], "cb_REPLACE_ME_DO_NOT_COMMIT")
-        self.assertIn(env["CRYPTOBANK_BASE_URL"], {"http://localhost:4000"})
+        self.assertEqual(env["CRYPTOKORR_API_KEY"], "cb_REPLACE_ME_DO_NOT_COMMIT")
+        self.assertIn(env["CRYPTOKORR_BASE_URL"], {"http://localhost:4000"})
         # READONLY may be either string boolean ("true"/"false")
-        self.assertIn(env["CRYPTOBANK_READONLY"], {"true", "false"})
+        self.assertIn(env["CRYPTOKORR_READONLY"], {"true", "false"})
 
 
 class TestSdkImportPaths(unittest.TestCase):
@@ -209,9 +209,9 @@ class TestSdkImportPaths(unittest.TestCase):
     def test_langgraph_imports_python_sdk(self) -> None:
         content = LANGGRAPH_MAIN.read_text()
         self.assertIn(
-            "from cryptobank import Cryptobank",
+            "from cryptokorr import CryptoKorr",
             content,
-            "langgraph/main.py does not import from cryptobank",
+            "langgraph/main.py does not import from cryptokorr",
         )
         self.assertIn(
             "submit_allocate_idle_capital",
@@ -222,9 +222,9 @@ class TestSdkImportPaths(unittest.TestCase):
     def test_vercel_imports_typescript_sdk(self) -> None:
         content = VERCEL_TOOLS.read_text()
         self.assertIn(
-            'from "@cryptobank/sdk"',
+            'from "@cryptokorr/sdk"',
             content,
-            "vercel-ai-sdk/tools.ts does not import @cryptobank/sdk",
+            "vercel-ai-sdk/tools.ts does not import @cryptokorr/sdk",
         )
         self.assertIn(
             "submitAllocateIdleCapital",

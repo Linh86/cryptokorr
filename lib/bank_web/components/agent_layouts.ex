@@ -1,6 +1,6 @@
 defmodule BankWeb.AgentLayouts do
   @moduledoc """
-  App shell for the Plynn redesign: TopBar + NavRail + main slot.
+  App shell for the Agent Control redesign: TopBar + NavRail + main slot.
 
   Mirrors `TopBar` / `NavRail` / `App` in `reference/root.jsx` +
   `reference/app.jsx`. Wraps everything in `<div class="cb">` so the

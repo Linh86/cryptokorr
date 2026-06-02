@@ -1,6 +1,6 @@
 """End-to-end smoke: run the MCP server in a subprocess via stdio.
 
-We point ``CRYPTOBANK_BASE_URL`` at a localhost port that is not
+We point ``CRYPTOKORR_BASE_URL`` at a localhost port that is not
 listening, so role probing fails open and no real network traffic
 leaves the process. Then we drive the JSON-RPC handshake (initialize
 + tools/list) over stdin/stdout to confirm the server boots and
@@ -21,15 +21,15 @@ from tests._fixtures import _PROJECT_ROOT  # noqa: F401  (sys.path side effect)
 def _spawn(env_overrides: dict[str, str]) -> subprocess.Popen:
     env = os.environ.copy()
     env.update({
-        "CRYPTOBANK_API_KEY": "cb_smoketest000000000",
-        "CRYPTOBANK_BASE_URL": "http://127.0.0.1:1",
-        "CRYPTOBANK_TIMEOUT_MS": "1000",
-        "CRYPTOBANK_LOG_LEVEL": "ERROR",
+        "CRYPTOKORR_API_KEY": "cb_smoketest000000000",
+        "CRYPTOKORR_BASE_URL": "http://127.0.0.1:1",
+        "CRYPTOKORR_TIMEOUT_MS": "1000",
+        "CRYPTOKORR_LOG_LEVEL": "ERROR",
         "PYTHONPATH": _PROJECT_ROOT + "/src",
     })
     env.update(env_overrides)
     return subprocess.Popen(
-        [sys.executable, "-m", "cryptobank_mcp"],
+        [sys.executable, "-m", "cryptokorr_mcp"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -81,7 +81,7 @@ class StdioSmokeTests(unittest.TestCase):
             _shutdown(proc)
 
     def test_initialize_then_list_tools_readonly_mode(self) -> None:
-        proc = _spawn({"CRYPTOBANK_READONLY": "true"})
+        proc = _spawn({"CRYPTOKORR_READONLY": "true"})
         try:
             _request(proc, {"jsonrpc": "2.0", "id": 1, "method": "initialize"})
             tools = _request(proc, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
@@ -103,10 +103,10 @@ class StdioSmokeTests(unittest.TestCase):
 
     def test_missing_api_key_exits_with_message(self) -> None:
         env = os.environ.copy()
-        env.pop("CRYPTOBANK_API_KEY", None)
+        env.pop("CRYPTOKORR_API_KEY", None)
         env["PYTHONPATH"] = _PROJECT_ROOT + "/src"
         proc = subprocess.Popen(
-            [sys.executable, "-m", "cryptobank_mcp"],
+            [sys.executable, "-m", "cryptokorr_mcp"],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -120,7 +120,7 @@ class StdioSmokeTests(unittest.TestCase):
                 if stream is not None and not stream.closed:
                     stream.close()
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("CRYPTOBANK_API_KEY", err)
+        self.assertIn("CRYPTOKORR_API_KEY", err)
 
 
 if __name__ == "__main__":

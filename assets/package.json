@@ -1,8 +1,8 @@
 {
-  "name": "cryptobank-assets",
+  "name": "cryptokorr-assets",
   "version": "0.1.0",
   "private": true,
-  "description": "Phoenix-side asset bundle for CryptoBank — pins ZeroDev SDK + viem for the browser-driven session permission install flow (#501).",
+  "description": "Phoenix-side asset bundle for CryptoKorr — pins ZeroDev SDK + viem for the browser-driven session permission install flow (#501).",
   "type": "module",
   "scripts": {
     "test": "vitest run --config vitest.config.js",

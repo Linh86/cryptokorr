@@ -3,7 +3,7 @@
 
 @import "tailwindcss" source(none);
 
-/* Plynn redesign — tokens + components scoped to .cb wrapper. The
+/* Agent Control redesign — tokens + components scoped to .cb wrapper. The
  * AgentLayouts shell wraps redesigned screens in <div class="cb">; old
  * operator screens are unaffected. CSS spec requires every @import to
  * appear before non-@import rules, so these stay at the top. */

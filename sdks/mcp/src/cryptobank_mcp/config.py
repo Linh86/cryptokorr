@@ -46,39 +46,39 @@ class Config:
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Config":
         env = env if env is not None else os.environ
-        api_key = (env.get("CRYPTOBANK_API_KEY") or "").strip()
+        api_key = (env.get("CRYPTOKORR_API_KEY") or "").strip()
         if not api_key:
             raise ConfigError(
-                "CRYPTOBANK_API_KEY is required. Set it in the MCP "
+                "CRYPTOKORR_API_KEY is required. Set it in the MCP "
                 "client config (Claude Desktop / Cursor)."
             )
         if not api_key.startswith("cb_"):
             raise ConfigError(
-                "CRYPTOBANK_API_KEY must start with 'cb_'. Get a key "
+                "CRYPTOKORR_API_KEY must start with 'cb_'. Get a key "
                 "from the operator console."
             )
 
-        base_url = (env.get("CRYPTOBANK_BASE_URL") or DEFAULT_BASE_URL).strip()
+        base_url = (env.get("CRYPTOKORR_BASE_URL") or DEFAULT_BASE_URL).strip()
         base_url = base_url.rstrip("/")
         if not (base_url.startswith("http://") or base_url.startswith("https://")):
             raise ConfigError(
-                "CRYPTOBANK_BASE_URL must be an http(s) URL "
+                "CRYPTOKORR_BASE_URL must be an http(s) URL "
                 f"(got {base_url!r})."
             )
 
-        readonly = _parse_bool(env.get("CRYPTOBANK_READONLY"), default=False)
+        readonly = _parse_bool(env.get("CRYPTOKORR_READONLY"), default=False)
 
-        agent_id_raw = (env.get("CRYPTOBANK_AGENT_ID") or "").strip()
+        agent_id_raw = (env.get("CRYPTOKORR_AGENT_ID") or "").strip()
         agent_id = agent_id_raw or None
 
         timeout_ms = _parse_int(
-            env.get("CRYPTOBANK_TIMEOUT_MS"),
+            env.get("CRYPTOKORR_TIMEOUT_MS"),
             default=DEFAULT_TIMEOUT_MS,
-            field="CRYPTOBANK_TIMEOUT_MS",
+            field="CRYPTOKORR_TIMEOUT_MS",
         )
         if not (MIN_TIMEOUT_MS <= timeout_ms <= MAX_TIMEOUT_MS):
             raise ConfigError(
-                f"CRYPTOBANK_TIMEOUT_MS must be between {MIN_TIMEOUT_MS} and "
+                f"CRYPTOKORR_TIMEOUT_MS must be between {MIN_TIMEOUT_MS} and "
                 f"{MAX_TIMEOUT_MS} (got {timeout_ms})."
             )
 

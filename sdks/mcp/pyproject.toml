@@ -3,13 +3,13 @@ requires = ["hatchling>=1.18"]
 build-backend = "hatchling.build"
 
 [project]
-name = "cryptobank-mcp"
+name = "cryptokorr-mcp"
 version = "0.1.0"
-description = "stdio MCP server for CryptoBank agent tools"
+description = "stdio MCP server for CryptoKorr agent tools"
 readme = "README.md"
 requires-python = ">=3.10"
-authors = [{ name = "CryptoBank" }]
-keywords = ["mcp", "model-context-protocol", "cryptobank", "agent", "stdio"]
+authors = [{ name = "CryptoKorr" }]
+keywords = ["mcp", "model-context-protocol", "cryptokorr", "agent", "stdio"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
@@ -26,21 +26,21 @@ dependencies = []
 dev = []
 
 [project.scripts]
-cryptobank-mcp = "cryptobank_mcp.__main__:main"
+cryptokorr-mcp = "cryptokorr_mcp.__main__:main"
 
 [project.urls]
-Homepage = "https://github.com/Linh86/cryptobank"
-Source = "https://github.com/Linh86/cryptobank/tree/main/sdks/mcp"
-Documentation = "https://github.com/Linh86/cryptobank/blob/main/docs/api/mcp-tools.md"
-Issues = "https://github.com/Linh86/cryptobank/issues"
-Changelog = "https://github.com/Linh86/cryptobank/blob/main/sdks/mcp/CHANGELOG.md"
+Homepage = "https://github.com/Linh86/cryptokorr"
+Source = "https://github.com/Linh86/cryptokorr/tree/main/sdks/mcp"
+Documentation = "https://github.com/Linh86/cryptokorr/blob/main/docs/api/mcp-tools.md"
+Issues = "https://github.com/Linh86/cryptokorr/issues"
+Changelog = "https://github.com/Linh86/cryptokorr/blob/main/sdks/mcp/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/cryptobank_mcp"]
+packages = ["src/cryptokorr_mcp"]
 
 [tool.hatch.build.targets.sdist]
 include = [
-  "src/cryptobank_mcp",
+  "src/cryptokorr_mcp",
   "README.md",
   "CHANGELOG.md",
   "tests",

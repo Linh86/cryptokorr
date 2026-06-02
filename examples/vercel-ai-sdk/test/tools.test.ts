@@ -9,8 +9,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { Cryptobank } from "@cryptobank/sdk";
-import { buildCryptobankTools } from "../tools.ts";
+import { CryptoKorr } from "@cryptokorr/sdk";
+import { buildCryptoKorrTools } from "../tools.ts";
 
 interface MockSpec {
   status?: number;
@@ -29,7 +29,7 @@ interface MockCall {
   init: RequestInit;
 }
 
-function mockClient(specs: MockSpec[]): { client: Cryptobank; calls: MockCall[] } {
+function mockClient(specs: MockSpec[]): { client: CryptoKorr; calls: MockCall[] } {
   const calls: MockCall[] = [];
   let i = 0;
   const fetchImpl = async (input: string | URL, init?: RequestInit) => {
@@ -40,7 +40,7 @@ function mockClient(specs: MockSpec[]): { client: Cryptobank; calls: MockCall[] 
     return jsonResponse(spec);
   };
   return {
-    client: new Cryptobank({
+    client: new CryptoKorr({
       apiKey: "cb_test_dummy_key_for_unit_tests_only",
       baseUrl: "http://localhost:4000",
       fetch: fetchImpl,
@@ -49,10 +49,10 @@ function mockClient(specs: MockSpec[]): { client: Cryptobank; calls: MockCall[] 
   };
 }
 
-describe("buildCryptobankTools", () => {
+describe("buildCryptoKorrTools", () => {
   it("exposes the three documented tools", () => {
     const { client } = mockClient([]);
-    const tools = buildCryptobankTools({ client });
+    const tools = buildCryptoKorrTools({ client });
     assert.deepEqual(Object.keys(tools).sort(), [
       "getDecision",
       "submitAllocateIdleCapital",
@@ -62,13 +62,13 @@ describe("buildCryptobankTools", () => {
 
   it("submitTransfer description warns about approval_required", () => {
     const { client } = mockClient([]);
-    const tools = buildCryptobankTools({ client });
+    const tools = buildCryptoKorrTools({ client });
     assert.match(tools.submitTransfer.description, /approval_required is a successful response/);
   });
 
   it("submitTransfer parameters pin Base Sepolia + USDC enums", () => {
     const { client } = mockClient([]);
-    const tools = buildCryptobankTools({ client });
+    const tools = buildCryptoKorrTools({ client });
     const props = tools.submitTransfer.parameters.properties as Record<string, { enum?: string[] }>;
     assert.deepEqual(props["chain"]!.enum, ["base-sepolia"]);
     assert.deepEqual(props["asset"]!.enum, ["USDC"]);
@@ -77,7 +77,7 @@ describe("buildCryptobankTools", () => {
 
   it("submitAllocateIdleCapital requires amount + vaultAddress", () => {
     const { client } = mockClient([]);
-    const tools = buildCryptobankTools({ client });
+    const tools = buildCryptoKorrTools({ client });
     assert.deepEqual(
       tools.submitAllocateIdleCapital.parameters.required,
       ["amount", "vaultAddress"],
@@ -86,7 +86,7 @@ describe("buildCryptobankTools", () => {
 
   it("getDecision description names every outcome", () => {
     const { client } = mockClient([]);
-    const tools = buildCryptobankTools({ client });
+    const tools = buildCryptoKorrTools({ client });
     const desc = tools.getDecision.description;
     for (const outcome of ["auto_exec", "approval_required", "hold", "block"]) {
       assert.ok(desc.includes(outcome), `getDecision description missing outcome ${outcome}`);
@@ -106,7 +106,7 @@ describe("buildCryptobankTools", () => {
         },
       },
     ]);
-    const tools = buildCryptobankTools({ client });
+    const tools = buildCryptoKorrTools({ client });
 
     const result = await tools.submitTransfer.execute({
       amount: "1.5",
@@ -136,7 +136,7 @@ describe("buildCryptobankTools", () => {
         },
       },
     ]);
-    const tools = buildCryptobankTools({ client });
+    const tools = buildCryptoKorrTools({ client });
 
     await tools.submitAllocateIdleCapital.execute({
       amount: "10",
@@ -171,7 +171,7 @@ describe("buildCryptobankTools", () => {
         },
       },
     ]);
-    const tools = buildCryptobankTools({ client });
+    const tools = buildCryptoKorrTools({ client });
 
     const decision = await tools.getDecision.execute({ decisionId: "dec_1" });
     assert.equal(decision.outcome, "approval_required");

@@ -24,7 +24,7 @@ Pairs with:
 
 - Adapter `.env` populated (see [`chain_adapter/.env.example`](../chain_adapter/.env.example)). Required at minimum: `BASE_RPC_URL`, `BUNDLER_RPC_URL`, `BASE_CHAIN_ID=84532`, `SMART_ACCOUNT_ADDRESS`, `DELEGATION_SIGNER_KEY`, `OPERATOR_PRIVATE_KEY`, `OPERATOR_ADDRESS`, `ADAPTER_DISPATCH_SECRET`, `ADAPTER_CALLBACK_SECRET`, `PHOENIX_BASE_URL`.
 - Phoenix running on `:4000` (`mix phx.server`).
-- Adapter running on `:4100` with logs captured: `npm run dev 2>&1 | tee /tmp/cryptobank-adapter.log` from `chain_adapter/`.
+- Adapter running on `:4100` with logs captured: `npm run dev 2>&1 | tee /tmp/cryptokorr-adapter.log` from `chain_adapter/`.
 - Operator EOA funded on Base Sepolia (small testnet ETH for gas, smart account funded for UserOp prefund).
 - Smart account already deployed under that operator EOA per [`docs/provisioning-kernel-v3.md`](provisioning-kernel-v3.md).
 
@@ -69,7 +69,7 @@ populated (0x + 64 hex), `installed_at_block` populated.
 
 If `state: :active` but `permission_id` is nil, the cryptographic
 grant FAILED and Phoenix accepted the synchronous receipt without
-an artifact. Read `/tmp/cryptobank-adapter.log` for the
+an artifact. Read `/tmp/cryptokorr-adapter.log` for the
 `grant_failed` callback `reason` code:
 
 | `reason` | What to check |
@@ -145,7 +145,7 @@ address, kernel version, and timestamp.
 
 | Phoenix state | Likely adapter callback `reason` | What to check |
 | --- | --- | --- |
-| `:pending` (no transition after 30s) | (no callback yet) | Adapter not running, dispatch route bearer mismatch, or worker stuck. Check `/tmp/cryptobank-adapter.log`. |
+| `:pending` (no transition after 30s) | (no callback yet) | Adapter not running, dispatch route bearer mismatch, or worker stuck. Check `/tmp/cryptokorr-adapter.log`. |
 | `:active`, `permission_id` nil | `grant_failed` reasons (Step 2 table) | Cryptographic grant did not produce artifacts; review the `grant_failed` callback. |
 | `:revoking` (stuck) | (no terminal callback) | Adapter accepted dispatch but never confirmed. Check bundler health + adapter log. |
 | `:revoke_failed` | Step 3 table | Match the callback `reason` to the table; remediate, then re-issue `POST /v1/security/revoke_delegation`. |

@@ -1,4 +1,4 @@
-"""Tests for ``cryptobank_mcp.errors``."""
+"""Tests for ``cryptokorr_mcp.errors``."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import unittest
 
 from tests._fixtures import _PROJECT_ROOT  # noqa: F401  (sys.path side effect)
 
-from cryptobank_mcp.errors import (
+from cryptokorr_mcp.errors import (
     ToolError,
     map_http_error,
     map_transport_error,

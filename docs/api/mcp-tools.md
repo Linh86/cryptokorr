@@ -23,11 +23,11 @@ inherits them. This matches the stdio MCP convention.
 
 | Env var                    | Required | Purpose                                                          |
 | -------------------------- | -------- | ---------------------------------------------------------------- |
-| `CRYPTOBANK_API_KEY`       | yes      | The `cb_<...>` API key. Maps directly to the workspace and role this MCP session can act as. |
-| `CRYPTOBANK_BASE_URL`      | no       | Defaults to `http://localhost:4000`. Production deployments override.                        |
-| `CRYPTOBANK_READONLY`      | no       | When set to `"true"`, write tools are **omitted from the tool list**. The server does not surface them at all — the model cannot invoke a write tool that wasn't advertised. Defaults to `"false"`. |
-| `CRYPTOBANK_AGENT_ID`      | no       | Optional default `agent_id` injected into write-tool requests when the caller doesn't supply one. Useful when one MCP session represents one agent. |
-| `CRYPTOBANK_TIMEOUT_MS`    | no       | Per-tool-call HTTP timeout. Defaults to `15_000`.                |
+| `CRYPTOKORR_API_KEY`       | yes      | The `cb_<...>` API key. Maps directly to the workspace and role this MCP session can act as. |
+| `CRYPTOKORR_BASE_URL`      | no       | Defaults to `http://localhost:4000`. Production deployments override.                        |
+| `CRYPTOKORR_READONLY`      | no       | When set to `"true"`, write tools are **omitted from the tool list**. The server does not surface them at all — the model cannot invoke a write tool that wasn't advertised. Defaults to `"false"`. |
+| `CRYPTOKORR_AGENT_ID`      | no       | Optional default `agent_id` injected into write-tool requests when the caller doesn't supply one. Useful when one MCP session represents one agent. |
+| `CRYPTOKORR_TIMEOUT_MS`    | no       | Per-tool-call HTTP timeout. Defaults to `15_000`.                |
 
 The MCP server **never** logs the API key, **never** echoes it in
 tool error data, and **never** surfaces it via a tool result.
@@ -36,13 +36,13 @@ tool error data, and **never** surfaces it via a tool result.
 
 Tools are partitioned into three tiers. The server advertises a
 different subset depending on the API key's role and
-`CRYPTOBANK_READONLY`:
+`CRYPTOKORR_READONLY`:
 
 | Tier        | Always advertised? | Hidden when…                                       |
 | ----------- | ------------------ | -------------------------------------------------- |
 | **read**    | yes                | (never hidden)                                     |
-| **write**   | conditional        | `CRYPTOBANK_READONLY=true`                         |
-| **operator**| conditional        | API key role is below `operator` (server probes the `/v1/health/deep` headers / a probe call to determine role at startup) OR `CRYPTOBANK_READONLY=true` |
+| **write**   | conditional        | `CRYPTOKORR_READONLY=true`                         |
+| **operator**| conditional        | API key role is below `operator` (server probes the `/v1/health/deep` headers / a probe call to determine role at startup) OR `CRYPTOKORR_READONLY=true` |
 
 If a tool is hidden, the model cannot invoke it. If the API key's
 role can't reach a tool's required role even when advertised (e.g.,
@@ -164,13 +164,13 @@ List decisions waiting on operator approval.
 
 * Backed by `GET /v1/approvals` (operator).
 * Hidden when the API key role is below `operator` OR
-  `CRYPTOBANK_READONLY=true` (because the typical follow-up is an
+  `CRYPTOKORR_READONLY=true` (because the typical follow-up is an
   approve/reject write).
 * Input schema: `{}`.
 * Output: `{ "pending": [Decision] }`.
 * Errors: `insufficient_role`, `rate_limited`.
 
-### Write tools (hidden when `CRYPTOBANK_READONLY=true`)
+### Write tools (hidden when `CRYPTOKORR_READONLY=true`)
 
 #### `submit_transfer`
 
@@ -291,10 +291,10 @@ Operator pre-execution cancel.
 * Output: `IntentCancelResult`.
 * Errors: `not_found`, `wrong_state`, `rate_limited`.
 
-### Operator tools (hidden when role < `operator` or `CRYPTOBANK_READONLY=true`)
+### Operator tools (hidden when role < `operator` or `CRYPTOKORR_READONLY=true`)
 
 These are the operator-only mutating surfaces. They share
-`CRYPTOBANK_READONLY=true` hiding semantics with the write tier.
+`CRYPTOKORR_READONLY=true` hiding semantics with the write tier.
 
 #### `approve_decision`
 
@@ -351,7 +351,7 @@ Globally resume the runtime.
 ## Explicit non-goals — never an MCP tool
 
 The MCP server **does not** expose the following surfaces, even
-when the API key is admin and `CRYPTOBANK_READONLY=false`:
+when the API key is admin and `CRYPTOKORR_READONLY=false`:
 
 * **Delegation revoke** (`POST /v1/security/revoke_delegation`).
   Delegation revocation is a hard-state-change with on-chain
@@ -456,7 +456,7 @@ needing to read this doc.
 ### Tool listing (readonly mode)
 
 ```bash
-CRYPTOBANK_API_KEY="cb_..." CRYPTOBANK_READONLY=true cryptobank-mcp
+CRYPTOKORR_API_KEY="cb_..." CRYPTOKORR_READONLY=true cryptokorr-mcp
 ```
 
 Visible tools:
@@ -474,7 +474,7 @@ Visible tools:
 ### Tool listing (operator key, readonly off)
 
 ```bash
-CRYPTOBANK_API_KEY="cb_op_..." cryptobank-mcp
+CRYPTOKORR_API_KEY="cb_op_..." cryptokorr-mcp
 ```
 
 Visible tools (additive over readonly):

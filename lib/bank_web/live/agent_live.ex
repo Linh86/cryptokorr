@@ -1,6 +1,6 @@
 defmodule BankWeb.AgentLive do
   @moduledoc """
-  Agent Control screen — the default landing page of the Plynn redesign.
+  Agent Control screen — the default landing page of the Agent Control redesign.
 
   Six sections in a single editorial column:
     1. Wallet status

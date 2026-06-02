@@ -14,10 +14,10 @@ from tests._fixtures import (  # noqa: F401  (sys.path side effect)
     static_responder,
 )
 
-from cryptobank_mcp.client import HttpClient
-from cryptobank_mcp.config import Config
-from cryptobank_mcp.errors import ToolError
-from cryptobank_mcp.tools import (
+from cryptokorr_mcp.client import HttpClient
+from cryptokorr_mcp.config import Config
+from cryptokorr_mcp.errors import ToolError
+from cryptokorr_mcp.tools import (
     Role,
     ToolContext,
     ToolRegistry,

@@ -576,7 +576,7 @@ async function executeCryptographicRevoke(
     assertValidationIdConsistent(permissionBlock);
     assertPackageVersionPinned(permissionBlock);
     if (!permissionBlock.session_signer_address) {
-      // Subagent D's keyless-blob design (PR #129 grant-flow
+      // The keyless-blob design (PR #129 grant-flow
       // follow-up) requires the session signer's EOA to be
       // shipped separately so we can rebuild a stub
       // `ModularSigner` for `deserializePermissionAccount`.
@@ -668,7 +668,7 @@ async function executeCryptographicRevoke(
     );
 
     // Reconstruct the regular permission plugin from the persisted
-    // blob. The blob is KEYLESS by design (Subagent D's review
+    // blob. The blob is KEYLESS by design (A security review
     // forbids embedding the session privateKey in
     // Phoenix-persisted material), so we MUST hand
     // `deserializePermissionAccount` an external `modularSigner`.
@@ -735,7 +735,7 @@ async function executeCryptographicRevoke(
     // signer-side check above, the policy addresses are CARRIED IN
     // THE BLOB (extracted from
     // `plugin.getPluginSerializationParams().policies[].policyParams.policyAddress`,
-    // see Subagent C's blob-shape research), so this is the
+    // see Prior blob-shape research), so this is the
     // meaningful runtime defense against a blob produced by a
     // grant flow we have not audited. Empty list is a refusal.
     if (

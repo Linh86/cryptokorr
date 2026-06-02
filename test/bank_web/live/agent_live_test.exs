@@ -1,6 +1,6 @@
 defmodule BankWeb.AgentLiveTest do
   @moduledoc """
-  Smoke render tests for the Plynn redesign screens.
+  Smoke render tests for the Agent Control redesign screens.
 
   Phase 1 verifies the AgentLive / AgentActivityLive / AgentAdvancedLive
   templates render under viewer auth without raising — the screens

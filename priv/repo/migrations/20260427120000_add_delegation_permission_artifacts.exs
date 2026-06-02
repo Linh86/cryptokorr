@@ -23,7 +23,7 @@ defmodule Bank.Repo.Migrations.AddDelegationPermissionArtifacts do
   cryptographic `permission` block or fall back to the legacy
   sentinel payload.
 
-  Schema choice rationale (see Subagent C's design report under
+  Schema choice rationale (see A prior design report under
   `docs/zerodev-permissions-integration.md` planning notes):
 
     * `permission_blob` — `bytea` carrying the

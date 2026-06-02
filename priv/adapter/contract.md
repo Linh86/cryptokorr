@@ -130,7 +130,7 @@ What is verifiable today:
 - **#56 — DECIDED.** Kernel v3 smart-account host. Independent of
   the permission-system layer above it.
 - **#57 — narrowed.** The ERC-7579 outer envelope is pinned in
-  [`cryptobank-ts-adapter/src/chains/base/erc7579.ts`](../../chain_adapter/src/chains/base/erc7579.ts)
+  [`cryptokorr-ts-adapter/src/chains/base/erc7579.ts`](../../chain_adapter/src/chains/base/erc7579.ts)
   against EIP-7579's normative `execute(bytes32, bytes)` signature
   (selector `0xe9ae5c53`), all-zeros single-call ModeCode, packed
   body layout. Earlier scaffolding (a `delegation_id ↔ bytes32
@@ -692,7 +692,7 @@ Field semantics:
   drift on either side of the wire.
 - `session_signer_address` — 0x-prefixed 20-byte session-signer
   EOA (42 hex chars). Required for cryptographic revoke because
-  the blob is KEYLESS by design (Subagent D's review: persisting
+  the blob is KEYLESS by design (A security review: persisting
   the session privateKey in Phoenix would make the control plane
   hold a signing key, which violates the threat model). At revoke
   time the adapter rebuilds a stub `ModularSigner` whose

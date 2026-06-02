@@ -5,15 +5,15 @@
  *
  * | Setting       | Env var                | Default                       |
  * | ------------- | ---------------------- | ----------------------------- |
- * | `apiKey`      | `CRYPTOBANK_API_KEY`   | (required, no default)        |
- * | `baseUrl`     | `CRYPTOBANK_BASE_URL`  | `http://localhost:4000`       |
- * | `timeoutMs`   | `CRYPTOBANK_TIMEOUT_MS`| `15_000` (ms)                 |
+ * | `apiKey`      | `CRYPTOKORR_API_KEY`   | (required, no default)        |
+ * | `baseUrl`     | `CRYPTOKORR_BASE_URL`  | `http://localhost:4000`       |
+ * | `timeoutMs`   | `CRYPTOKORR_TIMEOUT_MS`| `15_000` (ms)                 |
  */
 
 export const SDK_VERSION = "0.1.0";
 export const DEFAULT_BASE_URL = "http://localhost:4000";
 export const DEFAULT_TIMEOUT_MS = 15_000;
-export const DEFAULT_USER_AGENT = `cryptobank-js/${SDK_VERSION}`;
+export const DEFAULT_USER_AGENT = `cryptokorr-js/${SDK_VERSION}`;
 /** Hard cap on retry budget (`timeoutMs * RETRY_BUDGET_MULTIPLIER`). */
 export const RETRY_BUDGET_MULTIPLIER = 4;
 /** Exponential backoff cap. */
@@ -38,7 +38,7 @@ export interface ClientConfig {
   baseUrl?: string;
   /** Per-request HTTP timeout. Default 15s. */
   timeoutMs?: number;
-  /** `User-Agent` override. Default `cryptobank-js/<version>`. */
+  /** `User-Agent` override. Default `cryptokorr-js/<version>`. */
   userAgent?: string;
   /** Override `globalThis.fetch` — handy for tests. */
   fetch?: FetchLike;
@@ -55,19 +55,19 @@ export interface ResolvedConfig {
 export function resolveConfig(input: ClientConfig): ResolvedConfig {
   if (typeof input.apiKey !== "string" || input.apiKey.length === 0) {
     throw new Error(
-      "Cryptobank: missing apiKey. Pass `apiKey` to the constructor or set CRYPTOBANK_API_KEY.",
+      "CryptoKorr: missing apiKey. Pass `apiKey` to the constructor or set CRYPTOKORR_API_KEY.",
     );
   }
   if (!input.apiKey.startsWith("cb_")) {
     throw new Error(
-      'Cryptobank: apiKey must be a workspace API key in `cb_<...>` form.',
+      'CryptoKorr: apiKey must be a workspace API key in `cb_<...>` form.',
     );
   }
 
   const baseUrl = (input.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
   const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    throw new Error("Cryptobank: timeoutMs must be a positive number of milliseconds.");
+    throw new Error("CryptoKorr: timeoutMs must be a positive number of milliseconds.");
   }
   const userAgent = input.userAgent ?? DEFAULT_USER_AGENT;
   const fetchImpl =
@@ -77,7 +77,7 @@ export function resolveConfig(input: ClientConfig): ResolvedConfig {
       : null);
   if (!fetchImpl) {
     throw new Error(
-      "Cryptobank: no global `fetch` available. Run on Node 18+ or pass `fetch` in the config.",
+      "CryptoKorr: no global `fetch` available. Run on Node 18+ or pass `fetch` in the config.",
     );
   }
 
@@ -85,21 +85,21 @@ export function resolveConfig(input: ClientConfig): ResolvedConfig {
 }
 
 export function readConfigFromEnv(env: NodeJS.ProcessEnv = process.env): ClientConfig {
-  const apiKey = env["CRYPTOBANK_API_KEY"];
+  const apiKey = env["CRYPTOKORR_API_KEY"];
   if (typeof apiKey !== "string" || apiKey.length === 0) {
     throw new Error(
-      "Cryptobank.fromEnv: CRYPTOBANK_API_KEY is not set. Export it before calling fromEnv() or pass apiKey to the constructor.",
+      "CryptoKorr.fromEnv: CRYPTOKORR_API_KEY is not set. Export it before calling fromEnv() or pass apiKey to the constructor.",
     );
   }
 
-  const baseUrl = env["CRYPTOBANK_BASE_URL"];
-  const timeoutEnv = env["CRYPTOBANK_TIMEOUT_MS"];
+  const baseUrl = env["CRYPTOKORR_BASE_URL"];
+  const timeoutEnv = env["CRYPTOKORR_TIMEOUT_MS"];
   let timeoutMs: number | undefined;
   if (typeof timeoutEnv === "string" && timeoutEnv.length > 0) {
     const parsed = Number.parseInt(timeoutEnv, 10);
     if (!Number.isFinite(parsed) || parsed <= 0) {
       throw new Error(
-        `Cryptobank.fromEnv: CRYPTOBANK_TIMEOUT_MS must be a positive integer, got ${JSON.stringify(timeoutEnv)}.`,
+        `CryptoKorr.fromEnv: CRYPTOKORR_TIMEOUT_MS must be a positive integer, got ${JSON.stringify(timeoutEnv)}.`,
       );
     }
     timeoutMs = parsed;

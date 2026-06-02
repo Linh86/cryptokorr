@@ -15,9 +15,9 @@ from tests._fixtures import (  # noqa: F401  (sys.path side effect)
     static_responder,
 )
 
-from cryptobank_mcp.client import HttpClient
-from cryptobank_mcp.config import Config
-from cryptobank_mcp.server import (
+from cryptokorr_mcp.client import HttpClient
+from cryptokorr_mcp.config import Config
+from cryptokorr_mcp.server import (
     JSONRPC_INVALID_PARAMS,
     JSONRPC_METHOD_NOT_FOUND,
     JSONRPC_PARSE_ERROR,
@@ -25,7 +25,7 @@ from cryptobank_mcp.server import (
     SERVER_NAME,
     Server,
 )
-from cryptobank_mcp.tools import Role, ToolRegistry
+from cryptokorr_mcp.tools import Role, ToolRegistry
 
 
 def _config(*, readonly: bool = False) -> Config:

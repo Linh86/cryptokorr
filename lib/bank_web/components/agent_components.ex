@@ -1,6 +1,6 @@
 defmodule BankWeb.AgentComponents do
   @moduledoc """
-  Shared Phoenix.Components for the Plynn redesign.
+  Shared Phoenix.Components for the Agent Control redesign.
 
   Mirrors `reference/app.jsx` + `reference/agent-control.jsx` from the
   design handoff package. Class names match the React reference 1:1

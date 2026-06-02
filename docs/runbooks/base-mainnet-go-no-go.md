@@ -11,7 +11,7 @@ Issue [#182](https://github.com/Linh86/cryptokorr/issues/182) (epic [#166](https
 - Commit: `4a88386c86a3fe31ac2be02956e24329ca9b1129` (`main`)
 - Date: 2026-05-05
 - Env class: any deployment that has cleared the [no-broadcast rehearsal](base-mainnet-rehearsal.md) on this commit
-- Reviewer: Worker C (CryptoKorr parallel-issue protocol; final operator sign-off below)
+- Reviewer (parallel-issue protocol; final operator sign-off below)
 
 ## Verdict
 
@@ -38,7 +38,7 @@ Issue [#182](https://github.com/Linh86/cryptokorr/issues/182) (epic [#166](https
 
 ### Explicitly deferred (not blocking this verdict)
 
-- Morpho mainnet (epic #197) — Morpho deposits / withdraws are off-mainnet at this commit; Worker D is mid-flight.
+- Morpho mainnet (epic #197) — Morpho deposits / withdraws are off-mainnet at this commit; follow-up is mid-flight.
 - Token swap mainnet (epic #188) — swap dispatch + safety gates not on `main`.
 - Public launch (no public signup, no marketing copy).
 - Real-world incident drills against Base mainnet — zero; the runbook covers the procedure but not muscle memory.

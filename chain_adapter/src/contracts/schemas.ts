@@ -142,7 +142,7 @@ export type DispatchSwap = z.infer<typeof DispatchSwapSchema>;
  *   * `blob` — `serializePermissionAccount(account, undefined)`
  *     output (base64 string). The privateKey parameter is
  *     deliberately omitted at grant time so the blob is KEYLESS:
- *     Phoenix never holds session-signer secrets. See Subagent D's
+ *     Phoenix never holds session-signer secrets. See A prior security review's
  *     security review (PR #129 grant-flow follow-up) and
  *     `docs/security.md`. Adapter feeds the blob back to
  *     `deserializePermissionAccount(...)` to rebuild the same

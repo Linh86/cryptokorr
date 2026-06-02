@@ -24,10 +24,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Iterable, Mapping
 
-from cryptobank_mcp import schemas
-from cryptobank_mcp.client import HttpClient, HttpResponse
-from cryptobank_mcp.config import Config
-from cryptobank_mcp.errors import ToolError, map_http_error, map_transport_error
+from cryptokorr_mcp import schemas
+from cryptokorr_mcp.client import HttpClient, HttpResponse
+from cryptokorr_mcp.config import Config
+from cryptokorr_mcp.errors import ToolError, map_http_error, map_transport_error
 
 
 class Role(Enum):
@@ -276,10 +276,10 @@ def _build_intent_body(
             code="invalid_body",
             message=(
                 "agent_id is required. Pass it as a tool argument or set "
-                "CRYPTOBANK_AGENT_ID in the MCP server env."
+                "CRYPTOKORR_AGENT_ID in the MCP server env."
             ),
             retryable=False,
-            hint="Add agent_id to the tool call, or set CRYPTOBANK_AGENT_ID.",
+            hint="Add agent_id to the tool call, or set CRYPTOKORR_AGENT_ID.",
         )
 
     resolved_target = args.get("target") or target
@@ -391,7 +391,7 @@ ALL_TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec(
         name="get_intent",
         description=(
-            "Look up a CryptoBank intent by id. Returns the full Intent "
+            "Look up a CryptoKorr intent by id. Returns the full Intent "
             "record including its current state, decision id, and "
             "execution plan id."
         ),
@@ -464,7 +464,7 @@ ALL_TOOLS: tuple[ToolSpec, ...] = (
         name="list_pending_approvals",
         description=(
             "List decisions waiting on operator approval. Operator-tier; "
-            "hidden when CRYPTOBANK_READONLY=true or the API key is below "
+            "hidden when CRYPTOKORR_READONLY=true or the API key is below "
             "operator role."
         ),
         input_schema=schemas.LIST_PENDING_APPROVALS,

@@ -34,7 +34,7 @@ describe("GET /health", () => {
     expect(response.statusCode).toBe(200);
     const body = response.json();
     expect(body.status).toBe("ok");
-    expect(body.service).toBe("cryptobank-ts-adapter");
+    expect(body.service).toBe("cryptokorr-ts-adapter");
     expect(body.contract_version).toBe(1);
     expect(body.supported_chains).toEqual(["base", "base-sepolia"]);
     expect(body.supported_assets).toEqual(["USDC"]);

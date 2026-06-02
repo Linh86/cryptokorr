@@ -41,7 +41,7 @@ defmodule Bank.AccessTest do
   defp create_admin do
     create_user(%{
       subject: "admin-#{System.unique_integer([:positive])}",
-      email: "admin-#{System.unique_integer([:positive])}@cryptobank.test"
+      email: "admin-#{System.unique_integer([:positive])}@cryptokorr.test"
     })
   end
 

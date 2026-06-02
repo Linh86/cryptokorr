@@ -1,7 +1,7 @@
 // Browser-route fetch helpers for the session permission install
 // flow (#501). All requests carry the Phoenix CSRF token from the
 // `<meta name="csrf-token">` tag; the browser routes themselves
-// land under #500 (Worker B).
+// land under #500 .
 //
 // **No bundler URLs, no API keys, no ZeroDev SDK in this module.**
 // This module is the boundary between the hook (which knows the
