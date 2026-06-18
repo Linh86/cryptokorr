@@ -20,6 +20,6 @@
     "viem": "2.31.3"
   },
   "devDependencies": {
-    "vitest": "^3.2.1"
+    "vitest": "^4.1.9"
   }
 }
